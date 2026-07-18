@@ -5,7 +5,7 @@
 - ComfyUI (a 2025+ build; the pack is developed against current ComfyUI).
 - Nothing else — no pip dependencies.
 - Optional: [rgthree-comfy](https://github.com/rgthree/rgthree-comfy), only
-  if you want the `LoRA Set Controller` to drive a Power Lora Loader. The
+  if you want the `Power Lora Loader State Controller` to drive a Power Lora Loader. The
   rest of the pack works without it.
 
 ## Install
@@ -16,11 +16,11 @@ git clone https://github.com/ericpaulsnowden/comfyui-epsnodes
 ```
 
 Restart ComfyUI. You should see `lora_library vX.Y.Z loaded` in the server
-log, and a **LoRA Library** section in Settings.
+log, and an **EPSNodes** section in Settings.
 
 ## Point it at your library folder (optional but recommended)
 
-Settings → **LoRA Library** → *Library folder*: an absolute path, e.g.
+Settings → **EPSNodes** → *Library folder*: an absolute path, e.g.
 `D:\comfy-library` or `\\nas\share\comfy-library` (Windows) or
 `/Volumes/nas/comfy-library` (macOS). Leave empty to use the per-user
 default inside ComfyUI's `user/` directory.
@@ -38,4 +38,4 @@ git pull
 ```
 
 Restart ComfyUI **and** hard-refresh the browser tab. The versions shown in
-Settings → LoRA Library must match; a mismatch means one half is stale.
+Settings → EPSNodes must match; a mismatch means one half is stale.

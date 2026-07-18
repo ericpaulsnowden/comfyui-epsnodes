@@ -426,8 +426,8 @@ def test_class_shape_matches_format_md_section_6_2() -> None:
 
 
 def test_loras_text_formats_a1111_tags_in_order(context: LibraryContext) -> None:
-    """FORMAT.md SS6.2: <lora:stem:strength> tags, order preserved, extension
-    and subfolder stripped, compact %g strengths."""
+    """FORMAT.md SS6.2: normalized stem_strength tokens, order preserved,
+    extension and subfolder stripped, compact %g strengths."""
     slug, _ = sets_store.save_set(
         context,
         {
@@ -440,7 +440,7 @@ def test_loras_text_formats_a1111_tags_in_order(context: LibraryContext) -> None
     )
     node = nodes_sets.LoraLibraryApplySet()
     *_, loras_text = node.apply(set=slug, strength_scale=1.0)
-    assert loras_text == "<lora:detailer:0.8> <lora:film_grain:1>"
+    assert loras_text == "detailer_0.8 film_grain_1"
 
 
 def test_loras_text_dual_strength_and_scale(context: LibraryContext) -> None:
@@ -457,7 +457,7 @@ def test_loras_text_dual_strength_and_scale(context: LibraryContext) -> None:
     )
     node = nodes_sets.LoraLibraryApplySet()
     *_, loras_text = node.apply(set=slug, strength_scale=0.5)
-    assert loras_text == "<lora:detailer:0.4:0.2>"
+    assert loras_text == "detailer_0.4_0.2"
 
 
 def test_loras_text_empty_when_nothing_applies(context: LibraryContext) -> None:

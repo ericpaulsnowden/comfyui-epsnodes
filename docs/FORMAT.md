@@ -194,7 +194,9 @@ message>"}` with a 4xx status. `mtime` values are float POSIX seconds.
 | Route | → |
 |---|---|
 | `GET /lora_library/version` | `{"version": "X.Y.Z"}` |
-| `GET /lora_library/config` | `{"library_dir", "default_library_dir", "configured": bool}` |
+| `GET /lora_library/config` | `{"library_dir", "default_library_dir", "configured": bool, "is_local": bool}` — `is_local` = §2 loopback verdict for THIS request, so a browser can tell whether it sits on the server machine (drives §7.2's remote read-only gating) |
+| `GET /lora_library/fs/list?dir=` | **loopback-only** (403 remote): server-filesystem browser for the §7.2 picker. Empty/missing `dir` ⇒ `library_dir`. → `{"dir": <abs>, "parent": <abs or null>, "dirs": [names], "files": [names]}` — `files` limited to `.md`; entries sorted case-insensitively; unreadable dir ⇒ 400 |
+| `POST /lora_library/notebook/open_folder` `{"file"}` | **loopback-only** (403 remote): reveals the resolved notebook file's folder in the OS file manager ON THE SERVER MACHINE (Explorer/Finder). Missing folder ⇒ 404; `{"ok": true}` |
 | `POST /lora_library/config` `{"library_dir"}` | validates (absolute, creatable, writable), persists; `{"ok", "library_dir"}` |
 | `GET /lora_library/loras` | `{"loras": [".."]}` — installed loras for pickers |
 | `GET /lora_library/notebook?file=` | `{"file": <resolved abs>, "exists": bool, "mtime", "entries": [{"name","category"}], "problems": [".."]}` (missing file ⇒ `exists:false`, empty entries — NOT an error) |
@@ -249,11 +251,13 @@ execution — **the file is the truth; the UI is a view.**
   applied strength).
 - Outputs: `MODEL`, `CLIP`, `LORA_STACK`, `STRING` (`trigger_words`),
   `STRING` (`loras_text`).
-- `loras_text` is the human-readable/paste-able summary of what was applied:
-  the enabled, resolved rows in order as A1111-style tags —
-  `<lora:stem:strength>` (or `<lora:stem:strength_model:strength_clip>`
-  when the clip strength differs), `stem` = basename without extension,
-  strengths post-`strength_scale`, space-joined; `""` when nothing applied.
+- `loras_text` is the normalized summary of what was applied (owner format,
+  2026-07-18c — filename/caption-friendly, no `<>`/`:` punctuation): the
+  enabled, resolved rows in order as `stem_strength` tokens —
+  `MYLORA_HIGH_1`, `detailer_0.8` (dual strengths append both:
+  `detailer_0.8_0.4`) — `stem` = basename without extension, strengths
+  post-`strength_scale` formatted `%g`, tokens space-joined; `""` when
+  nothing applied.
 - Behavior: loads the §4 file; applies enabled rows IN ORDER via the same
   core machinery ComfyUI's own LoraLoader uses, when `model`/`clip` are
   wired; always emits `LORA_STACK` = `[(file, strength_model,
@@ -265,7 +269,16 @@ execution — **the file is the truth; the UI is a view.**
 - `IS_CHANGED` → set file mtime/size + widget values; `VALIDATE_INPUTS`
   True (set list is dynamic).
 
-### §6.3 `LoRA Set Controller` (frontend-only virtual node)
+### §6.3 `Power Lora Loader State Controller` (frontend-only virtual node)
+
+Naming (owner, 2026-07-18c): the node's DISPLAY name is "Power Lora Loader
+State Controller" and every user-facing word in its UI says **state**, not
+set — widget label `state`, buttons `New State` (capture current rows as a
+new state), `Save State` (overwrite the selected state with current rows),
+`Delete State` (two-click confirm). The class id `LoraLibrarySetController`
+stays frozen (§8), and states ARE §4 set files — same storage, same routes,
+same files the Apply LoRA Set node reads; only the controller's vocabulary
+changes.
 
 Registered purely in JS (like core's MarkdownNote) under the type name
 `LoraLibrarySetController`; it never executes server-side and never blocks a
@@ -273,11 +286,16 @@ queue. It drives a **genuine, untouched `Power Lora Loader (rgthree)`**:
 
 - Widgets: `target` (COMBO of PLL nodes in the graph, by title `#id`, PLUS
   an `All Power Lora Loaders (N)` option when N ≥ 2 — the WAN high/low
-  dual-loader case; auto-selects when exactly one exists), `set` (COMBO
-  from §5 sets routes — **choosing a set IS the apply**: the combo's
-  callback applies immediately, there is NO Apply button; owner decision
-  2026-07-18 after the button read as broken), `name` (text), buttons:
-  `Capture target → new set`, `Update set`, `Delete set`.
+  dual-loader case; auto-selects when exactly one exists), the state COMBO
+  (internal widget name `set`, displayed label `state`, options from §5
+  sets routes — **choosing a state IS the apply**: the combo's callback
+  applies immediately, there is NO Apply button; owner decision 2026-07-18
+  after the button read as broken), `name` (text), buttons: `New State`,
+  `Save State`, `Delete State` (two-click "Are you sure?" confirm; the
+  armed button is visually distinct, survives background cache refreshes
+  for its full window, and selection is slug-anchored so a mid-window
+  sets-poll cannot invalidate it — the 2026-07-18 "delete does nothing
+  during a running workflow" bug).
 - Multi-target semantics: with `All…` selected, APPLY writes the set to
   every PLL in the graph; CAPTURE reads from the lowest-node-id PLL (a
   deterministic, documented choice — capture needs one source of truth).
@@ -320,6 +338,23 @@ queue. It drives a **genuine, untouched `Power Lora Loader (rgthree)`**:
     single selection. All selected rows highlight; the EDITOR always shows
     the most recently clicked entry (the "active" one) — editing/saving
     touches only it. The `entry` widget holds the §6.1 newline-joined list.
+  - Delete removes EVERY selected entry (owner amendment 2026-07-18c): the
+    confirm label shows the count when >1 ("Are you sure? (3)"); deletion
+    is sequential client-side over the §5 delete route, refreshing
+    `base_mtime` from each response; a mid-sequence conflict stops the run
+    and surfaces the standard §3.5 conflict UI.
+  - Rename: double-click an entry row to edit its name inline (Enter/✓
+    commits via the §5 entry route's `rename_to`, Esc cancels; duplicate
+    names are refused client-side first, server remains the authority).
+  - File panel (owner amendment 2026-07-18c): the RESOLVED absolute path
+    of the notebook file is always visible (muted line under the widgets,
+    ellipsized middle-out, full path in its tooltip). Two buttons beside
+    it — `Browse…` (a server-filesystem picker dialog over §5 `fs/list`:
+    navigate dirs, pick a `.md` file → writes the `file` widget) and
+    `Open folder` (§5 `open_folder`) — both HIDDEN when the §5 config
+    reports `is_local: false`, and the `file` text widget becomes
+    read-only then too: a remote browser (the Mac viewing the PC) sees
+    where the file lives but defers to the host for changing it.
   - Drag-reorder: rows drag within the list with a visible insertion
     marker; dropping emits one §5 `/notebook/move` (before = the row below
     the marker, or `category` append when dropped at a category's end/on

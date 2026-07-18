@@ -1,8 +1,20 @@
 /**
- * @file LoRA Set Controller — frontend-only virtual node (FORMAT.md §6.3) that
- * drives a genuine, untouched `Power Lora Loader (rgthree)` node elsewhere in
- * the graph. Registered purely in JS (like core's MarkdownNote/NoteNode) —
- * never executes, never appears in the API prompt.
+ * @file Power Lora Loader State Controller — frontend-only virtual node
+ * (FORMAT.md §6.3) that drives a genuine, untouched `Power Lora Loader
+ * (rgthree)` node elsewhere in the graph. Registered purely in JS (like
+ * core's MarkdownNote/NoteNode) — never executes, never appears in the API
+ * prompt.
+ *
+ * Renamed from "LoRA Set Controller" (owner, 2026-07-18c): every user-facing
+ * word now says "state" instead of "set" — button labels, the `set` widget's
+ * on-canvas text, placeholders, toasts. The class id
+ * `LoraLibrarySetController` and the backend `sets` storage/routes stay
+ * FROZEN (FORMAT.md §6.3/§8) and keep saying "set" underneath — internal
+ * identifiers (variables, methods, the widget's `name`, the
+ * `lora_library:sets-changed` DOM event sets.js listens for) are
+ * DELIBERATELY left alone so this stays a pure vocabulary change with zero
+ * behavioral or serialization risk. See the `label` vs `name` bullet below
+ * for the one widget where that distinction is load-bearing.
  *
  * This file binds to rgthree internals it does not own. Every binding is
  * cited below with the exact file + lines read (rgthree-comfy's COMPILED
@@ -70,6 +82,45 @@
  *    returns (see `_addButton`/status widget below). Moot for prompt
  *    inclusion either way since `isVirtualNode` nodes are stripped from the
  *    API prompt wholesale (executionUtil.ts:37-39, 86-91).
+ *  - `label` vs `name` (2026-07-18c rename — fetched live from
+ *    Comfy-Org/ComfyUI_frontend `main` @ src/lib/litegraph/src/widgets/
+ *    BaseWidget.ts on 2026-07-18; VERIFY(live) against whatever's actually
+ *    installed on Eric's rig): `label` is a plain get/set pair backed by
+ *    internal state (lines 91-96); `name` is set once from `addWidget()`'s
+ *    2nd argument (line 169, `this.name = widget.name`) and never touched
+ *    again by the base class. The rendered row text is
+ *    `get displayName() { return this.label || this.name }` (lines 246-248),
+ *    read by the shared label+value draw routine every combo/text/number
+ *    widget goes through (`drawTruncatingText()`, lines 338-397 — line 348
+ *    `const { displayName, _displayValue } = this`). So `.label` changes
+ *    ONLY what's painted; `.name` is what `scanLoraRows()` pattern-matches
+ *    in this file and what `widgetId()`/`setNodeId()` (lines 135-158) key
+ *    off of, and per the save/restore-ordering note above this fork restores
+ *    `widgets_values` by plain positional index, not by name — so nothing
+ *    here needs `name === 'set'` for reload correctness, but our own
+ *    lookups and any external workflow-scripting that greps a saved graph
+ *    for a widget literally named `set` do. `_buildWidgets()` therefore sets
+ *    `this._w.set.label = 'state'` right after creating the widget and
+ *    leaves `name: 'set'` alone.
+ *  - Per-widget custom colors (delete-button arm indicator, added for the
+ *    2026-07-18c delete-bug fix, see `_armDeleteButtonColor()`):
+ *    `background_color`/`text_color`/`outline_color` on `BaseWidget` are
+ *    GETTER-ONLY accessors reading global theme constants (BaseWidget.ts:
+ *    222-244, e.g. `get background_color() { return litegraph().WIDGET_BGCOLOR }`).
+ *    The constructor even destructures and DISCARDS those exact key names
+ *    off whatever's passed to `addWidget()` (lines 175-200, comment "Prevent
+ *    naming conflicts with custom nodes") — passing them as widget options
+ *    is a silent no-op by design, and a plain `widget.background_color = x`
+ *    assignment would THROW if it ever reached the instance (getter-only
+ *    accessor, strict-mode ES module semantics). `Object.defineProperty` is
+ *    a different operation (`[[DefineOwnProperty]]`, not `[[Set]]`) and CAN
+ *    still shadow an inherited accessor with an own one; `ButtonWidget`'s
+ *    `drawWidget`/`drawLabel` (widgets/ButtonWidget.ts:24-59) read
+ *    `this.background_color`/`this.text_color` at draw time, so an own
+ *    accessor defined directly on one button instance is picked up on the
+ *    very next repaint with no need to override `drawWidget` itself, and
+ *    `delete`-ing that own property (`configurable: true`) restores the
+ *    original theme getter exactly. VERIFY(live).
  *  - Save/restore ordering hazard (LGraphNode.ts:912-936 restore vs 982-994
  *    save): save writes `widgets_values[i]` at each widget's OWN index and
  *    leaves a hole where `serialize===false`; restore instead walks a
@@ -159,7 +210,7 @@ import * as api from './api.js'
 // ---------------------------------------------------------------- constants
 
 const NODE_TYPE = 'LoraLibrarySetController'
-const NODE_TITLE = 'LoRA Set Controller'
+const NODE_TITLE = 'Power Lora Loader State Controller'
 const NODE_CATEGORY = 'EPSNodes'
 
 /** Exact rgthree type/title/comfyClass string — constants.js addRgthree("Power Lora Loader"). */
@@ -182,11 +233,26 @@ const PROP_SHOW_STATUS = 'Show status'
 const ALL_TARGETS_LABEL_PREFIX = 'All Power Lora Loaders'
 const ALL_TARGETS_RE = /^All Power Lora Loaders \(\d+\)$/
 
-const LABEL_CAPTURE = 'Capture target → new set'
-const LABEL_UPDATE = 'Update set (overwrite)'
-const LABEL_DELETE = 'Delete set'
+/**
+ * Button labels (owner, 2026-07-18c rename). Identifier names below stay
+ * put — same freeze pattern as NODE_TYPE and the `set` widget's `name`
+ * (FORMAT.md §6.3) — only the displayed strings follow the state vocabulary.
+ */
+const LABEL_CAPTURE = 'New State'
+const LABEL_UPDATE = 'Save State'
+const LABEL_DELETE = 'Delete State'
 const LABEL_DELETE_CONFIRM = 'Are you sure?'
 const DELETE_CONFIRM_MS = 4000
+/**
+ * Delete-armed visual (2026-07-18c delete-bug fix): a distinct color on the
+ * button itself, on top of the label swap above, so the two-step reads as
+ * "armed" even on a canvas that's constantly redrawing (an active queue) —
+ * see `_armDeleteButtonColor()` and the file header's per-widget-color
+ * citation for why this needs `Object.defineProperty` rather than a plain
+ * assignment.
+ */
+const DELETE_ARMED_BG_COLOR = '#8b2020'
+const DELETE_ARMED_TEXT_COLOR = '#ffffff'
 
 /** onDrawForeground fires on every canvas redraw; throttle our own work. */
 const HEARTBEAT_MIN_MS = 1000
@@ -195,7 +261,7 @@ const SETS_POLL_MS = 4000
 const MAX_ROW_ADJUST_STEPS = 500
 
 const PLACEHOLDER_NO_TARGET = '(none found)'
-const PLACEHOLDER_NO_SETS = '(no sets saved)'
+const PLACEHOLDER_NO_SETS = '(no states saved)'
 
 const MSG_NO_RGTHREE = 'Install rgthree-comfy, or use Apply LoRA Set instead'
 const MSG_SHAPE_DRIFT = 'Power Lora Loader internals changed — controller disabled (v-check)'
@@ -499,7 +565,7 @@ function applySetToTargets(nodes, setData) {
 export function registerControllerNode() {
   try {
     if (typeof LiteGraph === 'undefined' || typeof LGraphNode === 'undefined') {
-      api.warn('LiteGraph/LGraphNode globals not found; LoRA Set Controller not registered')
+      api.warn(`LiteGraph/LGraphNode globals not found; ${NODE_TITLE} not registered`)
       return
     }
     if (LiteGraph.registered_node_types && LiteGraph.registered_node_types[NODE_TYPE]) {
@@ -526,6 +592,12 @@ export function registerControllerNode() {
         this._lastStatusMessage = ''
         this._lastHeartbeat = 0
         this._lastSetsPoll = 0
+        // 2026-07-18c delete-bug fix: the last SLUG (stable) a label lookup
+        // in _selectedSetEntry() resolved to — a durable fallback for when
+        // _setsCache gets rebuilt (heartbeat-driven _refreshSetsCache) with a
+        // different dedup-suffixed label for the same underlying entry. See
+        // _selectedSetEntry() for the full root-cause writeup.
+        this._selectedSlug = null
         // Guards for the `set` combo's apply-on-select callback (file header:
         // "Combo callbacks do NOT fire during workflow restore" finding).
         // `_isRestoring` brackets configure() (workflow load); `_silentSetWrite`
@@ -604,7 +676,7 @@ export function registerControllerNode() {
         try {
           fn()
         } catch (error) {
-          api.warn(`LoRA Set Controller: ${label} failed`, error)
+          api.warn(`${NODE_TITLE}: ${label} failed`, error)
         }
       }
 
@@ -636,10 +708,19 @@ export function registerControllerNode() {
           () =>
             this._guarded('set changed', () => {
               if (this._isRestoring || this._silentSetWrite) return
+              // A genuine user reselect means any pending delete-confirm is
+              // now about a DIFFERENT entry than what's on screen — disarm
+              // rather than let a stale confirm click land on the old pick.
+              this._disarmDeleteButton()
               this._onSetSelected()
             }),
           { values: () => this._setComboValues() }
         )
+        // 2026-07-18c rename: display-only. `name` stays 'set' (serialize +
+        // our own scanLoraRows-style lookups key off it); see file header's
+        // `label` vs `name` citation for the BaseWidget mechanics this relies
+        // on. VERIFY(live).
+        this._w.set.label = 'state'
 
         this._w.name = this.addWidget('text', 'name', '', () => {}, {})
 
@@ -665,7 +746,11 @@ export function registerControllerNode() {
 
         this._w.captureBtn = this._addButton(LABEL_CAPTURE, () => this._onCaptureClick())
         this._w.updateBtn = this._addButton(LABEL_UPDATE, () => this._onUpdateClick())
-        this._w.deleteBtn = this._addButton(LABEL_DELETE, () => this._onDeleteClick())
+        // Guarded like the target/set combo callbacks above (unlike capture/
+        // update, this button's own synchronous body now does arm/disarm
+        // bookkeeping — Object.defineProperty et al — so it gets the same
+        // never-throw belt-and-suspenders. 2026-07-18c delete-bug fix.
+        this._w.deleteBtn = this._addButton(LABEL_DELETE, () => this._guarded('delete click', () => this._onDeleteClick()))
         this._actionButtons = [this._w.captureBtn, this._w.updateBtn, this._w.deleteBtn]
 
         this._refreshTargetCombo()
@@ -734,7 +819,18 @@ export function registerControllerNode() {
         this._lastProbe = probe
         this._lastStatusMessage = probe.message
         if (this._w.status) this._w.status.value = probe.message
-        for (const button of this._actionButtons || []) button.disabled = !probe.ok
+        for (const button of this._actionButtons || []) {
+          // 2026-07-18c delete-bug fix: never let a heartbeat-driven probe
+          // flip disable an ARMED delete button. A disabled widget swallows
+          // its click with zero feedback (litegraph skips the callback
+          // entirely) — during an active queue this heartbeat can easily
+          // fire mid-arm (see _heartbeat()), so without this guard a
+          // transient probe hiccup would eat click 2 silently and read as
+          // "the button does nothing" for the rest of the confirm window.
+          // The button re-syncs to the live probe the instant it disarms.
+          if (button === this._w.deleteBtn && button._armed) continue
+          button.disabled = !probe.ok
+        }
         this.setDirtyCanvas(true, false)
       }
 
@@ -758,7 +854,7 @@ export function registerControllerNode() {
           this._applySetsResponse(data)
         } catch (error) {
           api.warn(
-            'LoRA Set Controller: GET /lora_library/sets failed (backend sets routes may not be deployed yet)',
+            `${NODE_TITLE}: GET /lora_library/sets failed (backend sets routes may not be deployed yet)`,
             error
           )
         }
@@ -776,14 +872,66 @@ export function registerControllerNode() {
         this.setDirtyCanvas(true, false)
       }
 
+      /**
+       * 2026-07-18c delete-bug fix (owner report — delete failing while a
+       * workflow was RUNNING). ROOT CAUSE: the `set` combo's `.value` is a
+       * derived, dedup-suffixed LABEL string (`_applySetsResponse()`),
+       * rebuilt from scratch on every `_refreshSetsCache()` poll, and this
+       * method used to match ONLY by that label against the current
+       * `_setsCache`. The backend's `list_sets()` sort is fully
+       * deterministic for unchanged data (lora_library/sets_store.py:242,
+       * `sort(key=lambda e: (e["name"].casefold(), e["slug"]))` — slug is
+       * unique so there's never a real tie), so a bare, no-op poll never by
+       * itself reshuffles labels. But ANY actual library change during the
+       * ~4s arm-to-confirm window — renaming/capturing/deleting ANY state,
+       * even one unrelated to the one armed, since that can add or remove a
+       * DIFFERENT entry's "(slug)" dedup suffix — can leave the widget still
+       * holding a label string that no longer appears in the freshly
+       * rebuilt cache, even though the armed entry itself still exists.
+       * `_heartbeat()` only runs from `onDrawForeground()`, and an ACTIVE
+       * QUEUE keeps the canvas dirty continuously (progress bar, executing-
+       * node highlight), so its 1s throttle and the nested 4s
+       * `SETS_POLL_MS` both fire like clockwork — and `SETS_POLL_MS` is the
+       * SAME 4000ms as `DELETE_CONFIRM_MS`, so a sets-cache refresh is
+       * near-guaranteed to land inside any given arm window while a queue is
+       * busy, and often never fires at all across the same window while
+       * idle. That is the concrete mechanism behind "worked when I tried it
+       * standing still, failed mid-queue." When the label match failed, the
+       * second click fell through to `_doDelete()`'s `if (!entry)` branch,
+       * which only shows a WARN toast ("Pick a saved state first.") — easy
+       * to miss on a busy screen, and the `status` widget that would have
+       * shown the same text persistently is hidden by default
+       * (`PROP_SHOW_STATUS`) — so the button read as simply dead.
+       *
+       * FIX: match by label first (cheap, correct the overwhelming majority
+       * of the time, and what keeps a genuine NEW user pick working
+       * immediately) but fall back to the last confidently-resolved SLUG —
+       * stable for the entry's whole lifetime, FORMAT.md §4 — instead of
+       * reporting "nothing selected." `_onDeleteClick()` also calls this at
+       * ARM time specifically so `_selectedSlug` is fresh for the whole
+       * window even if the user never triggers another label-matching read
+       * before clicking confirm.
+       */
       _selectedSetEntry() {
         const value = this._w.set?.value
-        return this._setsCache.find((s) => s.label === value) || null
+        let entry = this._setsCache.find((s) => s.label === value)
+        if (entry) {
+          this._selectedSlug = entry.slug
+          return entry
+        }
+        if (this._selectedSlug) {
+          entry = this._setsCache.find((s) => s.slug === this._selectedSlug)
+          if (entry) return entry
+        }
+        return null
       }
 
       _selectSetBySlug(slug) {
         const entry = this._setsCache.find((s) => s.slug === slug)
-        if (entry) this._setSetValueSilently(entry.label)
+        if (entry) {
+          this._selectedSlug = entry.slug
+          this._setSetValueSilently(entry.label)
+        }
       }
 
       /**
@@ -823,8 +971,8 @@ export function registerControllerNode() {
         try {
           await fn()
         } catch (error) {
-          api.warn(`LoRA Set Controller: ${label} failed`, error)
-          this._toast('error', 'LoRA Set Controller', `${label} failed: ${error?.message || error}`)
+          api.warn(`${NODE_TITLE}: ${label} failed`, error)
+          this._toast('error', NODE_TITLE, `${label} failed: ${error?.message || error}`)
         }
       }
 
@@ -832,39 +980,89 @@ export function registerControllerNode() {
 
       /** Fired by the `set` combo's callback (see _buildWidgets) — not a button. */
       _onSetSelected() {
-        this._runAction('Apply set', () => this._doApply())
+        this._runAction('Apply State', () => this._doApply())
       }
 
       _onCaptureClick() {
-        this._runAction('Capture target', () => this._doCapture())
+        // A pending delete-confirm is about whatever was selected when it was
+        // armed; capturing a new state is a big enough context switch that
+        // it should never be silently confirmed by the next click instead.
+        this._disarmDeleteButton()
+        this._runAction(LABEL_CAPTURE, () => this._doCapture())
       }
 
       _onUpdateClick() {
-        this._runAction('Update set', () => this._doUpdate())
+        this._disarmDeleteButton()
+        this._runAction(LABEL_UPDATE, () => this._doUpdate())
       }
 
+      /**
+       * Two-step confirm: first click arms the button (distinct color +
+       * "Are you sure?" label) for DELETE_CONFIRM_MS; a second click within
+       * that window actually deletes. 2026-07-18c delete-bug fix: arming
+       * also refreshes `_selectedSlug` (via `_selectedSetEntry()`) while the
+       * combo's label match is fresh, so `_doDelete()`'s own lookup at
+       * confirm time — however many sets-cache refreshes have landed in
+       * between, see `_selectedSetEntry()` — still resolves correctly.
+       */
       _onDeleteClick() {
-        // Two-step confirm: first click arms the button and flips its label
-        // for ~4s; a second click within that window actually deletes.
         const button = this._w.deleteBtn
         if (!button) return
         if (!button._armed) {
+          this._selectedSetEntry()
           button._armed = true
           button.name = LABEL_DELETE_CONFIRM
+          this._armDeleteButtonColor(button)
           clearTimeout(button._armTimer)
-          button._armTimer = setTimeout(() => {
-            button._armed = false
-            button.name = LABEL_DELETE
-            this.setDirtyCanvas(true, false)
-          }, DELETE_CONFIRM_MS)
+          button._armTimer = setTimeout(() => this._disarmDeleteButton(), DELETE_CONFIRM_MS)
           this.setDirtyCanvas(true, false)
           return
         }
+        this._disarmDeleteButton()
+        this._runAction(LABEL_DELETE, () => this._doDelete())
+      }
+
+      /** Cancel a pending delete-confirmation and restore the button's normal look. Idempotent. */
+      _disarmDeleteButton() {
+        const button = this._w.deleteBtn
+        if (!button || !button._armed) return
         clearTimeout(button._armTimer)
         button._armed = false
         button.name = LABEL_DELETE
+        this._disarmDeleteButtonColor(button)
         this.setDirtyCanvas(true, false)
-        this._runAction('Delete set', () => this._doDelete())
+      }
+
+      /**
+       * File header's per-widget-color citation: shadow the inherited
+       * getter-only `background_color`/`text_color` accessors with own
+       * properties via `Object.defineProperty` (a plain assignment would
+       * throw). Wrapped defensively — this is cosmetic only, and must never
+       * be the reason the arm/disarm STATE machine itself breaks on some
+       * future or different litegraph build.
+       */
+      _armDeleteButtonColor(button) {
+        try {
+          Object.defineProperty(button, 'background_color', {
+            get: () => DELETE_ARMED_BG_COLOR,
+            configurable: true
+          })
+          Object.defineProperty(button, 'text_color', {
+            get: () => DELETE_ARMED_TEXT_COLOR,
+            configurable: true
+          })
+        } catch (error) {
+          api.warn(`${NODE_TITLE}: could not color the armed delete button (cosmetic only)`, error)
+        }
+      }
+
+      _disarmDeleteButtonColor(button) {
+        try {
+          delete button.background_color
+          delete button.text_color
+        } catch (error) {
+          api.warn(`${NODE_TITLE}: could not reset delete button color (cosmetic only)`, error)
+        }
       }
 
       /**
@@ -876,12 +1074,12 @@ export function registerControllerNode() {
         const targets = resolveTargetNodes(this._w.target?.value)
         const probe = probeTargets(targets)
         if (!probe.ok) {
-          this._toast('warn', 'LoRA Set Controller', probe.message)
+          this._toast('warn', NODE_TITLE, probe.message)
           return
         }
         const entry = this._selectedSetEntry()
         if (!entry) {
-          this._toast('warn', 'LoRA Set Controller', 'Pick a saved set first.')
+          this._toast('warn', NODE_TITLE, 'Pick a saved state first.')
           return
         }
         const full = await api.getJson('/lora_library/set', { slug: entry.slug })
@@ -894,7 +1092,7 @@ export function registerControllerNode() {
             : `${targets[0].title || targets[0].type} #${targets[0].id}`
         this._toast(
           'success',
-          'LoRA Set Controller',
+          NODE_TITLE,
           `Applied "${full.name}" -> ${targetDesc} (${rows} row${rows === 1 ? '' : 's'} each).`
         )
       }
@@ -908,12 +1106,12 @@ export function registerControllerNode() {
         const targets = resolveTargetNodes(this._w.target?.value)
         const probe = probeTargets(targets)
         if (!probe.ok) {
-          this._toast('warn', 'LoRA Set Controller', probe.message)
+          this._toast('warn', NODE_TITLE, probe.message)
           return
         }
         const source = targets[0]
         const loras = captureRows(source)
-        const name = (this._w.name?.value || '').trim() || `Set ${this._setsCache.length + 1}`
+        const name = (this._w.name?.value || '').trim() || `State ${this._setsCache.length + 1}`
         const response = await api.postJson('/lora_library/set', {
           set: { format: 1, name, loras, trigger_words: '', notes: '' }
         })
@@ -923,7 +1121,7 @@ export function registerControllerNode() {
         if (this._w.name) this._w.name.value = ''
         const sourceNote =
           targets.length > 1 ? ` from ${source.title || source.type} #${source.id} (lowest id of ${targets.length})` : ''
-        this._toast('success', 'LoRA Set Controller', `Saved "${name}" (${loras.length} rows)${sourceNote}.`)
+        this._toast('success', NODE_TITLE, `Saved "${name}" (${loras.length} rows)${sourceNote}.`)
       }
 
       /** Same lowest-node-id source rule as _doCapture() — Update is a re-capture. */
@@ -931,12 +1129,12 @@ export function registerControllerNode() {
         const targets = resolveTargetNodes(this._w.target?.value)
         const probe = probeTargets(targets)
         if (!probe.ok) {
-          this._toast('warn', 'LoRA Set Controller', probe.message)
+          this._toast('warn', NODE_TITLE, probe.message)
           return
         }
         const entry = this._selectedSetEntry()
         if (!entry) {
-          this._toast('warn', 'LoRA Set Controller', 'Pick a saved set first.')
+          this._toast('warn', NODE_TITLE, 'Pick a saved state first.')
           return
         }
         const source = targets[0]
@@ -952,7 +1150,7 @@ export function registerControllerNode() {
           trigger_words = existing.trigger_words ?? ''
           notes = existing.notes ?? ''
         } catch (error) {
-          api.warn('LoRA Set Controller: could not read existing set before update; overwriting rows only', error)
+          api.warn(`${NODE_TITLE}: could not read existing set before update; overwriting rows only`, error)
         }
         const response = await api.postJson('/lora_library/set', {
           slug: entry.slug,
@@ -963,20 +1161,22 @@ export function registerControllerNode() {
         this._selectSetBySlug(entry.slug)
         const sourceNote =
           targets.length > 1 ? ` from ${source.title || source.type} #${source.id} (lowest id of ${targets.length})` : ''
-        this._toast('success', 'LoRA Set Controller', `Updated "${name}" (${loras.length} rows)${sourceNote}.`)
+        this._toast('success', NODE_TITLE, `Updated "${name}" (${loras.length} rows)${sourceNote}.`)
       }
 
       async _doDelete() {
         const entry = this._selectedSetEntry()
         if (!entry) {
-          this._toast('warn', 'LoRA Set Controller', 'Pick a saved set first.')
+          this._toast('warn', NODE_TITLE, 'Pick a saved state first.')
           return
         }
         const response = await api.postJson('/lora_library/set/delete', { slug: entry.slug })
         this._applySetsResponse(response)
         announceSetsChanged()
-        this._setSetValueSilently(this._setsCache[0]?.label || '')
-        this._toast('success', 'LoRA Set Controller', `Deleted "${entry.name}".`)
+        const nextEntry = this._setsCache[0] || null
+        this._selectedSlug = nextEntry?.slug || null
+        this._setSetValueSilently(nextEntry?.label || '')
+        this._toast('success', NODE_TITLE, `Deleted "${entry.name}".`)
       }
     }
 

@@ -57,24 +57,22 @@ def _format_strength(value: float) -> str:
 
 
 def _loras_text(stack: list[tuple[str, float, float]]) -> str:
-    """FORMAT.md §6.2 ``loras_text``: the applied rows as A1111-style tags.
+    """FORMAT.md §6.2 ``loras_text``: normalized ``stem_strength`` tokens.
 
-    ``<lora:stem:strength>`` normally; ``<lora:stem:model:clip>`` when the
-    two strengths differ. ``stem`` = basename without extension, tolerant of
-    either path separator (the stack may carry this machine's spelling of a
-    set written on the other OS, FORMAT.md §4).
+    Owner format (2026-07-18c) — filename/caption-friendly, no ``<>``/``:``
+    punctuation: ``MYLORA_HIGH_1``, ``detailer_0.8`` (dual strengths append
+    both: ``detailer_0.8_0.4``), space-joined. ``stem`` = basename without
+    extension, tolerant of either path separator (the stack may carry this
+    machine's spelling of a set written on the other OS, FORMAT.md §4).
     """
-    tags = []
+    tokens = []
     for file, strength_model, strength_clip in stack:
         stem = file.replace("\\", "/").rsplit("/", 1)[-1].rsplit(".", 1)[0]
-        if strength_clip == strength_model:
-            tags.append(f"<lora:{stem}:{_format_strength(strength_model)}>")
-        else:
-            tags.append(
-                f"<lora:{stem}:{_format_strength(strength_model)}"
-                f":{_format_strength(strength_clip)}>"
-            )
-    return " ".join(tags)
+        token = f"{stem}_{_format_strength(strength_model)}"
+        if strength_clip != strength_model:
+            token += f"_{_format_strength(strength_clip)}"
+        tokens.append(token)
+    return " ".join(tokens)
 
 
 def _set_file_token(context: LibraryContext | None, slug: str) -> str:
