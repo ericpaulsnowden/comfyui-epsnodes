@@ -295,6 +295,160 @@ class TestRemoveEntry:
         assert ms.serialize(parsed) == ["# Cat A", "## E2", "B2"]
 
 
+class TestMoveEntry:
+    def test_move_before_an_earlier_sibling_within_a_category(self) -> None:
+        parsed = ms.parse("# Cat A\n## E1\nB1\n## E2\nB2\n## E3\nB3\n")
+        ms.move_entry(parsed, "E3", before="E1")
+        assert ms.list_entries(parsed) == [
+            {"name": "E3", "category": "Cat A"},
+            {"name": "E1", "category": "Cat A"},
+            {"name": "E2", "category": "Cat A"},
+        ]
+
+    def test_move_before_a_later_sibling_within_a_category(self) -> None:
+        parsed = ms.parse("# Cat A\n## E1\nB1\n## E2\nB2\n## E3\nB3\n")
+        ms.move_entry(parsed, "E1", before="E3")
+        assert ms.list_entries(parsed) == [
+            {"name": "E2", "category": "Cat A"},
+            {"name": "E1", "category": "Cat A"},
+            {"name": "E3", "category": "Cat A"},
+        ]
+
+    def test_move_across_categories_membership_follows_position(self) -> None:
+        parsed = ms.parse("# Cat A\n## E1\nB1\n# Cat B\n## E2\nB2\n")
+        result = ms.move_entry(parsed, "E1", before="E2")
+        assert result == {"name": "E1", "category": "Cat B"}
+        assert ms.list_entries(parsed) == [
+            {"name": "E1", "category": "Cat B"},
+            {"name": "E2", "category": "Cat B"},
+        ]
+
+    def test_move_across_categories_body_travels_byte_identically(self) -> None:
+        text = "# Cat A\n## E1\nLine one.\n\nLine two, blank above.\n# Cat B\n## E2\nB2\n"
+        parsed = ms.parse(text)
+        original_text = ms.get_entry(parsed, "E1")["text"]
+        ms.move_entry(parsed, "E1", before="E2")
+        assert ms.get_entry(parsed, "E1")["text"] == original_text
+        assert ms.list_entries(parsed) == [
+            {"name": "E1", "category": "Cat B"},
+            {"name": "E2", "category": "Cat B"},
+        ]
+        assert ms.serialize(parsed) == [
+            "# Cat A",
+            "# Cat B",
+            "## E1",
+            "Line one.",
+            "",
+            "Line two, blank above.",
+            "## E2",
+            "B2",
+        ]
+
+    def test_move_to_a_new_category_creates_heading_at_end_of_file(self) -> None:
+        parsed = ms.parse("## E1\nB1\n")
+        result = ms.move_entry(parsed, "E1", category="Brand New")
+        assert result == {"name": "E1", "category": "Brand New"}
+        assert ms.serialize(parsed) == ["# Brand New", "## E1", "B1"]
+
+    def test_move_to_an_existing_category_lands_at_its_end(self) -> None:
+        parsed = ms.parse("# Cat A\n## E1\nB1\n## E2\nB2\n# Cat B\n## E3\nB3\n")
+        ms.move_entry(parsed, "E3", category="Cat A")
+        assert ms.serialize(parsed) == [
+            "# Cat A",
+            "## E1",
+            "B1",
+            "## E2",
+            "B2",
+            "## E3",
+            "B3",
+            "# Cat B",
+        ]
+
+    def test_move_by_category_into_a_repeated_name_lands_in_the_last_one(self) -> None:
+        parsed = ms.parse(
+            "# Cat A\n## E1\nB1\n# Cat B\n## E2\nB2\n# Cat A\n## E3\nB3\n## E4\nB4\n"
+        )
+        ms.move_entry(parsed, "E1", category="Cat A")
+        lines = ms.serialize(parsed)
+        assert lines[-2:] == ["## E1", "B1"]
+        assert lines.count("# Cat A") == 2
+
+    def test_move_category_empty_string_lands_just_before_first_h1(self) -> None:
+        parsed = ms.parse("## Head1\nH1body\n# Cat A\n## E1\nB1\n")
+        ms.move_entry(parsed, "E1", category="")
+        assert ms.list_entries(parsed) == [
+            {"name": "Head1", "category": ""},
+            {"name": "E1", "category": ""},
+        ]
+        assert ms.serialize(parsed) == [
+            "## Head1",
+            "H1body",
+            "## E1",
+            "B1",
+            "# Cat A",
+        ]
+
+    def test_move_category_empty_string_with_no_head_region_lands_at_file_start(self) -> None:
+        # No entries currently have category "" — the file's first heading
+        # is already an H1 — so the moved entry becomes the new head.
+        parsed = ms.parse("# Cat A\n## E1\nB1\n## E2\nB2\n")
+        ms.move_entry(parsed, "E2", category="")
+        assert ms.list_entries(parsed) == [
+            {"name": "E2", "category": ""},
+            {"name": "E1", "category": "Cat A"},
+        ]
+        assert ms.serialize(parsed) == ["## E2", "B2", "# Cat A", "## E1", "B1"]
+
+    def test_move_category_empty_string_with_no_h1_anywhere_is_end_of_file(self) -> None:
+        # The whole file is already the "" category, so "end of the head
+        # region" and "end of file" are the same place.
+        parsed = ms.parse("## E1\nB1\n## E2\nB2\n")
+        ms.move_entry(parsed, "E1", category="")
+        assert ms.serialize(parsed) == ["## E2", "B2", "## E1", "B1"]
+
+    def test_move_before_self_is_a_documented_noop(self) -> None:
+        parsed = ms.parse("# Cat A\n## E1\nB1\n## E2\nB2\n")
+        result = ms.move_entry(parsed, "E1", before="E1")
+        assert result == {"name": "E1", "category": "Cat A"}
+        assert ms.serialize(parsed) == ["# Cat A", "## E1", "B1", "## E2", "B2"]
+
+    def test_move_unknown_name_raises_entry_not_found(self) -> None:
+        parsed = ms.parse("## E1\nB1\n")
+        with pytest.raises(ms.EntryNotFoundError):
+            ms.move_entry(parsed, "does-not-exist", category="")
+
+    def test_move_unknown_before_raises_entry_not_found(self) -> None:
+        parsed = ms.parse("## E1\nB1\n")
+        with pytest.raises(ms.EntryNotFoundError):
+            ms.move_entry(parsed, "E1", before="does-not-exist")
+
+    def test_move_requires_exactly_one_of_before_or_category_neither(self) -> None:
+        parsed = ms.parse("## E1\nB1\n")
+        with pytest.raises(ValueError):
+            ms.move_entry(parsed, "E1")
+
+    def test_move_requires_exactly_one_of_before_or_category_both(self) -> None:
+        parsed = ms.parse("## E1\nB1\n## E2\nB2\n")
+        with pytest.raises(ValueError):
+            ms.move_entry(parsed, "E1", before="E2", category="Cat A")
+
+    def test_move_leaves_untouched_entries_and_preamble_byte_identical(self) -> None:
+        text = (
+            "Preamble line.\n\n"
+            "# Cat A\n## Keep Me\nUntouched.\nTwo lines.\n"
+            "## E1\nB1\n# Cat B\n## E2\nB2\n"
+        )
+        parsed = ms.parse(text)
+        ms.move_entry(parsed, "E1", before="E2")
+        assert ms.get_entry(parsed, "Keep Me")["text"] == "Untouched.\nTwo lines."
+        assert ms.serialize(parsed)[:4] == [
+            "Preamble line.",
+            "",
+            "# Cat A",
+            "## Keep Me",
+        ]
+
+
 # -------------------------------------------------------------- round trips
 
 

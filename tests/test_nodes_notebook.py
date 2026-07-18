@@ -31,14 +31,21 @@ class TestReadEntry:
         _write_notebook(library_dir, "loras.md", "## Portrait\nSome prompt text.\n")
         node = nodes_notebook.LoraLibraryNotebook()
         result = node.read_entry(file="loras.md", entry="Portrait")
-        assert result == ("Some prompt text.",)
+        assert result == (["Some prompt text."], ["Portrait"])
 
-    def test_returns_a_one_tuple(self, library_dir: Path) -> None:
+    def test_returns_a_two_tuple_of_one_element_lists_for_a_single_selection(
+        self, library_dir: Path
+    ) -> None:
+        # FORMAT.md §6.1: a single-line `entry` is the degenerate one-line
+        # case — same shape as multi-select, just length-1 lists.
         _write_notebook(library_dir, "loras.md", "## E\nx\n")
         node = nodes_notebook.LoraLibraryNotebook()
         result = node.read_entry(file="loras.md", entry="E")
         assert isinstance(result, tuple)
-        assert len(result) == 1
+        assert len(result) == 2
+        texts, names = result
+        assert isinstance(texts, list) and isinstance(names, list)
+        assert len(texts) == len(names) == 1
 
     def test_missing_file_raises_naming_the_file(self) -> None:
         node = nodes_notebook.LoraLibraryNotebook()
@@ -60,38 +67,103 @@ class TestReadEntry:
     def test_reads_entry_inside_a_category(self, library_dir: Path) -> None:
         _write_notebook(library_dir, "loras.md", "# Style\n\n## Cinematic\nfilm grain\n")
         node = nodes_notebook.LoraLibraryNotebook()
-        assert node.read_entry(file="loras.md", entry="Cinematic") == ("film grain",)
+        assert node.read_entry(file="loras.md", entry="Cinematic") == (
+            ["film grain"],
+            ["Cinematic"],
+        )
 
     def test_reads_from_a_non_default_file(self, library_dir: Path) -> None:
         _write_notebook(library_dir, "other.md", "## E\nother file body\n")
         node = nodes_notebook.LoraLibraryNotebook()
-        assert node.read_entry(file="other.md", entry="E") == ("other file body",)
+        assert node.read_entry(file="other.md", entry="E") == (["other file body"], ["E"])
 
     def test_unicode_entry_name_and_text(self, library_dir: Path) -> None:
         _write_notebook(library_dir, "loras.md", "## Café ☕\n日本語のテキスト\n")
         node = nodes_notebook.LoraLibraryNotebook()
-        assert node.read_entry(file="loras.md", entry="Café ☕") == ("日本語のテキスト",)
+        assert node.read_entry(file="loras.md", entry="Café ☕") == (
+            ["日本語のテキスト"],
+            ["Café ☕"],
+        )
 
     def test_interior_blank_lines_are_kept_in_the_output(self, library_dir: Path) -> None:
         _write_notebook(library_dir, "loras.md", "## E\nLine1\n\nLine2\n")
         node = nodes_notebook.LoraLibraryNotebook()
-        assert node.read_entry(file="loras.md", entry="E") == ("Line1\n\nLine2",)
+        assert node.read_entry(file="loras.md", entry="E") == (["Line1\n\nLine2"], ["E"])
 
     def test_first_occurrence_wins_when_the_file_has_duplicate_names(
         self, library_dir: Path
     ) -> None:
         _write_notebook(library_dir, "loras.md", "## Foo\nfirst\n## Foo\nsecond\n")
         node = nodes_notebook.LoraLibraryNotebook()
-        assert node.read_entry(file="loras.md", entry="Foo") == ("first",)
+        assert node.read_entry(file="loras.md", entry="Foo") == (["first"], ["Foo"])
 
     def test_re_reads_the_file_on_every_call_rather_than_caching(
         self, library_dir: Path
     ) -> None:
         _write_notebook(library_dir, "loras.md", "## E\noriginal\n")
         node = nodes_notebook.LoraLibraryNotebook()
-        assert node.read_entry(file="loras.md", entry="E") == ("original",)
+        assert node.read_entry(file="loras.md", entry="E") == (["original"], ["E"])
         _write_notebook(library_dir, "loras.md", "## E\nedited on the other machine\n")
-        assert node.read_entry(file="loras.md", entry="E") == ("edited on the other machine",)
+        assert node.read_entry(file="loras.md", entry="E") == (
+            ["edited on the other machine"],
+            ["E"],
+        )
+
+
+# --------------------------------------------------------------- multi-select
+
+
+class TestMultiSelect:
+    def test_selection_order_is_preserved_not_file_order(self, library_dir: Path) -> None:
+        _write_notebook(library_dir, "loras.md", "## A\nbodyA\n## B\nbodyB\n## C\nbodyC\n")
+        node = nodes_notebook.LoraLibraryNotebook()
+        texts, names = node.read_entry(file="loras.md", entry="B\nA\nC")
+        assert names == ["B", "A", "C"]
+        assert texts == ["bodyB", "bodyA", "bodyC"]
+
+    def test_texts_and_names_stay_paired_across_categories(self, library_dir: Path) -> None:
+        _write_notebook(
+            library_dir, "loras.md", "# Cat A\n## A\nbodyA\n# Cat B\n## B\nbodyB\n"
+        )
+        node = nodes_notebook.LoraLibraryNotebook()
+        texts, names = node.read_entry(file="loras.md", entry="B\nA")
+        assert list(zip(names, texts, strict=True)) == [("B", "bodyB"), ("A", "bodyA")]
+
+    def test_blank_and_whitespace_only_lines_are_skipped(self, library_dir: Path) -> None:
+        _write_notebook(library_dir, "loras.md", "## A\nbodyA\n## B\nbodyB\n")
+        node = nodes_notebook.LoraLibraryNotebook()
+        texts, names = node.read_entry(file="loras.md", entry="\nA\n\n   \nB\n")
+        assert names == ["A", "B"]
+        assert texts == ["bodyA", "bodyB"]
+
+    def test_empty_selection_raises_naming_the_file(self, library_dir: Path) -> None:
+        _write_notebook(library_dir, "loras.md", "## A\nbodyA\n")
+        node = nodes_notebook.LoraLibraryNotebook()
+        with pytest.raises(ValueError, match=r"loras\.md"):
+            node.read_entry(file="loras.md", entry="")
+
+    def test_whitespace_only_selection_raises(self, library_dir: Path) -> None:
+        _write_notebook(library_dir, "loras.md", "## A\nbodyA\n")
+        node = nodes_notebook.LoraLibraryNotebook()
+        with pytest.raises(ValueError):
+            node.read_entry(file="loras.md", entry="\n   \n\n")
+
+    def test_one_missing_entry_among_several_raises_naming_it(
+        self, library_dir: Path
+    ) -> None:
+        _write_notebook(library_dir, "loras.md", "## A\nbodyA\n## B\nbodyB\n")
+        node = nodes_notebook.LoraLibraryNotebook()
+        with pytest.raises(ValueError, match="Ghost"):
+            node.read_entry(file="loras.md", entry="A\nGhost\nB")
+
+    def test_every_missing_entry_is_named_in_the_error(self, library_dir: Path) -> None:
+        _write_notebook(library_dir, "loras.md", "## A\nbodyA\n")
+        node = nodes_notebook.LoraLibraryNotebook()
+        with pytest.raises(ValueError) as exc_info:
+            node.read_entry(file="loras.md", entry="Ghost1\nGhost2")
+        message = str(exc_info.value)
+        assert "Ghost1" in message
+        assert "Ghost2" in message
 
 
 # --------------------------------------------------------------------- IS_CHANGED
@@ -156,8 +228,9 @@ class TestValidateAndInputTypes:
     def test_class_shape_matches_format_md_section_6_1(self) -> None:
         cls = nodes_notebook.LoraLibraryNotebook
         assert cls.CATEGORY == "EPSNodes"
-        assert cls.RETURN_TYPES == ("STRING",)
-        assert cls.RETURN_NAMES == ("text",)
+        assert cls.RETURN_TYPES == ("STRING", "STRING")
+        assert cls.RETURN_NAMES == ("text", "name")
+        assert cls.OUTPUT_IS_LIST == (True, True)
         assert cls.FUNCTION == "read_entry"
 
 

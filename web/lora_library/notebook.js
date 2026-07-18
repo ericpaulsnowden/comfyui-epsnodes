@@ -1,12 +1,27 @@
 /**
  * @file LoRA Notebook two-pane DOM widget (FORMAT.md §7.2) — attaches to
- * `LoraLibraryNotebook` nodes. Left pane: a scrollable, category-grouped
- * entry list with New/Delete controls. Right pane: a `<textarea>` editor
- * with a Save button and a status line (conflict resolution per §3.5 lands
- * there too). The node's own `file`/`entry` STRING widgets stay the
- * serialized truth (§6.1/§7.2) — this DOM widget only ever *reads* `file`
- * and *writes* `entry` through its normal widget setter; it never
- * serializes itself.
+ * `LoraLibraryNotebook` nodes. Left pane: a scrollable, category-grouped,
+ * multi-selectable, drag-to-reorder entry list with New/Delete controls.
+ * Right pane: a `<textarea>` editor with a Save button and a status line
+ * (conflict resolution per §3.5 lands there too). The node's own
+ * `file`/`entry` STRING widgets stay the serialized truth (§6.1/§7.2) — this
+ * DOM widget only ever *reads* `file` and *writes* `entry` through its
+ * normal widget setter; it never serializes itself.
+ *
+ * Multi-select (FORMAT.md §6.1/§7.2, owner amendment 2026-07-18): ctrl/
+ * cmd+click toggles one entry in/out of the selection, shift+click extends
+ * the visible range from the ACTIVE entry (the most recently clicked one),
+ * and a plain click collapses to a single selection. `entry` serializes the
+ * whole selection as one name per line, in selection order (§6.1) — the
+ * ACTIVE entry alone drives the editor pane, dirty tracking, Save, Delete,
+ * and conflict handling, exactly like the single-select behavior this file
+ * always had. See the "Selection model" section below the state helpers.
+ *
+ * Drag-to-reorder (FORMAT.md §3.4/§5/§7.2, owner amendment 2026-07-18):
+ * pointer-based row dragging (deliberately not HTML5 drag-and-drop — see the
+ * pointer-events bullet below) with an insertion-line marker, committed as
+ * one `POST /lora_library/notebook/move`. See the "Drag-to-reorder" section
+ * below the selection helpers.
  *
  * Frontend APIs relied on here (verified against a `Comfy-Org/ComfyUI_frontend`
  * checkout — see the notebook-frontend handoff notes for exact file:line
@@ -34,6 +49,31 @@
  *    below so the widget never serializes under either mechanism, matching
  *    core's own idiom (e.g. `extensions/core/webcamCapture.ts`:
  *    `btn.serializeValue = () => undefined`).
+ *  - Pointer events over a DOM widget are NOT swallowed by the litegraph
+ *    canvas underneath it, which is why drag-to-reorder below uses plain
+ *    pointerdown/move/up instead of HTML5 DnD (owner's ask, since native DnD
+ *    is known to fight canvas-level handlers):
+ *    `src/components/graph/GraphCanvas.vue` mounts `<canvas
+ *    id="graph-canvas">` (line 58) and `<DomWidgets>` (line 113) as DOM
+ *    SIBLINGS in the same template, never nested. A pointerdown that targets
+ *    our widget's elements therefore never passes through the `<canvas>`
+ *    element at all, so litegraph's own capture-phase handler
+ *    (`LGraphCanvas.ts:2026`: `canvas.addEventListener('pointerdown',
+ *    this._mousedown_callback, true)`) structurally cannot see it — capture
+ *    phase only intercepts events whose target is a descendant of the
+ *    listener's element, and a DOM sibling is not a descendant. On top of
+ *    that, `src/components/graph/widgets/DomWidget.vue` (lines 109-113)
+ *    inline-styles `pointerEvents: 'auto'` on the widget wrapper whenever it
+ *    is visible, not read-only, and not disabled (the normal editing state)
+ *    — that's what makes the browser hit-test to our DOM content instead of
+ *    falling through to the canvas visually underneath it. (The only other
+ *    capture-phase `document`-level pointerdown listener found,
+ *    `useNodeDragToCanvas.ts:125`, only activates mid "drag a new node from
+ *    the library onto the canvas" and no-ops otherwise, so it doesn't
+ *    interfere either.) This file's pre-existing pane-splitter drag
+ *    (`wireSplitter`, unchanged below) already exercised this exact
+ *    pointer-event path live before today's change — drag-to-reorder reuses
+ *    the identical technique.
  *
  * Vanilla ES modules, no build step — DOM nodes are built with
  * `document.createElement` (see the local `el()` helper) rather than any
@@ -56,6 +96,14 @@ const DELETE_CONFIRM_MS = 4000
 
 /** Debounce for reloading after the `file` widget's value changes. */
 const FILE_CHANGE_DEBOUNCE_MS = 250
+
+/**
+ * Pointer-movement distance (px) before a row pointerdown "becomes" a drag
+ * instead of a click (owner ask: "~4px"). Below this, pointerup resolves as
+ * a plain/ctrl/shift click; at or past it, the gesture commits to reordering
+ * and the click never fires — see onEntryPointerDown().
+ */
+const DRAG_THRESHOLD_PX = 4
 
 const STYLE_TAG_ID = 'lora-library-notebook-styles'
 
@@ -133,6 +181,8 @@ const CSS_TEXT = `
   overflow: hidden;
   text-overflow: ellipsis;
   outline: none;
+  user-select: none;
+  touch-action: none;
 }
 .llnb-entry:hover { background: var(--content-hover-bg, #2a2a2a); }
 .llnb-entry:focus-visible { box-shadow: inset 0 0 0 1px var(--border-color, #444); }
@@ -140,6 +190,25 @@ const CSS_TEXT = `
 .llnb-entry-selected:hover {
   background: rgba(66, 133, 244, 0.22);
   border-left-color: rgba(66, 133, 244, 0.9);
+}
+/* Active = most recently clicked among the selected rows (§7.2); it alone
+   drives the editor, so it gets a visibly stronger treatment than a plain
+   multi-selected row. Declared after .llnb-entry-selected so it wins on the
+   properties they share (equal specificity, later rule wins). */
+.llnb-entry-active,
+.llnb-entry-active:hover {
+  background: rgba(66, 133, 244, 0.38);
+  border-left-color: rgba(66, 133, 244, 1);
+  font-weight: 600;
+  box-shadow: inset 0 0 0 1px rgba(66, 133, 244, 0.55);
+}
+.llnb-entry-dragging { opacity: 0.4; }
+.llnb-drag-marker {
+  height: 2px;
+  margin: 3px 4px;
+  border-radius: 1px;
+  background: rgba(66, 133, 244, 0.9);
+  pointer-events: none;
 }
 .llnb-empty {
   padding: 6px 7px;
@@ -216,6 +285,14 @@ const CSS_TEXT = `
 }
 .llnb-status-actions { display: flex; gap: 4px; }
 .llnb-status-actions:empty { display: none; }
+.llnb-status-hint {
+  color: var(--descrip-text, #999);
+  font-size: 10px;
+  font-style: italic;
+  overflow-wrap: anywhere;
+  white-space: normal;
+}
+.llnb-status-hint:empty { display: none; }
 `
 
 function injectStyles() {
@@ -329,7 +406,13 @@ function createState(node, fileWidget, entryWidget) {
     file: null,
     exists: true,
     entries: [],
-    selectedName: null,
+    // Selection model (§6.1/§7.2): `selection` is the ordered list of
+    // selected entry names — exactly what gets newline-joined into the
+    // `entry` widget. `activeName` is the most-recently-clicked selected
+    // entry; it alone drives the editor/dirty/Save/Delete/conflict flow.
+    // See the "Selection model" functions below.
+    selection: [],
+    activeName: null,
     baseMtime: null,
     lastSavedText: '',
     dirty: false,
@@ -340,6 +423,14 @@ function createState(node, fileWidget, entryWidget) {
     deleteConfirmActive: false,
     deleteConfirmTimer: null,
     fileChangeDebounceTimer: null,
+    // Flat, top-to-bottom list of {el, kind: 'header'|'entry', name?,
+    // category} rebuilt every renderList() call — the drag hit-testing
+    // geometry in "Drag-to-reorder" below walks this instead of re-querying
+    // the DOM.
+    dragRows: [],
+    // In-flight pointer gesture (pointerdown → move → up), or null between
+    // gestures. See onEntryPointerDown().
+    drag: null,
     // DOM refs, filled in by buildUi() — only elements later functions need
     // to reach back into are tracked here (e.g. `newBtn` isn't, since
     // nothing but renderFooter() itself ever touches it).
@@ -351,6 +442,7 @@ function createState(node, fileWidget, entryWidget) {
     saveBtn: null,
     statusTextEl: null,
     statusActionsEl: null,
+    statusHintEl: null,
     deleteBtn: null
   }
 }
@@ -378,7 +470,12 @@ function buildUi(state) {
   state.saveBtn = el('button', { className: 'llnb-btn llnb-btn-save', text: 'Save' })
   state.statusTextEl = el('div', { className: 'llnb-status-text' })
   state.statusActionsEl = el('div', { className: 'llnb-status-actions' })
-  const statusRow = el('div', { className: 'llnb-status' }, [state.statusTextEl, state.statusActionsEl])
+  state.statusHintEl = el('div', { className: 'llnb-status-hint' })
+  const statusRow = el('div', { className: 'llnb-status' }, [
+    state.statusTextEl,
+    state.statusActionsEl,
+    state.statusHintEl
+  ])
   const bottomRow = el('div', { className: 'llnb-bottom-row' }, [state.saveBtn, statusRow])
   const rightPane = el('div', { className: 'llnb-pane llnb-pane-right' }, [state.textarea, bottomRow])
 
@@ -519,6 +616,10 @@ function wireNodeCleanup(state) {
 function teardown(state) {
   if (state.deleteConfirmTimer) clearTimeout(state.deleteConfirmTimer)
   if (state.fileChangeDebounceTimer) clearTimeout(state.fileChangeDebounceTimer)
+  // A node removal mid-drag (e.g. undo, right-click delete) would otherwise
+  // leak the drag's window-level pointermove/pointerup/pointercancel
+  // listeners forever — see onEntryPointerDown().
+  state.drag?.cleanup?.()
   // Invalidate any in-flight fetches so their `.then` handlers no-op.
   state.loadToken += 1
   state.selectToken += 1
@@ -549,15 +650,66 @@ async function reloadNow(state) {
   state.file = file
   state.entries = Array.isArray(data.entries) ? data.entries : []
   state.exists = data.exists !== false
-  renderList(state)
   setStatus(state, baselineStatus(state, data.problems))
 
-  const currentEntryName = state.entryWidget.value
-  if (currentEntryName && state.entries.some((entry) => entry.name === currentEntryName)) {
-    await selectEntry(state, currentEntryName)
+  // Restore the selection from the entry widget's (possibly multi-line)
+  // value (§6.1: one name per line, selection order; §7.2: "missing names
+  // silently drop out of the selection, first surviving = active"). This
+  // only updates in-memory rendering state — it deliberately does NOT
+  // rewrite entryWidget.value, mirroring this file's original single-select
+  // behavior (the old clearEditor() never touched the widget on a reload
+  // mismatch; only an explicit user action like delete did, via its own
+  // widget write). A name merely absent from THIS load stays in the
+  // serialized value untouched, so a transient race can't silently truncate
+  // a workflow's stored selection — the next real selection change (which
+  // only ever adds names backed by a rendered row) is what actually drops
+  // it from serialization.
+  const survivors = restoreSelectionFromWidget(state)
+  state.selection = survivors
+  state.activeName = survivors.length ? survivors[0] : null
+  renderList(state)
+  updateDeleteButtonEnabled(state)
+  updateSelectionHint(state)
+
+  if (state.activeName) {
+    const result = await loadEntryText(state, state.activeName)
+    if (result === 'failed') resetEditorDom(state)
   } else {
-    clearEditor(state)
+    resetEditorDom(state)
   }
+}
+
+/**
+ * Parses the entry widget's raw value into candidate selected names: split
+ * on any line ending, trim, drop blanks. A single bare name (no newline) is
+ * the pre-multiselect degenerate case (§6.1) and parses to a one-element
+ * array, so old workflows restore unchanged.
+ * @param {string} rawValue
+ * @returns {string[]}
+ */
+function parseSelectionValue(rawValue) {
+  if (!rawValue) return []
+  return String(rawValue)
+    .split(/\r\n|\r|\n/)
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0)
+}
+
+/**
+ * @returns {string[]} the entry widget's requested names, deduped, filtered
+ * to those that exist in `state.entries` right now, in their original order.
+ */
+function restoreSelectionFromWidget(state) {
+  const requested = parseSelectionValue(state.entryWidget.value)
+  const seen = new Set()
+  const survivors = []
+  for (const name of requested) {
+    if (seen.has(name)) continue
+    if (!state.entries.some((entry) => entry.name === name)) continue
+    seen.add(name)
+    survivors.push(name)
+  }
+  return survivors
 }
 
 function baselineStatus(state, problems) {
@@ -571,72 +723,219 @@ function baselineStatus(state, problems) {
 }
 
 // ---------------------------------------------------------------------------
-// Selecting an entry
+// Selection model (FORMAT.md §6.1/§7.2)
+//
+// `state.selection` is the ordered list of selected entry names — exactly
+// what gets newline-joined into the `entry` widget. `state.activeName` is
+// the most-recently-clicked selected entry; it alone drives the editor pane,
+// dirty tracking, Save, Delete, and conflict handling — the single-select
+// behavior this file always had, just decoupled from "what's highlighted."
+//
+// Two layers:
+//  - setSelection() is a dumb setter: replace selection+active, sync the
+//    widget, re-render. It never touches the editor pane.
+//  - chooseSelection() is the interactive entry point (click/ctrl+click/
+//    shift+click): applies immediately for a responsive list, then loads
+//    the new active entry's text; a failed load rolls the WHOLE selection
+//    back to what it was before the click — the click "didn't happen" —
+//    matching this file's original single-select failure behavior.
+// Callers that already know the target is valid and don't want rollback
+// semantics (delete's post-delete reassignment, move, reload-restore) call
+// setSelection() directly and load the active entry themselves.
 // ---------------------------------------------------------------------------
 
-async function selectEntry(state, name) {
-  cancelDeleteConfirm(state)
-  closeNewEntryRow(state)
-
-  const loadToken = state.loadToken
-  const selectToken = ++state.selectToken
-  const previousSelected = state.selectedName
-  state.selectedName = name
-  renderList(state)
-
-  let data
-  try {
-    data = await api.getJson('/lora_library/notebook/entry', { file: state.file, name })
-  } catch (error) {
-    if (loadToken !== state.loadToken || selectToken !== state.selectToken) return
-    api.warn('failed to load notebook entry', error)
-    state.selectedName = previousSelected
-    renderList(state)
-    setStatus(state, `Could not load "${name}": ${error.message}`)
-    return
-  }
-  if (loadToken !== state.loadToken || selectToken !== state.selectToken) return
-
-  state.textarea.value = data.text ?? ''
-  state.lastSavedText = state.textarea.value
-  state.baseMtime = typeof data.mtime === 'number' ? data.mtime : null
-  state.textarea.disabled = false
-  setDirty(state, false)
-  updateEntryWidget(state, name)
-  updateDeleteButtonEnabled(state)
-  clearConflict(state)
+function isSelected(state, name) {
+  return state.selection.includes(name)
 }
 
-function clearEditor(state) {
-  state.selectedName = null
+function lastOrNull(items) {
+  return items.length ? items[items.length - 1] : null
+}
+
+/** Resets the editor DOM/dirty state only — no rendering, no widget sync.
+ * Shared by every path that ends up with no (or no-longer-loadable) active
+ * entry. */
+function resetEditorDom(state) {
   state.textarea.value = ''
   state.lastSavedText = ''
   state.baseMtime = null
   state.textarea.disabled = true
   setDirty(state, false)
+}
+
+/** Initial, pre-load editor state (buildUi() only — nothing has been
+ * fetched yet, so there is nothing to preserve in the entry widget). */
+function clearEditor(state) {
+  state.selection = []
+  state.activeName = null
+  resetEditorDom(state)
   renderList(state)
   updateDeleteButtonEnabled(state)
+  updateSelectionHint(state)
 }
 
 /**
- * Sets the `entry` STRING widget's value through its normal setter +
- * callback (FORMAT.md §7.2: "Selection writes the entry STRING widget so
- * serialization needs no custom code") and nudges the canvas to redraw so
- * the change is visible immediately. Mirrors the pattern ComfyUI's own
- * `scripts/widgets.ts` (`applyWidgetControl`) uses to drive one widget's
- * value from other logic: `targetWidget.value = next;
- * targetWidget.callback?.(next)`.
+ * Writes the full multi-select `entry` STRING widget value (§6.1: one name
+ * per line, in selection order) through the widget's real setter + callback
+ * ("Selection writes the entry STRING widget so serialization needs no
+ * custom code") and nudges the canvas to redraw so the change is visible
+ * immediately. Mirrors the pattern ComfyUI's own `scripts/widgets.ts`
+ * (`applyWidgetControl`) uses to drive one widget's value from other logic:
+ * `targetWidget.value = next; targetWidget.callback?.(next)`.
  */
-function updateEntryWidget(state, name) {
+function syncEntryWidget(state) {
   const widget = state.entryWidget
-  if (widget.value === name) return
-  widget.value = name
+  const next = state.selection.join('\n')
+  if (widget.value === next) return
+  widget.value = next
   try {
-    widget.callback?.(name)
+    widget.callback?.(next)
   } catch (error) {
     api.warn('entry widget callback threw', error)
   }
   state.node.graph?.setDirtyCanvas(true, true)
+}
+
+/** Dumb setter: replace the selection + active entry, sync the `entry`
+ * widget, and re-render. Does not touch the editor pane — callers that
+ * change the ACTIVE entry are responsible for loading (or clearing) it. */
+function setSelection(state, names, active) {
+  state.selection = names
+  state.activeName = active
+  syncEntryWidget(state)
+  renderList(state)
+  updateDeleteButtonEnabled(state)
+  updateSelectionHint(state)
+}
+
+function fetchEntry(state, name) {
+  return api.getJson('/lora_library/notebook/entry', { file: state.file, name })
+}
+
+function populateEditor(state, data) {
+  state.textarea.value = data.text ?? ''
+  state.lastSavedText = state.textarea.value
+  state.baseMtime = typeof data.mtime === 'number' ? data.mtime : null
+  state.textarea.disabled = false
+  setDirty(state, false)
+  updateDeleteButtonEnabled(state)
+  clearConflict(state)
+}
+
+/**
+ * Fetches `name`'s text and populates the editor. Token-guarded against
+ * races with a later reload/select/teardown. Returns `'ok'`, `'failed'`
+ * (fetch/parse error — already reported via setStatus), or `'stale'` (a
+ * newer load/select superseded this one before it resolved — caller should
+ * no-op either way, distinguished from `'failed'` only so a caller COULD
+ * tell them apart if it ever needed to).
+ * @returns {Promise<'ok'|'failed'|'stale'>}
+ */
+async function loadEntryText(state, name) {
+  const loadToken = state.loadToken
+  const selectToken = ++state.selectToken
+  let data
+  try {
+    data = await fetchEntry(state, name)
+  } catch (error) {
+    if (loadToken !== state.loadToken || selectToken !== state.selectToken) return 'stale'
+    api.warn('failed to load notebook entry', error)
+    setStatus(state, `Could not load "${name}": ${error.message}`)
+    return 'failed'
+  }
+  if (loadToken !== state.loadToken || selectToken !== state.selectToken) return 'stale'
+  populateEditor(state, data)
+  return 'ok'
+}
+
+/**
+ * The interactive entry point: apply a new selection immediately, then load
+ * the new active entry (only when the active identity actually changed —
+ * clicking around a multi-selection must never clobber unsaved edits in the
+ * entry that's already open). A failed load rolls back to the selection
+ * that was in effect before this call.
+ * @param {string[]} names
+ * @param {string|null} active
+ */
+async function chooseSelection(state, names, active) {
+  cancelDeleteConfirm(state)
+  closeNewEntryRow(state)
+
+  const previousSelection = state.selection
+  const previousActive = state.activeName
+  setSelection(state, names, active)
+  if (active === previousActive) return
+
+  if (active == null) {
+    resetEditorDom(state)
+    updateDeleteButtonEnabled(state)
+    return
+  }
+
+  const result = await loadEntryText(state, active)
+  if (result === 'failed') {
+    setSelection(state, previousSelection, previousActive)
+  }
+}
+
+/** Plain click: collapse to a single selection. */
+function selectSingle(state, name) {
+  chooseSelection(state, [name], name).catch((error) => api.warn('select entry failed', error))
+}
+
+/** ctrl/cmd+click: toggle membership. Toggling the active entry off hands
+ * "active" to the last-remaining selected entry (or clears it). Toggling
+ * any entry on makes it active — it's the one just clicked. */
+function toggleEntry(state, name) {
+  if (isSelected(state, name)) {
+    const nextSelection = state.selection.filter((n) => n !== name)
+    const nextActive = state.activeName === name ? lastOrNull(nextSelection) : state.activeName
+    chooseSelection(state, nextSelection, nextActive).catch((error) => api.warn('select entry failed', error))
+  } else {
+    chooseSelection(state, [...state.selection, name], name).catch((error) => api.warn('select entry failed', error))
+  }
+}
+
+/** shift+click: replace the selection with the visible range between the
+ * current active entry (the anchor) and the clicked one, inclusive, in
+ * top-to-bottom list order — order = selection order (§6.1), so a shift-
+ * range runs prompts top-to-bottom. No anchor yet (nothing active) falls
+ * back to a plain single-select. */
+function selectRange(state, name) {
+  const anchorName = state.activeName
+  if (!anchorName) {
+    selectSingle(state, name)
+    return
+  }
+  const anchorIndex = state.entries.findIndex((entry) => entry.name === anchorName)
+  const clickIndex = state.entries.findIndex((entry) => entry.name === name)
+  if (anchorIndex === -1 || clickIndex === -1) {
+    selectSingle(state, name)
+    return
+  }
+  const lo = Math.min(anchorIndex, clickIndex)
+  const hi = Math.max(anchorIndex, clickIndex)
+  const names = state.entries.slice(lo, hi + 1).map((entry) => entry.name)
+  chooseSelection(state, names, name).catch((error) => api.warn('select entry failed', error))
+}
+
+/** Dispatches a resolved (non-drag) pointer gesture to the right selection
+ * mode, mirroring standard list-box modifier conventions. */
+function handleEntryClick(state, name, modifiers) {
+  if (modifiers.shiftKey) selectRange(state, name)
+  else if (modifiers.toggleKey) toggleEntry(state, name)
+  else selectSingle(state, name)
+}
+
+/** Muted status-area hint (owner ask): visible only for 2+ selected, since
+ * that's when OUTPUT_IS_LIST fan-out (§6.1) actually changes queue behavior.
+ * Lives in its own element (not statusTextEl) so Saving…/Deleted…/conflict
+ * messages never clobber it and vice versa. */
+function updateSelectionHint(state) {
+  if (!state.statusHintEl) return
+  const count = state.selection.length
+  state.statusHintEl.textContent =
+    count >= 2 ? `${count} prompts selected — queue runs once per prompt.` : ''
 }
 
 // ---------------------------------------------------------------------------
@@ -645,6 +944,7 @@ function updateEntryWidget(state, name) {
 
 function renderList(state) {
   state.listEl.replaceChildren()
+  state.dragRows = []
 
   if (!state.entries.length) {
     state.listEl.append(
@@ -662,26 +962,297 @@ function renderList(state) {
     if (category !== lastCategory) {
       lastCategory = category
       if (category) {
-        state.listEl.append(el('div', { className: 'llnb-category', text: category }))
+        const headerEl = el('div', { className: 'llnb-category', text: category })
+        state.listEl.append(headerEl)
+        state.dragRows.push({ el: headerEl, kind: 'header', category })
       }
     }
 
-    const selected = entry.name === state.selectedName
+    const selected = isSelected(state, entry.name)
+    const active = entry.name === state.activeName
+    const classes = ['llnb-entry']
+    if (selected) classes.push('llnb-entry-selected')
+    if (active) classes.push('llnb-entry-active')
+
     const row = el('div', {
-      className: `llnb-entry${selected ? ' llnb-entry-selected' : ''}`,
+      className: classes.join(' '),
       text: entry.name,
       attrs: { tabindex: '0', title: entry.name }
     })
-    row.addEventListener('click', () => {
-      selectEntry(state, entry.name).catch((error) => api.warn('select entry failed', error))
-    })
+    row.addEventListener('pointerdown', (event) => onEntryPointerDown(state, event, entry.name))
     row.addEventListener('keydown', (event) => {
-      if (event.key === 'Enter' || event.key === ' ') {
-        event.preventDefault()
-        selectEntry(state, entry.name).catch((error) => api.warn('select entry failed', error))
-      }
+      if (event.key !== 'Enter' && event.key !== ' ') return
+      event.preventDefault()
+      handleEntryClick(state, entry.name, { shiftKey: event.shiftKey, toggleKey: event.ctrlKey || event.metaKey })
     })
     state.listEl.append(row)
+    state.dragRows.push({ el: row, kind: 'entry', name: entry.name, category })
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Drag-to-reorder (FORMAT.md §3.4/§5/§7.2)
+//
+// Pointer-based (see the file header's pointer-events citation), mirroring
+// this file's own pane-splitter drag: capture the pointer on the row that
+// started the gesture, but listen on `window` so movement outside the row's
+// (or even the list's) bounds still tracks. A single pointerdown starts a
+// tentative gesture that resolves ONE of two ways on pointerup:
+//  - moved < DRAG_THRESHOLD_PX the whole time → a click; dispatched to the
+//    plain/ctrl/shift selection logic above.
+//  - moved >= DRAG_THRESHOLD_PX at any point → a drag; commits to reorder
+//    and the click never fires.
+// ---------------------------------------------------------------------------
+
+function onEntryPointerDown(state, event, name) {
+  if (event.button !== 0) return // primary button/touch only
+  cancelDeleteConfirm(state)
+
+  const drag = {
+    pointerId: event.pointerId,
+    name,
+    startX: event.clientX,
+    startY: event.clientY,
+    active: false,
+    modifiers: { shiftKey: event.shiftKey, toggleKey: event.ctrlKey || event.metaKey },
+    rowEl: event.currentTarget,
+    marker: null,
+    target: null
+  }
+  state.drag = drag
+
+  const onMove = (moveEvent) => {
+    if (moveEvent.pointerId !== drag.pointerId) return
+    if (!drag.active) {
+      if (state.busy) return // don't start reordering mid-save/delete/move
+      const dx = moveEvent.clientX - drag.startX
+      const dy = moveEvent.clientY - drag.startY
+      if (Math.hypot(dx, dy) < DRAG_THRESHOLD_PX) return
+      beginDrag(state, drag)
+    }
+    updateDrag(state, drag, moveEvent.clientY)
+  }
+  const onUp = (upEvent) => {
+    if (upEvent.pointerId !== drag.pointerId) return
+    detach()
+    if (drag.active) {
+      finishDrag(state, drag)
+    } else {
+      handleEntryClick(state, name, drag.modifiers)
+    }
+    state.drag = null
+  }
+  const onCancel = (cancelEvent) => {
+    if (cancelEvent.pointerId !== drag.pointerId) return
+    detach()
+    if (drag.active) cancelDrag(state, drag)
+    state.drag = null
+  }
+  function detach() {
+    window.removeEventListener('pointermove', onMove)
+    window.removeEventListener('pointerup', onUp)
+    window.removeEventListener('pointercancel', onCancel)
+  }
+  // Escape hatch for teardown() — a node removal mid-drag has no pointerup
+  // of its own, so it must be able to detach + restore visuals itself.
+  drag.cleanup = () => {
+    detach()
+    if (drag.active) cancelDrag(state, drag)
+  }
+
+  window.addEventListener('pointermove', onMove)
+  window.addEventListener('pointerup', onUp)
+  window.addEventListener('pointercancel', onCancel)
+}
+
+function beginDrag(state, drag) {
+  drag.active = true
+  try {
+    drag.rowEl.setPointerCapture(drag.pointerId)
+  } catch {
+    // Best-effort, mirrors wireSplitter() — the window-level listeners still
+    // cover the drag either way.
+  }
+  drag.rowEl.classList.add('llnb-entry-dragging')
+  drag.marker = el('div', { className: 'llnb-drag-marker' })
+}
+
+function updateDrag(state, drag, clientY) {
+  drag.target = computeDropTarget(state, clientY, drag.name)
+  positionMarker(drag)
+}
+
+function positionMarker(drag) {
+  drag.marker.remove()
+  const target = drag.target
+  if (!target) return
+  if (target.kind === 'before') {
+    target.markerBeforeEl.before(drag.marker)
+  } else {
+    target.markerAfterEl.after(drag.marker)
+  }
+}
+
+function endDragVisuals(drag) {
+  try {
+    drag.rowEl.releasePointerCapture(drag.pointerId)
+  } catch {
+    // Already released, or never captured.
+  }
+  drag.rowEl.classList.remove('llnb-entry-dragging')
+  drag.marker?.remove()
+}
+
+function finishDrag(state, drag) {
+  endDragVisuals(drag)
+  const target = drag.target
+  if (!target) return
+  if (isNoopMove(state, drag.name, target)) return
+  performMove(state, drag.name, target).catch((error) => api.warn('move failed', error))
+}
+
+function cancelDrag(state, drag) {
+  endDragVisuals(drag)
+}
+
+/**
+ * Hit-tests `clientY` against the rendered rows (headers + entries, minus
+ * the row being dragged) and returns the §5 `/notebook/move` target it
+ * corresponds to, or null if there's nothing to hit (empty list).
+ *
+ * Model: find the row whose vertical midpoint is nearest `clientY`.
+ *  - Nearest is an ENTRY and clientY is above its midpoint → before that
+ *    entry.
+ *  - Nearest is an ENTRY and clientY is at/below its midpoint → before the
+ *    NEXT entry if the next row is an entry, else append to THIS entry's
+ *    category (the next row is a different category's header, or there is
+ *    no next row at all — either way this entry is the last of its run).
+ *  - Nearest is a category HEADER (clientY landed anywhere near it, above
+ *    or below) → append to that category, regardless of pointer side: §3.4
+ *    has no "before a category heading" primitive (`before` always names a
+ *    sibling ENTRY), so a header can only ever mean "append to this
+ *    category's end" — the marker is placed at that category's actual last
+ *    row so it never visually promises a landing spot other than where the
+ *    entry will really go.
+ * @returns {{kind:'before', before:string, markerBeforeEl:HTMLElement} |
+ *           {kind:'category', category:string, markerAfterEl:HTMLElement} | null}
+ */
+function computeDropTarget(state, clientY, excludeName) {
+  const rows = state.dragRows.filter((row) => row.kind !== 'entry' || row.name !== excludeName)
+  if (!rows.length) return null
+
+  let bestIndex = -1
+  let bestMid = 0
+  let bestDist = Infinity
+  for (let i = 0; i < rows.length; i++) {
+    const rect = rows[i].el.getBoundingClientRect()
+    const mid = rect.top + rect.height / 2
+    const dist = Math.abs(clientY - mid)
+    if (dist < bestDist) {
+      bestDist = dist
+      bestIndex = i
+      bestMid = mid
+    }
+  }
+  const best = rows[bestIndex]
+
+  if (best.kind === 'header') {
+    return { kind: 'category', category: best.category, markerAfterEl: lastRowElOfCategory(rows, bestIndex) }
+  }
+
+  const above = clientY < bestMid
+  if (above) {
+    return { kind: 'before', before: best.name, markerBeforeEl: best.el }
+  }
+  const next = rows[bestIndex + 1]
+  if (next && next.kind === 'entry') {
+    return { kind: 'before', before: next.name, markerBeforeEl: next.el }
+  }
+  return { kind: 'category', category: best.category, markerAfterEl: best.el }
+}
+
+/** Walks forward from a header row to the last entry belonging to it
+ * (falling back to the header itself for an empty category). `rows` is
+ * already exclude-filtered, so this naturally treats "only the dragged
+ * entry was in this category" as empty too. */
+function lastRowElOfCategory(rows, headerIndex) {
+  let lastEl = rows[headerIndex].el
+  for (let i = headerIndex + 1; i < rows.length; i++) {
+    if (rows[i].kind === 'header') break
+    lastEl = rows[i].el
+  }
+  return lastEl
+}
+
+/** True when `target` describes the position `draggedName` is already in —
+ * skips a pointless request + conflict round-trip for a drop back onto its
+ * own slot. */
+function isNoopMove(state, draggedName, target) {
+  const entries = state.entries
+  const index = entries.findIndex((entry) => entry.name === draggedName)
+  if (index === -1) return false
+  const currentCategory = entries[index].category || ''
+  const next = entries[index + 1]
+
+  if (target.kind === 'before') {
+    return !!next && next.name === target.before
+  }
+  const isLastOfOwnCategory = !next || (next.category || '') !== currentCategory
+  return currentCategory === target.category && isLastOfOwnCategory
+}
+
+/**
+ * Commits one drag-drop as a single §5 `/notebook/move`. A 409 surfaces
+ * through the same conflict UI Save/Delete use (Reload / Overwrite, where
+ * Overwrite retries this exact move with the mtime check skipped); any
+ * other error reports on the status line and falls back to a full reload
+ * (§3.5 notwithstanding, a move failure means we no longer trust our
+ * in-memory ordering).
+ */
+async function performMove(state, name, target, { force = false } = {}) {
+  if (state.busy) return
+  state.busy = true
+  updateSaveButtonEnabled(state)
+  updateDeleteButtonEnabled(state)
+  setStatus(state, 'Moving…')
+  try {
+    const body = { file: state.file, name }
+    if (target.kind === 'before') body.before = target.before
+    else body.category = target.category
+    if (!force && typeof state.baseMtime === 'number') body.base_mtime = state.baseMtime
+
+    const data = await api.postJson('/lora_library/notebook/move', body)
+    state.busy = false
+    state.entries = Array.isArray(data.entries) ? data.entries : state.entries
+    // The move just wrote the file, advancing its mtime — the active
+    // entry's own content didn't change, but a stale baseMtime here would
+    // make the NEXT save/delete/move spuriously 409 against this move's own
+    // write (§3.5's conflict check is file-wide, not per-entry).
+    state.baseMtime = typeof data.mtime === 'number' ? data.mtime : state.baseMtime
+    // A move only reorders/recategorizes — it never adds or removes
+    // entries — so the current selection/active stay exactly as they were;
+    // just re-render against the fresh order.
+    setSelection(state, state.selection, state.activeName)
+    updateSaveButtonEnabled(state)
+    setStatus(state, 'Moved.')
+  } catch (error) {
+    state.busy = false
+    updateSaveButtonEnabled(state)
+    updateDeleteButtonEnabled(state)
+    if (error?.status === 409) {
+      showConflict(state, 'File changed on disk', {
+        onReload: () => reloadNow(state),
+        onOverwrite: () => performMove(state, name, target, { force: true })
+      })
+    } else {
+      api.warn('failed to move notebook entry', error)
+      try {
+        await reloadNow(state)
+      } catch (reloadError) {
+        api.warn('notebook reload after move failure failed', reloadError)
+      }
+      setStatus(state, `Move failed: ${error.message}`)
+    }
   }
 }
 
@@ -776,15 +1347,15 @@ async function confirmNewEntry(state, rawName) {
     state.exists = true
     closeNewEntryRow(state)
 
-    state.selectedName = name
+    // A new entry is created empty and already known (no need to re-fetch
+    // it) — becomes the sole active selection, replacing whatever
+    // multi-selection existed before.
+    setSelection(state, [name], name)
     state.textarea.value = ''
     state.lastSavedText = ''
     state.baseMtime = typeof data.mtime === 'number' ? data.mtime : null
     state.textarea.disabled = false
     setDirty(state, false)
-    updateEntryWidget(state, name)
-    renderList(state)
-    updateDeleteButtonEnabled(state)
     setStatus(state, `Created "${name}".`)
   } catch (error) {
     state.busy = false
@@ -798,7 +1369,7 @@ async function confirmNewEntry(state, rawName) {
 // ---------------------------------------------------------------------------
 
 function onDeleteClick(state) {
-  if (!state.selectedName || state.busy) return
+  if (!state.activeName || state.busy) return
 
   if (!state.deleteConfirmActive) {
     state.deleteConfirmActive = true
@@ -827,7 +1398,7 @@ function cancelDeleteConfirm(state) {
 }
 
 async function performDelete(state, { force = false } = {}) {
-  const name = state.selectedName
+  const name = state.activeName
   if (!name || state.busy) return
 
   state.busy = true
@@ -841,11 +1412,24 @@ async function performDelete(state, { force = false } = {}) {
     state.busy = false
     state.entries = Array.isArray(data.entries) ? data.entries : state.entries
 
-    if (state.selectedName === name) {
-      clearEditor(state)
-      updateEntryWidget(state, '')
-    } else {
-      renderList(state)
+    // §7.2: "Delete acts on the ACTIVE entry only." Drop it from the
+    // selection; if it WAS the active one, hand "active" to the last
+    // remaining selected entry (or clear the editor if none remain). If the
+    // active entry had already moved on to something else while this
+    // request was in flight, leave that alone — just drop the deleted name
+    // from the selection set.
+    const previousActive = state.activeName
+    const nextSelection = state.selection.filter((n) => n !== name)
+    const nextActive = previousActive === name ? lastOrNull(nextSelection) : previousActive
+    setSelection(state, nextSelection, nextActive)
+
+    if (nextActive !== previousActive) {
+      if (nextActive == null) {
+        resetEditorDom(state)
+      } else {
+        const result = await loadEntryText(state, nextActive)
+        if (result === 'failed') resetEditorDom(state)
+      }
     }
     setStatus(state, 'Deleted.')
   } catch (error) {
@@ -868,9 +1452,9 @@ async function performDelete(state, { force = false } = {}) {
 // ---------------------------------------------------------------------------
 
 async function performSave(state, { force = false } = {}) {
-  if (!state.selectedName || state.busy) return
+  if (!state.activeName || state.busy) return
 
-  const name = state.selectedName
+  const name = state.activeName
   const text = state.textarea.value
 
   state.busy = true
@@ -882,7 +1466,7 @@ async function performSave(state, { force = false } = {}) {
 
     const data = await api.postJson('/lora_library/notebook/entry', body)
     state.busy = false
-    if (state.selectedName !== name) {
+    if (state.activeName !== name) {
       // Selection moved on while the request was in flight; nothing left to
       // reconcile against the (now stale) textarea contents.
       updateSaveButtonEnabled(state)
@@ -920,12 +1504,12 @@ function setDirty(state, value) {
 
 function updateSaveButtonEnabled(state) {
   if (!state.saveBtn) return
-  state.saveBtn.disabled = state.busy || !state.selectedName || !state.dirty
+  state.saveBtn.disabled = state.busy || !state.activeName || !state.dirty
 }
 
 function updateDeleteButtonEnabled(state) {
   if (!state.deleteBtn) return
-  state.deleteBtn.disabled = state.busy || !state.selectedName
+  state.deleteBtn.disabled = state.busy || !state.activeName
 }
 
 // ---------------------------------------------------------------------------

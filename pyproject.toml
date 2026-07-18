@@ -1,7 +1,7 @@
 [project]
 name = "epsnodes"
 description = "A file-backed LoRA notebook and switchable LoRA sets for ComfyUI: keep prompts, trigger words, and whole lora configurations in plain files you can share across machines (including a NAS)."
-version = "0.6.0"
+version = "0.7.0"
 license = { file = "LICENSE" }
 readme = "README.md"
 requires-python = ">=3.10"

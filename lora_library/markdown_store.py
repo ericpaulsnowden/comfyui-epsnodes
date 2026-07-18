@@ -37,6 +37,11 @@ class NameCollisionError(MarkdownStoreError):
     """``rename_to`` names a different entry that already exists."""
 
 
+class EntryNotFoundError(MarkdownStoreError):
+    """``move_entry``'s *name* or *before* names no existing addressable
+    entry (FORMAT.md §3.2) — the route layer maps this to 404."""
+
+
 class ConflictError(MarkdownStoreError):
     """``base_mtime`` didn't match the file's current mtime (FORMAT.md §3.5).
 
@@ -325,6 +330,76 @@ def remove_entry(parsed: ParsedNotebook, name: str) -> bool:
     block, entry = found
     block.entries.remove(entry)
     return True
+
+
+def move_entry(
+    parsed: ParsedNotebook,
+    name: str,
+    *,
+    before: str | None = None,
+    category: str | None = None,
+) -> dict:
+    """Relocate the addressable entry *name* — FORMAT.md §3.4 Move, the
+    primitive behind §5's ``POST /lora_library/notebook/move`` and §7.2's
+    drag-reorder. Mutates *parsed* in place; returns ``{"name","category"}``
+    for the entry's new position.
+
+    Exactly one of *before*/*category* must be given (the route validates
+    this and 400s before calling here; this is just the precondition):
+
+    - *before*: move *name* to just before the named sibling entry. Moving
+      an entry before itself (``before == name``) is a documented no-op —
+      returned unchanged rather than treated as an error, matching a
+      drag-reorder that drops a row back on itself.
+    - *category*: move *name* to the END of that category's entries,
+      creating the category heading at end-of-file when *category* names
+      one that doesn't exist yet (mirrors :func:`upsert_entry`'s create
+      placement — a repeated category name lands in the LAST one). ``""``
+      targets ``parsed.blocks[0]`` specifically — the always-present
+      implicit leading block (FORMAT.md's "uncategorized head region") —
+      rather than searching by name, so it always means "just before the
+      file's first H1, or end of file if there is none," never a
+      coincidentally empty-titled ``#`` heading elsewhere in a hand-edited
+      file.
+
+    The moved :class:`Entry` object is relocated by reference (removed from
+    one block's ``entries`` list, inserted/appended into another's) — never
+    rebuilt — so its heading line and body travel byte-identically.
+
+    Raises :class:`EntryNotFoundError` if *name* or *before* doesn't name
+    an existing addressable entry.
+    """
+    if (before is None) == (category is None):
+        raise ValueError("move_entry requires exactly one of 'before' or 'category'")
+
+    name = (name or "").strip()
+    found = _find_addressable(parsed, name)
+    if found is None:
+        raise EntryNotFoundError(f"no such entry {name!r} — FORMAT.md §3.2")
+    src_block, entry = found
+
+    if before is not None:
+        before = before.strip()
+        if before == entry.name:
+            return {"name": entry.name, "category": src_block.name}
+        target = _find_addressable(parsed, before)
+        if target is None:
+            raise EntryNotFoundError(
+                f"no such entry {before!r} to move before — FORMAT.md §3.2"
+            )
+        dst_block, sibling = target
+        src_block.entries.remove(entry)
+        dst_block.entries.insert(dst_block.entries.index(sibling), entry)
+        return {"name": entry.name, "category": dst_block.name}
+
+    category = (category or "").strip()
+    dst_block = parsed.blocks[0] if category == "" else _find_last_block(parsed, category)
+    if dst_block is None:
+        dst_block = CategoryBlock(name=category, heading_line=f"# {category}")
+        parsed.blocks.append(dst_block)
+    src_block.entries.remove(entry)
+    dst_block.entries.append(entry)
+    return {"name": entry.name, "category": dst_block.name}
 
 
 # --------------------------------------------------------------------- I/O

@@ -27,10 +27,20 @@ Current capabilities, no dependencies:
 
 ## LoRA Notebook (shipped)
 
-`LoRA Library → LoRA Notebook`: a two-pane editor inside the node — entry
+`EPSNodes → LoRA Notebook`: a two-pane editor inside the node — entry
 list on the left (grouped by `# Category` headings, with `＋ New` /
-`🗑 Delete`), a flexible text editor + `Save` on the right. The selected
-entry's text is the node's `STRING` output.
+`🗑 Delete`), a flexible text editor + `Save` on the right. Outputs:
+`text` and `name` (the entry's heading — handy for filename prefixes and
+captions).
+
+- **Select several prompts, get one run per prompt:** ctrl/cmd+click
+  toggles entries into the selection, shift+click selects a range. Queue
+  once and the workflow executes once per selected prompt, in selection
+  order, with `text`/`name` paired. A single selection behaves exactly
+  like a plain string.
+- **Drag to reorder:** drag entries within the list (an insertion line
+  shows the landing spot); drop onto a category header to move an entry
+  into that category — the file is rewritten to match, byte-safe.
 
 - **Plain Markdown, yours:** one `## Entry Name` per entry in a file you
   point the node at — relative names live in the library folder, absolute
