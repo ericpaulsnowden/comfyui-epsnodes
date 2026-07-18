@@ -409,6 +409,6 @@ def test_input_types_without_context_falls_back_to_none_only() -> None:
 
 def test_class_shape_matches_format_md_section_6_2() -> None:
     cls = nodes_sets.LoraLibraryApplySet
-    assert cls.CATEGORY == "LoRA Library"
+    assert cls.CATEGORY == "EPSNodes"
     assert cls.RETURN_TYPES == ("MODEL", "CLIP", "LORA_STACK", "STRING")
     assert cls.RETURN_NAMES == ("model", "clip", "lora_stack", "trigger_words")

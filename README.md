@@ -1,9 +1,11 @@
-# comfyui-lora-library
+# EPSNodes
 
-Keep your LoRA knowledge in plain files you own — and switch whole LoRA
-setups in one click.
+Eric Paul Snowden's ComfyUI node pack — practical workflow utilities that
+live in **plain files you own**. Everything appears under **EPSNodes** in
+the node browser and Settings. The first feature family is about LoRAs;
+the pack will grow beyond them.
 
-Two capabilities, one pack, no dependencies:
+Current capabilities, no dependencies:
 
 - **LoRA Notebook** — a node holding a scrollable list of entries (one per
   lora, or anything else) with an editor pane beside it. Backed by a plain

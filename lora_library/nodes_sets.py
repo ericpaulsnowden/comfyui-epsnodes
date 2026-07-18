@@ -77,7 +77,7 @@ class LoraLibraryApplySet:
     lora, FORMAT.md §4).
     """
 
-    CATEGORY = "LoRA Library"
+    CATEGORY = "EPSNodes"
     RETURN_TYPES = ("MODEL", "CLIP", "LORA_STACK", "STRING")
     RETURN_NAMES = ("model", "clip", "lora_stack", "trigger_words")
     FUNCTION = "apply"

@@ -155,7 +155,7 @@ class TestValidateAndInputTypes:
 
     def test_class_shape_matches_format_md_section_6_1(self) -> None:
         cls = nodes_notebook.LoraLibraryNotebook
-        assert cls.CATEGORY == "LoRA Library"
+        assert cls.CATEGORY == "EPSNodes"
         assert cls.RETURN_TYPES == ("STRING",)
         assert cls.RETURN_NAMES == ("text",)
         assert cls.FUNCTION == "read_entry"

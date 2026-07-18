@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Bump comfyui-lora-library's version across every file that carries it.
+"""Bump EPSNodes' version across every file that carries it.
 
 Usage::
 
@@ -133,7 +133,7 @@ def bump_all(repo_root: Path, part: str, dry_run: bool = False) -> tuple[str, st
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        description="Bump comfyui-lora-library's version across every file that carries it."
+        description="Bump EPSNodes' version across every file that carries it."
     )
     bump_part = parser.add_mutually_exclusive_group()
     bump_part.add_argument(

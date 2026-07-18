@@ -66,7 +66,7 @@ class LoraLibraryNotebook:
     would be indistinguishable from a genuinely empty entry.
     """
 
-    CATEGORY = "LoRA Library"
+    CATEGORY = "EPSNodes"
     RETURN_TYPES = ("STRING",)
     RETURN_NAMES = ("text",)
     FUNCTION = "read_entry"

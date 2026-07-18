@@ -1,7 +1,7 @@
 [project]
-name = "comfyui-lora-library"
+name = "epsnodes"
 description = "A file-backed LoRA notebook and switchable LoRA sets for ComfyUI: keep prompts, trigger words, and whole lora configurations in plain files you can share across machines (including a NAS)."
-version = "0.4.0"
+version = "0.5.0"
 license = { file = "LICENSE" }
 readme = "README.md"
 requires-python = ">=3.10"
@@ -9,13 +9,13 @@ requires-python = ">=3.10"
 dependencies = []
 
 [project.urls]
-Repository = "https://github.com/ericpaulsnowden/comfyui-lora-library"
+Repository = "https://github.com/ericpaulsnowden/EPSNodes"
 
 [tool.comfy]
 # PublisherId must match the publisher created at https://registry.comfy.org
 # before the first `comfy node publish`.
 PublisherId = "REPLACE_ME"
-DisplayName = "LoRA Library"
+DisplayName = "EPSNodes"
 Icon = ""
 
 [tool.ruff]

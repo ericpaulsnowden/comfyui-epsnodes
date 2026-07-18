@@ -34,14 +34,14 @@ function safely(label, fn) {
   }
 }
 
-const REPO_URL = 'https://github.com/ericpaulsnowden/comfyui-lora-library'
+const REPO_URL = 'https://github.com/ericpaulsnowden/EPSNodes'
 
 app.registerExtension({
   name: 'lora_library.LoraLibrary',
   settings: SETTINGS,
   aboutPageBadges: [
     {
-      label: `LoRA Library v${api.FRONTEND_VERSION}`,
+      label: `EPSNodes v${api.FRONTEND_VERSION}`,
       url: REPO_URL,
       icon: 'pi pi-github'
     }

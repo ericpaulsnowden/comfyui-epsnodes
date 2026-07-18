@@ -12,7 +12,7 @@
 
 ```bash
 cd ComfyUI/custom_nodes
-git clone https://github.com/ericpaulsnowden/comfyui-lora-library
+git clone https://github.com/ericpaulsnowden/EPSNodes
 ```
 
 Restart ComfyUI. You should see `lora_library vX.Y.Z loaded` in the server
