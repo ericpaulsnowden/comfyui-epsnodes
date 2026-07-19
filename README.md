@@ -22,8 +22,8 @@ Current capabilities, no dependencies:
   its current rows as a state, apply a state back, reorder included.
 
 > **Status: pre-release. All three capabilities ship today:** the **Prompt
-> Notebook**, **Apply LoRA Set**, and the **Power Lora Loader State
-> Controller** (each described below). Contracts live in
+> Notebook**, **Apply LoRA Set**, and the **Lora Loader State Controller**
+> (each described below). Contracts live in
 > [docs/FORMAT.md](docs/FORMAT.md).
 
 ## Prompt Notebook (shipped)
