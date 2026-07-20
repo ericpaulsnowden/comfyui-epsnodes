@@ -163,7 +163,9 @@ dimensions. It replaces a resize node + a reroute + a get-image-size node.
 
 - **The size grid:** a drag pad right on the node — drag anywhere and
   `width`/`height` follow, snapping to `multiple_of` (or 64 when it's off).
-  Hold **Shift** to drag free, **Ctrl/Cmd** to lock the aspect ratio. The
+  Hold **Shift** for a 1:1 square, **Ctrl/Cmd** to keep the aspect ratio the
+  box had when you started dragging. The pad is square, so a 1:1 target sits
+  on the diagonal. The
   typed fields and the grid stay in sync (edit either), a live readout shows
   `W x H`, the reduced aspect (3:2) and megapixels, and right-click
   Properties offers `Grid max` (range) and `Show grid` (hide the pad

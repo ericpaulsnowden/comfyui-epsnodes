@@ -291,7 +291,10 @@ const GRID_WIDGET_TYPE = 'eps_resolution_grid'
 
 const GRID_H = 210 // fixed pad height, CSS px (FORMAT.md §6.5 M2: 200-220)
 const GRID_MIN_SIZE = 64 // pad's logical minimum on both axes
-const GRID_MAX_DEFAULT = 4096
+const GRID_MAX_DEFAULT = 2048 // node property seed; FORMAT.md §6.5 M2 (owner ask 2026-07-20: "make 2048 the
+// default max size" — was 4096 in v0.15.0. NEW nodes only: attach() seeds this via addProperty(), which is a
+// silent this.properties[name] = default assignment (see file header) never touching an EXISTING node's already-
+// serialized property value — an old workflow's saved "Grid max" keeps whatever it was, by design, no migration.
 const GRID_MAX_FLOOR = 256 // "Grid max" property clamp: sane lower bound
 const GRID_MAX_CEILING = 16384 // matches width/height widgets' own INPUT_TYPES max
 const SNAP_FALLBACK = 64 // used when `multiple_of` is 0 (off)
@@ -472,10 +475,39 @@ function applyGridVisibility(node) {
 }
 
 /**
+ * Centered SQUARE plot region within the widget (FORMAT.md §6.5 M2
+ * square-cells fix, owner bug 2026-07-20: "a 1000 x 1000 grid is displayed
+ * incorrectly as a rectangle because the grid elements it is made up of are
+ * rectangles"). `side = min(availW, availH)` so mapX/mapY below can share
+ * ONE scale (`side / span`) instead of the old two independent per-axis
+ * scales — the fix, in full, IS this shared side value. The square anchors
+ * to the top-left inset and is letterboxed (centered) across any LEFTOVER
+ * horizontal space, since `availW > availH` is the common case (a wide
+ * node, GRID_H's fixed 210px height budget). Shared by drawGrid() (so the
+ * visual gridlines/diagonal/crosshair are square) AND attachGridDrag()'s
+ * pointer mapping (so a drag along the visible diagonal actually produces
+ * width == height) — one function, two callers, so they can never drift
+ * apart into "looks square but drags rectangular" or vice versa.
+ */
+function getPlotRect(cssW, cssH) {
+  const availW = Math.max(1, cssW - PLOT_PAD * 2)
+  const availH = Math.max(1, cssH - PLOT_PAD * 2 - TEXT_STRIP_H)
+  const side = Math.max(1, Math.min(availW, availH))
+  return {
+    plotX: PLOT_PAD + (availW - side) / 2, // letterbox: center the square in the leftover width
+    plotY: PLOT_PAD, // anchored to the top; the readout strip stays directly below (TEXT_STRIP_H)
+    side
+  }
+}
+
+/**
  * Draws the pad's contents: gridlines every GRIDLINE_STEP, a faint 1:1
  * diagonal, a crosshair + dot at the current target, and a compact
  * "W x H" / "aspect · MP" readout. All colors come from readThemeColors()
  * so the pad reads on both Comfy themes without any light/dark branching.
+ * The plot itself is the centered SQUARE from getPlotRect() — mapX/mapY
+ * share one scale, so a 1000x1000 target sits on the true 45° diagonal and
+ * every gridline cell is visually square, not just numerically square.
  */
 function drawGrid(node, ctx, cssW, cssH) {
   const canvas = node._epsGrid.canvas
@@ -483,13 +515,10 @@ function drawGrid(node, ctx, cssW, cssH) {
   const gridMax = getGridMax(node)
   const disp = computeDisplayWH(node)
 
-  const plotX = PLOT_PAD
-  const plotY = PLOT_PAD
-  const plotW = Math.max(1, cssW - PLOT_PAD * 2)
-  const plotH = Math.max(1, cssH - PLOT_PAD * 2 - TEXT_STRIP_H)
+  const { plotX, plotY, side } = getPlotRect(cssW, cssH)
   const span = Math.max(1, gridMax - GRID_MIN_SIZE)
-  const mapX = (v) => plotX + clamp01((v - GRID_MIN_SIZE) / span) * plotW
-  const mapY = (v) => plotY + clamp01((v - GRID_MIN_SIZE) / span) * plotH
+  const mapX = (v) => plotX + clamp01((v - GRID_MIN_SIZE) / span) * side
+  const mapY = (v) => plotY + clamp01((v - GRID_MIN_SIZE) / span) * side
 
   // Gridlines every 512 units.
   ctx.save()
@@ -500,17 +529,17 @@ function drawGrid(node, ctx, cssW, cssH) {
   for (let u = GRIDLINE_STEP; u < gridMax; u += GRIDLINE_STEP) {
     const x = Math.round(mapX(u)) + 0.5
     ctx.moveTo(x, plotY)
-    ctx.lineTo(x, plotY + plotH)
+    ctx.lineTo(x, plotY + side)
     const y = Math.round(mapY(u)) + 0.5
     ctx.moveTo(plotX, y)
-    ctx.lineTo(plotX + plotW, y)
+    ctx.lineTo(plotX + side, y)
   }
   ctx.stroke()
   ctx.restore()
 
-  // Faint 1:1 diagonal (w == h locus under this same, possibly non-uniform
-  // per-axis mapping — the dot always sits exactly on it when w==h,
-  // regardless of the pad's aspect).
+  // Faint 1:1 diagonal (w == h locus under this now-uniform mapping — the
+  // dot always sits exactly on it when w==h, and now that's visually TRUE,
+  // not just numerically true, since mapX/mapY share one scale).
   ctx.save()
   ctx.strokeStyle = ACCENT_COLOR
   ctx.globalAlpha = 0.3
@@ -530,9 +559,9 @@ function drawGrid(node, ctx, cssW, cssH) {
   ctx.lineWidth = 1
   ctx.beginPath()
   ctx.moveTo(Math.round(tx) + 0.5, plotY)
-  ctx.lineTo(Math.round(tx) + 0.5, plotY + plotH)
+  ctx.lineTo(Math.round(tx) + 0.5, plotY + side)
   ctx.moveTo(plotX, Math.round(ty) + 0.5)
-  ctx.lineTo(plotX + plotW, Math.round(ty) + 0.5)
+  ctx.lineTo(plotX + side, Math.round(ty) + 0.5)
   ctx.stroke()
   ctx.restore()
 
@@ -550,20 +579,23 @@ function drawGrid(node, ctx, cssW, cssH) {
   ctx.restore()
 
   // Compact readout: "1024 x 512" (or "auto" per axis), then a muted
-  // "2:1 · 0.52 MP" line.
+  // "2:1 · 0.52 MP" line. Anchored at PLOT_PAD (the widget's own left
+  // inset), NOT the letterboxed square's `plotX` — the strip reads as a
+  // stable full-width bar directly below the square regardless of how much
+  // horizontal margin centering leaves on a wide node.
   const wLabel = disp.wAuto ? 'auto' : String(Math.round(disp.rawW))
   const hLabel = disp.hAuto ? 'auto' : String(Math.round(disp.rawH))
-  const textBaseY = plotY + plotH
+  const textBaseY = plotY + side
   ctx.save()
   ctx.textBaseline = 'alphabetic'
   ctx.fillStyle = colors.text
   ctx.font = '600 13px ui-monospace, "SF Mono", Menlo, Consolas, monospace'
-  ctx.fillText(`${wLabel} x ${hLabel}`, plotX, textBaseY + 18)
+  ctx.fillText(`${wLabel} x ${hLabel}`, PLOT_PAD, textBaseY + 18)
   ctx.fillStyle = colors.muted
   ctx.font = '11px ui-monospace, "SF Mono", Menlo, Consolas, monospace'
   ctx.fillText(
     `${formatAspect(disp.dispW, disp.dispH)}  ·  ${formatMegapixels(disp.dispW, disp.dispH)}`,
-    plotX,
+    PLOT_PAD,
     textBaseY + 33
   )
   ctx.restore()
@@ -607,6 +639,19 @@ function renderGrid(node) {
  * wireSplitter (see file header). Returns a `cancel()` the caller stashes
  * for node-removal cleanup (a removed node's pointerup never fires, so
  * in-flight window listeners would otherwise leak).
+ *
+ * Modifiers (FORMAT.md §6.5 M2, owner ask 2026-07-20 — supersedes v0.15.0's
+ * "Shift = free drag / no snap"): Shift constrains the drag to a 1:1
+ * square; Ctrl/Cmd constrains to the aspect ratio the box had when THIS
+ * drag started. The two are mutually exclusive (Shift wins if somehow both
+ * are held — a fixed 1:1 is the more explicit ask, and the two targets
+ * would otherwise conflict). Snapping (to `multiple_of`, else 64) now
+ * applies under BOTH modifiers and under no modifier at all — there is no
+ * more no-snap path. The raw-pointer -> width/height mapping below uses
+ * getPlotRect() — the SAME centered-square region drawGrid() paints — so a
+ * drag along the visible 45° diagonal lands on width == height even
+ * without Shift, and Shift's forced equality survives snapping exactly
+ * (both axes run the identical snapTo(), so equal inputs stay equal).
  */
 function attachGridDrag(node, canvasEl) {
   let drag = null // { pointerId, aspect, startX, startY }
@@ -615,13 +660,26 @@ function attachGridDrag(node, canvasEl) {
     const rect = canvasEl.getBoundingClientRect()
     const gridMax = getGridMax(node)
     const span = Math.max(1, gridMax - GRID_MIN_SIZE)
+    const { plotX, plotY, side } = getPlotRect(rect.width, rect.height)
     const x = clamp(event.clientX - rect.left, 0, rect.width)
     const y = clamp(event.clientY - rect.top, 0, rect.height)
 
-    let w = GRID_MIN_SIZE + (x / Math.max(1, rect.width)) * span
-    let h = GRID_MIN_SIZE + (y / Math.max(1, rect.height)) * span
+    // Inverse of drawGrid()'s mapX/mapY: same plot origin, same single
+    // side/span scale for both axes (the square-cells fix) — a pointer
+    // position outside the letterboxed square (in its margin) clamps to
+    // the nearest edge value via clamp01, exactly like the visual pad edge.
+    let w = GRID_MIN_SIZE + clamp01((x - plotX) / side) * span
+    let h = GRID_MIN_SIZE + clamp01((y - plotY) / side) * span
 
-    if (drag && (event.ctrlKey || event.metaKey)) {
+    if (event.shiftKey) {
+      // Constrain to a 1:1 square: whichever axis the pointer has pushed
+      // further from the pad's origin drives both. No drag-start state
+      // needed (unlike Ctrl's captured aspect), so toggling Shift mid-drag
+      // just works.
+      const size = Math.max(w, h)
+      w = size
+      h = size
+    } else if (drag && (event.ctrlKey || event.metaKey)) {
       // Lock the aspect captured at drag start; let whichever axis has
       // moved further from the drag's origin drive the other (a plain,
       // predictable rule — this pad is deliberately the ANTI-Resolution-
@@ -634,11 +692,11 @@ function attachGridDrag(node, canvasEl) {
       else h = w / aspect
     }
 
-    if (!event.shiftKey) {
-      const snap = getSnapUnit(node)
-      w = snapTo(w, snap)
-      h = snapTo(h, snap)
-    }
+    // Snapping applies unconditionally now — Shift no longer means
+    // "free drag" (FORMAT.md §6.5 M2, supersedes v0.15.0).
+    const snap = getSnapUnit(node)
+    w = snapTo(w, snap)
+    h = snapTo(h, snap)
 
     w = clamp(Math.round(w), GRID_MIN_SIZE, gridMax)
     h = clamp(Math.round(h), GRID_MIN_SIZE, gridMax)

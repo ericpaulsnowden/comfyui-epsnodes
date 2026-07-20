@@ -274,7 +274,18 @@ execution — **the file is the truth; the UI is a view.**
 - Optional inputs: `model` (MODEL), `clip` (CLIP).
 - Widgets: `set` (COMBO of set names by slug + `"None"`), `strength_scale`
   (FLOAT 0.0–2.0, default 1.0, step 0.05 — master multiplier on every
-  applied strength).
+  applied strength). **`strength_scale` is HIDDEN by default** (owner ask
+  2026-07-20: "this should be turned off by default … by default the
+  strength should pass through what is set in the loader … it's an edge
+  case"): a node property `Show strength scale` (default false, right-click
+  Properties) reveals the widget. Hidden, its value stays `1.0`, so the
+  default is a clean pass-through of each set's stored strengths — the
+  multiplier never silently overrides them. Move `strength_scale` to
+  `optional` (default `1.0`) as part of this change (same rationale as the
+  Switcher's `toggles`, §6.4): a hidden widget still serializes from the
+  frontend, and `optional` makes a hand-built `/prompt` that omits it get
+  `1.0` rather than a "required input missing" rejection. The apply math
+  (`strength * strength_scale`) is otherwise unchanged.
 - Outputs: `MODEL`, `CLIP`, `LORA_STACK`, `STRING` (`trigger_words`),
   `STRING` (`loras_text`).
 - `loras_text` is the normalized summary of what was applied (owner format,
@@ -551,12 +562,23 @@ is the functional core WITHOUT the grid.
     height) so it can never collapse to a sliver.
   - **Interaction:** drag anywhere on the pad to set the target — x maps to
     `width`, y to `height`, over a 64..`Grid max` range (node property,
-    default 4096). Dragging SNAPS to `multiple_of` when > 0, else to 64;
-    hold **Shift** to drag free (no snap); hold **Ctrl/Cmd** to lock the
-    current aspect ratio while dragging. Two-way sync: the grid writes the
-    `width`/`height` INT widgets (value + callback) and editing the numbers
-    moves the dot. The grid never writes `0` — the 0=derive mode stays a
-    typed-field feature; a `0` axis renders as "auto" on the pad.
+    default **2048** — owner ask 2026-07-20). Dragging SNAPS to `multiple_of`
+    when > 0, else to 64. **Modifiers (owner ask 2026-07-20, supersedes the
+    v0.15.0 "Shift = free drag"): hold Shift to constrain to a 1:1 square
+    (width == height as you drag); hold Ctrl/Cmd to constrain to the aspect
+    ratio the box had when THIS drag started (e.g. a 16:9 box grows/shrinks
+    staying 16:9).** Snapping still applies under both modifiers. Two-way
+    sync: the grid writes the `width`/`height` INT widgets (value + callback)
+    and editing the numbers moves the dot. The grid never writes `0` — the
+    0=derive mode stays a typed-field feature; a `0` axis renders as "auto"
+    on the pad.
+  - **Square cells (owner bug 2026-07-20):** the pad must map both axes at
+    the SAME pixels-per-unit so a square target (e.g. 1000×1000) plots as a
+    square on the true 45° diagonal and the gridline cells are square — not
+    rectangles. v0.15.0 mapped x over the full (wide) width and y over the
+    (short) height independently, distorting squares. Use a uniform scale
+    (a centered square plot region, side = min(plotW, plotH)) so the drag
+    space is visually true to the numbers.
   - **Display:** current-target dot + crosshair, live `W x H` label, reduced
     aspect (e.g. 3:2) + megapixels, subtle gridlines (every 512) and a faint
     1:1 diagonal. Dark, minimal, readable on both Comfy themes.
