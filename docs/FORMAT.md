@@ -413,6 +413,105 @@ queue. It drives a **genuine, untouched `Power Lora Loader (rgthree)`**:
   ComfyUI-only floor is §6.2; the controller is the upgrade for rgthree
   users).
 
+## §6.4 `EPSSwitcher` (display: "EPS Switcher") — image toggle + fan-out
+
+Roadmap: `research/roadmap-eps-switcher.md` (M1 = this section). NON-lora node;
+lives in the sibling `eps_image/` module, category "EPSNodes". Class id
+`EPSSwitcher` frozen once shipped (§8). Genuinely novel per research
+(`research-eps-nodes.md`): every existing switch picks ONE input; nothing fuses
+per-input toggle + toggle-all header + N-enabled→N-runs fan-out.
+
+- **Inputs:** growing optional `image_1`, `image_2`, … (IMAGE) — a fresh empty
+  socket appears when the last is connected; connected slots never renumber;
+  trailing empties collapse to exactly one spare (the monorepo's proven
+  pattern: backend `_FlexibleOptionalImageInputs` dict-subclass à la
+  `cprb/nodes_save.py`'s `_FlexibleOptionalVideoInputs`; frontend
+  `converge`/`onConnectionsChange` à la `cprb/web/cprb/nodes.js`, guarding
+  `configure()`'s hardcoded `isConnected=true` restore). Do NOT use core
+  `io.Autogrow` (unverified on the rig's 1.45.21).
+- **Per-input toggle + header:** each `image_N` row carries an on/off toggle;
+  a header "all on / all off" tri-state toggle like rgthree's Power Lora
+  Loader (borrow the pattern, MIT — write fresh, no rgthree runtime dep).
+  Toggle state is a serialized node property/widget (survives reload).
+- **Output:** single `IMAGE` declared `OUTPUT_IS_LIST` — emits the ENABLED
+  images in slot order; downstream runs once per enabled image (N enabled →
+  N runs) via core list execution. Disabled inputs are simply omitted from
+  the list (v1 = simple filter; their upstreams still execute — lazy-skip is
+  the tracked M3 future, `research-eps-nodes.md` § lazy backlog).
+- **Enforce ≥1 enabled:** all-off yields an empty list, which can crash a
+  downstream whose only input is that list (`max_len_input==0`). Block it
+  with a clear message (or force one on) — never ship the silent crash.
+- **Backend:** a real (non-virtual) node; `INPUT_TYPES` uses the flexible
+  optional dict, which also carries the `toggles` STRING bridge (in `optional`,
+  NOT `required` — a required input absent from a hand-built `/prompt` is
+  rejected before the node runs, breaking the no-frontend API path;
+  `execute`'s default covers omission). `execute(**kwargs)` collects
+  present-and-enabled `image_N` in ascending N into a list — a slot is enabled
+  unless `toggles` records it as the literal boolean `false` (matching the
+  frontend's `!== false`); `RETURN_TYPES=("IMAGE",)`, `OUTPUT_IS_LIST=(True,)`.
+  No ComfyUI imports at module scope (torch only if needed, lazy).
+  `set_context` optional (not needed for M1).
+- **Docs caveat:** a scalar seed downstream repeats identically across the N
+  fanned runs — surface this in the node description (per-image variation
+  needs an explicit seed list).
+
+## §6.5 `EPSResolution` (display: "EPS Resolution") — M1 core
+
+Roadmap: `research/roadmap-eps-resolution.md` (M1 = this section; grid=M2,
+NAS presets=M3, list multi-image=M4 come later). NON-lora node in `eps_image/`,
+category "EPSNodes". Class id `EPSResolution` frozen once shipped (§8). Owner
+framing: an elegant, IMAGE-first (not latent) all-in-one resolution node — M1
+is the functional core WITHOUT the grid.
+
+- **Inputs:** `image` (IMAGE, optional — a single image for M1; list/multi is
+  M4), widgets `width` (INT) and `height` (INT) (easy-to-edit target size;
+  `0` on an axis = derive it from the other axis + the input image's aspect),
+  plus the thin-resize controls: `resize_method` (COMBO: `stretch`,
+  `keep aspect (fit)`, `crop to fill`, `pad`), `interpolation` (COMBO:
+  `nearest`, `bilinear`, `bicubic`, `area`, `lanczos`), `multiple_of` (INT,
+  default 0 = off).
+- **Outputs (in this order):** `image` (passthrough, untouched),
+  `resized_image` (the input resized to target per the controls; if no image
+  is wired this is `None` — the node is then a pure size source), `width`
+  (INT), `height` (INT), `original_width` (INT), `original_height` (INT). The
+  passthrough + original-size outputs are the novel bit (Resolution Master
+  re-emits neither). `width`/`height` report the ACTUAL dimensions of
+  `resized_image` (so for `keep aspect (fit)` they are the fitted size, not the
+  requested box — the fit is smaller); with no image wired they report the
+  requested target (`multiple_of`-rounded), so the node still drives downstream
+  size consumers standalone.
+- **Hideable outputs:** implemented as two per-node **right-click Properties**
+  (`Show passthrough image`, `Show original size`, both default on), NOT a
+  global settings group — output visibility is inherently per-node, and the JS
+  file that would own a settings registration is the shared entry, not this
+  node's module. NOTE: litegraph has no output-slot `hidden` flag (only widget
+  INPUT slots have one), so the hide uses two mechanisms: `Show original size`
+  really `removeOutput`/`addOutput`s the trailing `original_width`/
+  `original_height` pair (safe because they are the TAIL of `RETURN_TYPES` —
+  removing a non-tail output would repoint later wires, since ComfyUI resolves
+  a link's source by positional index against the fixed backend tuple);
+  `Show passthrough image` is a cosmetic draw-suppression of the leading
+  `image` output's dot/label (removing it for real would corrupt the links of
+  `resized_image`/`width`/`height` after it). Both refuse to hide an output
+  that is currently wired (revert + toast) rather than leave a dangling wire.
+- **Resize impl:** mirror core `ImageScale` semantics via
+  `comfy.utils.common_upscale` (lazy `import comfy.utils`/`torch` inside the
+  function, never at module scope) — thin, common-case; documented "pipe the
+  width/height outputs into KJNodes' resize for anything fancier" (ethos).
+  `stretch` = plain resize to WxH; `crop to fill` = `common_upscale` crop
+  `"center"` (scale-to-cover + center-crop); `keep aspect (fit)` = the largest
+  aspect-correct size that fits within WxH; `pad` = fit then center on a black
+  (`0.0`) canvas at WxH. When `multiple_of` > 0, `stretch`/`crop`/`pad` round
+  the box to the NEAREST multiple, but `keep aspect (fit)` FLOORS the fitted
+  axes to the multiple so the result can never exceed the box (containment).
+- **Backend-first:** M1 needs almost no custom frontend (standard widgets +
+  the per-node Property toggles for hideable outputs). The canvas GRID is M2 —
+  a separate, higher-risk build (dual LiteGraph/Vue rendering backends). Ship
+  M1 first.
+- **Deferred (M2–M4):** grid, NAS presets (reuse `lora_library`
+  context/sets_store/settings), multi-image list fan-out. Do NOT build them
+  in M1.
+
 ## §7 Frontend surfaces
 
 - **§7.1 Extension entry** `web/lora_library.js`: exactly one

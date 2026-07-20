@@ -22,7 +22,12 @@ try:
     from .lora_library.context import LibraryContext
     from .lora_library.version import __version__
 
-    _PACKAGE_PREFIX = f"{__name__}.lora_library"
+    # The pack's own package name, so feature modules in ANY sibling
+    # sub-package (lora_library/, eps_image/, …) import as
+    # f"{_TOP_PREFIX}.{module_path}". EPSNodes is deliberately a multi-family
+    # pack (FORMAT.md naming note): lora nodes live in lora_library/, non-lora
+    # image nodes in eps_image/, future families in their own siblings.
+    _TOP_PREFIX = __name__
 except ImportError:
     # Imported without package context (e.g. pytest rootdir setups, or tooling
     # that loads node-pack entry files flat). ComfyUI itself always loads this
@@ -31,7 +36,7 @@ except ImportError:
     from lora_library.context import LibraryContext
     from lora_library.version import __version__
 
-    _PACKAGE_PREFIX = "lora_library"
+    _TOP_PREFIX = ""
 
 logger = logging.getLogger("lora_library")
 
@@ -48,14 +53,14 @@ def _build_context() -> LibraryContext:
     def _list_loras() -> list[str]:
         try:
             return list(folder_paths.get_filename_list("loras"))
-        except Exception:  # noqa: BLE001 - a broken model dir must not kill the pack
+        except Exception:  # a broken model dir must not kill the pack
             logger.exception("lora_library: could not list loras")
             return []
 
     def _resolve_lora_path(name: str) -> str | None:
         try:
             return folder_paths.get_full_path("loras", name)
-        except Exception:  # noqa: BLE001 - resolution failure means "not found"
+        except Exception:  # resolution failure means "not found"
             return None
 
     return LibraryContext(
@@ -71,24 +76,31 @@ _routes.register(_context)
 
 # Class ids are FROZEN once shipped (FORMAT.md §8): saved workflows reference
 # nodes by id, and renaming one silently breaks every workflow containing it.
-# The "LoraLibrary" prefix exists to avoid colliding with other packs'
-# generically named lora nodes.
+# Each spec is (module_path_under_the_pack, class_id, display_name); the
+# module path names its sub-package so families can live in siblings
+# (lora_library/ = the lora family; eps_image/ = non-lora image nodes).
+# set_context is called only when a module defines it (the image nodes don't
+# need the library context for their current milestones).
 _NODE_SPECS = [
-    ("nodes_notebook", "LoraLibraryNotebook", "Prompt Notebook"),
-    ("nodes_sets", "LoraLibraryApplySet", "Apply LoRA Set"),
+    ("lora_library.nodes_notebook", "LoraLibraryNotebook", "Prompt Notebook"),
+    ("lora_library.nodes_sets", "LoraLibraryApplySet", "Apply LoRA Set"),
+    ("eps_image.nodes_switcher", "EPSSwitcher", "EPS Switcher"),
+    ("eps_image.nodes_resolution", "EPSResolution", "EPS Resolution"),
 ]
 
 NODE_CLASS_MAPPINGS = {}
 NODE_DISPLAY_NAME_MAPPINGS = {}
 
-for _module_name, _class_id, _display in _NODE_SPECS:
+for _module_path, _class_id, _display in _NODE_SPECS:
     try:
-        _module = importlib.import_module(f"{_PACKAGE_PREFIX}.{_module_name}")
-        _module.set_context(_context)
+        _full = f"{_TOP_PREFIX}.{_module_path}" if _TOP_PREFIX else _module_path
+        _module = importlib.import_module(_full)
+        if hasattr(_module, "set_context"):
+            _module.set_context(_context)
         NODE_CLASS_MAPPINGS[_class_id] = getattr(_module, _class_id)
         NODE_DISPLAY_NAME_MAPPINGS[_class_id] = _display
-    except Exception:  # noqa: BLE001 - skip the feature, keep the pack alive
-        logger.exception("lora_library: feature module %s failed to load", _module_name)
+    except Exception:  # skip the feature, keep the pack alive
+        logger.exception("lora_library: feature module %s failed to load", _module_path)
 
 WEB_DIRECTORY = "./web"
 

@@ -2,8 +2,8 @@
 
 Eric Paul Snowden's ComfyUI node pack — practical workflow utilities that
 live in **plain files you own**. Everything appears under **EPSNodes** in
-the node browser and Settings. The first feature family is about LoRAs;
-the pack will grow beyond them.
+the node browser and Settings. It started as a LoRA family and has grown
+beyond it — image-flow utilities now live here too.
 
 Current capabilities, no dependencies:
 
@@ -20,11 +20,16 @@ Current capabilities, no dependencies:
   [rgthree's Power Lora Loader](https://github.com/rgthree/rgthree-comfy),
   the `Lora Loader State Controller` drives it directly — capture
   its current rows as a state, apply a state back, reorder included.
+- **Image utilities** — **EPS Switcher** toggles any number of image inputs
+  on/off and fans the enabled ones out (N enabled → the workflow runs N
+  times); **EPS Resolution** is an image-first, all-in-one resize + size
+  node (target size, four resize modes, and the original image + both sizes
+  passed through) so one node replaces a resize + a reroute + a get-size.
 
-> **Status: pre-release. All three capabilities ship today:** the **Prompt
-> Notebook**, **Apply LoRA Set**, and the **Lora Loader State Controller**
-> (each described below). Contracts live in
-> [docs/FORMAT.md](docs/FORMAT.md).
+> **Status: pre-release. Five capabilities ship today:** the **Prompt
+> Notebook**, **Apply LoRA Set**, the **Lora Loader State Controller**,
+> **EPS Switcher**, and **EPS Resolution** (each described below).
+> Contracts live in [docs/FORMAT.md](docs/FORMAT.md).
 
 ## Prompt Notebook (shipped)
 
@@ -117,6 +122,47 @@ basename fallback, so a set written on Windows applies on macOS and vice
 versa; anything that can't resolve is skipped with a logged warning rather
 than failing the run. After creating states outside the graph, press `R`
 (refresh node definitions) to update an open dropdown.
+
+## EPS Switcher (shipped)
+
+`EPSNodes → EPS Switcher`: wire in **any number of images**, flip each one
+on or off, and the enabled ones flow out as a list — so the rest of the
+workflow **runs once per enabled image**. Four images in with one turned
+off means three runs.
+
+- **Grows as you wire:** connect the last image socket and a fresh empty one
+  appears; a connected socket never renumbers, so your wires stay put.
+- **A toggle on every row**, plus a **Toggle All** header (tri-state: all
+  on / all off / a dash for mixed, with a live `enabled/total` count) — the
+  same one-click-everything control as rgthree's Power Lora Loader.
+- **Fan-out, not pick-one:** unlike a normal switch that forwards a single
+  chosen input, EPS Switcher forwards *all* the enabled ones and lets
+  ComfyUI iterate. (A scalar wired downstream — e.g. a seed — repeats
+  identically across the runs; use a per-image list for per-image
+  variation.) Toggle everything off and it stops with a clear message rather
+  than a confusing downstream crash.
+- Toggle states save with the workflow and survive reload.
+
+## EPS Resolution (shipped)
+
+`EPSNodes → EPS Resolution`: one image-first node for the everyday
+"resize this and tell me the sizes" job — set a target width/height, pick a
+mode, and get back the resized image **and** the original, plus both sets of
+dimensions. It replaces a resize node + a reroute + a get-image-size node.
+
+- **Four resize modes:** `stretch`, `keep aspect (fit)`, `crop to fill`,
+  and `pad` (black), with a choice of interpolation. `multiple_of` snaps the
+  result to a multiple (e.g. 64) for latent-friendly sizes.
+- **Set one axis to `0`** to derive it from the other and the image's aspect.
+- **Outputs:** `image` (untouched passthrough), `resized_image`, `width`,
+  `height`, `original_width`, `original_height`. `width`/`height` report the
+  actual resized dimensions; with no image wired the node still emits your
+  target size, so it doubles as a pure size source.
+- **Declutter:** right-click → Properties to hide the passthrough image or
+  the original-size outputs you aren't using (it won't hide one that's still
+  wired).
+- Deliberately thin — pipe `width`/`height` into a heavier resize node for
+  anything fancier.
 
 ## Install
 
