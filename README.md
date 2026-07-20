@@ -89,6 +89,12 @@ whole configurations ("states") in and out of it:
   capture reads from the lowest-numbered one.
 - A debug `status` line is hidden by default — right-click the node →
   Properties → `Show status` to reveal it.
+- **If a saved state ever disagrees with what you set on the loader**, the
+  capture now reads the loader's own serialized row values (the same source
+  your saved workflows use) and every New/Save State leaves a compact
+  per-row trace in the browser console. Right-click → Properties →
+  `Debug capture` adds a full table of each row's raw values — paste that
+  with any bug report and the cause is pinpointed.
 - It's a frontend-only virtual node: it never executes and can't block a
   queue. If rgthree isn't installed (or its internals ever drift), the node
   disables itself with a message and points you at `Apply LoRA Set`, which

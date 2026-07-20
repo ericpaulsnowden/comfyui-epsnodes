@@ -117,6 +117,90 @@
  *      touches rgthree, so it keeps working with rgthree uninstalled or the
  *      target unhealthy, exactly as before this amendment.
  *
+ * 2026-07-20 (round 10, owner report on v0.14.0): "Isn't working. Strength
+ * is always 1.0." for BOTH `sc-save-state-overwrites` and `sc-readback-toast`
+ * — the read-back toast (4 above) is doing exactly its job: it shows what
+ * CAPTURE actually read, and on the owner's machine that is a flat 1.0
+ * regardless of the dragged on-screen value, even though APPLY (3 above),
+ * Push State, and selective Push all still work for him. Investigation:
+ *  - The rig's rgthree-comfy checkout was diffed BYTE-FOR-BYTE (2026-07-20)
+ *    against `raw.githubusercontent.com/rgthree/rgthree-comfy/main/web/
+ *    comfyui/power_lora_loader.js` — zero differences; this rig is running
+ *    current upstream `main`. `PowerLoraLoaderWidget` stores its row as a
+ *    plain `{on, lora, strength, strengthTwo}` object behind a plain
+ *    get/set pair (`set value(v) { this._value = v }`), mutated IN PLACE by
+ *    the real drag handler (`doOnStrengthAnyMove`: `this.value[prop] =
+ *    (this.value[prop] ?? 1) + event.deltaX * 0.05`) — exactly what
+ *    `captureRows()` already assumed and what R4-R9 verified with a real
+ *    pointer drag on this rig. Could NOT reproduce the owner's exact
+ *    symptom against this code — see the final "HONEST GAP" bullet.
+ *  - ComfyUI_frontend's OWN `LGraphNode.serialize()` (src/lib/litegraph/src/
+ *    LGraphNode.ts, the `widgets_values`-building loop, ~lines 984-990)
+ *    reads `widget.value` directly too, for the workflow-SAVE path — but it
+ *    round-trips any object value through `JSON.parse(JSON.stringify(val))`,
+ *    with the code comment "Ensure object values are plain (not reactive
+ *    proxies) for structuredClone compatibility." That is this frontend's
+ *    OWN authors documenting that `.value` is not guaranteed to be the plain
+ *    object rgthree constructs on every widget/render path — precisely the
+ *    class of skew a newer or differently-configured frontend build (the
+ *    owner is on ComfyUI 0.28.1; this rig is verified against
+ *    comfyui-frontend-package 1.45.21) could introduce without rgthree
+ *    itself changing one line.
+ *  - A DIFFERENT frontend path, `executionUtil.ts` (the API-PROMPT-building
+ *    path, not the workflow-save path above, ~lines 103-104), goes further:
+ *    `widget.serializeValue ? await widget.serializeValue(node, i) :
+ *    widget.value` — i.e. ComfyUI_frontend's own code PREFERS a widget's
+ *    `serializeValue()` over raw `.value`, wherever a widget defines one,
+ *    for this exact reason. rgthree's `PowerLoraLoaderWidget.serializeValue
+ *    (node, index)` DOES define one: `{...this.value}` (spreading into a
+ *    fresh object literal always yields a plain one, proxied source or not)
+ *    with `strengthTwo` deleted in single-strength mode or defaulted to 1 in
+ *    dual mode. That is rgthree's OWN stated choice of "the value an
+ *    outside reader should trust" — not a foreign technique bolted on, the
+ *    same seam ComfyUI_frontend itself already relies on for this exact
+ *    widget.
+ *  - THE FIX: `captureRows()` (see its own updated doc comment and
+ *    `readRowSources()`) now reads BOTH sources per row and prefers
+ *    `serializeValue()`'s fields when it returns a usable object, falling
+ *    back to the existing `.value`-based alias chain field-by-field
+ *    otherwise — a widening, not a replacement: on any rgthree without a
+ *    working `serializeValue` (including THIS rig's) this produces
+ *    byte-identical output to before; on any environment where the two
+ *    sources diverge, this reads the one both rgthree and ComfyUI_frontend
+ *    already trust more. Every strength is then coerced through `Number()`
+ *    (`coerceStrength()`); a non-numeric result is reported by row name via
+ *    `console.warn` and replaced with a safe fallback rather than silently
+ *    writing garbage into a saved state file. `serializeValue()` is awaited
+ *    (its type allows returning a `Promise`, per ComfyUI_frontend's
+ *    `simplifiedWidget.ts`), so `captureRows()` is now `async` — both call
+ *    sites (`_doCapture`/`_doUpdate`) already `await` other calls in the
+ *    same function, so this is a non-breaking signature change internal to
+ *    this file.
+ *  - DIAGNOSTICS: new `Debug capture` node property (default false,
+ *    alongside `Show status`). Every capture now `console.debug`s one
+ *    compact line per row (`.value` strength vs `serializeValue()` strength
+ *    vs the strength actually used, and which source won) UNCONDITIONALLY —
+ *    no property to flip, so the very next mismatch report already has this
+ *    trail in the console with zero setup. With `Debug capture` on, a full
+ *    `console.table()` of every row's raw `.value` + `serializeValue()`
+ *    objects is additionally logged, for the rarer case the compact line
+ *    can't resolve alone.
+ *  - HONEST GAP: none of the above could be LIVE-verified against the
+ *    owner's exact ComfyUI 0.28.1 install and his exact installed rgthree
+ *    commit — this rig has neither, and rgthree ships no version tags to
+ *    pin against (its GitHub releases list is a single 2023 entry; it is
+ *    developed and distributed straight off `main`). The fix is reasoned
+ *    from cited, current source in both projects, not from a rig-side
+ *    repro of the 1.0 symptom itself. It is still the right bet: it can only
+ *    ever be MORE correct than the old read (identical on this rig, better
+ *    anywhere the two sources diverge), it costs nothing when the two agree,
+ *    and it now leaves a console trail specific enough that if the owner's
+ *    next report is still "1.0," the `console.debug`/`console.table` output
+ *    will show definitively whether `serializeValue()` itself is returning
+ *    1.0 (an rgthree-side or 0.28.1-side issue upstream of this file) or
+ *    whether something else is happening (e.g. the wrong node/row being
+ *    read) — either way narrowing the next round instead of re-guessing.
+ *
  * This file binds to rgthree internals it does not own. Every binding is
  * cited below with the exact file + lines read (rgthree-comfy's COMPILED
  * `web/comfyui/power_lora_loader.js`, since that's what actually runs — not
@@ -347,6 +431,16 @@ const MIRRORS_ANY_VALUE = '(any)'
 
 /** FORMAT.md §6.3: our OWN node property — default false, revealed via right-click Properties. */
 const PROP_SHOW_STATUS = 'Show status'
+/**
+ * 2026-07-20 (round 10) diagnostics property — default false, revealed via
+ * right-click Properties. When on, every capture additionally
+ * `console.table()`s each row's full raw `.value` + `serializeValue()`
+ * objects (see `captureRows()`). The compact one-line-per-row
+ * `console.debug` trace runs unconditionally regardless of this property —
+ * this only adds the deeper dump for a report the compact trace can't
+ * resolve on its own.
+ */
+const PROP_DEBUG_CAPTURE = 'Debug capture'
 
 /**
  * FORMAT.md §6.3 multi-target: label prefix + matching regex for the "All
@@ -575,6 +669,64 @@ function probeTargets(nodes) {
 }
 
 /**
+ * 2026-07-20 (round 10) — read one row's value from BOTH sources: the raw
+ * `widget.value` this file has always read, and rgthree's own
+ * `serializeValue(node, index)` where the widget defines one (see the file
+ * header's dated section for the full evidence trail on why the latter is
+ * the more version-proof source: it's the exact seam ComfyUI_frontend's own
+ * `executionUtil.ts` prefers over raw `.value`, and rgthree's
+ * `PowerLoraLoaderWidget` defines one that returns an always-plain snapshot,
+ * `{...this.value}`). `serializeValue` is awaited defensively — its declared
+ * type (ComfyUI_frontend's `simplifiedWidget.ts`) allows returning a
+ * `Promise`, even though rgthree's own implementation today is synchronous.
+ * Never throws: a `serializeValue` that throws or returns something unusable
+ * just falls back to `liveValue` alone, so this can only ever make a read
+ * MORE forgiving, never less, exactly like the fallback-chain widening below
+ * it. `nodeIndex` (the widget's real position in `node.widgets`, not its
+ * position among lora rows) is what `serializeValue(node, index)` actually
+ * expects per its signature, even though rgthree's current implementation
+ * ignores both arguments.
+ */
+async function readRowSources(node, widget, nodeIndex) {
+  const liveValue = (widget && widget.value) || {}
+  let serialized = null
+  if (typeof widget?.serializeValue === 'function') {
+    try {
+      serialized = await widget.serializeValue(node, nodeIndex)
+    } catch (error) {
+      api.warn(`${NODE_TITLE}: ${widget.name}.serializeValue() threw; falling back to .value`, error)
+    }
+  }
+  const usedSerialize = serialized != null && typeof serialized === 'object'
+  // serializeValue's fields win when present; anything it omits (e.g. a
+  // deleted `strengthTwo` in single-strength mode) still falls through to
+  // liveValue, so the alias-chain widening below sees a merged object, not
+  // a partial one.
+  const merged = usedSerialize ? { ...liveValue, ...serialized } : liveValue
+  return { liveValue, serialized, merged, usedSerialize }
+}
+
+/**
+ * `Number()`, NaN -> `fallback` (FORMAT.md §6.3 2026-07-20 hardening): a
+ * strength that survives every alias in the fallback chain but still isn't a
+ * finite number (an entirely unanticipated shape — not something either the
+ * owner's or this rig's rgthree has ever been observed to produce) must
+ * never be written into a saved state file silently. Named by ROW so a
+ * console.warn here is actionable without needing `Debug capture` on.
+ */
+function coerceStrength(raw, fallback, rowName, fieldName) {
+  if (raw == null) return fallback
+  const n = Number(raw)
+  if (Number.isNaN(n)) {
+    api.warn(
+      `${NODE_TITLE}: ${rowName}.${fieldName} read a non-numeric strength (${JSON.stringify(raw)}); using ${fallback}`
+    )
+    return fallback
+  }
+  return n
+}
+
+/**
  * CAPTURE (FORMAT.md §6.3 + §4). Only called after probeTargets().ok (which
  * runs probeTarget() over every node in play), so every row here is already
  * known to have the expected `{on, lora, strength, strengthTwo}`-ish shape.
@@ -588,19 +740,56 @@ function probeTargets(nodes) {
  * `_toastRowsSaved()`'s read-back is the other half of "robust and
  * observable" (FORMAT.md §6.3): if even this widened chain still reads the
  * wrong thing on the owner's fork, the save toast shows it plainly.
+ * 2026-07-20: now reads `serializeValue()` alongside `.value` per row (see
+ * `readRowSources()`) and coerces every strength through `Number()` (see
+ * `coerceStrength()`) — `async` as a result (`serializeValue` may return a
+ * Promise); both call sites already `await` other calls in the same
+ * function, so this is a non-breaking signature change internal to this
+ * file. `debugCapture` (FORMAT.md §6.3 2026-07-20 diagnostics, the "Debug
+ * capture" node property) additionally `console.table()`s every row's full
+ * raw sources; the compact one-line-per-row `console.debug` trace below runs
+ * unconditionally either way.
  */
-function captureRows(node) {
+async function captureRows(node, { debugCapture = false } = {}) {
   const { rows } = scanLoraRows(node)
   const out = []
+  const debugRows = debugCapture ? [] : null
   for (const widget of rows) {
-    const v = widget.value || {}
+    const nodeIndex = node.widgets.indexOf(widget)
+    const { liveValue, serialized, merged, usedSerialize } = await readRowSources(node, widget, nodeIndex)
+    const v = merged
     if (v.lora == null || v.lora === 'None') continue
-    out.push({
-      file: v.lora,
-      on: v.on ?? v.enabled ?? v.active ?? true,
-      strength: v.strength ?? v.strengthOne ?? v.strength_model ?? 1,
-      strength_clip: v.strengthTwo ?? v.strength_two ?? v.strengthClip ?? v.strength_clip ?? null
-    })
+    const strength = coerceStrength(v.strength ?? v.strengthOne ?? v.strength_model, 1, widget.name, 'strength')
+    const rawClip = v.strengthTwo ?? v.strength_two ?? v.strengthClip ?? v.strength_clip
+    const strength_clip = rawClip == null ? null : coerceStrength(rawClip, strength, widget.name, 'strength_clip')
+    out.push({ file: v.lora, on: v.on ?? v.enabled ?? v.active ?? true, strength, strength_clip })
+
+    // Always-on, compact per-row trace: which source won, and what each one
+    // said the strength was — so the NEXT mismatch report already has this
+    // in the console with no property to flip first.
+    console.debug(
+      `${NODE_TITLE}: captured ${widget.name} — value.strength=${liveValue?.strength} ` +
+        `serializeValue.strength=${usedSerialize ? serialized?.strength : '(n/a)'} -> ${strength}` +
+        `${usedSerialize ? ' [serializeValue]' : ' [value]'}`
+    )
+    if (debugRows) {
+      debugRows.push({
+        row: widget.name,
+        lora: v.lora,
+        strength,
+        strength_clip,
+        usedSerialize,
+        value: liveValue,
+        serializeValue: serialized
+      })
+    }
+  }
+  if (debugRows) {
+    try {
+      console.table(debugRows)
+    } catch {
+      console.debug(`${NODE_TITLE}: Debug capture rows`, debugRows)
+    }
   }
   return out
 }
@@ -870,6 +1059,11 @@ export function registerControllerNode() {
         // _buildWidgets() runs below so the status widget's initial
         // `.hidden` can read it. See onPropertyChanged() for the live toggle.
         this.addProperty(PROP_SHOW_STATUS, false, 'boolean')
+        // 2026-07-20 (round 10): "Debug capture" — same Properties-Panel
+        // pattern as "Show status" above, but this one has no widget to
+        // show/hide; onPropertyChanged() has nothing to do for it, it's read
+        // fresh from `this.properties` at the top of every capture instead.
+        this.addProperty(PROP_DEBUG_CAPTURE, false, 'boolean')
 
         this._guarded('build widgets', () => this._buildWidgets())
       }
@@ -1458,7 +1652,7 @@ export function registerControllerNode() {
           return
         }
         const source = targets[0]
-        const loras = captureRows(source)
+        const loras = await captureRows(source, { debugCapture: !!this.properties[PROP_DEBUG_CAPTURE] })
         const name = (this._w.name?.value || '').trim() || `State ${this._setsCache.length + 1}`
         const response = await api.postJson('/lora_library/set', {
           set: { format: 1, name, loras, trigger_words: '', notes: '' }
@@ -1491,7 +1685,7 @@ export function registerControllerNode() {
           return
         }
         const source = targets[0]
-        const loras = captureRows(source)
+        const loras = await captureRows(source, { debugCapture: !!this.properties[PROP_DEBUG_CAPTURE] })
         // Preserve the existing name/trigger_words/notes; only the rows
         // change on "Update" — best-effort GET, falls back to rows-only.
         let name = entry.name

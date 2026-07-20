@@ -433,14 +433,32 @@ per-input toggle + toggle-all header + N-enabled→N-runs fan-out.
   a header "all on / all off" tri-state toggle like rgthree's Power Lora
   Loader (borrow the pattern, MIT — write fresh, no rgthree runtime dep).
   Toggle state is a serialized node property/widget (survives reload).
+- **Renamable rows** (owner ask 2026-07-20): double-clicking an `image_N`
+  row renames its DISPLAYED label only — set `input.label` (litegraph draws
+  `label || name`); `input.name` stays the frozen `image_N` (it is the
+  backend kwargs/serialization contract, and `toggles` keys stay names).
+  Labels persist with the workflow (the serialized inputs array carries
+  `label`; verify `configure()` restores it). The per-row toggle box measures
+  the DISPLAYED label so a long label never collides with its hit-region.
+  Renaming to an empty string resets the label back to the socket name.
 - **Output:** single `IMAGE` declared `OUTPUT_IS_LIST` — emits the ENABLED
   images in slot order; downstream runs once per enabled image (N enabled →
   N runs) via core list execution. Disabled inputs are simply omitted from
   the list (v1 = simple filter; their upstreams still execute — lazy-skip is
   the tracked M3 future, `research-eps-nodes.md` § lazy backlog).
-- **Enforce ≥1 enabled:** all-off yields an empty list, which can crash a
-  downstream whose only input is that list (`max_len_input==0`). Block it
-  with a clear message (or force one on) — never ship the silent crash.
+- **All-off / none-connected is a VALID state** (owner decision 2026-07-20,
+  supersedes the v0.14.0 queue-time error — "there will be times when a user
+  might want to turn them all off"): queueing with every input toggled off,
+  or nothing wired at all, must SUCCEED, with the downstream image branch
+  simply not running that queue. No error, no silent crash. Mechanism: when
+  zero images are enabled, return `[ExecutionBlocker(None)]` (lazy
+  `from comfy_execution.graph import ExecutionBlocker`) as the list — a bare
+  empty list only propagates safely while every downstream list input comes
+  from this node (a node mixing our list with a non-empty co-input hits
+  repeat-last on an empty list → IndexError), while an ExecutionBlocker makes
+  core skip dependent nodes silently (rgthree / Impact precedent). Verify the
+  blocker path live under OUTPUT_IS_LIST before shipping; if it misbehaves,
+  fall back to the empty list and record the mixed-input caveat here.
 - **Backend:** a real (non-virtual) node; `INPUT_TYPES` uses the flexible
   optional dict, which also carries the `toggles` STRING bridge (in `optional`,
   NOT `required` — a required input absent from a hand-built `/prompt` is
@@ -481,8 +499,12 @@ is the functional core WITHOUT the grid.
   requested target (`multiple_of`-rounded), so the node still drives downstream
   size consumers standalone.
 - **Hideable outputs:** implemented as two per-node **right-click Properties**
-  (`Show passthrough image`, `Show original size`, both default on), NOT a
-  global settings group — output visibility is inherently per-node, and the JS
+  (`Show passthrough image`, `Show original size` — both default **OFF** per
+  owner ask 2026-07-20 after validating the mechanism: a fresh node shows only
+  `resized_image`/`width`/`height`, and the Properties reveal the passthrough
+  and original-size outputs when wanted; `attach()` applies the hidden state
+  to fresh nodes, while a reloaded workflow's saved property values win via
+  `configure()`), NOT a global settings group — output visibility is inherently per-node, and the JS
   file that would own a settings registration is the shared entry, not this
   node's module. NOTE: litegraph has no output-slot `hidden` flag (only widget
   INPUT slots have one), so the hide uses two mechanisms: `Show original size`
@@ -508,9 +530,33 @@ is the functional core WITHOUT the grid.
   the per-node Property toggles for hideable outputs). The canvas GRID is M2 —
   a separate, higher-risk build (dual LiteGraph/Vue rendering backends). Ship
   M1 first.
-- **Deferred (M2–M4):** grid, NAS presets (reuse `lora_library`
+- **M2 — the size grid** (owner go 2026-07-20): an interactive 2D size pad
+  INSIDE the node — the "simple, image-first" grid (anti-Resolution-Master),
+  per `research/roadmap-eps-resolution.md` M2.
+  - **Mechanism: a DOM widget** (a `<canvas>` element via `addDOMWidget`),
+    NOT a litegraph `draw()`/`mouse()` custom widget: DOM widgets render
+    under BOTH frontend backends (LiteGraph canvas and Vue nodes) with one
+    implementation — the pack's proven Notebook / premiere-buttons pattern —
+    which sidesteps exactly the dual-backend risk the roadmap flags for a
+    canvas widget. Size it with the premiere lesson (widget
+    `computeSize = (w) => [w, H]` + `computedHeight` + explicit element
+    height) so it can never collapse to a sliver.
+  - **Interaction:** drag anywhere on the pad to set the target — x maps to
+    `width`, y to `height`, over a 64..`Grid max` range (node property,
+    default 4096). Dragging SNAPS to `multiple_of` when > 0, else to 64;
+    hold **Shift** to drag free (no snap); hold **Ctrl/Cmd** to lock the
+    current aspect ratio while dragging. Two-way sync: the grid writes the
+    `width`/`height` INT widgets (value + callback) and editing the numbers
+    moves the dot. The grid never writes `0` — the 0=derive mode stays a
+    typed-field feature; a `0` axis renders as "auto" on the pad.
+  - **Display:** current-target dot + crosshair, live `W x H` label, reduced
+    aspect (e.g. 3:2) + megapixels, subtle gridlines (every 512) and a faint
+    1:1 diagonal. Dark, minimal, readable on both Comfy themes.
+  - **`Show grid` node property** (default on) hides it for users who only
+    want the typed fields. No backend change in M2.
+- **Deferred (M3–M4):** NAS presets (reuse `lora_library`
   context/sets_store/settings), multi-image list fan-out. Do NOT build them
-  in M1.
+  yet.
 
 ## §7 Frontend surfaces
 
