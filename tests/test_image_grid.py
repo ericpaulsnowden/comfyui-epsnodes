@@ -7,6 +7,12 @@ the node's calls into ``image_grid_store`` resolve under a throwaway
 environment). ``comfy_execution.graph.ExecutionBlocker`` is faked the same
 way ``tests/test_switcher.py`` fakes it for `EPSSwitcher`'s identical
 empty-output mechanism.
+
+Also covers ``eps_image.routes_image_grid``'s ``GET /eps_image_grid/list``
+and ``POST /eps_image_grid/clone`` routes (the 2026-07-20 bug-fix pair),
+through ``routes_image_grid.build_routes()`` and aiohttp's own test client
+(``aiohttp_client``, from the ``pytest-aiohttp`` plugin) -- no ComfyUI
+needed, mirroring ``tests/test_routes_sets.py``'s ``make_app`` pattern.
 """
 
 from __future__ import annotations
@@ -19,8 +25,10 @@ from pathlib import Path
 
 import pytest
 import torch
+from aiohttp import web
 
-from eps_image import nodes_image_grid
+from eps_image import image_grid_store as store
+from eps_image import nodes_image_grid, routes_image_grid
 from eps_image.nodes_image_grid import EPSImageGrid
 
 
@@ -54,7 +62,21 @@ def fake_execution_blocker(monkeypatch: pytest.MonkeyPatch):
     return FakeExecutionBlocker
 
 
+@pytest.fixture
+async def client(fake_folder_paths: Path, aiohttp_client):
+    """A plain aiohttp test client wired to just this module's routes (no
+    ComfyUI) -- mirrors test_routes_sets.py's ``make_app``. Depends on
+    ``fake_folder_paths`` so every route handler's calls into
+    ``image_grid_store`` resolve under the same throwaway ``tmp_path`` a
+    test can also poke directly via the ``store`` import above.
+    """
+    app = web.Application()
+    app.add_routes(routes_image_grid.build_routes())
+    return await aiohttp_client(app)
+
+
 VALID_UUID = "a1b2c3d4-e5f6-47a8-9b0c-d1e2f3a4b5c6"
+OTHER_VALID_UUID = "11111111-2222-3333-4444-555555555555"
 
 
 def _make_batch(count: int, height: int = 4, width: int = 6) -> torch.Tensor:
@@ -218,8 +240,6 @@ class TestReturnShape:
         assert set(result.keys()) == {"ui", "result"}
 
     def test_ui_images_matches_the_on_disk_buffer(self, fake_folder_paths: Path) -> None:
-        from eps_image import image_grid_store as store
-
         node = _node()
         result = node.run(mode="Collect", image=_make_batch(2), grid_uuid=VALID_UUID)
         assert result["ui"]["images"] == store.list_refs(VALID_UUID)
@@ -285,3 +305,133 @@ def test_module_never_imports_torch_or_comfy_at_module_scope() -> None:
     source = inspect.getsource(sys.modules[nodes_image_grid.__name__])
     assert "import torch" not in source
     assert "import comfy" not in source
+
+
+# ------------------------------------------------------- GET /eps_image_grid/list
+# (2026-07-20 bug fix: FORMAT.md §6.6 "Display reflects the buffer on LOAD" --
+# the frontend's `refreshFromBuffer` calls this on attach/reload/undo.)
+
+
+class TestListRoute:
+    async def test_unknown_but_valid_uuid_returns_an_empty_list(self, client) -> None:
+        response = await client.get("/eps_image_grid/list", params={"uuid": VALID_UUID})
+        assert response.status == 200
+        assert await response.json() == {"ok": True, "uuid": VALID_UUID, "refs": []}
+
+    async def test_returns_the_whole_buffer_in_append_order(self, client) -> None:
+        store.append_batch(VALID_UUID, _make_batch(3))
+        response = await client.get("/eps_image_grid/list", params={"uuid": VALID_UUID})
+        body = await response.json()
+        assert body["ok"] is True
+        assert [r["filename"] for r in body["refs"]] == ["0001.png", "0002.png", "0003.png"]
+
+    async def test_reflects_a_second_append_without_a_second_call_needed_elsewhere(
+        self, client
+    ) -> None:
+        store.append_batch(VALID_UUID, _make_batch(1))
+        store.append_batch(VALID_UUID, _make_batch(2))
+        response = await client.get("/eps_image_grid/list", params={"uuid": VALID_UUID})
+        body = await response.json()
+        assert len(body["refs"]) == 3
+
+    async def test_two_uuids_never_share_a_list(self, client) -> None:
+        store.append_batch(VALID_UUID, _make_batch(2))
+        store.append_batch(OTHER_VALID_UUID, _make_batch(1))
+        response = await client.get("/eps_image_grid/list", params={"uuid": OTHER_VALID_UUID})
+        body = await response.json()
+        assert len(body["refs"]) == 1
+
+    async def test_invalid_uuid_is_400(self, client) -> None:
+        response = await client.get("/eps_image_grid/list", params={"uuid": "not valid!"})
+        assert response.status == 400
+        assert "error" in await response.json()
+
+    async def test_missing_uuid_query_param_is_400(self, client) -> None:
+        response = await client.get("/eps_image_grid/list")
+        assert response.status == 400
+
+    async def test_never_500s_on_a_malformed_manifest(
+        self, client, fake_folder_paths: Path
+    ) -> None:
+        directory = fake_folder_paths / store.DIRNAME / VALID_UUID
+        directory.mkdir(parents=True)
+        (directory / store.MANIFEST_FILENAME).write_text("{not valid json")
+        response = await client.get("/eps_image_grid/list", params={"uuid": VALID_UUID})
+        assert response.status == 200
+        assert (await response.json())["refs"] == []
+
+
+# ------------------------------------------------------ POST /eps_image_grid/clone
+# (2026-07-20 bug fix: FORMAT.md §6.6 "Copy carries the images, independently"
+# -- the frontend's `ensureUniqueUuid` collision branch calls this right after
+# minting a fresh uuid for an in-graph duplicate.)
+
+
+class TestCloneRoute:
+    async def test_clones_the_source_buffer_into_the_destination(self, client) -> None:
+        store.append_batch(VALID_UUID, _make_batch(2))
+        response = await client.post(
+            "/eps_image_grid/clone", json={"from": VALID_UUID, "to": OTHER_VALID_UUID}
+        )
+        assert response.status == 200
+        body = await response.json()
+        assert body["ok"] is True
+        assert len(body["refs"]) == 2
+        assert len(store.list_refs(OTHER_VALID_UUID)) == 2
+
+    async def test_empty_source_returns_ok_with_empty_refs(self, client) -> None:
+        response = await client.post(
+            "/eps_image_grid/clone", json={"from": VALID_UUID, "to": OTHER_VALID_UUID}
+        )
+        assert response.status == 200
+        assert await response.json() == {"ok": True, "refs": []}
+
+    async def test_clone_is_independent_of_a_later_source_append(self, client) -> None:
+        store.append_batch(VALID_UUID, _make_batch(2))
+        await client.post(
+            "/eps_image_grid/clone", json={"from": VALID_UUID, "to": OTHER_VALID_UUID}
+        )
+        store.append_batch(VALID_UUID, _make_batch(1))  # source grows to 3 post-clone
+        assert len(store.list_refs(VALID_UUID)) == 3
+        assert len(store.list_refs(OTHER_VALID_UUID)) == 2  # destination untouched
+
+    async def test_clone_is_independent_of_a_later_source_clear(self, client) -> None:
+        store.append_batch(VALID_UUID, _make_batch(2))
+        await client.post(
+            "/eps_image_grid/clone", json={"from": VALID_UUID, "to": OTHER_VALID_UUID}
+        )
+        assert store.clear(VALID_UUID) is True
+        assert len(store.list_refs(OTHER_VALID_UUID)) == 2  # destination survives
+
+    async def test_invalid_from_uuid_is_400(self, client) -> None:
+        response = await client.post(
+            "/eps_image_grid/clone", json={"from": "nope!", "to": OTHER_VALID_UUID}
+        )
+        assert response.status == 400
+        assert "error" in await response.json()
+
+    async def test_invalid_to_uuid_is_400(self, client) -> None:
+        response = await client.post(
+            "/eps_image_grid/clone", json={"from": VALID_UUID, "to": "nope!"}
+        )
+        assert response.status == 400
+
+    async def test_missing_from_key_is_400(self, client) -> None:
+        response = await client.post("/eps_image_grid/clone", json={"to": OTHER_VALID_UUID})
+        assert response.status == 400
+
+    async def test_missing_to_key_is_400(self, client) -> None:
+        response = await client.post("/eps_image_grid/clone", json={"from": VALID_UUID})
+        assert response.status == 400
+
+    async def test_malformed_json_body_is_400(self, client) -> None:
+        response = await client.post(
+            "/eps_image_grid/clone",
+            data="not json",
+            headers={"Content-Type": "application/json"},
+        )
+        assert response.status == 400
+
+    async def test_non_object_body_is_400(self, client) -> None:
+        response = await client.post("/eps_image_grid/clone", json=["not", "an", "object"])
+        assert response.status == 400

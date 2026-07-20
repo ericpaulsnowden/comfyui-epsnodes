@@ -701,6 +701,35 @@ add; single batch-aware IMAGE input; disk-backed, survive-restart, NO cap.
   and cross-workflow load a collision check (`loadedGraphNode` + deferred
   `nodeCreated`) against live siblings mints a fresh uuid (litegraph only
   self-heals its numeric `id`). Regex-validate the uuid before any fs use.
+- **Display reflects the buffer on LOAD, not only after a Run** (fix
+  2026-07-20, owner-reported): `node.imgs` is not serialized, so a reloaded /
+  pasted / undone node would otherwise show an EMPTY grid until the next Run
+  even though the buffer is intact on disk. The frontend must FETCH the
+  buffer and populate `node.imgs` on `attach`, `loadedGraphNode`, AND
+  `onConfigure` (the last covers undo, which re-applies node state without
+  re-running attach) — via a new `GET /eps_image_grid/list?uuid=` route
+  returning `{refs: list_refs(uuid)}`. So the persistent grid is visible
+  immediately, and undo/reload never appear to "lose" images (they were
+  always safe on disk). (On frontend 1.45.21, undo/redo go through
+  `loadGraphData` = a full node rebuild that re-fires `nodeCreated`/`attach`
+  AND `loadedGraphNode`, so those two already cover undo; `onConfigure` is
+  the belt-and-suspenders third site. All three firing is redundant by
+  design. KNOWN churn: because that rebuild re-runs the collision dedup on
+  transient historical states, an undo/redo sequence can mint fresh uuids +
+  clone buffers for those transients, leaving orphan `eps_image_grid/<uuid>/`
+  dirs — harmless, correctness always settles right, and folded into the M3
+  orphaned-buffer-cleanup backlog.)
+- **Copy carries the images, independently** (fix 2026-07-20, owner-reported
+  "images didn't travel to a copy"): when the dedup mints a fresh uuid
+  because of a live-sibling COLLISION (a genuine in-graph duplicate), the
+  source buffer is CLONED into the new uuid's dir (`POST
+  /eps_image_grid/clone {from, to}` → `store.clone_buffer`), so the duplicate
+  carries its own copy of the images and the two nodes stay independent.
+  (First-create — an empty/invalid uuid — mints fresh with NO clone. A
+  cross-tab paste with no live sibling keeps the uuid and thus shares the
+  same on-disk buffer as its source — the images still "travel"/show via the
+  load-fetch above; true cross-tab buffer independence is a later
+  refinement, noted not blocking.)
 - **Clear:** a frontend Clear button → `POST /eps_image_grid/clear {uuid}`
   (on `PromptServer.instance.routes`, never raw `app.add_routes`).
 - **Copy/paste (M2):** copy a selected grid cell to the OS clipboard

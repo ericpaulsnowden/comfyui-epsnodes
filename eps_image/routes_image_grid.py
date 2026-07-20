@@ -1,9 +1,18 @@
 """HTTP routes for ``EPSImageGrid`` (FORMAT.md §6.6): ``POST
-/eps_image_grid/clear`` (M1, the Clear button) and ``POST
+/eps_image_grid/clear`` (M1, the Clear button), ``POST
 /eps_image_grid/add`` (M2, the Ctrl+V/paste-to-add backend half — the
 frontend uploads the pasted file through core's own ``POST /upload/image``
 first, then calls this one with the uuid + that upload's ``{name,
-subfolder, type}``).
+subfolder, type}``), and two more added for the 2026-07-20 owner-reported
+bug fixes:
+
+- ``GET /eps_image_grid/list`` — the whole buffer's refs for a uuid, so the
+  frontend can populate ``node.imgs`` on attach/reload/undo WITHOUT a Run
+  (FORMAT.md §6.6 "Display reflects the buffer on LOAD").
+- ``POST /eps_image_grid/clone`` — copies one uuid's buffer into another's,
+  so an in-graph duplicate (paste-collision) keeps its own copy of the
+  original's images instead of starting empty (FORMAT.md §6.6 "Copy carries
+  the images, independently").
 
 Registered directly onto ``PromptServer.instance.routes`` — never raw
 ``app.add_routes`` (invisible to the frontend; see ``lora_library/
@@ -79,6 +88,34 @@ def register_routes(routes: web.RouteTableDef) -> None:
 
         images = store.append_uploaded_image(grid_uuid, filename, subfolder, source_type)
         return web.json_response({"ok": True, "uuid": grid_uuid, "images": images})
+
+    @routes.get("/eps_image_grid/list")
+    async def get_list(request: web.Request) -> web.Response:
+        grid_uuid = request.query.get("uuid")
+        if not store.is_valid_grid_uuid(grid_uuid):
+            return error_response(400, f"invalid grid uuid {grid_uuid!r} -- FORMAT.md §6.6")
+
+        refs = store.list_refs(grid_uuid)
+        return web.json_response({"ok": True, "uuid": grid_uuid, "refs": refs})
+
+    @routes.post("/eps_image_grid/clone")
+    async def post_clone(request: web.Request) -> web.Response:
+        try:
+            body = await request.json()
+        except Exception:  # broad: malformed body is a client error
+            return error_response(400, "body must be JSON")
+        if not isinstance(body, dict):
+            return error_response(400, "body must be a JSON object")
+
+        src_uuid = body.get("from")
+        if not store.is_valid_grid_uuid(src_uuid):
+            return error_response(400, f"invalid grid uuid {src_uuid!r} -- FORMAT.md §6.6")
+        dst_uuid = body.get("to")
+        if not store.is_valid_grid_uuid(dst_uuid):
+            return error_response(400, f"invalid grid uuid {dst_uuid!r} -- FORMAT.md §6.6")
+
+        refs = store.clone_buffer(src_uuid, dst_uuid)
+        return web.json_response({"ok": True, "refs": refs})
 
 
 def build_routes() -> web.RouteTableDef:

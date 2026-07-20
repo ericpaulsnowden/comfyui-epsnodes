@@ -47,6 +47,16 @@ then calls this to copy that ONE file into the buffer as the next frame.
 Copy/paste OUT (OS clipboard + ComfyUI clipspace) needed no backend
 change at all — see ``web/eps_image/image_grid.js``'s module docstring
 for why those are already free from ComfyUI core.
+
+**2026-07-20 bug-fix addition (two owner reports):** :func:`clone_buffer`
+backs the "copy carries the images, independently" fix — the frontend's
+dedup calls it right after minting a fresh uuid for an in-graph duplicate,
+so the copy starts with the original's images instead of an empty buffer.
+:func:`list_refs` (already existed for M1's own free-grid `ui.images`) is
+now ALSO the backend half of the "display reflects the buffer on load" fix,
+served fresh over the new ``GET /eps_image_grid/list`` route
+(``routes_image_grid.py``) so the frontend can populate `node.imgs` on
+attach/reload/undo without waiting for a Run.
 """
 
 from __future__ import annotations
@@ -419,3 +429,62 @@ def clear(grid_uuid: str) -> bool:
         return False
     shutil.rmtree(directory, ignore_errors=True)
     return True
+
+
+# --------------------------------------------------------------------- clone
+
+
+def clone_buffer(src_uuid: str, dst_uuid: str) -> list[dict]:
+    """Copy *src_uuid*'s whole buffer (manifest + every ``NNNN.png`` frame)
+    into *dst_uuid*'s buffer dir, so the two uuids end up as INDEPENDENT
+    copies (FORMAT.md §6.6 "Copy carries the images, independently") — a
+    later append/clear against either uuid never touches the other.
+
+    This is the backend half of the "images didn't travel to a copy" fix:
+    the frontend (`image_grid.js`'s `ensureUniqueUuid`) calls this right
+    after minting a fresh uuid for an in-graph duplicate (a genuine
+    live-sibling collision), so the duplicate starts with its own copy of
+    the original's images instead of an empty buffer.
+
+    Returns the refs for *dst_uuid*'s buffer after the copy — same
+    ``list_refs`` shape every other function here returns, so a caller never
+    needs a separate follow-up call. A safe no-op that returns ``[]`` and
+    touches NOTHING on disk (does not even create *dst_uuid*'s directory)
+    when: either uuid fails :func:`is_valid_grid_uuid`, *src_uuid* has no
+    buffer directory yet, or its buffer is empty (nothing to clone) — never
+    raises. An individual frame that's missing or unreadable is logged and
+    skipped rather than aborting the whole clone (mirrors
+    :func:`read_all_as_tensors`'s per-frame tolerance); only frames actually
+    copied are recorded in *dst_uuid*'s manifest.
+    """
+    src_dir = buffer_dir(src_uuid)
+    dst_dir = buffer_dir(dst_uuid)
+    if src_dir is None or dst_dir is None:
+        logger.warning(
+            "eps_image_grid: refusing to clone -- invalid uuid(s) src=%r dst=%r",
+            src_uuid,
+            dst_uuid,
+        )
+        return []
+    if not src_dir.exists():
+        return []
+
+    manifest = _load_manifest(src_dir)
+    copied: list[str] = []
+    for name in manifest["frames"]:
+        src_path = src_dir / name
+        try:
+            data = src_path.read_bytes()
+        except OSError as exc:
+            logger.warning(
+                "eps_image_grid: clone skipping unreadable frame %s (%s)", src_path, exc
+            )
+            continue
+        _atomic_write_bytes(dst_dir / name, data)
+        copied.append(name)
+
+    if not copied:
+        return []
+
+    _save_manifest(dst_dir, {"format": CURRENT_FORMAT, "frames": copied})
+    return list_refs(dst_uuid)

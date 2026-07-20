@@ -462,3 +462,123 @@ class TestResolveUploadedPath:
     ) -> None:
         resolved = store._resolve_uploaded_path("x.png", "pasted", "input")
         assert resolved == fake_input_dir / "pasted" / "x.png"
+
+
+# ----------------------------------------------------------------- clone_buffer
+# (2026-07-20 bug fix: FORMAT.md §6.6 "Copy carries the images, independently"
+# -- the frontend calls this right after minting a fresh uuid for an in-graph
+# duplicate, so the copy starts with the original's images.)
+
+
+class TestCloneBuffer:
+    def test_invalid_src_uuid_is_a_safe_no_op(self, fake_folder_paths: Path) -> None:
+        store.append_batch(OTHER_VALID_UUID, _make_batch(1))
+        assert store.clone_buffer("bad uuid!", OTHER_VALID_UUID) == []
+        # The valid (dst-shaped) uuid's own pre-existing buffer is untouched.
+        assert len(store.list_refs(OTHER_VALID_UUID)) == 1
+
+    def test_invalid_dst_uuid_is_a_safe_no_op(self, fake_folder_paths: Path) -> None:
+        store.append_batch(VALID_UUID, _make_batch(2))
+        assert store.clone_buffer(VALID_UUID, "bad uuid!") == []
+        # Source is untouched by a rejected clone.
+        assert len(store.list_refs(VALID_UUID)) == 2
+
+    def test_both_uuids_invalid_is_a_safe_no_op(self, fake_folder_paths: Path) -> None:
+        assert store.clone_buffer("nope!", "also nope!") == []
+
+    def test_src_with_no_buffer_directory_is_a_safe_no_op(self, fake_folder_paths: Path) -> None:
+        # VALID_UUID was never used -- no directory exists for it at all.
+        assert store.clone_buffer(VALID_UUID, OTHER_VALID_UUID) == []
+        assert store.list_refs(OTHER_VALID_UUID) == []
+        dst_dir = fake_folder_paths / store.DIRNAME / OTHER_VALID_UUID
+        assert not dst_dir.exists()  # nothing to clone -- dst is never created
+
+    def test_src_with_a_dir_but_zero_frames_is_a_safe_no_op(
+        self, fake_folder_paths: Path
+    ) -> None:
+        # A src directory that exists (e.g. left over after a Clear) but has
+        # no manifest/frames -- still nothing to clone.
+        src_dir = fake_folder_paths / store.DIRNAME / VALID_UUID
+        src_dir.mkdir(parents=True)
+        assert store.clone_buffer(VALID_UUID, OTHER_VALID_UUID) == []
+        assert store.list_refs(OTHER_VALID_UUID) == []
+
+    def test_copies_every_frame_and_the_manifest(self, fake_folder_paths: Path) -> None:
+        store.append_batch(VALID_UUID, _make_batch(3))
+        refs = store.clone_buffer(VALID_UUID, OTHER_VALID_UUID)
+        assert [r["filename"] for r in refs] == ["0001.png", "0002.png", "0003.png"]
+
+        dst_dir = fake_folder_paths / store.DIRNAME / OTHER_VALID_UUID
+        pngs = sorted(p.name for p in dst_dir.glob("*.png"))
+        assert pngs == ["0001.png", "0002.png", "0003.png"]
+        manifest = json.loads((dst_dir / store.MANIFEST_FILENAME).read_text())
+        assert manifest["frames"] == ["0001.png", "0002.png", "0003.png"]
+
+    def test_returned_refs_use_the_dst_uuid_subfolder(self, fake_folder_paths: Path) -> None:
+        store.append_batch(VALID_UUID, _make_batch(1))
+        refs = store.clone_buffer(VALID_UUID, OTHER_VALID_UUID)
+        assert refs == [
+            {
+                "filename": "0001.png",
+                "subfolder": f"{store.DIRNAME}/{OTHER_VALID_UUID}",
+                "type": "output",
+            }
+        ]
+
+    def test_return_value_matches_list_refs_of_dst(self, fake_folder_paths: Path) -> None:
+        store.append_batch(VALID_UUID, _make_batch(2))
+        refs = store.clone_buffer(VALID_UUID, OTHER_VALID_UUID)
+        assert refs == store.list_refs(OTHER_VALID_UUID)
+
+    def test_cloned_frames_round_trip_pixel_values(self, fake_folder_paths: Path) -> None:
+        batch = _make_batch(1, height=5, width=5)
+        store.append_batch(VALID_UUID, batch)
+        store.clone_buffer(VALID_UUID, OTHER_VALID_UUID)
+        [decoded] = store.read_all_as_tensors(OTHER_VALID_UUID)
+        assert torch.allclose(decoded, batch, atol=1.0 / 255.0 + 1e-6)
+
+    def test_dst_is_independent_of_a_later_append_to_src(self, fake_folder_paths: Path) -> None:
+        store.append_batch(VALID_UUID, _make_batch(2))
+        store.clone_buffer(VALID_UUID, OTHER_VALID_UUID)
+
+        store.append_batch(VALID_UUID, _make_batch(1))  # src grows to 3
+        assert len(store.list_refs(VALID_UUID)) == 3
+        assert len(store.list_refs(OTHER_VALID_UUID)) == 2  # dst untouched
+
+    def test_dst_is_independent_of_a_later_clear_of_src(self, fake_folder_paths: Path) -> None:
+        store.append_batch(VALID_UUID, _make_batch(2))
+        store.clone_buffer(VALID_UUID, OTHER_VALID_UUID)
+
+        assert store.clear(VALID_UUID) is True
+        assert store.list_refs(VALID_UUID) == []
+        assert len(store.list_refs(OTHER_VALID_UUID)) == 2  # dst untouched
+
+    def test_src_is_independent_of_a_later_append_to_dst(self, fake_folder_paths: Path) -> None:
+        store.append_batch(VALID_UUID, _make_batch(2))
+        store.clone_buffer(VALID_UUID, OTHER_VALID_UUID)
+
+        store.append_batch(OTHER_VALID_UUID, _make_batch(5))  # dst grows to 7
+        assert len(store.list_refs(OTHER_VALID_UUID)) == 7
+        assert len(store.list_refs(VALID_UUID)) == 2  # src untouched
+
+    def test_skips_a_frame_missing_from_disk_but_copies_the_rest(
+        self, fake_folder_paths: Path
+    ) -> None:
+        store.append_batch(VALID_UUID, _make_batch(2))
+        src_dir = fake_folder_paths / store.DIRNAME / VALID_UUID
+        (src_dir / "0001.png").unlink()  # simulate a corrupted/hand-deleted frame
+
+        refs = store.clone_buffer(VALID_UUID, OTHER_VALID_UUID)
+        assert [r["filename"] for r in refs] == ["0002.png"]
+
+    def test_leaves_no_temp_files_behind(self, fake_folder_paths: Path) -> None:
+        store.append_batch(VALID_UUID, _make_batch(2))
+        store.clone_buffer(VALID_UUID, OTHER_VALID_UUID)
+        dst_dir = fake_folder_paths / store.DIRNAME / OTHER_VALID_UUID
+        assert list(dst_dir.glob("*.tmp")) == []
+
+    def test_does_not_mutate_the_source_buffer(self, fake_folder_paths: Path) -> None:
+        store.append_batch(VALID_UUID, _make_batch(2))
+        before = store.list_refs(VALID_UUID)
+        store.clone_buffer(VALID_UUID, OTHER_VALID_UUID)
+        assert store.list_refs(VALID_UUID) == before

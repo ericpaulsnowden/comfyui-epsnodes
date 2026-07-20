@@ -150,7 +150,59 @@
  * `.callback` is a NOTIFICATION hook, not a setter, so calling it alone
  * without also assigning `.value` leaves the old value in place) and then
  * ALSO through its `.callback`, if any, so anything else observing
- * widget-value changes sees it too.
+ * widget-value changes sees it too. Since the 2026-07-20 fixes below,
+ * `ensureUniqueUuid()` is `async`: the COLLISION branch (a genuine
+ * live-sibling duplicate) additionally clones the OLD uuid's buffer into
+ * the fresh one before returning; the first-create branch (empty/invalid
+ * uuid, nothing to clone) still just mints and returns.
+ *
+ * ---- Bug fixes 2026-07-20: display-on-load + copy independence ----
+ *
+ * Two distinct owner reports, both rooted in the same fact: `node.imgs`
+ * (what core's free thumbnail grid actually draws, M1) is populated ONLY by
+ * a Run's `{"ui":{"images":[...]}}` response or the M2 paste-add path --
+ * it is never serialized with the node, and NOTHING previously re-read the
+ * on-disk buffer on load. So a reloaded, pasted, or undone node showed an
+ * EMPTY grid until the next Run, even though the buffer was intact on disk
+ * the whole time.
+ *
+ * 1. **"I copy-pasted the grid node from one workflow to a second workflow
+ *    and the images didn't travel."** Two separate causes:
+ *    - Display: opening a second workflow is exactly the `loadedGraphNode`
+ *      path above -- it fixed the uuid but never told the canvas to show
+ *      anything.
+ *    - True in-graph duplicates (paste within the SAME graph, hook 1's
+ *      collision branch): `ensureUniqueUuid()` minted a fresh uuid for the
+ *      duplicate but never copied the source's buffer, so the fresh uuid
+ *      pointed at a genuinely empty folder even after a display refresh.
+ *      Fixed by cloning: `POST /eps_image_grid/clone {from: oldUuid, to:
+ *      newUuid}` (`store.clone_buffer`) right after minting, so the
+ *      duplicate gets its own independent copy of the images -- verified
+ *      independent both ways (Clearing the original leaves the copy's
+ *      images intact, and vice versa).
+ * 2. **"I copied an image out of the grid into another node, then pressed
+ *    undo a few times -- the grid cleared itself and the images never came
+ *    back."** Undo/redo re-applies a node's PRIOR serialized state through
+ *    `LGraphNode.configure()` directly -- it does NOT recreate the node
+ *    instance, so `nodeCreated`/`attach()` never runs again. `node.imgs`
+ *    was never part of that serialized state either way, so undo left
+ *    whatever `node.imgs` happened to hold at that moment (frequently
+ *    nothing) on screen -- looking exactly like the buffer itself had been
+ *    wiped, when it was untouched on disk the entire time.
+ *
+ * The fix for both is the same primitive, `refreshFromBuffer(node)` (`GET
+ * /eps_image_grid/list?uuid=` -> `setNodeImagesFromRefs`), called from
+ * every place a node's uuid can become "the one to display" without a Run
+ * ever happening: the deferred `nodeCreated` tail in `attach()` (after
+ * `ensureUniqueUuid` settles, so it fetches the correct, possibly-just-
+ * cloned uuid), `loadedGraphNode()` (after its own dedup call), and a
+ * wrapped `onConfigure` (installed once per node, guarded by
+ * `node.__epsGridConfigureWrapped` -- this is the undo fix, since
+ * `onConfigure` is the one hook that fires on undo/redo without `attach()`
+ * running first). Every one of these fails soft (a missing route on an
+ * older backend, a network hiccup, or a not-yet-valid uuid all just leave
+ * today's display untouched) -- this is pure ADDITIONAL visibility into a
+ * buffer that was already safe, never a new way to lose data.
  *
  * ---- Clear button ----
  *
@@ -295,8 +347,19 @@ function siblingUuids(node) {
  * (re-syncing property<->widget only if they've somehow drifted apart).
  * Idempotent and cheap to call repeatedly -- both call sites below
  * (deferred `nodeCreated`, and `loadedGraphNode`) may run for the same node.
+ *
+ * `async` since the 2026-07-20 "images didn't travel to a copy" fix: the
+ * COLLISION branch (a genuine live-sibling duplicate -- NOT first-create,
+ * see FORMAT.md §6.6) captures the OLD uuid before overwriting, mints the
+ * fresh one, then clones the old buffer into the new uuid
+ * (`POST /eps_image_grid/clone`) before refreshing the display, so the
+ * duplicate carries its own independent copy of the original's images
+ * instead of starting empty. Callers that don't care about completion can
+ * ignore the returned promise; both call sites below await it specifically
+ * so their OWN follow-up `refreshFromBuffer` fetches the settled (possibly
+ * just-cloned) uuid rather than racing it.
  */
-function ensureUniqueUuid(node) {
+async function ensureUniqueUuid(node) {
   if (nodeClassOf(node) !== CLASS_ID) return
 
   const widget = getGridUuidWidget(node)
@@ -307,15 +370,31 @@ function ensureUniqueUuid(node) {
   const colliding = valid && siblingUuids(node).has(current)
 
   if (!valid || colliding) {
+    const oldUuid = current
     const fresh = generateUuid()
     writeUuid(node, fresh)
-    if (colliding) {
-      console.log(
+
+    if (!colliding) {
+      // First create (empty/invalid uuid, e.g. a brand-new node) -- fresh
+      // uuid, no clone: there is no source buffer to copy from.
+      return
+    }
+
+    console.log(
+      PREFIX,
+      `node #${node.id}: grid_uuid collided with a live sibling -- minted a new one ` +
+        '(each EPSImageGrid keeps its own buffer)'
+    )
+    try {
+      await postClone(oldUuid, fresh)
+    } catch (error) {
+      console.warn(
         PREFIX,
-        `node #${node.id}: grid_uuid collided with a live sibling -- minted a new one ` +
-          '(each EPSImageGrid keeps its own buffer)'
+        'clone-on-collision failed; the duplicate starts with an empty buffer',
+        error
       )
     }
+    await refreshFromBuffer(node)
     return
   }
   if (propertyUuid !== widgetUuid) {
@@ -413,7 +492,10 @@ function imageUrlForRef(ref) {
  * same shape the backend's `ui.images` always sends) and focuses the LAST
  * one, so right after an add the user sees exactly the image they just
  * pasted (FORMAT.md §6.6 "refresh the node so the new thumbnail shows").
- * Shared with the Clear path's empty case.
+ * Shared with the Clear path's empty case, and with `refreshFromBuffer`
+ * below (the 2026-07-20 display-on-load/undo fix) -- every caller hands it
+ * the SAME ref shape, so a load-triggered refresh renders identically to a
+ * just-added image.
  */
 function setNodeImagesFromRefs(node, refs) {
   if (!refs || !refs.length) {
@@ -526,6 +608,111 @@ function installPasteFiles(node) {
 }
 
 // ---------------------------------------------------------------------------
+// Bug fixes 2026-07-20: buffer refresh (display-on-load/undo) + clone-on-
+// collision (copy independence) -- see file header for the full writeup.
+// ---------------------------------------------------------------------------
+
+const LIST_ROUTE = '/eps_image_grid/list'
+const CLONE_ROUTE = '/eps_image_grid/clone'
+
+/**
+ * Fetches *node*'s whole on-disk buffer (`GET /eps_image_grid/list`) and
+ * repopulates its displayed thumbnails to match -- FORMAT.md §6.6 "Display
+ * reflects the buffer on LOAD, not only after a Run". Reuses
+ * `setNodeImagesFromRefs` (the exact same "replace the node's thumbnails"
+ * primitive the M2 paste-add path already uses), so a load-triggered
+ * refresh renders identically to a just-added image.
+ *
+ * Called from every place a node's uuid can become "the one to show"
+ * without a Run: the deferred `nodeCreated` tail (`attach()`),
+ * `loadedGraphNode()`, and the `onConfigure` wrap below (undo/redo). Fails
+ * soft in every direction on purpose -- a node whose uuid isn't valid yet, a
+ * missing route (an older backend that hasn't picked up this fix), a
+ * non-OK response, or a network error all just leave the node's CURRENT
+ * display untouched rather than throwing; never rejects, so callers may
+ * `await` it or fire-and-forget it interchangeably.
+ */
+async function refreshFromBuffer(node) {
+  const uuid = currentUuid(node)
+  if (!GRID_UUID_RE.test(uuid)) return
+  try {
+    const response = await api.fetchApi(`${LIST_ROUTE}?uuid=${encodeURIComponent(uuid)}`)
+    if (!response.ok) {
+      console.warn(PREFIX, `refreshFromBuffer: HTTP ${response.status} for uuid ${uuid}`)
+      return
+    }
+    const data = await response.json()
+    if (!data || data.ok !== true || !Array.isArray(data.refs)) return
+    setNodeImagesFromRefs(node, data.refs)
+    node.setDirtyCanvas(true, true)
+  } catch (error) {
+    console.warn(PREFIX, 'refreshFromBuffer failed', error)
+  }
+}
+
+/**
+ * `POST /eps_image_grid/clone {from, to}` -- copies *fromUuid*'s buffer
+ * into *toUuid*'s (FORMAT.md §6.6 "Copy carries the images,
+ * independently"). Called only from `ensureUniqueUuid`'s collision branch.
+ * Mirrors `postClear`'s request/response shape exactly. Throws on a non-OK
+ * response; the caller decides how to degrade (see `ensureUniqueUuid`).
+ */
+async function postClone(fromUuid, toUuid) {
+  const response = await api.fetchApi(CLONE_ROUTE, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ from: fromUuid, to: toUuid })
+  })
+  let data = null
+  try {
+    data = await response.json()
+  } catch {
+    // Non-JSON body (proxy error page etc.) -- fall through to status check.
+  }
+  if (!response.ok) {
+    const message = data && data.error ? data.error : `HTTP ${response.status}`
+    throw new Error(message)
+  }
+  return data
+}
+
+/**
+ * Wraps `onConfigure` so *node*'s display re-syncs to the on-disk buffer
+ * every time litegraph re-applies its serialized state WITHOUT going
+ * through `attach()` first -- concretely, undo/redo (FORMAT.md §6.6): it
+ * re-applies a node's PRIOR widgets/properties via `LGraphNode.configure()`
+ * directly, on the SAME existing node instance, so `nodeCreated`/`attach()`
+ * never runs again and nothing else here would ever notice. `node.imgs`
+ * isn't part of that serialized state either way, so without this, undo
+ * left the canvas showing whatever `node.imgs` happened to be at that
+ * instant (often nothing) even though the on-disk buffer was untouched.
+ *
+ * Guarded by `node.__epsGridConfigureWrapped` (a plain instance flag, NOT
+ * the module-level `attachedNodes` WeakSet `attach()` itself uses) so this
+ * specific wrap can only ever be installed once per node no matter how many
+ * times something re-triggers node setup for the same live instance. Calls
+ * the original `onConfigure` FIRST, unconditionally, then refreshes --
+ * `refreshFromBuffer` never rejects (see its own docstring), so firing it
+ * without an `await` here is safe; `onConfigure` itself is a synchronous
+ * litegraph hook with no promise contract to honor.
+ */
+function installConfigureRefresh(node) {
+  if (node.__epsGridConfigureWrapped) return
+  node.__epsGridConfigureWrapped = true
+
+  const originalOnConfigure = node.onConfigure
+  node.onConfigure = function (info) {
+    let result
+    try {
+      result = originalOnConfigure?.call(this, info)
+    } finally {
+      void refreshFromBuffer(this)
+    }
+    return result
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Public entry points (called from web/eps_image.js)
 // ---------------------------------------------------------------------------
 
@@ -545,6 +732,7 @@ export function attach(node) {
     hideGridUuidWidget(node)
     addClearButton(node)
     installPasteFiles(node)
+    installConfigureRefresh(node) // undo/redo display fix -- see its own docstring
     // Makes `isImageNode(node)` (litegraphUtil.ts) true even before
     // anything has ever been collected, so a real Ctrl+V onto a
     // brand-new, still-empty node routes to `pasteFiles` above instead of
@@ -553,12 +741,18 @@ export function attach(node) {
     node.previewMediaType = 'image'
 
     // Deferred one tick -- the paste-collision path. See file header
-    // point 1 for exactly why this can't run synchronously here.
-    setTimeout(() => {
+    // point 1 for exactly why this can't run synchronously here. Awaiting
+    // ensureUniqueUuid before refreshFromBuffer (rather than firing both in
+    // parallel) matters specifically for the collision branch: it fetches
+    // whichever uuid actually settles -- the fresh, possibly-just-cloned
+    // one -- not whatever was on the node before dedup ran.
+    setTimeout(async () => {
       try {
-        ensureUniqueUuid(node)
+        await ensureUniqueUuid(node)
       } catch (error) {
         console.warn(PREFIX, 'deferred uuid dedup failed', error)
+      } finally {
+        await refreshFromBuffer(node)
       }
     }, 0)
   } catch (error) {
@@ -573,6 +767,8 @@ export function loadedGraphNode(node) {
     if (!node) return
     if (nodeClassOf(node) !== CLASS_ID) return
     ensureUniqueUuid(node)
+      .catch((error) => console.warn(PREFIX, 'loadedGraphNode dedup failed', error))
+      .finally(() => refreshFromBuffer(node))
   } catch (error) {
     console.warn(PREFIX, 'loadedGraphNode dedup failed', error)
   }
