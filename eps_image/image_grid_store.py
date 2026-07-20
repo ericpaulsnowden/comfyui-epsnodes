@@ -29,14 +29,24 @@ buffer survives a restart (roadmap-eps-image-grid.md "Persistence: survive
 restart, NO cap").
 
 ``folder_paths`` (ComfyUI's own module) is imported lazily, only inside
-``_base_dir()``, so this module — and its manifest/path-validation/clear
-logic — stays importable and unit-testable without a real ComfyUI install
-(see ``tests/test_image_grid_store.py``'s ``fake_folder_paths`` fixture,
-mirroring this pack's established ``sys.modules`` faking convention).
-``torch``/``numpy``/``PIL`` are imported lazily too, only inside
-``append_batch``/``read_all_as_tensors`` — the two functions that actually
-touch tensors/images — for the same reason; every other function here
-never needs them at all.
+``_base_dir()``/``_resolve_uploaded_path()``, so this module — and its
+manifest/path-validation/clear logic — stays importable and unit-testable
+without a real ComfyUI install (see ``tests/test_image_grid_store.py``'s
+``fake_folder_paths`` fixture, mirroring this pack's established
+``sys.modules`` faking convention). ``torch``/``numpy``/``PIL`` are
+imported lazily too, only inside the functions that actually touch
+tensors/images (``append_batch``, ``read_all_as_tensors``,
+``append_uploaded_image``) — for the same reason; every other function
+here never needs them at all.
+
+**M2 addition (FORMAT.md §6.6 "Copy/paste (M2)"):** :func:`append_uploaded_image`
+is the Ctrl+V/paste-to-add path's backend half — the frontend uploads a
+pasted file through core's own ``POST /upload/image`` first (landing under
+``folder_paths``'s ``input``/``output``/``temp`` dirs, NOT our buffer),
+then calls this to copy that ONE file into the buffer as the next frame.
+Copy/paste OUT (OS clipboard + ComfyUI clipspace) needed no backend
+change at all — see ``web/eps_image/image_grid.js``'s module docstring
+for why those are already free from ComfyUI core.
 """
 
 from __future__ import annotations
@@ -235,13 +245,108 @@ def append_batch(grid_uuid: str, image_batch: Any) -> list[dict]:
 
 def _encode_png(array: Any) -> bytes:
     """A ``[H,W,C]`` ``uint8`` numpy array -> PNG bytes."""
+    from PIL import Image
+
+    return _encode_png_image(Image.fromarray(array))
+
+
+def _encode_png_image(pil_image: Any) -> bytes:
+    """A PIL ``Image`` -> PNG bytes. Shared tail of :func:`_encode_png`
+    (M1, tensor batches) and :func:`append_uploaded_image` (M2, an
+    already-on-disk file opened directly) — both funnel through this so
+    the buffer's on-disk shape is identical either way."""
     import io
+
+    buffer = io.BytesIO()
+    pil_image.save(buffer, format="PNG")
+    return buffer.getvalue()
+
+
+# --------------------------------------------------------- append (M2: add)
+
+
+def _resolve_uploaded_path(filename: str, subfolder: str, source_type: str) -> Path | None:
+    """``<folder_paths dir for source_type>/<subfolder>/<filename>``,
+    contained -- mirrors core's own ``/upload/image``+``/view`` resolution
+    (``server.py``) exactly, INCLUDING its containment check, so a hostile
+    filename/subfolder can never escape *source_type*'s base directory.
+    ``None`` for an unresolvable type or a path that would resolve outside
+    it -- callers treat that exactly like "file not found".
+    """
+    if not isinstance(filename, str) or not filename:
+        return None
+    if filename[0] in ("/", "\\") or ".." in filename:
+        return None
+    if not isinstance(subfolder, str) or ".." in subfolder:
+        return None
+
+    import folder_paths  # ComfyUI's own module; only importable inside ComfyUI
+
+    base = folder_paths.get_directory_by_type(source_type)
+    if base is None:
+        return None
+
+    full_dir = os.path.join(base, subfolder) if subfolder else base
+    full_dir_abs = os.path.abspath(full_dir)
+    if os.path.commonpath((full_dir_abs, base)) != base:
+        return None
+    return Path(full_dir_abs) / filename
+
+
+def append_uploaded_image(
+    grid_uuid: str, filename: str, subfolder: str = "", source_type: str = "input"
+) -> list[dict]:
+    """Append ONE already-uploaded image to the buffer as the next frame --
+    the M2 Ctrl+V/paste-to-add path (FORMAT.md §6.6 "Copy/paste (M2)"): the
+    frontend POSTs ``/upload/image`` first (core's own route), then this
+    with that response's ``{name, subfolder, type}`` (as ``filename``,
+    ``subfolder``, ``source_type``) plus our own *grid_uuid*.
+
+    Re-encodes through PIL (open -> convert RGB -> PNG via
+    :func:`_encode_png_image`, the exact tail :func:`append_batch` (M1)
+    also uses) so whatever format was actually uploaded (PNG/JPEG/WEBP --
+    browsers vary on what a copied image becomes) lands in the buffer as
+    the same canonical PNG-on-disk shape, and reuses the exact same
+    manifest/atomic-write machinery. Returns the whole buffer's refs, same
+    contract as :func:`append_batch`.
+
+    Never raises: an invalid *grid_uuid*, an unresolvable source (bad
+    type/traversal attempt), or an unreadable/missing source file are all
+    a no-op that returns the CURRENT buffer unchanged (or ``[]`` for an
+    invalid uuid) -- a bad paste must not crash the node's next Run.
+    """
+    directory = buffer_dir(grid_uuid)
+    if directory is None:
+        logger.warning("eps_image_grid: refusing to add -- invalid grid_uuid %r", grid_uuid)
+        return []
+
+    source_path = _resolve_uploaded_path(filename, subfolder, source_type)
+    if source_path is None:
+        logger.warning(
+            "eps_image_grid: refusing to add -- unresolvable source "
+            "(filename=%r subfolder=%r type=%r)",
+            filename,
+            subfolder,
+            source_type,
+        )
+        return list_refs(grid_uuid)
 
     from PIL import Image
 
-    buffer = io.BytesIO()
-    Image.fromarray(array).save(buffer, format="PNG")
-    return buffer.getvalue()
+    try:
+        with Image.open(source_path) as raw:
+            png_bytes = _encode_png_image(raw.convert("RGB"))
+    except (OSError, ValueError) as exc:
+        logger.warning("eps_image_grid: could not read %s to add (%s)", source_path, exc)
+        return list_refs(grid_uuid)
+
+    manifest = _load_manifest(directory)
+    frames = manifest["frames"]
+    name = _next_frame_filename(frames)
+    _atomic_write_bytes(directory / name, png_bytes)
+    frames.append(name)
+    _save_manifest(directory, manifest)
+    return _refs_for(grid_uuid, frames)
 
 
 # -------------------------------------------------------------- list / read

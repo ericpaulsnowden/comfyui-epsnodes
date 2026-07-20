@@ -1,7 +1,9 @@
-"""HTTP routes for ``EPSImageGrid`` (FORMAT.md §6.6): just the Clear
-button's backend, ``POST /eps_image_grid/clear``. The ``/add`` route
-(Ctrl+V paste-to-append) is M2 (`research/roadmap-eps-image-grid.md`) —
-deliberately not built here.
+"""HTTP routes for ``EPSImageGrid`` (FORMAT.md §6.6): ``POST
+/eps_image_grid/clear`` (M1, the Clear button) and ``POST
+/eps_image_grid/add`` (M2, the Ctrl+V/paste-to-add backend half — the
+frontend uploads the pasted file through core's own ``POST /upload/image``
+first, then calls this one with the uuid + that upload's ``{name,
+subfolder, type}``).
 
 Registered directly onto ``PromptServer.instance.routes`` — never raw
 ``app.add_routes`` (invisible to the frontend; see ``lora_library/
@@ -34,7 +36,7 @@ def error_response(status: int, message: str) -> web.Response:
 
 
 def register_routes(routes: web.RouteTableDef) -> None:
-    """Attach the Clear route to *routes* (FORMAT.md §6.6)."""
+    """Attach the Clear and Add routes to *routes* (FORMAT.md §6.6)."""
 
     @routes.post("/eps_image_grid/clear")
     async def post_clear(request: web.Request) -> web.Response:
@@ -52,9 +54,35 @@ def register_routes(routes: web.RouteTableDef) -> None:
         cleared = store.clear(grid_uuid)
         return web.json_response({"ok": True, "uuid": grid_uuid, "cleared": cleared})
 
+    @routes.post("/eps_image_grid/add")
+    async def post_add(request: web.Request) -> web.Response:
+        try:
+            body = await request.json()
+        except Exception:  # broad: malformed body is a client error
+            return error_response(400, "body must be JSON")
+        if not isinstance(body, dict):
+            return error_response(400, "body must be a JSON object")
+
+        grid_uuid = body.get("uuid")
+        if not store.is_valid_grid_uuid(grid_uuid):
+            return error_response(400, f"invalid grid uuid {grid_uuid!r} -- FORMAT.md §6.6")
+
+        filename = body.get("filename")
+        if not isinstance(filename, str) or not filename:
+            return error_response(400, "missing/invalid 'filename'")
+        subfolder = body.get("subfolder", "")
+        if not isinstance(subfolder, str):
+            return error_response(400, "'subfolder' must be a string")
+        source_type = body.get("type", "input")
+        if not isinstance(source_type, str) or not source_type:
+            return error_response(400, "'type' must be a non-empty string")
+
+        images = store.append_uploaded_image(grid_uuid, filename, subfolder, source_type)
+        return web.json_response({"ok": True, "uuid": grid_uuid, "images": images})
+
 
 def build_routes() -> web.RouteTableDef:
-    """A standalone table with just this module's route — used by tests
+    """A standalone table with just this module's routes — used by tests
     (wrapped in a plain ``aiohttp.web.Application``, no ComfyUI) and,
     indirectly, by :func:`register`."""
     routes = web.RouteTableDef()

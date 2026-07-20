@@ -216,8 +216,10 @@ times to gather images, then send the whole set through a workflow at once.
   folder, keyed to that node), so it's still there after you close and reopen
   ComfyUI. A **Clear** button wipes it; deleting the node abandons it. No cap.
 - Each node keeps its own independent buffer, even after copy/paste.
-- *(Copy/paste of grid images to the clipboard / clipspace, and Ctrl+V to add,
-  land in the next update.)*
+- **Copy/paste:** right-click a collected image → Copy Image (to the OS
+  clipboard, for Photoshop/etc.) or Copy (Clipspace) (into the mask editor or
+  another node); and with the node selected, **Ctrl+V** an image to add it to
+  the buffer.
 
 ## Install
 

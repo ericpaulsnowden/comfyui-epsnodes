@@ -3,7 +3,7 @@
  * `attach(node)`/`loadedGraphNode(node)` hooks `web/eps_image.js` calls;
  * each no-ops for every node type other than `EPSImageGrid`.
  *
- * M1 only: identity/dedup for the hidden `grid_uuid` widget, and a `Clear`
+ * M1: identity/dedup for the hidden `grid_uuid` widget, and a `Clear`
  * button. The thumbnail GRID ITSELF IS FREE from ComfyUI core — the backend
  * (`nodes_image_grid.py`) returns `{"ui": {"images": [...whole buffer...]}}`
  * on every Run, which core turns into `node.imgs` (its normal, unconditional
@@ -12,10 +12,86 @@
  * current buffer rather than just what THIS run added, that ordinary
  * replace-per-run behavior is what makes the grid look like it's growing
  * across separate Runs — no custom widget, no code here at all for the grid
- * proper. Copy/paste-to-clipspace (M2, roadmap-eps-image-grid.md) is
- * deliberately NOT built here; the module shape below (separate,
- * independently-callable helpers for identity vs. the Clear affordance) is
- * meant to leave room for it without a rewrite.
+ * proper.
+ *
+ * M2 (this round): copy OUT (OS clipboard + ComfyUI clipspace) and paste IN
+ * (Ctrl+V adds to the buffer).
+ *
+ * ---- Copy OUT is entirely free from core — verified against the actual
+ * installed frontend source, not assumed ----
+ *
+ * `docs/FORMAT.md` §6.6 describes wiring "Copy image (clipboard)" / "Copy
+ * (Clipspace)" as right-click menu items. Reading the exact ComfyUI
+ * checkout this pack is built against (`ComfyUI_frontend/src/services/
+ * litegraphService.ts` `addNodeContextMenuHandler`, which every node class
+ * gets via the SAME generic registration path custom node defs go through
+ * -- not a core-only allowlist) shows `LGraphNode.prototype.
+ * getExtraMenuOptions` already adds, for ANY node:
+ *   - "Copy Image" (OS clipboard: canvas -> `toBlob('image/png')` ->
+ *     `navigator.clipboard.write([ClipboardItem])`, feature-detected on
+ *     `window.ClipboardItem` and gated on `this.imgs` + a selected/hovered
+ *     image) -- the EXACT mechanism FORMAT.md §6.6 names.
+ *   - "Copy (Clipspace)" (`ComfyApp.copyToClipspace`, `scripts/app.ts`) --
+ *     UNCONDITIONAL, not even gated on `this.imgs`.
+ *   - "Paste (Clipspace)" (`ComfyApp.pasteFromClipspace`) -- shown whenever
+ *     `ComfyApp.clipspace != null` (something has been copied by ANY node).
+ *   - "Open Image" / "Save Image" (same `this.imgs` gate as Copy Image).
+ * The Vue "More Options" popover surfaces equivalent items independently
+ * (`composables/graph/useImageMenuOptions.ts` `getImageMenuOptions`, wired
+ * from `useMoreOptionsMenu.ts` for any `hasImageNode` selection). Both
+ * surfaces key off `node.imgs` (which core already populates for us every
+ * Run, M1) -- there is nothing to build here; the file's own job is to
+ * click-and-confirm these actually render for `EPSImageGrid`, which
+ * `imageIndex` (set by clicking a cell in the free grid pager) already
+ * targets at the specific cell the user selected.
+ *
+ * ---- Paste IN needs real code — `node.pasteFiles` ----
+ *
+ * There's no free equivalent for "add an image to this specific node's
+ * durable buffer" (core's paste only ever replaces a node's in-memory
+ * `imgs`/widget value, per `ComfyApp.pasteFromClipspace` above -- it never
+ * calls any of our routes). FORMAT.md §6.6: "Ctrl+V on the selected node
+ * uploads the pasted image (`POST /upload/image`) and appends it (`POST
+ * /eps_image_grid/add`)". The real Ctrl+V dispatch (`composables/
+ * usePaste.ts`'s global `document` "paste" listener) only routes pasted
+ * image data to the SELECTED node when `isImageNode(node)` is true
+ * (`utils/litegraphUtil.ts`: `previewMediaType === 'image' || (!video &&
+ * imgs.length)`) -- otherwise it creates a brand-new `LoadImage` node
+ * instead. Setting `node.previewMediaType = 'image'` in `attach()` (a
+ * documented, typed node property other core code already sets this same
+ * way for its own image-preview nodes, `composables/node/useNodeImage.ts`)
+ * makes that true EVEN ON A STILL-EMPTY BUFFER (where `imgs.length` alone
+ * would be falsy) -- the exact case that matters for "paste something
+ * before you've ever Collected anything". Once routed, `usePaste.ts` calls
+ * `node.pasteFiles?.(files)` (via `pasteItemsOnNode`); the SAME free
+ * "Paste Image" menu item mentioned above (`useImageMenuOptions.ts`'s
+ * `canPasteImage`, gated on `typeof node.pasteFiles === 'function'`) reads
+ * the OS clipboard directly and calls the exact same function -- so
+ * installing `pasteFiles` here (`installPasteFiles()` below) wires BOTH
+ * the keyboard and the explicit menu path at once.
+ *
+ * `pasteFiles`/`useNodePaste`/`useNodeImageUpload` are themselves Vue
+ * composables living in the app's own bundle (no stable import path for a
+ * plain extension script), so the upload (`POST /upload/image`, core's
+ * route) and the `/eps_image_grid/add` call are reimplemented directly
+ * here rather than imported -- same shapes, verified against
+ * `composables/node/useNodeImageUpload.ts`'s `uploadFile` for the request,
+ * and `server.py`'s `image_upload` for the `{name,subfolder,type}`
+ * response this hands straight to `/add`.
+ *
+ * ---- 0.28.1 / clipboard-API sensitivity ----
+ *
+ * Copy OUT (above) is core's own code, already feature-detected there
+ * (`typeof window.ClipboardItem === 'undefined'` short-circuits `Copy
+ * Image` to a no-op rather than throwing). Paste IN here uses the native
+ * DOM `"paste"` event's `clipboardData` -- NOT `navigator.clipboard.read()`
+ * -- so it needs no permission prompt and works the same across browsers
+ * that support the clipboard event at all; the "Paste Image" MENU item
+ * (free, core's) is the one path that does call `navigator.clipboard.read()`
+ * and could differ across browsers/frontend versions. All of the above was
+ * verified against this rig's installed `comfyui-frontend-package` 1.45.21
+ * source, not the owner's actual ComfyUI 0.28.1 -- re-verify live if
+ * anything here doesn't match.
  *
  * ---- Per-node identity + dedup (FORMAT.md §6.6) ----
  *
@@ -307,6 +383,149 @@ function addClearButton(node) {
 }
 
 // ---------------------------------------------------------------------------
+// M2: paste-to-add (Ctrl+V and the free "Paste Image" menu item both land
+// on `node.pasteFiles`, installed below -- see file header for the hook
+// citations).
+// ---------------------------------------------------------------------------
+
+const UPLOAD_ROUTE = '/upload/image'
+const ADD_ROUTE = '/eps_image_grid/add'
+
+/**
+ * A core-style `/view` URL for one buffer ref (`{filename, subfolder,
+ * type}`) -- same query-param shape already observed for every OTHER
+ * thumbnail this node shows (core's own `ui.images` handling), so a
+ * just-added image renders identically to one that arrived via a normal
+ * Run. `rand=` matches core's own cache-busting convention.
+ */
+function imageUrlForRef(ref) {
+  const params = new URLSearchParams({
+    filename: ref.filename,
+    subfolder: ref.subfolder || '',
+    type: ref.type || 'output',
+    rand: String(Math.random())
+  })
+  return api.apiURL(`/view?${params.toString()}`)
+}
+
+/**
+ * Replaces the node's displayed thumbnails with *refs* (the whole buffer,
+ * same shape the backend's `ui.images` always sends) and focuses the LAST
+ * one, so right after an add the user sees exactly the image they just
+ * pasted (FORMAT.md §6.6 "refresh the node so the new thumbnail shows").
+ * Shared with the Clear path's empty case.
+ */
+function setNodeImagesFromRefs(node, refs) {
+  if (!refs || !refs.length) {
+    node.imgs = []
+    node.images = undefined
+    return
+  }
+  const imgs = refs.map((ref) => {
+    const img = new Image()
+    img.src = imageUrlForRef(ref)
+    return img
+  })
+  node.imgs = imgs
+  node.images = refs
+  node.imageIndex = imgs.length - 1
+}
+
+/**
+ * `POST /upload/image` (core's own route) -- returns `{name, subfolder,
+ * type}` on success, throws otherwise. Reimplemented directly (see file
+ * header) rather than importing `useNodeImageUpload`'s `uploadFile`.
+ */
+async function uploadImageFile(file) {
+  const formData = new FormData()
+  formData.append('image', file)
+  const response = await api.fetchApi(UPLOAD_ROUTE, { method: 'POST', body: formData })
+  if (!response.ok) {
+    throw new Error(`upload failed (HTTP ${response.status})`)
+  }
+  return response.json()
+}
+
+/**
+ * `POST /eps_image_grid/add` -- appends the just-uploaded file (its
+ * `{name,subfolder,type}` from `uploadImageFile`) to *node*'s buffer.
+ * Returns `{ok, uuid, images}` on success, throws otherwise.
+ */
+async function addUploadToBuffer(node, uploaded) {
+  const uuid = currentUuid(node)
+  if (!GRID_UUID_RE.test(uuid)) {
+    throw new Error('node has no valid grid_uuid yet')
+  }
+  const response = await api.fetchApi(ADD_ROUTE, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      uuid,
+      filename: uploaded.name,
+      subfolder: uploaded.subfolder || '',
+      type: uploaded.type || 'input'
+    })
+  })
+  let data = null
+  try {
+    data = await response.json()
+  } catch {
+    // Non-JSON body -- fall through to the status check below.
+  }
+  if (!response.ok) {
+    const message = data && data.error ? data.error : `HTTP ${response.status}`
+    throw new Error(message)
+  }
+  return data
+}
+
+/**
+ * Uploads and appends every image `File` in *files* to *node*'s buffer,
+ * one at a time (so a batch paste/drop with several images adds all of
+ * them, in order -- sequential on purpose: our own atomic manifest writes
+ * are not safe against truly concurrent appends from the same process).
+ * Refreshes the displayed grid after each successful add. Fails soft per
+ * file -- one bad file logs a warning and does not stop the rest; a
+ * *files* list with nothing image-shaped is a silent no-op (`false`).
+ */
+async function addFilesToBuffer(node, files) {
+  const imageFiles = Array.from(files || []).filter(
+    (file) => file && typeof file.type === 'string' && file.type.startsWith('image/')
+  )
+  if (!imageFiles.length) return false
+
+  for (const file of imageFiles) {
+    try {
+      const uploaded = await uploadImageFile(file)
+      const result = await addUploadToBuffer(node, uploaded)
+      if (result && Array.isArray(result.images)) {
+        setNodeImagesFromRefs(node, result.images)
+      }
+    } catch (error) {
+      console.warn(PREFIX, 'paste-to-add failed for one file', error)
+    }
+  }
+  app.graph?.setDirtyCanvas(true, true)
+  return true
+}
+
+/**
+ * Installs `node.pasteFiles` (FORMAT.md §6.6). This is the exact hook
+ * core's own paste pipeline calls -- both a real Ctrl+V while this node is
+ * selected (via `usePaste.ts`, gated on `isImageNode(node)`; see
+ * `previewMediaType` in `attach()` for why that's true even on an empty
+ * buffer) and the free "Paste Image" menu item (`canPasteImage`, gated on
+ * `typeof node.pasteFiles === 'function'`) land here. Never throws --
+ * `addFilesToBuffer` already fails soft per file.
+ */
+function installPasteFiles(node) {
+  node.pasteFiles = (files) => {
+    void addFilesToBuffer(node, files)
+    return true
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Public entry points (called from web/eps_image.js)
 // ---------------------------------------------------------------------------
 
@@ -325,6 +544,13 @@ export function attach(node) {
 
     hideGridUuidWidget(node)
     addClearButton(node)
+    installPasteFiles(node)
+    // Makes `isImageNode(node)` (litegraphUtil.ts) true even before
+    // anything has ever been collected, so a real Ctrl+V onto a
+    // brand-new, still-empty node routes to `pasteFiles` above instead of
+    // core creating a fresh LoadImage node (see file header's "Paste IN"
+    // section for the exact check this satisfies).
+    node.previewMediaType = 'image'
 
     // Deferred one tick -- the paste-collision path. See file header
     // point 1 for exactly why this can't run synchronously here.
