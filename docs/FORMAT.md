@@ -676,6 +676,12 @@ add; single batch-aware IMAGE input; disk-backed, survive-restart, NO cap.
   — N buffered images make the workflow run N times, each with its paired
   width/height. Each emitted image is a `[1,H,W,C]` batch-of-one in a plain
   Python list (NEVER stacked — buffered images may differ in size).
+  **Empty buffer emits `[ExecutionBlocker(None)]` for each output, NOT bare
+  `[]`:** a bare empty list `IndexError`s in execution.py's `slice_dict`
+  (`v[-1]`) the moment it feeds a downstream node that also has any ordinary
+  widget input (nearly every node), crashing the run; the blocker makes core
+  silently skip the downstream branch (the same fix `EPSSwitcher` uses for
+  all-off). Verified live 2026-07-20.
 - **Execution model:** `OUTPUT_NODE = True` (so it runs even with nothing
   wired downstream — collect phase) + `IS_CHANGED` returns an
   always-different token (`float("nan")`) so caching never skips it → exactly

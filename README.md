@@ -24,12 +24,15 @@ Current capabilities, no dependencies:
   on/off and fans the enabled ones out (N enabled → the workflow runs N
   times); **EPS Resolution** is an image-first, all-in-one resize + size
   node (target size, four resize modes, and the original image + both sizes
-  passed through) so one node replaces a resize + a reroute + a get-size.
+  passed through) so one node replaces a resize + a reroute + a get-size;
+  **EPS Image Grid** collects images across separate Runs into a navigable
+  grid and fans the whole set out (gather 10, then run them through a
+  workflow at once).
 
-> **Status: pre-release. Five capabilities ship today:** the **Prompt
+> **Status: pre-release. Six capabilities ship today:** the **Prompt
 > Notebook**, **Apply LoRA Set**, the **Lora Loader State Controller**,
-> **EPS Switcher**, and **EPS Resolution** (each described below).
-> Contracts live in [docs/FORMAT.md](docs/FORMAT.md).
+> **EPS Switcher**, **EPS Resolution**, and **EPS Image Grid** (each
+> described below). Contracts live in [docs/FORMAT.md](docs/FORMAT.md).
 
 ## Prompt Notebook (shipped)
 
@@ -192,6 +195,29 @@ dimensions. It replaces a resize node + a reroute + a get-image-size node.
   them (it won't hide one that's still wired).
 - Deliberately thin — pipe `width`/`height` into a heavier resize node for
   anything fancier.
+
+## EPS Image Grid (shipped)
+
+`EPSNodes → EPS Image Grid`: a node that **collects images across separate
+Runs** into a buffer and then fans them out — wire a loader in, run it a few
+times to gather images, then send the whole set through a workflow at once.
+
+- **Collect / Emit:** in **Collect** mode each Run adds the current input
+  image to the buffer (it *keeps* them — unlike a Preview node that replaces);
+  switch to **Emit** and a Run just sends the buffer out without adding.
+- **Navigable grid:** the collected images show as a clickable thumbnail grid
+  right on the node (ComfyUI's own image viewer — click to enlarge, arrow
+  through them).
+- **Fan-out outputs:** `image`, `width`, `height` — wire them downstream and
+  the workflow runs once per collected image (10 images → 10 runs, e.g. to
+  put a logo on 10 models' shirts). All-empty runs are skipped cleanly, never
+  a crash.
+- **Survives restarts:** the buffer lives on disk (under ComfyUI's output
+  folder, keyed to that node), so it's still there after you close and reopen
+  ComfyUI. A **Clear** button wipes it; deleting the node abandons it. No cap.
+- Each node keeps its own independent buffer, even after copy/paste.
+- *(Copy/paste of grid images to the clipboard / clipspace, and Ctrl+V to add,
+  land in the next update.)*
 
 ## Install
 

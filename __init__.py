@@ -86,6 +86,7 @@ _NODE_SPECS = [
     ("lora_library.nodes_sets", "LoraLibraryApplySet", "Apply LoRA Set"),
     ("eps_image.nodes_switcher", "EPSSwitcher", "EPS Switcher"),
     ("eps_image.nodes_resolution", "EPSResolution", "EPS Resolution"),
+    ("eps_image.nodes_image_grid", "EPSImageGrid", "EPS Image Grid"),
 ]
 
 NODE_CLASS_MAPPINGS = {}
@@ -101,6 +102,21 @@ for _module_path, _class_id, _display in _NODE_SPECS:
         NODE_DISPLAY_NAME_MAPPINGS[_class_id] = _display
     except Exception:  # skip the feature, keep the pack alive
         logger.exception("lora_library: feature module %s failed to load", _module_path)
+
+# EPSImageGrid's own tiny route module (FORMAT.md §6.6: just `POST
+# /eps_image_grid/clear`) — needs no LibraryContext (its store resolves
+# ComfyUI's output dir straight from `folder_paths`, lazily), so it isn't
+# folded into `_routes.register(_context)` above. Defensive, like the node
+# loop above: a routing failure here must not take the rest of the pack
+# down with it.
+try:
+    _image_grid_routes_path = "eps_image.routes_image_grid"
+    if _TOP_PREFIX:
+        _image_grid_routes_path = f"{_TOP_PREFIX}.{_image_grid_routes_path}"
+    _image_grid_routes = importlib.import_module(_image_grid_routes_path)
+    _image_grid_routes.register()
+except Exception:
+    logger.exception("lora_library: eps_image.routes_image_grid failed to register")
 
 WEB_DIRECTORY = "./web"
 
