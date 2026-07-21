@@ -243,6 +243,125 @@
  *    convention as every other duplicated constant here (e.g.
  *    `APPLY_SET_WIDGET_NAME`).
  *
+ * 2026-07-21 (TWO-PANE layout, owner ask, FORMAT.md §6.3 "TWO-PANE layout"
+ * bullet — "just the two-pane layout," explicitly no file/Browse panel this
+ * round): the `set` state COMBO (built + owned end-to-end by the
+ * 2026-07-19c hardening above) is replaced by a Notebook-style two-pane DOM
+ * widget (`_buildStatePane()`) — LEFT: a scrolling `<div>` list of every
+ * saved state, one row per `_setsCache` entry, the current selection
+ * highlighted; RIGHT: the four action buttons stacked vertically. This
+ * mirrors `web/lora_library/notebook.js`'s own two-pane editor (FORMAT.md
+ * §7.2) function-for-function, not just in spirit: `_renderStateList()` is
+ * this file's `renderList()`/`buildEntryRow()` (list rebuild, per-row
+ * click+keydown, an `llsc-row-active` highlight class in place of
+ * Notebook's `.llnb-entry-active`); `_buildStatePane()`'s `addDOMWidget(...)`
+ * call is Notebook's `attachDomWidget()` (identical `hideOnZoom`/
+ * `serialize:false`/`serializeValue: () => undefined`/`getMinHeight`-only
+ * shape, so the panel fills the node and never collapses to a sliver,
+ * exactly per Notebook's own verified citation for that mechanism — not
+ * re-derived here, just reused); `el()` below is a hand-copied twin of
+ * Notebook's own tiny DOM-builder helper (this file had zero DOM-
+ * construction code before today — nothing to import, so it's copied, same
+ * "duplicated by hand, no cross-module coupling" convention as every other
+ * shared-shape constant/helper in this file, e.g. `APPLY_SET_WIDGET_NAME`
+ * above); `injectControllerStyles()`/`STATE_PANE_CSS_TEXT` is Notebook's
+ * `injectStyles()`/`CSS_TEXT` twin, under a DISTINCT `<style>` tag id and an
+ * `llsc-` class prefix (vs. Notebook's `llnb-`) so the two style sheets
+ * never collide in the shared `document.head`.
+ *
+ * Clicking a list row IS the apply, unconditionally, even on the
+ * already-selected row (FORMAT.md §6.3 — the exact semantics the combo had
+ * per the 2026-07-19/2026-07-19c strength-persistence fixes above) —
+ * because the row's click handler calls `_onSetPicked(entry.label)`
+ * DIRECTLY, the very same method the old `LiteGraph.ContextMenu` callback
+ * invoked, completely UNMODIFIED by this change (see its doc comment, only
+ * re-worded to name the new caller — the body is byte-identical). There is
+ * still no same-value branch anywhere in that path, so a re-click re-applies
+ * exactly like a click on a different row. This is a STRENGTHENING of the
+ * 2026-07-19c hardening's own goal, not just a UI change:
+ * `_hookSetWidgetMenu()`/`_openSetMenu()` are REMOVED OUTRIGHT this round
+ * (not merely superseded — there is no combo left to hook a click onto),
+ * because a plain DOM element's `click`/`keydown` listener touches ZERO
+ * litegraph widget internals — no `ComboWidget`, no `BaseWidget.onClick`, no
+ * `LiteGraph.ContextMenu` — so the entire CLASS of "a different frontend
+ * build lays out widget internals differently" risk that motivated
+ * 2026-07-19c's `onClick`-shadowing design in the first place (see that
+ * section's own citation trail below — still an accurate record of why THAT
+ * design was necessary at the time, not rewritten) is now structurally
+ * inapplicable to state selection: there is nothing version-sensitive left
+ * to bind to. `_setComboValues()` is removed as dead code (no combo left to
+ * feed values to); `_renderStateList()` reads `_setsCache` directly instead,
+ * which is what every label string was always sourced from underneath the
+ * combo anyway.
+ *
+ * Serialization (FORMAT.md §6.3: "keep the internal `set` STRING widget,
+ * hidden, driven by the list selection — the Notebook's `entry`-widget
+ * trick"): `_w.set` changes TYPE from `'combo'` to `'text'` and gains
+ * `.hidden = true` (the same first-class litegraph layout primitive this
+ * file already cites for `status` below, and Notebook's own header cites
+ * for its `file` widget — a real hide, not a value-blank). The widget's
+ * `name` stays the frozen literal `'set'` — unchanged, so every existing
+ * "kept in sync by hand" consumer of that name elsewhere, and the
+ * save/restore positional-index contract documented below, are unaffected
+ * by the type change. `_w.set` stays in the SERIALIZED group, declared
+ * before `status` (which stays `serialize:false`) — the save/restore
+ * ordering invariant documented below is unaffected: the split is still
+ * target+set+name (serialized) then status+the-DOM-widget (not), in that
+ * order. Restore still goes through `configure()`'s plain
+ * `widget.value = ...` assignment (LGraphNode.ts, cited below) for EVERY
+ * widget type, not only `ComboWidget` — so the "combo callbacks do NOT fire
+ * during workflow restore" guarantee documented below is, if anything, on
+ * firmer ground for a plain text widget than it was for the combo (one
+ * fewer subclass layer between `BaseWidget`'s value setter and this
+ * widget). VERIFY(live) regardless: re-confirm empirically (reload a saved
+ * workflow, watch it NOT re-apply) rather than resting on that reasoning
+ * alone — this file's own hard-won lesson from 2026-07-19c is that
+ * litegraph internals are exactly the kind of thing to verify live, never
+ * assume.
+ *
+ * The four buttons move from canvas `addWidget('button', ...)` widgets into
+ * real `<button>` elements in the DOM widget's right pane
+ * (`_createActionButton()`, replacing the removed `_addButton()`); every
+ * click is now wrapped in `_guarded()` (a strengthening — previously only
+ * Delete's click was explicitly re-guarded at the call site).
+ * `_onCaptureClick()`/`_onUpdateClick()`/`_onDeleteClick()`/`_onPushClick()`
+ * and everything they call (`_doCapture`/`_doUpdate`/`_doApply`/`_doDelete`/
+ * `_doPush`, composite capture/apply, selective Push, the read-back toasts)
+ * are UNTOUCHED — this change only alters how a click REACHES those
+ * methods, never what they do once reached. The two-click delete-confirm
+ * (2026-07-18c) keeps its exact constants (`DELETE_CONFIRM_MS`,
+ * `DELETE_ARMED_BG_COLOR`/`_TEXT_COLOR`) and its exact arm/disarm timing and
+ * slug-anchoring (`_selectedSetEntry()` is still called at arm time,
+ * unchanged) — only the PAINT mechanism changes: from
+ * `Object.defineProperty`-shadowing litegraph's getter-only
+ * `background_color`/`text_color` accessors (moot for a real DOM node,
+ * which has plain, freely-settable `style` properties — see
+ * `_armDeleteButtonColor()`) to `button.style.background`/`.color`, and
+ * from `button.name = ...` (a canvas WIDGET's displayed text) to
+ * `button.textContent = ...` (a DOM button's displayed text — `.name` on a
+ * real `<button>` element is the unrelated HTML form-control name
+ * attribute, invisible on screen; using it here would silently fail to show
+ * anything, which is why this particular rename is not optional cosmetics).
+ * `_actionButtons`/`_probeAndUpdateStatus()`'s disable loop is untouched and
+ * works verbatim: a real `<button>`'s native `.disabled` is, if anything, a
+ * more correct fit than the canvas widget's `.disabled` ever was (recall
+ * the file header's own VERIFY(live) note below about `.disabled` blanking
+ * a TEXT widget's value outright — moot for a button, which has no value to
+ * blank either way).
+ *
+ * `target`/`name`/`status` (FORMAT.md §6.3: "[keep] the `name` text input
+ * ... and the `target` control (place it sensibly — e.g. a small row above
+ * the panes)") are untouched canvas widgets, declared before the DOM widget
+ * in `_buildWidgets()` exactly as before — litegraph stacks widgets
+ * top-to-bottom in declaration order, so they land above the two-pane panel
+ * for free, with no new layout code needed. Composite capture/apply
+ * (§4.1), selective Push (§6.2), `Show status`, and the v0.14.1
+ * serialize-based capture are all in the "pure graph helpers" section far
+ * below this class and in the `_do*`/`applySetTo*` methods — none of them
+ * reference the `set` widget's TYPE or the removed menu functions at all,
+ * so none of them needed to change for this redesign to be, per the task's
+ * own framing, "a UI swap, not a behavior change."
+ *
  * This file binds to rgthree internals it does not own. Every binding is
  * cited below with the exact file + lines read (rgthree-comfy's COMPILED
  * `web/comfyui/power_lora_loader.js`, since that's what actually runs — not
@@ -326,11 +445,19 @@
  *    `widgets_values` by plain positional index, not by name — so nothing
  *    here needs `name === 'set'` for reload correctness, but our own
  *    lookups and any external workflow-scripting that greps a saved graph
- *    for a widget literally named `set` do. `_buildWidgets()` therefore sets
- *    `this._w.set.label = 'state'` right after creating the widget and
- *    leaves `name: 'set'` alone.
+ *    for a widget literally named `set` do. (2026-07-21: since the two-pane
+ *    redesign hides this widget outright — `.hidden = true`, nothing paints
+ *    it — `_buildWidgets()` no longer sets `.label` on it at all; `name:
+ *    'set'` alone still carries every reload/lookup guarantee this bullet
+ *    documents, unchanged.)
  *  - Per-widget custom colors (delete-button arm indicator, added for the
- *    2026-07-18c delete-bug fix, see `_armDeleteButtonColor()`):
+ *    2026-07-18c delete-bug fix, see `_armDeleteButtonColor()`; 2026-07-21:
+ *    that function no longer uses this technique — the delete button is now
+ *    a real DOM `<button>` with freely-settable `style` properties, so no
+ *    getter-shadowing is needed there anymore. This bullet remains an
+ *    accurate general LITEGRAPH BINDING for any canvas widget that still
+ *    needs it — `status` below does not need colors, so nothing else in
+ *    this file uses this technique post-redesign either):
  *    `background_color`/`text_color`/`outline_color` on `BaseWidget` are
  *    GETTER-ONLY accessors reading global theme constants (BaseWidget.ts:
  *    222-244, e.g. `get background_color() { return litegraph().WIDGET_BGCOLOR }`).
@@ -355,21 +482,26 @@
  *    only agree if every `serialize:false` widget sits AFTER every normally
  *    serialized widget — an interleaved layout would misread values on
  *    reload. This is why `target`/`set`/`name` are declared first and
- *    `status` + all 4 buttons (all `serialize:false`) are declared last.
- *    Do not reorder without re-checking this. Button count history: 4 → 3
- *    when the 2026-07-18 owner change removed the standalone Apply button
- *    (see `_onSetSelected`) → 4 again on 2026-07-19 with Push State added
- *    (see `_doPush`).
+ *    `status` + the two-pane DOM widget (both `serialize:false`) are
+ *    declared last. Do not reorder without re-checking this. History: 4
+ *    canvas buttons → 3 (2026-07-18 owner change removed the standalone
+ *    Apply button, see `_onSetSelected`) → 4 (2026-07-19, Push State added,
+ *    see `_doPush`) → 0 (2026-07-21: all 4 moved into the two-pane DOM
+ *    widget's right pane as real `<button>` elements, see the file header's
+ *    2026-07-21 section — they no longer participate in this ordering
+ *    invariant at all; only `status` and the DOM widget itself still do).
  *  - `ComboWidget` supports `options.values` as a function
  *    (ComboWidget.ts:59-64, `getValues()`) — but it's deprecated as of
  *    v0.14.5 and logs a console warning on every dropdown open
  *    (ComboWidget.ts:126-135: "Using a function for values is deprecated.").
  *    It is still fully functional (this is the same pattern the deprecation
  *    message itself cites from ComfyUI-KJNodes), so we use it for `target`
- *    (cheap, pure in-memory graph scan — safe to re-run on every call) and
- *    for `set` (backed by a manually-refreshed cache, never a network call
- *    from inside the values function itself). VERIFY(live): a future
- *    litegraph release could remove this path outright.
+ *    (cheap, pure in-memory graph scan — safe to re-run on every call).
+ *    VERIFY(live): a future litegraph release could remove this path
+ *    outright. (2026-07-21: `set` no longer uses this at all — it is a
+ *    hidden plain `'text'` widget now, not a combo; the two-pane DOM
+ *    widget's list reads `_setsCache` directly, with no `ComboWidget`/
+ *    `getValues()` involved for state selection anymore.)
  *  - `LiteGraph`/`LGraphNode` are ambient globals in real, currently-shipping
  *    custom-node JS (not importable via any stable path from a node pack's
  *    own web dir) — confirmed by rgthree's OWN shipped code using them
@@ -516,10 +648,13 @@ const DELETE_CONFIRM_MS = 4000
 /**
  * Delete-armed visual (2026-07-18c delete-bug fix): a distinct color on the
  * button itself, on top of the label swap above, so the two-step reads as
- * "armed" even on a canvas that's constantly redrawing (an active queue) —
- * see `_armDeleteButtonColor()` and the file header's per-widget-color
- * citation for why this needs `Object.defineProperty` rather than a plain
- * assignment.
+ * "armed" even during a constantly-redrawing active queue — see
+ * `_armDeleteButtonColor()`. Since the 2026-07-21 two-pane redesign the
+ * delete button is a real DOM `<button>` element, so applying this is a
+ * plain `button.style.*` assignment; before that it needed
+ * `Object.defineProperty` to shadow litegraph's getter-only canvas-widget
+ * color accessors (file header's per-widget-color citation has that
+ * history).
  */
 const DELETE_ARMED_BG_COLOR = '#8b2020'
 const DELETE_ARMED_TEXT_COLOR = '#ffffff'
@@ -1177,6 +1312,159 @@ function pushLoaderSlotForTag(node) {
   node.setDirtyCanvas(true, true)
 }
 
+// ---------------------------------------------------- two-pane state picker
+// FORMAT.md §6.3 TWO-PANE layout (owner ask 2026-07-21) / §7.2 pattern this
+// mirrors. See the file header's 2026-07-21 section for the full design
+// rationale; everything below is new DOM-construction code this file had
+// none of before today.
+// ---------------------------------------------------------------------------
+
+/** DOM widget name/type for `addDOMWidget` — Notebook's own `WIDGET_NAME`/`WIDGET_TYPE` twin (web/lora_library/notebook.js). */
+const STATE_PANE_WIDGET_NAME = 'states'
+const STATE_PANE_WIDGET_TYPE = 'lora_library_state_picker'
+
+/** FORMAT.md §7.2 "the widget fills available height" — Notebook's `MIN_WIDGET_HEIGHT` twin, sized for 4 stacked buttons plus a couple of visible list rows. */
+const MIN_STATE_PANE_HEIGHT = 140
+
+const STATE_PANE_STYLE_TAG_ID = 'lora-library-controller-styles'
+let controllerStylesInjected = false
+
+/**
+ * Notebook's `CSS_TEXT` twin (web/lora_library/notebook.js) — same
+ * ComfyUI theme variables with literal fallbacks, under an `llsc-` prefix
+ * (Notebook uses `llnb-`) so the two injected `<style>` tags never collide
+ * in the shared `document.head`.
+ */
+const STATE_PANE_CSS_TEXT = `
+.llsc-root {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  height: 100%;
+  box-sizing: border-box;
+  overflow: hidden;
+  background: var(--comfy-input-bg, #1e1e1e);
+  border: 1px solid var(--border-color, #444);
+  border-radius: 4px;
+  font-family: inherit;
+  font-size: 11px;
+  color: var(--input-text, #ccc);
+}
+.llsc-panes {
+  display: flex;
+  flex-direction: row;
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+.llsc-pane-left {
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  border-right: 1px solid var(--border-color, #444);
+}
+.llsc-pane-right {
+  flex: 0 0 104px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 4px;
+  overflow-y: auto;
+}
+.llsc-list {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding: 3px;
+}
+.llsc-row {
+  padding: 4px 7px;
+  margin: 1px 0;
+  border-radius: 3px;
+  border-left: 3px solid transparent;
+  cursor: pointer;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  outline: none;
+  user-select: none;
+}
+.llsc-row:hover { background: var(--content-hover-bg, #2a2a2a); }
+.llsc-row:focus-visible { box-shadow: inset 0 0 0 1px var(--border-color, #444); }
+.llsc-row-active,
+.llsc-row-active:hover {
+  background: rgba(66, 133, 244, 0.28);
+  border-left-color: rgba(66, 133, 244, 1);
+  font-weight: 600;
+}
+.llsc-empty {
+  padding: 6px 7px;
+  color: var(--descrip-text, #999);
+  font-style: italic;
+}
+.llsc-btn {
+  flex: 0 0 auto;
+  box-sizing: border-box;
+  width: 100%;
+  background: var(--comfy-menu-bg, #262626);
+  border: 1px solid var(--border-color, #444);
+  color: var(--input-text, #ccc);
+  border-radius: 4px;
+  padding: 6px 4px;
+  font-size: 11px;
+  font-family: inherit;
+  cursor: pointer;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.llsc-btn:hover:not(:disabled) { background: var(--content-hover-bg, #2a2a2a); }
+.llsc-btn:disabled { opacity: 0.45; cursor: default; }
+.llsc-btn-danger { border-color: var(--error-text, #ff4444); color: var(--error-text, #ff4444); }
+`
+
+function injectControllerStyles() {
+  if (controllerStylesInjected) return
+  controllerStylesInjected = true
+  if (document.getElementById(STATE_PANE_STYLE_TAG_ID)) return
+  const style = document.createElement('style')
+  style.id = STATE_PANE_STYLE_TAG_ID
+  style.textContent = STATE_PANE_CSS_TEXT
+  document.head.appendChild(style)
+}
+
+/**
+ * Tiny DOM builder, hand-copied from `web/lora_library/notebook.js`'s own
+ * `el()` — this file had zero DOM-construction code before the 2026-07-21
+ * two-pane redesign, so there was nothing to import; same "duplicated by
+ * hand, no cross-module coupling" convention as every other shared-shape
+ * constant/helper in this file (e.g. `APPLY_SET_WIDGET_NAME` above).
+ * @param {string} tag
+ * @param {{className?: string, text?: string, attrs?: Record<string,string>}} [options]
+ * @param {(Node|string)[]} [children]
+ * @returns {HTMLElement}
+ */
+function el(tag, options = {}, children = []) {
+  const node = document.createElement(tag)
+  if (options.className) node.className = options.className
+  if (options.text !== undefined) node.textContent = options.text
+  if (options.attrs) {
+    for (const [key, value] of Object.entries(options.attrs)) {
+      node.setAttribute(key, value)
+    }
+  }
+  for (const child of children) {
+    if (child == null) continue
+    node.append(child instanceof Node ? child : document.createTextNode(String(child)))
+  }
+  return node
+}
+
 // ------------------------------------------------------------ node registration
 
 /**
@@ -1205,11 +1493,20 @@ export function registerControllerNode() {
         // isVirtualNode nodes wholesale before building the prompt) — this
         // node can never break queueing by construction, not just by care.
         this.isVirtualNode = true
-        // target/set/name persist in the workflow; buttons+status opt out
-        // individually via widget.serialize = false (see _addButton below).
+        // target/set/name persist in the workflow; status opts out via
+        // widget.serialize = false (see _buildWidgets below) and the
+        // two-pane DOM widget opts out the same way (see _buildStatePane) —
+        // the 4 action buttons used to be a 3rd opt-out group here too, but
+        // 2026-07-21 moved them into the DOM widget's right pane, where
+        // they're plain DOM elements with no `serialize` flag of their own.
         this.serialize_widgets = true
 
         this._w = {}
+        // FORMAT.md §6.3 TWO-PANE layout (2026-07-21) — the two-pane DOM
+        // widget's own element refs (`root`/`listEl`), filled in by
+        // `_buildStatePane()`. Kept separate from `_w` (which holds real
+        // litegraph widgets) since these are plain DOM nodes.
+        this._pane = null
         this._setsCache = []
         this._lastProbe = null
         this._lastStatusMessage = ''
@@ -1310,9 +1607,13 @@ export function registerControllerNode() {
 
       _buildWidgets() {
         // Order matters beyond layout: every serialize:false widget below
-        // (status + 4 buttons) MUST stay after every normally-serialized one
-        // (target/set/name) — see the litegraph save/restore note in the
-        // file header for why an interleaved order would corrupt reload.
+        // (status + the two-pane DOM widget) MUST stay after every
+        // normally-serialized one (target/set/name) — see the litegraph
+        // save/restore note in the file header for why an interleaved order
+        // would corrupt reload. 2026-07-21: the 4 action buttons moved OFF
+        // canvas into the DOM widget's right pane (`_buildStatePane()`), so
+        // this invariant now covers one fewer *kind* of widget, not a
+        // different rule.
         this._w.target = this.addWidget(
           'combo',
           'target',
@@ -1321,26 +1622,20 @@ export function registerControllerNode() {
           { values: () => this._targetComboValues() }
         )
 
-        // Choosing a set IS the apply (FORMAT.md §6.3, owner decision
-        // 2026-07-18: the separate Apply button "was very confusing and I
-        // thought it was broken") — there is no Apply button anymore.
-        // 2026-07-19c: the combo's own `callback` option below is
-        // deliberately a no-op — `_hookSetWidgetMenu()` replaces the click
-        // path entirely (file header 2026-07-19c section), so this callback
-        // is unreachable in normal operation. It's still passed so
-        // `addWidget('combo', ...)` doesn't console.warn about a
-        // callback-less combo.
-        this._w.set = this.addWidget('combo', 'set', '', () => {}, { values: () => this._setComboValues() })
-        // 2026-07-18c rename: display-only. `name` stays 'set' (serialize +
-        // our own scanLoraRows-style lookups key off it); see file header's
-        // `label` vs `name` citation for the BaseWidget mechanics this relies
-        // on. VERIFY(live).
-        this._w.set.label = 'state'
-        // 2026-07-19c hardening: the controller owns this widget's click
-        // entirely (see file header + _hookSetWidgetMenu/_openSetMenu below)
-        // instead of shadowing setValue — see _onSetPicked() for why this
-        // makes a same-value re-pick a non-issue by construction.
-        this._hookSetWidgetMenu(this._w.set)
+        // FORMAT.md §6.3 TWO-PANE layout (owner ask 2026-07-21): the `set`
+        // COMBO and its on-canvas dropdown are gone — state selection is now
+        // the two-pane DOM widget below (`_buildStatePane()`/
+        // `_renderStateList()`). `_w.set` survives as a HIDDEN plain text
+        // widget purely so the selection still serializes (Notebook's
+        // `entry`-widget trick, FORMAT.md §7.2) — `name: 'set'` stays the
+        // frozen literal (file header: every "kept in sync by hand" consumer
+        // of that name, and the save/restore positional-index contract, are
+        // unaffected by the type change from 'combo' to 'text'). The
+        // callback is a deliberate no-op: the widget is hidden, so no canvas
+        // click can ever reach it, and every programmatic write goes through
+        // `_setSetValueSilently()`, which sets `.value` directly.
+        this._w.set = this.addWidget('text', 'set', '', () => {}, {})
+        this._w.set.hidden = true
 
         this._w.name = this.addWidget('text', 'name', '', () => {}, {})
 
@@ -1364,32 +1659,140 @@ export function registerControllerNode() {
         this._w.status.serialize = false
         this._w.status.hidden = !this.properties[PROP_SHOW_STATUS]
 
-        this._w.captureBtn = this._addButton(LABEL_CAPTURE, () => this._onCaptureClick())
-        this._w.updateBtn = this._addButton(LABEL_UPDATE, () => this._onUpdateClick())
-        // Guarded like the target/set combo callbacks above (unlike capture/
-        // update, this button's own synchronous body now does arm/disarm
-        // bookkeeping — Object.defineProperty et al — so it gets the same
-        // never-throw belt-and-suspenders. 2026-07-18c delete-bug fix.
-        this._w.deleteBtn = this._addButton(LABEL_DELETE, () => this._guarded('delete click', () => this._onDeleteClick()))
-        // FORMAT.md §6.3 Push State (2026-07-19): broadcasts to Apply LoRA
-        // Set nodes, entirely independent of the rgthree target/probe this
-        // pack drives above — deliberately NOT in `_actionButtons` below, so
-        // it stays clickable even with no Power Lora Loader in the graph (or
-        // rgthree not installed at all); see `_doPush()`.
-        this._w.pushBtn = this._addButton(LABEL_PUSH, () => this._onPushClick())
-        this._actionButtons = [this._w.captureBtn, this._w.updateBtn, this._w.deleteBtn]
+        // FORMAT.md §6.3 TWO-PANE layout (2026-07-21): left list + right
+        // stacked buttons, replacing the removed `set` combo's dropdown and
+        // the 4 canvas button widgets. See `_buildStatePane()` and the file
+        // header's 2026-07-21 section.
+        this._buildStatePane()
 
         this._refreshTargetCombo()
         this._probeAndUpdateStatus()
       }
 
-      _addButton(label, callback) {
-        const widget = this.addWidget('button', label, null, callback, {})
-        // widget.serialize (top-level) — NOT options.serialize — is what
-        // LGraphNode.ts:986 checks when writing widgets_values. See file
-        // header for the two-flags finding this depends on. VERIFY(live).
-        widget.serialize = false
-        return widget
+      /**
+       * FORMAT.md §6.3 (2026-07-21): builds one right-pane action button.
+       * Every click funnels through `_guarded()` — a strengthening over the
+       * pre-2026-07-21 canvas buttons, where only Delete's click was
+       * explicitly re-guarded at the call site — consistent with this
+       * file's "every handler funnels through here — never throw" rule
+       * (`_guarded()`'s own doc comment). Replaces the removed
+       * `_addButton()`, which built a canvas `'button'`-type widget instead.
+       */
+      _createActionButton(className, label, onClick) {
+        const button = el('button', { className, text: label })
+        button.addEventListener('click', () => this._guarded(`${label} click`, onClick))
+        return button
+      }
+
+      /**
+       * FORMAT.md §6.3 TWO-PANE layout (owner ask 2026-07-21) — see the file
+       * header's dated section for the full design rationale. Builds the
+       * left-list/right-buttons DOM widget that replaces the old `set`
+       * COMBO's on-canvas dropdown. Mirrors `web/lora_library/notebook.js`'s
+       * `attachDomWidget()` (identical addDOMWidget option shape) and its
+       * separation of "build the static chrome once" from "re-render the
+       * dynamic list on demand" (`renderList()`/here, `_renderStateList()`)
+       * — the buttons are built exactly ONCE, here, so an armed Delete
+       * button's DOM identity (and its `_armed`/`_armTimer` state) survives
+       * every later `_renderStateList()` call untouched, including the
+       * periodic background sets-cache poll (FORMAT.md §6.3: the armed
+       * button "survives background cache refreshes for its full window").
+       */
+      _buildStatePane() {
+        injectControllerStyles()
+
+        this._pane = {}
+        this._pane.listEl = el('div', { className: 'llsc-list' })
+        const leftPane = el('div', { className: 'llsc-pane-left' }, [this._pane.listEl])
+
+        this._w.captureBtn = this._createActionButton('llsc-btn', LABEL_CAPTURE, () => this._onCaptureClick())
+        this._w.updateBtn = this._createActionButton('llsc-btn', LABEL_UPDATE, () => this._onUpdateClick())
+        this._w.deleteBtn = this._createActionButton('llsc-btn llsc-btn-danger', LABEL_DELETE, () =>
+          this._onDeleteClick()
+        )
+        // FORMAT.md §6.3 Push State (2026-07-19): broadcasts to Apply LoRA
+        // Set nodes, entirely independent of the rgthree target/probe this
+        // pack drives above — deliberately NOT in `_actionButtons` below, so
+        // it stays clickable even with no Power Lora Loader in the graph (or
+        // rgthree not installed at all); see `_doPush()`.
+        this._w.pushBtn = this._createActionButton('llsc-btn', LABEL_PUSH, () => this._onPushClick())
+        this._actionButtons = [this._w.captureBtn, this._w.updateBtn, this._w.deleteBtn]
+
+        const rightPane = el('div', { className: 'llsc-pane-right' }, [
+          this._w.captureBtn,
+          this._w.updateBtn,
+          this._w.deleteBtn,
+          this._w.pushBtn
+        ])
+
+        const panes = el('div', { className: 'llsc-panes' }, [leftPane, rightPane])
+        this._pane.root = el('div', { className: 'llsc-root' }, [panes])
+
+        if (typeof this.addDOMWidget !== 'function') {
+          // Fail soft (FORMAT.md §6.3) — mirrors notebook.js's own defensive
+          // check for the identical API; every currently-shipping ComfyUI
+          // frontend already runs the Notebook's addDOMWidget-based editor,
+          // so this branch is not expected to fire, but the controller must
+          // never throw during graph load regardless.
+          api.warn(`${NODE_TITLE}: this ComfyUI frontend has no addDOMWidget; two-pane state picker not attached`)
+          return
+        }
+        const domWidget = this.addDOMWidget(STATE_PANE_WIDGET_NAME, STATE_PANE_WIDGET_TYPE, this._pane.root, {
+          hideOnZoom: true,
+          serialize: false,
+          getMinHeight: () => MIN_STATE_PANE_HEIGHT
+        })
+        domWidget.serialize = false
+        domWidget.serializeValue = () => undefined
+
+        this._renderStateList()
+      }
+
+      /**
+       * FORMAT.md §6.3/§7.2 (2026-07-21): rebuild the left list from
+       * `_setsCache` — Notebook's `renderList()`/`buildEntryRow()` twin,
+       * minus categories/multi-select/drag (states have none of those; a
+       * controller selects exactly one state at a time, same as the combo
+       * it replaces). Called whenever `_setsCache` is rebuilt
+       * (`_applySetsResponse()`) or the current selection changes
+       * (`_setSetValueSilently()` — the single write point for
+       * `_w.set.value`, so routing the repaint through it covers every
+       * selection change for free: a user row click, a post-Capture/Save/
+       * Delete auto-select, and the initial paint once the first
+       * `_refreshSetsCache()` resolves after a workflow load).
+       */
+      _renderStateList() {
+        const listEl = this._pane?.listEl
+        if (!listEl) return
+        listEl.replaceChildren()
+
+        if (!this._setsCache.length) {
+          listEl.append(el('div', { className: 'llsc-empty', text: PLACEHOLDER_NO_SETS }))
+          return
+        }
+
+        const selected = this._selectedSetEntry()
+        for (const entry of this._setsCache) {
+          const active = !!selected && entry.slug === selected.slug
+          const row = el('div', {
+            className: active ? 'llsc-row llsc-row-active' : 'llsc-row',
+            text: entry.label,
+            attrs: { tabindex: '0', title: entry.label }
+          })
+          // Clicking a row IS the apply (FORMAT.md §6.3) — calls the SAME
+          // apply path the old combo's ContextMenu callback used
+          // (`_onSetPicked()`, unmodified by this redesign), unconditionally,
+          // so re-clicking the already-active row force-re-applies exactly
+          // like picking a different one. No litegraph widget internals
+          // involved at all — see the file header's 2026-07-21 section.
+          row.addEventListener('click', () => this._onSetPicked(entry.label))
+          row.addEventListener('keydown', (event) => {
+            if (event.key !== 'Enter' && event.key !== ' ') return
+            event.preventDefault()
+            this._onSetPicked(entry.label)
+          })
+          listEl.append(row)
+        }
       }
 
       /**
@@ -1403,10 +1806,6 @@ export function registerControllerNode() {
         const labels = candidates.map((c) => c.label)
         if (candidates.length >= 2) labels.push(formatAllTargetsLabel(candidates.length))
         return labels
-      }
-
-      _setComboValues() {
-        return this._setsCache.length ? this._setsCache.map((s) => s.label) : [PLACEHOLDER_NO_SETS]
       }
 
       /**
@@ -1500,6 +1899,10 @@ export function registerControllerNode() {
           seenLabels.add(label)
           return { slug: s.slug, name: s.name, count: s.count, label }
         })
+        // FORMAT.md §6.3 (2026-07-21): keep the two-pane list in sync with
+        // the cache on every rebuild — a capture/update/delete response, or
+        // the periodic sets-poll (`_heartbeat()`/`_refreshSetsCache()`).
+        this._renderStateList()
         this.setDirtyCanvas(true, false)
       }
 
@@ -1568,57 +1971,21 @@ export function registerControllerNode() {
       /**
        * The ONLY sanctioned way to write `this._w.set.value` from our own
        * code (Capture/Update select the newly-touched set; Delete falls
-       * back to whatever is now first). 2026-07-19c: a plain, UNGUARDED
-       * `.value =` assignment — it no longer needs to "silently" suppress
-       * anything, since selection no longer goes through the combo's
-       * callback/setValue at all (see the file header's 2026-07-19c section
-       * and `_hookSetWidgetMenu()` below). Kept as a named helper purely for
-       * readability at call sites, not for a guard it used to need.
+       * back to whatever is now first) — AND, since the 2026-07-21 two-pane
+       * redesign, the one place that repaints the two-pane list's highlight
+       * (`_renderStateList()`), so every selection-changing call site gets
+       * that repaint for free instead of needing its own call. A plain,
+       * UNGUARDED `.value =` assignment (2026-07-19c: it no longer needs to
+       * "silently" suppress anything, since selection never goes through a
+       * combo's callback/setValue at all — now doubly true, since there is
+       * no combo left, only a hidden text widget and a DOM list with its own
+       * click handlers). Kept as a named helper purely for readability at
+       * call sites, not for a guard it used to need.
        */
       _setSetValueSilently(label) {
         if (!this._w.set) return
         this._w.set.value = label
-      }
-
-      /**
-       * FORMAT.md §6.3 2026-07-19c hardening — see the file header's
-       * dated section for the full citation trail (verified against THIS
-       * rig's exact bundle: comfyui-frontend-package 1.45.21,
-       * static/assets/api-BqIxvqZ8.js). Shadows `.onClick` as an own
-       * property on THIS widget INSTANCE — identity-stable per the header's
-       * `toConcreteWidget`/`addCustomWidget` citation, so this is not the
-       * same kind of internal-dependent trick the REMOVED
-       * `_hookSetValueForReselect()` was; it replaces the stock
-       * ComboWidget click -> dropdown -> `setValue()` path with our own
-       * dropdown -> direct-apply path (`_openSetMenu()`/`_onSetPicked()`),
-       * never touching `setValue` at all. `widget.callback` (passed to
-       * `addWidget` in `_buildWidgets`) is deliberately a no-op now — it is
-       * unreachable through any path we exercise, kept only so `addWidget`
-       * doesn't console.warn about a callback-less combo.
-       */
-      _hookSetWidgetMenu(widget) {
-        widget.onClick = ({ e, canvas }) =>
-          this._guarded('set widget click', () => this._openSetMenu(e, canvas))
-      }
-
-      /**
-       * Builds the controller's OWN dropdown for the `set`/state widget
-       * (file header 2026-07-19c) — the exact `LiteGraph.ContextMenu(items,
-       * {scale, event, className, callback})` shape stock `ComboWidget.onClick`
-       * itself uses (file header citation), minus the `setValue()` detour.
-       */
-      _openSetMenu(event, canvas) {
-        const labels = this._setComboValues()
-        if (!labels.length || labels[0] === PLACEHOLDER_NO_SETS) {
-          this._toast('warn', NODE_TITLE, 'No saved states yet — use New State first.')
-          return
-        }
-        new LiteGraph.ContextMenu(labels, {
-          event,
-          scale: Math.max(1, canvas?.ds?.scale || 1),
-          className: 'dark',
-          callback: (label) => this._onSetPicked(label)
-        })
+        this._renderStateList()
       }
 
       _toast(severity, summary, detail) {
@@ -1646,15 +2013,19 @@ export function registerControllerNode() {
       // -------------------------------------------------------- button actions
 
       /**
-       * FORMAT.md §6.3 2026-07-19c hardening: fired by `_openSetMenu()`'s
-       * `LiteGraph.ContextMenu` callback — i.e. a REAL user pick, always
-       * (see the file header's 2026-07-19c section for why nothing else can
-       * reach this method: workflow restore only ever does a plain
-       * `.value =` assignment, never `.onClick`). `label` is one of
-       * `_setComboValues()`'s own strings, so a `_setsCache` lookup by exact
-       * match always succeeds here. Runs apply UNCONDITIONALLY — there is
-       * no same-value branch anywhere in this path, so re-picking the state
-       * already showing re-applies exactly like picking a different one.
+       * FORMAT.md §6.3 TWO-PANE layout (2026-07-21): fired by a two-pane
+       * list row's plain `click`/`keydown` handler (`_renderStateList()`) —
+       * i.e. a REAL user pick, always (workflow restore only ever does a
+       * plain `.value =` assignment on the hidden `set` widget, never
+       * touching the DOM list at all — see the file header's 2026-07-21
+       * section). `label` is always one of `_setsCache`'s own `.label`
+       * strings (the row's text IS the label), so the lookup below by exact
+       * match always succeeds here. UNCHANGED since the 2026-07-19c
+       * ContextMenu design this replaces (only this doc comment names the
+       * new caller — the body below is byte-identical): runs apply
+       * UNCONDITIONALLY — there is no same-value branch anywhere in this
+       * path, so re-picking the state already showing re-applies exactly
+       * like picking a different one.
        */
       _onSetPicked(label) {
         this._guarded('set picked', () => {
@@ -1716,7 +2087,13 @@ export function registerControllerNode() {
         if (!button._armed) {
           this._selectedSetEntry()
           button._armed = true
-          button.name = LABEL_DELETE_CONFIRM
+          // 2026-07-21: `button` is a real DOM `<button>` — `.textContent`
+          // is its displayed text. (`.name` on a real `<button>` element is
+          // the unrelated HTML form-control name attribute, invisible on
+          // screen; the pre-redesign canvas WIDGET used `.name` for its
+          // painted label, which is why this literally changed from `.name`
+          // here, not just cosmetically.)
+          button.textContent = LABEL_DELETE_CONFIRM
           this._armDeleteButtonColor(button)
           clearTimeout(button._armTimer)
           button._armTimer = setTimeout(() => this._disarmDeleteButton(), DELETE_CONFIRM_MS)
@@ -1733,29 +2110,27 @@ export function registerControllerNode() {
         if (!button || !button._armed) return
         clearTimeout(button._armTimer)
         button._armed = false
-        button.name = LABEL_DELETE
+        button.textContent = LABEL_DELETE
         this._disarmDeleteButtonColor(button)
         this.setDirtyCanvas(true, false)
       }
 
       /**
-       * File header's per-widget-color citation: shadow the inherited
-       * getter-only `background_color`/`text_color` accessors with own
-       * properties via `Object.defineProperty` (a plain assignment would
-       * throw). Wrapped defensively — this is cosmetic only, and must never
-       * be the reason the arm/disarm STATE machine itself breaks on some
-       * future or different litegraph build.
+       * 2026-07-21: `button` is now a real DOM `<button>` element (the
+       * two-pane redesign's right pane), not a canvas widget — plain
+       * `style` properties are freely settable, so the
+       * `Object.defineProperty`-shadowing trick this used before (needed
+       * only because litegraph's `background_color`/`text_color` are
+       * getter-only accessors on a canvas widget — file header citation) is
+       * no longer needed at all. Still wrapped defensively: this is
+       * cosmetic only, and must never be the reason the arm/disarm STATE
+       * machine itself breaks.
        */
       _armDeleteButtonColor(button) {
         try {
-          Object.defineProperty(button, 'background_color', {
-            get: () => DELETE_ARMED_BG_COLOR,
-            configurable: true
-          })
-          Object.defineProperty(button, 'text_color', {
-            get: () => DELETE_ARMED_TEXT_COLOR,
-            configurable: true
-          })
+          button.style.background = DELETE_ARMED_BG_COLOR
+          button.style.borderColor = DELETE_ARMED_BG_COLOR
+          button.style.color = DELETE_ARMED_TEXT_COLOR
         } catch (error) {
           api.warn(`${NODE_TITLE}: could not color the armed delete button (cosmetic only)`, error)
         }
@@ -1763,8 +2138,9 @@ export function registerControllerNode() {
 
       _disarmDeleteButtonColor(button) {
         try {
-          delete button.background_color
-          delete button.text_color
+          button.style.background = ''
+          button.style.borderColor = ''
+          button.style.color = ''
         } catch (error) {
           api.warn(`${NODE_TITLE}: could not reset delete button color (cosmetic only)`, error)
         }

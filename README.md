@@ -14,7 +14,7 @@ Current capabilities, no dependencies:
   into any text input. The file is the truth: edit it in ComfyUI, in
   VS Code, on the other computer — everything stays in sync.
 - **LoRA states** — save a whole lora configuration (which loras, order,
-  on/off, strengths) as a named state, then switch from a dropdown.
+  on/off, strengths) as a named state, then switch from a list.
   `Apply LoRA Set` works standalone (MODEL/CLIP in → out, plus a
   `LORA_STACK` and trigger words). If you use
   [rgthree's Power Lora Loader](https://github.com/rgthree/rgthree-comfy),
@@ -78,10 +78,12 @@ drives a genuine, untouched
 elsewhere in your graph — rgthree stays the loader; this node just moves
 whole configurations ("states") in and out of it:
 
-- **Picking a state applies it.** The `state` dropdown *is* the switch:
-  choose one and the target loader's rows snap to it — count, order,
-  toggles, strengths. (Reloading a saved workflow never re-applies; only a
-  real selection does.)
+- **Two-pane layout** (like the Prompt Notebook): a scrolling list of all
+  your saved states on the left, the buttons stacked on the right.
+- **Clicking a state applies it.** The list *is* the switch: click a state
+  and the target loader's rows snap to it — count, order, toggles,
+  strengths. (Reloading a saved workflow never re-applies; only a real click
+  does.)
 - **New State** captures the loader's current rows into a named state
   file; **Save State** overwrites the selected state with the current
   rows; **Delete State** removes it (two-click "Are you sure?" confirm —
