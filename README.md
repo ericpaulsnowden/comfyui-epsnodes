@@ -149,6 +149,15 @@ versa; anything that can't resolve is skipped with a logged warning rather
 than failing the run. After creating states outside the graph, press `R`
 (refresh node definitions) to update an open dropdown.
 
+The weight math is covered by a permanent numeric regression test
+(`tests/test_nodes_sets_weight_math.py`): it drives this node against real
+ComfyUI patching machinery and asserts the patched model AND clip weights
+equal the first-principles `base + strength × (alpha/rank) × (up·down)`
+expectation — including stacked rows, a dual clip strength, a disabled row,
+and `strength_scale`. It needs `torch` plus an importable ComfyUI (set
+`EPS_COMFYUI_ROOT=/path/to/ComfyUI` if `comfy` isn't already on the path)
+and skips cleanly where those are absent.
+
 ## EPS Switcher (shipped)
 
 `EPSNodes → EPS Switcher`: wire in **any number of images**, flip each one
