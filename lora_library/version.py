@@ -5,4 +5,4 @@ by ``scripts/bump_version.py`` (FORMAT.md §8: version = code-sync signal;
 docs-only changes do NOT bump).
 """
 
-__version__ = "0.19.1"
+__version__ = "0.19.2"

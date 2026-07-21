@@ -204,6 +204,99 @@
  * today's display untouched) -- this is pure ADDITIONAL visibility into a
  * buffer that was already safe, never a new way to lose data.
  *
+ * ---- Identity is STABLE; refresh is CHEAP (fix 2026-07-21, owner-reported
+ * regressions from the block above) ----
+ *
+ * The 2026-07-20 fix above was too aggressive. `loadGraphData` on this
+ * frontend (`scripts/app.ts`) rebuilds the ENTIRE node list on every whole-
+ * graph load -- initial open, undo/redo (`changeTracker.ts`'s `undo()`/
+ * `redo()` both call `app.loadGraphData()`), and tab switch all go through
+ * it (confirmed live against this rig's `comfyui-frontend-package` 1.45.21).
+ * Each rebuild wipes `LGraph._nodes` and creates FRESH node object instances
+ * for every serialized node, even ones whose data never changed. If a SECOND
+ * rebuild starts before an EARLIER one's deferred `attach()` dedup check
+ * (the `setTimeout(fn, 0)` below) has fired -- trivially reproduced live by
+ * firing a few overlapping `app.loadGraphData()` calls without awaiting each
+ * one, which is exactly what rapid repeated Ctrl+Z or fast tab-switching can
+ * do -- a stale, about-to-be-discarded node instance and the fresh,
+ * currently-displayed one briefly coexist in `app.graph._nodes` sharing the
+ * SAME uuid. `ensureUniqueUuid()`'s collision check couldn't tell "a
+ * genuine in-graph duplicate" apart from "the same logical node, mid-
+ * rebuild, momentarily double-represented" -- so it fired the same
+ * remint+clone either way, on nodes that were never actually duplicated.
+ * Verified live: a single 13-image grid, reloaded a handful of times
+ * without waiting for each to settle, logs multiple spurious "collided with
+ * a live sibling" mints and clones -- harmless orphan buffers when the
+ * CURRENT node happens to settle back onto the original uuid, but nothing
+ * guaranteed that; the owner's report ("13 -> 4", thumbnails vanishing) is
+ * this same race landing less kindly.
+ *
+ * The fix distinguishes the two cases with `app.configuringGraph`
+ * (`scripts/app.ts`): a private counter incremented for the exact duration
+ * of `LGraph.prototype.configure()`, which every whole-graph rebuild above
+ * runs through. Confirmed LIVE against this rig's installed frontend by
+ * instrumenting the pack's own registered extension hooks directly (not
+ * just timing theory): our `nodeCreated` hook (`attach()` below) and a
+ * wrapped `LGraphNode.prototype.configure` (what the `onConfigure` wrap
+ * below observes) both read `app.configuringGraph === true` while a whole-
+ * graph load/undo/redo/tab-switch is rebuilding nodes; a genuine paste/
+ * clone (`LiteGraph.createNode()` + a LONE `node.configure()`, never
+ * wrapped by the graph-level flag) reads `false` at both points.
+ * `loadedGraphNode()` itself always observes `false` (it fires only AFTER
+ * `rootGraph.configure()` has already returned) -- but it ONLY EVER fires
+ * from within that same whole-graph rebuild in the first place (confirmed
+ * live: never for a same-session paste), so its own invocation already IS
+ * the "don't mint" signal, no flag needed there.
+ *
+ * `isGraphConfiguring()` below reads that flag; `attach()` captures it
+ * SYNCHRONOUSLY at `nodeCreated` time (before deferring) rather than
+ * re-reading it inside the deferred callback, because `LGraph.configure()`
+ * is fully synchronous and reliably finishes -- flag back to `false` --
+ * before any `setTimeout(fn, 0)` macrotask gets a turn. `ensureUniqueUuid()`
+ * now takes an explicit `allowCollisionMint` flag: when false (this check
+ * is running as part of a load/undo/configure pass), a valid uuid that
+ * "collides" is left COMPLETELY untouched -- no remint, no clone, no
+ * buffer-repointing side effect -- because the saved uuid is authoritative
+ * there and the apparent collision is transient rebuild noise, never a real
+ * duplicate. An actually invalid/empty uuid (a hand-edited or corrupted
+ * workflow) still self-heals to a fresh one even during a load -- there is
+ * no buffer to protect for a uuid that was never valid. `loadedGraphNode()`
+ * always passes `allowCollisionMint: false` unconditionally, both because it
+ * can't be true (see above) and as defense-in-depth if that ever changes.
+ * Only a genuine interactive duplicate detected OUTSIDE any configure pass
+ * (`attach()` when `isGraphConfiguring()` read false at creation time) still
+ * mints + clones, preserving the 2026-07-20 "copy carries the images"
+ * behavior for the case it actually describes.
+ *
+ * **0.28.1 risk:** `app.configuringGraph` is an internal flag (its own
+ * comment in `scripts/app.ts` calls it exactly that) -- not documented
+ * public extension API -- and its presence/behavior on the frontend build
+ * ComfyUI 0.28.1 actually pins has NOT been independently verified (this rig
+ * runs `comfyui-frontend-package` 1.45.21). `isGraphConfiguring()` reads it
+ * via a plain property access and coerces with `Boolean(...)`, so a
+ * frontend build where the property is simply absent degrades to `false`
+ * (fails OPEN to the pre-2026-07-21 remint-on-collision behavior for that
+ * one check) rather than throwing -- never worse than before 2026-07-21,
+ * but re-verify live on 0.28.1 if this specific guard doesn't hold there.
+ *
+ * Separately, CHEAP: `refreshFromBuffer()` was being triggered up to THREE
+ * times per node per load (the deferred `attach()` tail, `loadedGraphNode`,
+ * and `onConfigure` each fire once for the very same settle) -- confirmed
+ * live via the network log. `scheduleRefresh()` below is the single funnel
+ * every call site now goes through: concurrent calls for the same node
+ * coalesce onto one in-flight fetch, and a call arriving just after one
+ * already settled is skipped outright (nothing changed in the meantime).
+ * The `onConfigure` wrap additionally skips scheduling entirely while
+ * `isGraphConfiguring()` is true, since `loadedGraphNode` is about to (or
+ * just did) cover the exact same settle -- it still refreshes for a
+ * standalone per-node `configure()` outside a load pass (a paste/clone
+ * restore), the one case nothing else reaches. `setNodeImagesFromRefs()`
+ * also no longer focuses the last image after a refresh or a paste-add --
+ * it sets `imageIndex = null` (core's own "show the grid" sentinel) per
+ * FORMAT.md §6.6, fixing the "paste shows one image, no way back to the
+ * grid until you switch tabs" report; `setDirtyCanvas` still repaints
+ * immediately, no tab round-trip required.
+ *
  * ---- Clear button ----
  *
  * A plain `addWidget('button', ...)` (not a DOM widget — no layout beyond a
@@ -342,24 +435,54 @@ function siblingUuids(node) {
 }
 
 /**
- * Mint a fresh uuid on first create (empty/invalid) or on collision with a
- * live sibling; otherwise leave a valid, non-colliding uuid untouched
+ * Whether a whole-graph rebuild (initial load, workflow open, undo/redo, or
+ * a workflow-tab switch -- all route through `app.loadGraphData()` ->
+ * `LGraph.prototype.configure()` on this frontend) is CURRENTLY in progress
+ * -- FORMAT.md §6.6 "Identity is STABLE" (2026-07-21). `app.configuringGraph`
+ * (`scripts/app.ts`) is the exact flag core wraps that method with; confirmed
+ * LIVE against this rig's installed frontend that it reads `true` at both
+ * `nodeCreated` time and per-node `configure()` time during such a rebuild,
+ * and `false` at the equivalent points for a genuine interactive paste/clone
+ * (see the file header's dated section for the full writeup + how each call
+ * site below uses this). Coerced with `Boolean(...)` so a frontend build
+ * missing this internal, non-public property reads `false` rather than
+ * throwing -- see the header's "0.28.1 risk" note.
+ */
+function isGraphConfiguring() {
+  return Boolean(app.configuringGraph)
+}
+
+/**
+ * Mint a fresh uuid on first create (empty/invalid); mint + clone on
+ * collision with a live sibling ONLY when *allowCollisionMint* is true;
+ * otherwise leave a valid uuid -- colliding or not -- completely untouched
  * (re-syncing property<->widget only if they've somehow drifted apart).
  * Idempotent and cheap to call repeatedly -- both call sites below
  * (deferred `nodeCreated`, and `loadedGraphNode`) may run for the same node.
  *
+ * *allowCollisionMint* is the 2026-07-21 fix (FORMAT.md §6.6 "Identity is
+ * STABLE"): a whole-graph rebuild (load/undo/redo/tab-switch) can make an
+ * untouched node's OWN saved uuid look like it "collides" against a stale
+ * sibling instance left over from an overlapping rebuild generation -- see
+ * the file header's dated section for the live-reproduced mechanism. That
+ * is never a genuine duplicate, so callers pass `false` for it whenever this
+ * check is running as part of such a rebuild (`isGraphConfiguring()`, or --
+ * for `loadedGraphNode`, which only ever fires from inside one -- always).
+ * Only a real interactive duplicate, detected OUTSIDE any rebuild, passes
+ * `true` and actually mints + clones.
+ *
  * `async` since the 2026-07-20 "images didn't travel to a copy" fix: the
- * COLLISION branch (a genuine live-sibling duplicate -- NOT first-create,
- * see FORMAT.md §6.6) captures the OLD uuid before overwriting, mints the
- * fresh one, then clones the old buffer into the new uuid
- * (`POST /eps_image_grid/clone`) before refreshing the display, so the
+ * COLLISION+mint branch (a genuine live-sibling duplicate -- NOT first-
+ * create, see FORMAT.md §6.6) captures the OLD uuid before overwriting,
+ * mints the fresh one, then clones the old buffer into the new uuid
+ * (`POST /eps_image_grid/clone`) before scheduling a refresh, so the
  * duplicate carries its own independent copy of the original's images
  * instead of starting empty. Callers that don't care about completion can
  * ignore the returned promise; both call sites below await it specifically
- * so their OWN follow-up `refreshFromBuffer` fetches the settled (possibly
- * just-cloned) uuid rather than racing it.
+ * so their OWN follow-up refresh fetches the settled (possibly just-cloned)
+ * uuid rather than racing it.
  */
-async function ensureUniqueUuid(node) {
+async function ensureUniqueUuid(node, { allowCollisionMint }) {
   if (nodeClassOf(node) !== CLASS_ID) return
 
   const widget = getGridUuidWidget(node)
@@ -369,37 +492,50 @@ async function ensureUniqueUuid(node) {
   const valid = GRID_UUID_RE.test(current)
   const colliding = valid && siblingUuids(node).has(current)
 
-  if (!valid || colliding) {
-    const oldUuid = current
-    const fresh = generateUuid()
-    writeUuid(node, fresh)
-
-    if (!colliding) {
-      // First create (empty/invalid uuid, e.g. a brand-new node) -- fresh
-      // uuid, no clone: there is no source buffer to copy from.
+  if (valid) {
+    if (colliding && !allowCollisionMint) {
+      // Never remint/clone during a load/undo/configure pass -- the saved
+      // uuid is authoritative here, and an apparent collision against a
+      // transient sibling from an overlapping rebuild is not a real
+      // duplicate. Leave the node -- and its buffer pointer -- untouched.
       return
     }
-
-    console.log(
-      PREFIX,
-      `node #${node.id}: grid_uuid collided with a live sibling -- minted a new one ` +
-        '(each EPSImageGrid keeps its own buffer)'
-    )
-    try {
-      await postClone(oldUuid, fresh)
-    } catch (error) {
-      console.warn(
-        PREFIX,
-        'clone-on-collision failed; the duplicate starts with an empty buffer',
-        error
-      )
+    if (!colliding) {
+      if (propertyUuid !== widgetUuid) {
+        writeUuid(node, current) // re-sync, e.g. a hand-edited workflow set only one of the two
+      }
+      return
     }
-    await refreshFromBuffer(node)
+    // valid && colliding && allowCollisionMint -- a genuine interactive
+    // duplicate; fall through to mint + clone below.
+  }
+
+  const oldUuid = current
+  const fresh = generateUuid()
+  writeUuid(node, fresh)
+
+  if (!valid) {
+    // First create (empty/invalid uuid, e.g. a brand-new node, or a
+    // hand-edited/corrupted workflow value) -- fresh uuid, no clone: there
+    // is no source buffer to copy from, load pass or not.
     return
   }
-  if (propertyUuid !== widgetUuid) {
-    writeUuid(node, current) // re-sync, e.g. a hand-edited workflow set only one of the two
+
+  console.log(
+    PREFIX,
+    `node #${node.id}: grid_uuid collided with a live sibling -- minted a new one ` +
+      '(each EPSImageGrid keeps its own buffer)'
+  )
+  try {
+    await postClone(oldUuid, fresh)
+  } catch (error) {
+    console.warn(
+      PREFIX,
+      'clone-on-collision failed; the duplicate starts with an empty buffer',
+      error
+    )
   }
+  await scheduleRefresh(node)
 }
 
 // ---------------------------------------------------------------------------
@@ -427,10 +563,12 @@ async function postClear(grid_uuid) {
 
 /** Drops the node's own displayed thumbnails immediately, ahead of the next
  * Run's `ui.images` (which would otherwise be the only thing that refreshes
- * the canvas) -- Clear should feel instant. */
+ * the canvas) -- Clear should feel instant. `imageIndex = null` keeps a
+ * stale index from pointing past the now-empty array (FORMAT.md §6.6). */
 function clearNodePreview(node) {
   node.imgs = []
   node.images = undefined
+  node.imageIndex = null
   try {
     node.setSizeForImage?.()
   } catch {
@@ -489,18 +627,22 @@ function imageUrlForRef(ref) {
 
 /**
  * Replaces the node's displayed thumbnails with *refs* (the whole buffer,
- * same shape the backend's `ui.images` always sends) and focuses the LAST
- * one, so right after an add the user sees exactly the image they just
- * pasted (FORMAT.md §6.6 "refresh the node so the new thumbnail shows").
- * Shared with the Clear path's empty case, and with `refreshFromBuffer`
- * below (the 2026-07-20 display-on-load/undo fix) -- every caller hands it
- * the SAME ref shape, so a load-triggered refresh renders identically to a
- * just-added image.
+ * same shape the backend's `ui.images` always sends) and shows the GRID
+ * (`imageIndex = null`, core's own "no single image focused" sentinel --
+ * FORMAT.md §6.6 "Identity is STABLE; refresh is CHEAP", 2026-07-21).
+ * Previously this focused the LAST image (`imgs.length - 1`), which was the
+ * owner-reported "paste shows one image, no way back to the grid until you
+ * switch tabs" regression -- a paste-add should surface the new thumbnail
+ * IN the grid, not replace the grid view. Shared with the Clear path's
+ * empty case, and with `refreshFromBuffer` below (the 2026-07-20 display-
+ * on-load/undo fix) -- every caller hands it the SAME ref shape, so a
+ * load-triggered refresh renders identically to a just-added image.
  */
 function setNodeImagesFromRefs(node, refs) {
   if (!refs || !refs.length) {
     node.imgs = []
     node.images = undefined
+    node.imageIndex = null
     return
   }
   const imgs = refs.map((ref) => {
@@ -510,7 +652,7 @@ function setNodeImagesFromRefs(node, refs) {
   })
   node.imgs = imgs
   node.images = refs
-  node.imageIndex = imgs.length - 1
+  node.imageIndex = null
 }
 
 /**
@@ -623,14 +765,15 @@ const CLONE_ROUTE = '/eps_image_grid/clone'
  * primitive the M2 paste-add path already uses), so a load-triggered
  * refresh renders identically to a just-added image.
  *
- * Called from every place a node's uuid can become "the one to show"
- * without a Run: the deferred `nodeCreated` tail (`attach()`),
- * `loadedGraphNode()`, and the `onConfigure` wrap below (undo/redo). Fails
- * soft in every direction on purpose -- a node whose uuid isn't valid yet, a
- * missing route (an older backend that hasn't picked up this fix), a
- * non-OK response, or a network error all just leave the node's CURRENT
- * display untouched rather than throwing; never rejects, so callers may
- * `await` it or fire-and-forget it interchangeably.
+ * Called (via `scheduleRefresh` below, never directly) from every place a
+ * node's uuid can become "the one to show" without a Run: the deferred
+ * `nodeCreated` tail (`attach()`), `loadedGraphNode()`, and the
+ * `onConfigure` wrap below (undo/redo, and a standalone paste/clone
+ * restore). Fails soft in every direction on purpose -- a node whose uuid
+ * isn't valid yet, a missing route (an older backend that hasn't picked up
+ * this fix), a non-OK response, or a network error all just leave the
+ * node's CURRENT display untouched rather than throwing; never rejects, so
+ * callers may `await` it or fire-and-forget it interchangeably.
  */
 async function refreshFromBuffer(node) {
   const uuid = currentUuid(node)
@@ -648,6 +791,41 @@ async function refreshFromBuffer(node) {
   } catch (error) {
     console.warn(PREFIX, 'refreshFromBuffer failed', error)
   }
+}
+
+//: node -> {promise: Promise|null, settledAt: number} -- backs
+//: `scheduleRefresh` immediately below (FORMAT.md §6.6 "refresh is CHEAP",
+//: 2026-07-21).
+const refreshState = new WeakMap()
+//: How long a just-settled refresh is trusted as "still fresh" before a new
+//: call is allowed to hit the network again -- long enough to swallow the
+//: 2-3 refresh triggers one load/undo/paste settle fires in quick
+//: succession, short enough that it's imperceptible as a delay.
+const REFRESH_SETTLE_MS = 250
+
+/**
+ * The single funnel every call site now uses instead of calling
+ * `refreshFromBuffer` directly -- coalesces the several refresh triggers
+ * that can legitimately fire for the SAME node within one load/undo/paste
+ * "settle" (the deferred `attach()` tail, `loadedGraphNode`, `onConfigure`)
+ * down to AT MOST ONE real `/list` fetch, confirmed live to otherwise fire
+ * up to 3x per node per load. A call while a fetch is already in flight for
+ * *node* rides that SAME promise rather than starting a second one; a call
+ * arriving shortly after one already settled is skipped outright (nothing
+ * changed in the meantime, so there is nothing new to fetch). Never
+ * rejects, same contract as `refreshFromBuffer` itself.
+ */
+function scheduleRefresh(node) {
+  const state = refreshState.get(node)
+  if (state) {
+    if (state.promise) return state.promise
+    if (Date.now() - state.settledAt < REFRESH_SETTLE_MS) return Promise.resolve()
+  }
+  const promise = refreshFromBuffer(node).finally(() => {
+    refreshState.set(node, { promise: null, settledAt: Date.now() })
+  })
+  refreshState.set(node, { promise, settledAt: 0 })
+  return promise
 }
 
 /**
@@ -687,14 +865,24 @@ async function postClone(fromUuid, toUuid) {
  * left the canvas showing whatever `node.imgs` happened to be at that
  * instant (often nothing) even though the on-disk buffer was untouched.
  *
+ * 2026-07-21: skips scheduling a refresh here entirely while
+ * `isGraphConfiguring()` reads true -- confirmed live that this fires WHILE
+ * a whole-graph load/undo/redo/tab-switch's `rootGraph.configure()` is still
+ * running, i.e. BEFORE `loadedGraphNode()` runs for this same node and
+ * schedules the very same refresh moments later anyway. That redundancy was
+ * a third of the "3 fetches per node per load" cost (FORMAT.md §6.6
+ * "refresh is CHEAP"). Still schedules when `onConfigure` fires OUTSIDE a
+ * configure pass -- a standalone paste/clone's per-node restore -- since
+ * nothing else covers that case.
+ *
  * Guarded by `node.__epsGridConfigureWrapped` (a plain instance flag, NOT
  * the module-level `attachedNodes` WeakSet `attach()` itself uses) so this
  * specific wrap can only ever be installed once per node no matter how many
  * times something re-triggers node setup for the same live instance. Calls
- * the original `onConfigure` FIRST, unconditionally, then refreshes --
- * `refreshFromBuffer` never rejects (see its own docstring), so firing it
- * without an `await` here is safe; `onConfigure` itself is a synchronous
- * litegraph hook with no promise contract to honor.
+ * the original `onConfigure` FIRST, unconditionally, then (maybe) refreshes
+ * -- `scheduleRefresh`/`refreshFromBuffer` never reject (see their own
+ * docstrings), so firing without an `await` here is safe; `onConfigure`
+ * itself is a synchronous litegraph hook with no promise contract to honor.
  */
 function installConfigureRefresh(node) {
   if (node.__epsGridConfigureWrapped) return
@@ -706,7 +894,9 @@ function installConfigureRefresh(node) {
     try {
       result = originalOnConfigure?.call(this, info)
     } finally {
-      void refreshFromBuffer(this)
+      if (!isGraphConfiguring()) {
+        void scheduleRefresh(this)
+      }
     }
     return result
   }
@@ -729,6 +919,17 @@ export function attach(node) {
     if (attachedNodes.has(node)) return
     attachedNodes.add(node)
 
+    // Captured HERE, synchronously, at the exact moment litegraph creates
+    // this node instance -- NOT re-read inside the deferred callback below.
+    // `isGraphConfiguring()` correctly reads `true` during a whole-graph
+    // load/undo/redo/tab-switch and `false` for a genuine interactive
+    // paste/clone (confirmed live, see file header's 2026-07-21 section),
+    // but `LGraph.configure()` -- the thing it wraps -- is fully
+    // synchronous and reliably finishes (flag back to `false`) long before
+    // any `setTimeout(fn, 0)` macrotask gets a turn, so re-reading it below
+    // would always see `false` and defeat the whole guard.
+    const allowCollisionMint = !isGraphConfiguring()
+
     hideGridUuidWidget(node)
     addClearButton(node)
     installPasteFiles(node)
@@ -742,17 +943,17 @@ export function attach(node) {
 
     // Deferred one tick -- the paste-collision path. See file header
     // point 1 for exactly why this can't run synchronously here. Awaiting
-    // ensureUniqueUuid before refreshFromBuffer (rather than firing both in
-    // parallel) matters specifically for the collision branch: it fetches
-    // whichever uuid actually settles -- the fresh, possibly-just-cloned
-    // one -- not whatever was on the node before dedup ran.
+    // ensureUniqueUuid before scheduling a refresh (rather than firing both
+    // in parallel) matters specifically for the collision branch: it
+    // fetches whichever uuid actually settles -- the fresh, possibly-just-
+    // cloned one -- not whatever was on the node before dedup ran.
     setTimeout(async () => {
       try {
-        await ensureUniqueUuid(node)
+        await ensureUniqueUuid(node, { allowCollisionMint })
       } catch (error) {
         console.warn(PREFIX, 'deferred uuid dedup failed', error)
       } finally {
-        await refreshFromBuffer(node)
+        await scheduleRefresh(node)
       }
     }, 0)
   } catch (error) {
@@ -761,14 +962,18 @@ export function attach(node) {
 }
 
 /** Fires once per node, after a whole saved workflow has finished loading
- * (see file header point 2). No-op unless *node* is an EPSImageGrid. */
+ * (see file header point 2). No-op unless *node* is an EPSImageGrid.
+ * Always passes `allowCollisionMint: false` -- this hook only ever fires
+ * from within a whole-graph load pass (confirmed live: never for a
+ * same-session paste), so collision-minting is never appropriate here; see
+ * `ensureUniqueUuid`'s docstring. */
 export function loadedGraphNode(node) {
   try {
     if (!node) return
     if (nodeClassOf(node) !== CLASS_ID) return
-    ensureUniqueUuid(node)
+    ensureUniqueUuid(node, { allowCollisionMint: false })
       .catch((error) => console.warn(PREFIX, 'loadedGraphNode dedup failed', error))
-      .finally(() => refreshFromBuffer(node))
+      .finally(() => scheduleRefresh(node))
   } catch (error) {
     console.warn(PREFIX, 'loadedGraphNode dedup failed', error)
   }

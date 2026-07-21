@@ -456,20 +456,35 @@ Registered purely in JS (like core's MarkdownNote) under the type name
 `LoraLibrarySetController`; it never executes server-side and never blocks a
 queue. It drives a **genuine, untouched `Power Lora Loader (rgthree)`**:
 
-- Widgets: `target` (COMBO of PLL nodes in the graph, by title `#id`, PLUS
-  an `All Power Lora Loaders (N)` option when N ≥ 2 — the WAN high/low
-  dual-loader case; auto-selects when exactly one exists), the state COMBO
-  (internal widget name `set`, displayed label `state`, options from §5
-  sets routes — **choosing a state IS the apply**: the combo's callback
-  applies immediately, there is NO Apply button; owner decision 2026-07-18
-  after the button read as broken; but see the strength-persistence fix —
-  selecting must force an apply even when the value is unchanged), `name`
-  (text), buttons: `New State`, `Save State`, `Delete State` (two-click
-  "Are you sure?" confirm; the armed button is visually distinct, survives
-  background cache refreshes for its full window, and selection is
-  slug-anchored so a mid-window sets-poll cannot invalidate it — the
-  2026-07-18 "delete does nothing during a running workflow" bug), and
-  `Push State` (§6.3 broadcast to all Apply LoRA Set nodes).
+- **TWO-PANE layout (owner ask 2026-07-21 — supersedes the state DROPDOWN;
+  "just the two-pane layout"):** replace the `state` COMBO with a Notebook-
+  style two-pane DOM widget — LEFT: a scrolling list of ALL states (one row
+  per state, the current one highlighted); RIGHT: the buttons stacked
+  vertically. **Clicking a list row IS the apply** (same semantics the combo
+  had: applies immediately, forces apply even if it's the already-selected
+  row, per the strength-persistence fix). A `name` text field for New/Save
+  stays. The selected state must still round-trip as a serialized value
+  (keep the internal `set` STRING widget, hidden, driven by the list
+  selection — the Notebook's `entry`-widget trick, §7.2), so a saved
+  workflow reopens on the same state and re-selecting never auto-re-applies
+  on load. Storage is UNCHANGED (per-state JSON files in the shared library
+  folder, configured in Settings as today — NO file/Browse panel this round,
+  owner scoped it to "just the two-pane layout"). Mirror the Notebook's
+  list-render/scroll/click/highlight (`web/lora_library/notebook.js`) and its
+  DOM-widget sizing so the panel fills the node and never collapses.
+- Widgets/controls retained: `target` (COMBO of PLL nodes by title `#id`,
+  PLUS `All Power Lora Loaders (N)` when N ≥ 2 — the WAN high/low case;
+  auto-selects when exactly one exists). Buttons (now stacked in the RIGHT
+  pane): `New State`, `Save State`, `Delete State` (two-click "Are you sure?"
+  confirm; the armed button is visually distinct, survives background cache
+  refreshes for its full window, and selection is slug-anchored so a
+  mid-window sets-poll cannot invalidate it — the 2026-07-18 "delete does
+  nothing during a running workflow" bug), and `Push State` (broadcast to all
+  Apply LoRA Set nodes). All existing behavior — apply-on-select, composite
+  capture/apply with target `All`, selective Push, `Show status`,
+  serialize-based capture (v0.14.1), own-menu version-proof apply (v0.13.0) —
+  is PRESERVED; only the state-selection UI changes from a dropdown to the
+  left list.
 - Multi-target semantics: with `All…` selected, APPLY writes the set to
   every PLL in the graph; CAPTURE reads from the lowest-node-id PLL (a
   deterministic, documented choice — capture needs one source of truth).
@@ -730,6 +745,28 @@ add; single batch-aware IMAGE input; disk-backed, survive-restart, NO cap.
   same on-disk buffer as its source — the images still "travel"/show via the
   load-fetch above; true cross-tab buffer independence is a later
   refinement, noted not blocking.)
+- **Identity is STABLE; refresh is CHEAP (fix 2026-07-21, owner-reported
+  regressions from v0.19.1).** v0.19.1's remint+clone was too aggressive:
+  undo/reload go through a full `loadGraphData`/`configure` rebuild that
+  re-runs the dedup on TRANSIENT historical states, so a node could be
+  reminted onto a freshly-cloned PARTIAL buffer — the owner saw a 13-image
+  grid drop to 4, and thumbnails vanish. Rules now:
+  - **Never remint/clone during a graph load/undo/configure pass** — saved
+    uuids are authoritative there; a node that already holds a valid uuid
+    keeps it untouched. Reminting+cloning happens ONLY for a genuine
+    interactive duplicate (a real clipboard/Ctrl-C-V paste of a node whose
+    original is a live sibling), detected out of any configure/load pass.
+    A node's populated buffer is never silently repointed or overwritten.
+  - **Refresh must be debounced/cheap**: fetch `/list` and repopulate at
+    most once per load-settle, not 3× per node and not on every
+    `onConfigure` fire during undo churn (that is the slow-redraw the owner
+    hit). After any refresh or a paste-add, set `imageIndex = null` so the
+    node shows the GRID, not a single image (the owner's "paste shows one
+    image, no way back to the grid" bug), and repaint without a full tab
+    round-trip.
+  - The backend buffer is verified lossless at 13+ images across restart +
+    repeated emit; any apparent loss is a frontend identity/refresh bug, not
+    the store — fix it there, never by touching the manifest.
 - **Clear:** a frontend Clear button → `POST /eps_image_grid/clear {uuid}`
   (on `PromptServer.instance.routes`, never raw `app.add_routes`).
 - **Copy/paste (M2):** copy a selected grid cell to the OS clipboard
@@ -741,6 +778,59 @@ add; single batch-aware IMAGE input; disk-backed, survive-restart, NO cap.
   identity/dedup; M2 = copy/paste (both targets) + Ctrl+V add; M3 = buffer
   management (per-image remove, count, reorder, batch-count guard). No cap in
   v1. No module-scope torch/ComfyUI import (lazy inside functions).
+
+## §6.7 `EPSFrameSaver` (display: "EPS Frame Saver") — video frame picker
+
+Owner ask 2026-07-21 ("a load-video node; pick a frame by play/pause/step/
+type; output that frame + w/h; see total frames"). Research:
+`research/` feasibility scan 2026-07-21. NON-lora node in `eps_image/`,
+category "EPSNodes". Class id `EPSFrameSaver` frozen once shipped (§8).
+Owner decisions locked: **PATH source (Browse a file, NEVER copy to input)**;
+single-frame output (NOT a list); "close-enough preview, EXACT on output".
+
+- **Inputs/widgets:** `video_path` STRING (the video file, chosen via a
+  Browse dialog reusing the pack's `fs/list` fs-browse standard with a VIDEO
+  ext allowlist — `.mp4,.mov,.webm,.mkv,.avi,...`); `frame` INT (the selected
+  frame index, default 0, driven by the player + serialized so it round-trips
+  and reaches `execute()`). Host-only Browse (hidden on a remote browser, like
+  the notebook/premiere pickers). No IMAGE input.
+- **Outputs:** `image` (IMAGE, a single `[1,H,W,C]` float32 0..1),
+  `width` (INT), `height` (INT). **NO `OUTPUT_IS_LIST`** — plain single
+  outputs (matches `PremiereShotFrame`). Multi-frame = a future sibling node.
+- **Backend extract:** lazy `import av`/`torch` inside the function (av is a
+  hard ComfyUI dep, but keep the module import-clean per pack convention);
+  MIRROR the sibling `comfyui-premiere-bridge/cprb/frame_extract.py` recipe
+  (Eric's own MIT: `frame_index/fps → target_seconds`, `container.seek`
+  keyframe + decode-forward to the first frame at/after target, keep the last
+  frame if the stream ends; `frame.to_ndarray('rgb24')`/255 → `[1,H,W,C]`).
+  A missing/unreadable path → clean `ValueError` naming the path, never a raw
+  ffmpeg traceback. width/height from `stream.width/height`.
+- **Probe route** `GET /eps_frame_saver/probe?path=` → `{fps, frame_count,
+  width, height, duration}` — loopback-only + path-validated (the pack's
+  `is_local` gate + ext allowlist, NOT VHS's permissive default). Frame count
+  via the trustworthy cascade (mirror ComfyUI core `video_types.py`:
+  `stream.frames>0` → `duration*rate` estimate → decode-count last resort);
+  fps via `stream.average_rate`. The frontend calls this on path-set to drive
+  the counter + frame-input bounds.
+- **Stream route** `GET /eps_frame_saver/stream?path=` → `web.FileResponse(
+  path)` (aiohttp gives Range/206 seek support for free → smooth `<video>`
+  scrubbing on browser-native codecs), loopback-only + path-validated. This
+  is the `<video>` element's `src`. Exotic codecs the browser can't decode →
+  the player degrades to backend-extracted still-frame scrubbing (a frame
+  route or reuse the probe/extract path); the OUTPUT extraction is exact
+  regardless. Both routes on `PromptServer.instance.routes`.
+- **Frontend player** (DOM widget, notebook/premiere fill-height + fixed-bar
+  sizing patterns): a `<video>` for smooth play/pause/loop preview + a control
+  strip — step −/＋ (currentTime ± 1/fps), play/pause, a bounded `frame`
+  number input, and a live "Frame X / N" counter — all driven by
+  `currentTime = frame/fps` against the PROBED fps/frame_count (the LNL /
+  core / cprb split: preview approximate, run-time extraction authoritative).
+  Selecting/stepping writes the `frame` INT widget. Clean-room — do NOT copy
+  GPL VHS/LNL code (this pack is MIT); reimplement the pattern.
+- **Deferred:** multi-frame (sibling node), transcode-for-exotic-codecs,
+  in/out range. VFR sources: the frame↔time arithmetic is approximate for the
+  counter (shared limitation of all prior art); output still lands on a real
+  frame. No module-scope torch/av/ComfyUI import.
 
 ## §7 Frontend surfaces
 
