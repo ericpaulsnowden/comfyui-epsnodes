@@ -460,10 +460,23 @@ queue. It drives a **genuine, untouched `Power Lora Loader (rgthree)`**:
   "just the two-pane layout"):** replace the `state` COMBO with a Notebook-
   style two-pane DOM widget — LEFT: a scrolling list of ALL states (one row
   per state, the current one highlighted); RIGHT: the buttons stacked
-  vertically. **Clicking a list row IS the apply** (same semantics the combo
-  had: applies immediately, forces apply even if it's the already-selected
-  row, per the strength-persistence fix). A `name` text field for New/Save
-  stays. The selected state must still round-trip as a serialized value
+  vertically. **Select vs. apply are SEPARATE clicks (owner ask 2026-07-21 —
+  supersedes "clicking a row IS the apply"):** a SINGLE click only *selects* a
+  row (highlights it, loads its name into the `name` field) and does NOT touch
+  any loader — so the user can rename or delete a state without rewriting every
+  wired loader. A SECOND click on the already-selected row (i.e. a double-click,
+  or a click on the row that is already highlighted) is what *applies* the state
+  to the target loader(s) — forcing the apply even when re-picking the same row,
+  per the strength-persistence fix. (The old auto-apply-on-single-click was too
+  eager: selecting to rename/delete detonated an apply across all loaders.) A
+  `name` text field for New/Save stays. **Save State honors a changed name
+  (owner bug 2026-07-21 — "Save doesn't save a new name if an element is
+  selected"):** when a row is selected and the `name` field has been edited to
+  something different, `Save State` writes a NEW state under that new name
+  (this is the primary way to spin a new item off an existing one) and selects
+  it; when the name is unchanged it overwrites the selected state as before.
+  `New State` (empty name → capture current rows) is unchanged. The selected
+  state must still round-trip as a serialized value
   (keep the internal `set` STRING widget, hidden, driven by the list
   selection — the Notebook's `entry`-widget trick, §7.2), so a saved
   workflow reopens on the same state and re-selecting never auto-re-applies
@@ -643,14 +656,31 @@ is the functional core WITHOUT the grid.
     which sidesteps exactly the dual-backend risk the roadmap flags for a
     canvas widget. Size it with the premiere lesson (widget
     `computeSize` + `computedHeight` + explicit element height) so it can
-    never collapse to a sliver. **The pad FILLS the node (fix 2026-07-21,
-    owner-reported "too small"):** a floor of `GRID_MIN_H` (210) with NO
-    ceiling (`getMaxHeight → Infinity`, the Notebook's fill idiom), a live
-    `computeGridHeight = floor + max(0, node.size[1] − naturalMin)`, and an
-    `onResize` hook — so dragging the node taller grows the square pad
-    (easier fine navigation), and a manually-tall size survives reload
-    (grow-never-shrink on load); the centered-square math is unchanged, the
-    square just gets bigger.
+    never collapse to a sliver. **The pad is a FULL-WIDTH square whose size is
+    driven by node WIDTH (fix 2026-07-21, supersedes the "drag taller to grow"
+    model — owner reported it "grows, but awkwardly"):**
+    - **No horizontal letterbox.** The square spans the node's full content
+      width, locked to the left and right edges — there is NEVER empty space
+      beside it. (The old centered-square-with-side-margins is gone.)
+    - **Height follows width.** The pad's height == its width (a true square),
+      so the DOM widget's `computeSize`/`computedHeight` report a height equal
+      to the current content width; the NODE's min height is therefore
+      *determined by its width*. The user resizes by dragging the node WIDER
+      (bigger square, node auto-grows taller to fit) — not by dragging it
+      taller.
+    - **Freely shrinkable (owner bug 2026-07-21 — "once dragged taller you
+      can't reduce the height").** Because height is width-derived, there is no
+      independent tall state to get stuck in: narrowing the node shrinks the
+      square and the node's height with it. Do NOT reintroduce any
+      grow-never-shrink / `getMaxHeight → Infinity` floor-only logic — that was
+      the cause of the stuck-tall bug. Round-trips through save/reload at the
+      saved width.
+    - **Readout text (owner bug 2026-07-21).** The two lines below the pad must
+      be the SAME (small) font size — the pixel-dimension line was too large.
+      The megapixels reading is RIGHT-ALIGNED on the SAME line as the
+      dimensions (not wrapped onto its own second line): line 1 = `W x H`
+      (left) · `N.N MP` (right-aligned); line 2 = the reduced aspect (e.g.
+      `3:2`), same small size, muted.
   - **Interaction:** drag anywhere on the pad to set the target — x maps to
     `width`, y to `height`, over a 64..`Grid max` range (node property,
     default **2048** — owner ask 2026-07-20). Dragging SNAPS to `multiple_of`
@@ -667,8 +697,9 @@ is the functional core WITHOUT the grid.
     the SAME pixels-per-unit so a square target (e.g. 1000×1000) plots as a
     square on the true 45° diagonal and the gridline cells are square — not
     rectangles. v0.15.0 mapped x over the full (wide) width and y over the
-    (short) height independently, distorting squares. Use a uniform scale
-    (a centered square plot region, side = min(plotW, plotH)) so the drag
+    (short) height independently, distorting squares. Uniform scale is now
+    automatic since the plot region is itself the full-width square (plotW ==
+    plotH == content width): one pixels-per-unit for both axes, so the drag
     space is visually true to the numbers.
   - **Display:** current-target dot + crosshair, live `W x H` label, reduced
     aspect (e.g. 3:2) + megapixels, subtle gridlines (every 512) and a faint
@@ -781,6 +812,31 @@ add; single batch-aware IMAGE input; disk-backed, survive-restart, NO cap.
   pattern) AND to ComfyUI clipspace (populate `node.images`/`imgs`); Ctrl+V
   on the selected node uploads the pasted image (`POST /upload/image`) and
   appends it (`POST /eps_image_grid/add`).
+- **Mac / insecure-context fixes (owner reports 2026-07-21, both fail ONLY on
+  his Mac; ComfyUI runs on his Windows PC and the Mac views it over
+  `http://<pc-ip>` — plain http, so `window.isSecureContext === false`
+  there):**
+  - **"Copy Image" missing on the Mac (only "Copy (Clipspace)" shows).** Core's
+    OS-clipboard copy uses `navigator.clipboard.write([ClipboardItem])`, which
+    is `[SecureContext]`-gated — `ClipboardItem` is `undefined` on insecure
+    origins, so core omits its own menu item; "Copy (Clipspace)" survives
+    because it never touches the Clipboard API. This is a BROWSER security
+    boundary, not fixable — you cannot put a binary image on the OS clipboard
+    from insecure http. The node adds its OWN "Copy image" item that does the
+    real OS copy when a secure context exists, and otherwise DEGRADES: copies
+    the image's `/view` URL as text (`execCommand('copy')`, no secure-context
+    requirement) + opens it in a new tab (for the browser's native Copy Image)
+    + a toast explaining. "Copy (Clipspace)" stays the identical-everywhere
+    path. The wrap of `getExtraMenuOptions` is per-instance (guard flag), the
+    same idiom as `installPasteFiles`.
+  - **Undo "clears" the grid on the Mac (fine on the PC).** `setNodeImagesFromRefs`
+    sets each `Image.src` and every caller repaints ONCE, immediately —
+    before the `/view` images finish loading over the LAN. Litegraph only
+    repaints a layer whose dirty flag is set, so an image that arrives after
+    that one repaint never shows until something else dirties the canvas. Fix
+    = litegraph's own `loadImage()` idiom: each image's `onload` calls
+    `setDirtyCanvas(true, true)`, so the slowest image still gets a final
+    correct paint. Correct for any client; only a slow/remote one shows the bug.
 - **Milestones:** M1 = collect/emit + buffer + fan-out + free grid + Clear +
   identity/dedup; M2 = copy/paste (both targets) + Ctrl+V add; M3 = buffer
   management (per-image remove, count, reorder, batch-count guard). No cap in

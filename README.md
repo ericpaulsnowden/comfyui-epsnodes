@@ -82,14 +82,18 @@ whole configurations ("states") in and out of it:
 
 - **Two-pane layout** (like the Prompt Notebook): a scrolling list of all
   your saved states on the left, the buttons stacked on the right.
-- **Clicking a state applies it.** The list *is* the switch: click a state
-  and the target loader's rows snap to it — count, order, toggles,
-  strengths. (Reloading a saved workflow never re-applies; only a real click
-  does.)
+- **One click selects, a second click applies.** A single click just
+  *selects* a state (highlights it, loads its name) — it does **not** touch
+  your loaders, so you can safely rename or delete a state without rewriting
+  every wired loader. Clicking the already-selected state again applies it:
+  the target's rows snap to it — count, order, toggles, strengths. (Reloading
+  a saved workflow never re-applies; only that second click does.)
 - **New State** captures the loader's current rows into a named state
-  file; **Save State** overwrites the selected state with the current
-  rows; **Delete State** removes it (two-click "Are you sure?" confirm —
-  the armed button turns red).
+  file; **Save State** overwrites the selected state with the current rows —
+  **unless you've typed a new name in the field, in which case it saves a
+  brand-new state under that name** (the quickest way to spin a variant off an
+  existing state); **Delete State** removes it (two-click "Are you sure?"
+  confirm — the armed button turns red).
 - **Multi-loader targeting:** with two or more Power Lora Loaders in the
   graph (WAN high/low noise, for example) the target dropdown offers
   `All Power Lora Loaders (N)`. With `All` selected, a state stores **each
@@ -177,15 +181,18 @@ off means three runs.
 mode, and get back the resized image **and** the original, plus both sets of
 dimensions. It replaces a resize node + a reroute + a get-image-size node.
 
-- **The size grid:** a drag pad right on the node — drag anywhere and
-  `width`/`height` follow, snapping to `multiple_of` (or 64 when it's off).
-  Drag the node taller and the pad grows to fill it, for finer control.
-  Hold **Shift** for a 1:1 square, **Ctrl/Cmd** to keep the aspect ratio the
-  box had when you started dragging. The pad is square, so a 1:1 target sits
-  on the diagonal. The
-  typed fields and the grid stay in sync (edit either), a live readout shows
-  `W x H`, the reduced aspect (3:2) and megapixels, and right-click
-  Properties offers `Grid max` (range) and `Show grid` (hide the pad
+- **The size grid:** a full-width square drag pad right on the node — drag
+  anywhere and `width`/`height` follow, snapping to `multiple_of` (or 64 when
+  it's off). The pad is locked to the node's left and right edges (no wasted
+  space beside it), and it's a true square, so a 1:1 target sits on the
+  diagonal. **Make it bigger by dragging the node wider** — the square (and the
+  node's height) grow to match; narrow the node and it shrinks back. Hold
+  **Shift** for a 1:1 square, **Ctrl/Cmd** to keep the aspect ratio the box had
+  when you started dragging. The typed fields and the grid stay in sync (edit
+  either); a compact readout under the pad shows `W x H` with the megapixels
+  right-aligned on the same line and the reduced aspect (3:2) below it, and
+  right-click Properties offers `Grid max` (range) and `Show grid` (hide the
+  pad
   entirely if you only want the numbers).
 - **Four resize modes:** `stretch`, `keep aspect (fit)`, `crop to fill`,
   and `pad` (black), with a choice of interpolation. `multiple_of` snaps the
@@ -221,10 +228,17 @@ times to gather images, then send the whole set through a workflow at once.
   folder, keyed to that node), so it's still there after you close and reopen
   ComfyUI. A **Clear** button wipes it; deleting the node abandons it. No cap.
 - Each node keeps its own independent buffer, even after copy/paste.
-- **Copy/paste:** right-click a collected image → Copy Image (to the OS
+- **Copy/paste:** right-click a collected image → Copy image (to the OS
   clipboard, for Photoshop/etc.) or Copy (Clipspace) (into the mask editor or
   another node); and with the node selected, **Ctrl+V** an image to add it to
   the buffer.
+  - *Viewing ComfyUI on another machine over plain `http://` (e.g. a Mac
+    pointed at a PC's LAN address)?* Browsers block writing an image to the OS
+    clipboard outside a "secure context", so **Copy image** can't reach the OS
+    clipboard there — it falls back to copying the image's link and opening it
+    in a new tab (right-click → Copy Image there for a true copy), and tells
+    you so. **Copy (Clipspace)** works everywhere. For real OS image-copy, use
+    the ComfyUI desktop app or open ComfyUI via `localhost`/`https`.
 
 ## EPS Frame Saver (shipped)
 

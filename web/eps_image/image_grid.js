@@ -297,6 +297,64 @@
  * grid until you switch tabs" report; `setDirtyCanvas` still repaints
  * immediately, no tab round-trip required.
  *
+ * ---- Mac-only fixes 2026-07-21: Copy Image (insecure context) +
+ * late-image repaint ----
+ *
+ * Two more owner reports, both reproducible ONLY on Eric's Mac. Ground
+ * truth for both: ComfyUI runs on Eric's Windows PC; the Mac reaches it
+ * over the LAN at `http://<pc-ip>:8188` -- plain http, never `localhost` --
+ * so `window.isSecureContext` is `false` there. Both machines load the
+ * exact SAME frontend build (served by the PC), so a PC-vs-Mac difference
+ * can only come from the browser/network, never from different code.
+ * Neither fix below could be driven live from this session -- the shared
+ * verification rig is localhost-only on a different frontend build, so it
+ * cannot reproduce either bug by construction -- both need Eric's actual
+ * Mac to confirm.
+ *
+ * 1. **"On the Mac I only see Copy (Clipspace), not Copy Image."**
+ *    Mechanism confirmed against frontend SOURCE, not guessed (see
+ *    `canUseOsClipboardImage`'s docstring below for exact file/line
+ *    citations): core's "Copy Image" menu item feature-detects
+ *    `window.ClipboardItem` and silently omits itself when that's
+ *    `undefined` -- which the Clipboard API spec makes true for ANY
+ *    insecure context, not just a broken/old browser. "Copy (Clipspace)"
+ *    has no such gate (it never touches the Clipboard API, only internal
+ *    `node.imgs` bookkeeping), so it alone survives -- exactly the split
+ *    reported. This is a BROWSER security boundary, not a ComfyUI or pack
+ *    bug, and it cannot be bypassed from here -- only gracefully degraded
+ *    around. Fix: `installCopyImageMenuItem` below adds an
+ *    EPSImageGrid-owned "Copy image" item (wrapping, never replacing, this
+ *    node's `getExtraMenuOptions` -- the same per-instance idiom
+ *    `installPasteFiles`/`installConfigureRefresh` already use) that does
+ *    the real OS-clipboard copy when the APIs exist, and otherwise copies
+ *    the image's URL as text (`document.execCommand('copy')`, which has no
+ *    secure-context requirement) and opens the image in a new tab for a
+ *    native browser-level "Copy Image" -- plus a toast that says plainly
+ *    why a true OS image-copy isn't happening. "Copy (Clipspace)" remains
+ *    the one path that's identical in every context.
+ * 2. **"Undo still clears the grid preview on the Mac, works fine on the
+ *    PC."** `setNodeImagesFromRefs` (backing every refresh/paste-add path
+ *    above) sets each new `Image`'s `.src` and returns immediately --
+ *    decoding is always async -- and every caller repaints exactly ONCE,
+ *    right away. Confirmed in litegraph source: the render loop
+ *    (`LGraphCanvas.ts`'s `startRendering`) calls `draw()` every animation
+ *    frame unconditionally, but `draw()` itself only repaints a layer when
+ *    its `dirty_canvas`/`dirty_bgcanvas` flag is set -- an image that
+ *    finishes loading AFTER that one repaint call never appears until
+ *    something ELSE marks the canvas dirty. On localhost (the PC) these
+ *    `/view` fetches are done before that repaint even happens; over the
+ *    Mac's LAN hop to the PC they routinely aren't -- reproducing exactly
+ *    as "the grid cleared and never came back" (nothing else touches this
+ *    node's canvas once an undo settles). The fix is litegraph's OWN
+ *    established idiom for this exact problem -- `LGraphNode.prototype.
+ *    loadImage()` already repaints from the image's own `load` event, not
+ *    from the moment `.src` was set -- so `setNodeImagesFromRefs` now does
+ *    the same for every image it creates. Whichever image is slowest to
+ *    arrive is also the one that gets the canvas its final, correct paint.
+ *    Correct and cheap for ANY client, not only a slow one, so it's
+ *    included even though only Eric's Mac can fully confirm it firing
+ *    fixes the report.
+ *
  * ---- Clear button ----
  *
  * A plain `addWidget('button', ...)` (not a DOM widget — no layout beyond a
@@ -316,6 +374,7 @@ import { app } from '../../../scripts/app.js'
 
 const CLASS_ID = 'EPSImageGrid'
 const PREFIX = '[eps_image:image_grid]'
+const NODE_TITLE = 'EPS Image Grid' // FORMAT.md §6.6 display name -- toast summaries only.
 const GRID_UUID_WIDGET_NAME = 'grid_uuid'
 const CLEAR_BUTTON_LABEL = 'Clear'
 const UUID_PROPERTY_NAME = 'uuid'
@@ -637,6 +696,30 @@ function imageUrlForRef(ref) {
  * empty case, and with `refreshFromBuffer` below (the 2026-07-20 display-
  * on-load/undo fix) -- every caller hands it the SAME ref shape, so a
  * load-triggered refresh renders identically to a just-added image.
+ *
+ * Repaint-on-load (Mac-only fix 2026-07-21, see file header for the full
+ * writeup): setting `.src` starts an async fetch+decode and returns
+ * immediately -- every caller here repaints ONCE, right after this
+ * function returns, long before any of these images can possibly have
+ * finished loading over a slow/remote connection. Litegraph's own render
+ * loop redraws every animation frame regardless (`LGraphCanvas.ts`'s
+ * `startRendering`/`draw()`), but only actually REPAINTS a layer when its
+ * `dirty_canvas`/`dirty_bgcanvas` flag is set -- confirmed in source, not
+ * assumed -- so an image that finishes loading AFTER that one repaint
+ * never appears until something ELSE marks the canvas dirty (switching
+ * tabs, moving the node, undoing again...). On localhost this race is
+ * invisible (images load fast enough to already be ready at that one
+ * repaint); over the Mac's LAN link to the PC they routinely aren't, which
+ * is the "undo clears the grid" report. Each image's own `onload` now
+ * repaints individually -- the same idiom litegraph's own
+ * `LGraphNode.prototype.loadImage()` helper already uses for exactly this
+ * problem (`this.setDirtyCanvas(true)` from the image's own `load`
+ * listener) -- so whichever image is slowest to arrive is also the one
+ * that gets the canvas its final, correct paint, independent of how the
+ * rest finished. Correct and cheap for ANY client, including a fast one
+ * (an extra repaint of an already-correct canvas is a no-op visually);
+ * `onerror` only logs -- a broken thumbnail must not repeatedly retrigger
+ * anything.
  */
 function setNodeImagesFromRefs(node, refs) {
   if (!refs || !refs.length) {
@@ -647,6 +730,11 @@ function setNodeImagesFromRefs(node, refs) {
   }
   const imgs = refs.map((ref) => {
     const img = new Image()
+    // Listeners attached BEFORE `.src` (belt-and-suspenders -- image loads
+    // are always async in every real browser, so ordering can't actually
+    // matter, but this matches the safer convention).
+    img.onload = () => node.setDirtyCanvas(true, true)
+    img.onerror = () => console.warn(PREFIX, `image failed to load: ${ref.filename}`)
     img.src = imageUrlForRef(ref)
     return img
   })
@@ -746,6 +834,271 @@ function installPasteFiles(node) {
   node.pasteFiles = (files) => {
     void addFilesToBuffer(node, files)
     return true
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Copy image (Mac-only fix 2026-07-21): OS-clipboard image copy needs a
+// secure context core doesn't have on Eric's Mac-over-LAN-http setup -- see
+// file header for the full writeup.
+// ---------------------------------------------------------------------------
+
+/**
+ * Whether the OS-clipboard image-copy path -- `navigator.clipboard.write([
+ * new ClipboardItem(...)])`, the exact mechanism core's own "Copy Image"
+ * menu item uses (`ComfyUI_frontend/src/services/litegraphService.ts`'s
+ * `getCopyImageOption`, inside `addNodeContextMenuHandler`) -- is actually
+ * usable in THIS browsing context. `Clipboard` and `ClipboardItem` are both
+ * `[SecureContext]` in the platform spec: outside a secure context
+ * (`https:`, or `localhost`/`127.0.0.1`/`file:`), `navigator.clipboard` and
+ * `window.ClipboardItem` don't merely reject -- they don't EXIST
+ * (`undefined`). Eric's Mac browses ComfyUI at `http://<pc-ip>:8188` (the
+ * Windows PC's LAN address) -- plain http, not localhost -- so
+ * `window.isSecureContext` is `false` there, `window.ClipboardItem` is
+ * `undefined`, and core's own item disappears with NO replacement
+ * (confirmed at the exact line: `if (typeof window.ClipboardItem ===
+ * 'undefined') return []`, `litegraphService.ts` line 634). "Copy
+ * (Clipspace)" keeps showing because it never touches the Clipboard API at
+ * all (`ComfyApp.copyToClipspace`, `scripts/app.ts`, line ~723 of
+ * `litegraphService.ts` for where it's added to the menu -- plain
+ * `node.imgs`/`node.images` bookkeeping) -- exactly the split the owner
+ * reported ("I only see Copy (Clipspace), not Copy Image").
+ *
+ * This is a BROWSER security boundary, not a ComfyUI or pack bug -- there
+ * is no way to put a binary image on the OS clipboard from an insecure
+ * origin, full stop. `installCopyImageMenuItem` below exists to degrade
+ * GRACEFULLY when this reads false, never to bypass it.
+ *
+ * Verified against a `ComfyUI_frontend` git checkout at 1.48.3 (this
+ * session's scratchpad) -- newer than both the rig's actually-installed
+ * `comfyui-frontend-package` 1.45.21 and Eric's real ComfyUI 0.28.1-paired
+ * build, so the exact line numbers above are NOT independently confirmed
+ * on either of those; the underlying Clipboard-API secure-context gate is
+ * a stable web-platform rule with no ComfyUI-version dependency, so it
+ * should hold regardless -- re-verify live on 0.28.1 if this citation ever
+ * looks wrong.
+ */
+function canUseOsClipboardImage() {
+  return (
+    typeof window !== 'undefined' &&
+    window.isSecureContext === true &&
+    typeof window.ClipboardItem !== 'undefined' &&
+    typeof navigator !== 'undefined' &&
+    typeof navigator.clipboard?.write === 'function'
+  )
+}
+
+/**
+ * The exact image core's OWN "Open/Copy/Save Image" items would target --
+ * mirrors `litegraphService.ts`'s `getExtraMenuOptions` resolution order
+ * precisely (a focused single image via `imageIndex`, else a merely-
+ * hovered one via `overIndex` while the grid view is showing) so this
+ * node's OWN "Copy image" item appears/targets in exactly the same
+ * circumstances core's would, never a surprise to someone used to core's
+ * behavior on other image nodes. Returns `null` when nothing resolves
+ * (e.g. the grid view with nothing hovered) -- callers must not offer a
+ * copy action with nothing to act on.
+ */
+function currentMenuImage(node) {
+  if (!node.imgs || !node.imgs.length) return null
+  let img = null
+  if (node.imageIndex != null) {
+    img = node.imgs[node.imageIndex]
+  } else if (node.overIndex != null) {
+    img = node.imgs[node.overIndex]
+  }
+  return img || null
+}
+
+/** *img*'s real `/view` URL with the `preview` resize hint stripped --
+ * matches core's own Open/Copy/Save Image handling (`litegraphService.ts`)
+ * so this targets the actual full asset, not a thumbnail-sized render.
+ * Works whether *img* came from this file's own `imageUrlForRef` (never
+ * has a `preview` param to begin with) or from a normal Run's `ui.images`
+ * (core's own thumbnail loading, which sometimes does) -- `URLSearchParams
+ * .delete` on an absent key is simply a no-op either way. */
+function fullImageUrl(img) {
+  const url = new URL(img.src)
+  url.searchParams.delete('preview')
+  return url
+}
+
+//: Per-node cooldown so a burst of clicks on the degraded path doesn't
+//: stack several identical toasts.
+const lastClipboardToastAt = new WeakMap()
+const CLIPBOARD_TOAST_COOLDOWN_MS = 4000
+
+/** Best-effort toast via this pack's established `app.extensionManager?.
+ * toast?.add?.(...)` convention (`resolution.js`'s `toast()`,
+ * `lora_library/controller.js`'s `_toast()`) -- never throws, falls back
+ * to `console.info` if the toast surface is missing on some older/newer
+ * frontend build. Debounced per node (*lastClipboardToastAt* above) so
+ * this reads as one calm explanation, not per-click spam. */
+function notifyClipboard(node, detail) {
+  const now = Date.now()
+  const last = lastClipboardToastAt.get(node) || 0
+  if (now - last < CLIPBOARD_TOAST_COOLDOWN_MS) return
+  lastClipboardToastAt.set(node, now)
+  try {
+    if (app.extensionManager?.toast?.add) {
+      app.extensionManager.toast.add({
+        severity: 'info',
+        summary: node.title || NODE_TITLE,
+        detail,
+        life: 6000
+      })
+      return
+    }
+  } catch (error) {
+    console.warn(PREFIX, 'toast failed', error)
+  }
+  console.info(PREFIX, detail)
+}
+
+/**
+ * Legacy copy-as-TEXT for an insecure context, where
+ * `navigator.clipboard.writeText` is EQUALLY unavailable (see
+ * `canUseOsClipboardImage`'s docstring -- the whole `navigator.clipboard`
+ * object is `[SecureContext]`, not just `.write`). A hidden, off-screen
+ * `<textarea>` + `document.execCommand('copy')` has no secure-context
+ * requirement -- it's the pre-Clipboard-API mechanism the modern API
+ * replaced, still supported everywhere. Mirrors ComfyUI's OWN fallback for
+ * this exact situation almost line for line (`ComfyUI_frontend/src/
+ * composables/useCopyToClipboard.ts`'s `legacyCopy()`) -- not a workaround
+ * invented for this pack, the same thing core reaches for when its own
+ * primary clipboard path fails. Unlike that version, this one also catches
+ * a THROWING `execCommand` (rather than letting it propagate) so a caller
+ * can still fall through to the new-tab fallback below even if this one
+ * fails outright, not just when it returns `false`.
+ */
+function copyTextViaExecCommand(text) {
+  const textarea = document.createElement('textarea')
+  textarea.setAttribute('readonly', '')
+  textarea.value = text
+  textarea.style.position = 'fixed'
+  textarea.style.left = '-9999px'
+  textarea.style.top = '-9999px'
+  document.body.appendChild(textarea)
+  textarea.select()
+  try {
+    return document.execCommand('copy')
+  } catch (error) {
+    return false
+  } finally {
+    textarea.remove()
+  }
+}
+
+/**
+ * OS-clipboard image copy -- the "normal path", only ever called after
+ * `canUseOsClipboardImage()` has confirmed the APIs exist. Fetches the
+ * image's own bytes (plain `fetch`, matching core's OWN
+ * `getCopyImageOption` exactly -- `/view` is a CORE route, not one of this
+ * pack's own, so there's no reason to route it through `api.fetchApi`) and
+ * hands them to `navigator.clipboard.write` as a `ClipboardItem`. Still
+ * wrapped in try/catch by the caller -- a secure context guarantees the
+ * API's PRESENCE, not that the write will succeed (the user can deny a
+ * clipboard permission prompt, etc).
+ */
+async function copyImageToOsClipboard(img) {
+  const url = fullImageUrl(img)
+  const response = await fetch(url)
+  if (!response.ok) throw new Error(`fetch failed (HTTP ${response.status})`)
+  const blob = await response.blob()
+  await navigator.clipboard.write([
+    new ClipboardItem({ [blob.type || 'image/png']: blob })
+  ])
+}
+
+/**
+ * Insecure-context degradation (the Mac case). Cannot put a binary image
+ * on the OS clipboard -- that's the browser's security boundary, not
+ * fixable from here (see `canUseOsClipboardImage`'s docstring) -- so
+ * instead this does the best available TWO things, independently,
+ * best-effort:
+ *   1. Copies the image's `/view` URL as TEXT (`copyTextViaExecCommand`
+ *      above) -- at least something lands on the OS clipboard.
+ *   2. Opens the image in a new browser tab, where the BROWSER's OWN
+ *      native "Copy Image" (no ComfyUI/secure-context dependency at all)
+ *      is available on the image itself.
+ * Deliberately fully SYNCHRONOUS (no `await` before `window.open`) so the
+ * call stays inside the same user-gesture the menu click provides --
+ * anything async first risks the browser treating the tab-open as an
+ * unrequested popup and blocking it. A toast always explains why this
+ * isn't a real OS image-copy -- never pretend to fix what the browser
+ * forbids; "Copy (Clipspace)" remains the one path that works identically
+ * in every context, because it never touches the OS clipboard at all.
+ */
+function degradedCopyImage(node, img) {
+  const url = fullImageUrl(img)
+  const textCopied = copyTextViaExecCommand(url.toString())
+  window.open(url.toString(), '_blank', 'noopener')
+  notifyClipboard(
+    node,
+    (textCopied
+      ? 'Copied the image link (opened it in a new tab too). '
+      : 'Opened the image in a new tab. ') +
+      'A real OS image-copy needs a secure context (https, or localhost) -- ' +
+      'browsers block it over plain http on a LAN address. In the new tab, ' +
+      'right-click the image and choose "Copy Image" for a true OS-' +
+      'clipboard copy, or use "Copy (Clipspace)" to stay inside ComfyUI.'
+  )
+}
+
+/**
+ * Installs an EPSImageGrid-owned "Copy image" context-menu item, WRAPPING
+ * (never replacing) whatever `getExtraMenuOptions` this node instance
+ * already has -- core's own generic per-CLASS handler
+ * (`litegraphService.ts`'s `addNodeContextMenuHandler`, installed on the
+ * node CLASS's prototype during registration, before any instance exists),
+ * so calling it here still runs core's own Open/Copy/Save/Bypass/Clipspace
+ * items first, unchanged. Assigning `node.getExtraMenuOptions` creates an
+ * OWN, instance-level property that shadows the inherited prototype method
+ * for THIS node only (confirmed at the call site, `LGraphCanvas.ts`:
+ * `node.getExtraMenuOptions?.(this, options)` -- a plain method call,
+ * resolved per-instance) -- the identical "wrap, don't replace" idiom
+ * `installPasteFiles`/`installConfigureRefresh` already use elsewhere in
+ * this file, so no other node type or instance is ever affected.
+ *
+ * Always adds the item when there's an image to target (`currentMenuImage`
+ * above); the callback branches on `canUseOsClipboardImage()` at CLICK
+ * time (not once at menu-build time) since a browser's secure-context
+ * status cannot change between one right-click and the next, but checking
+ * fresh costs nothing and avoids any risk of a stale cached read. See
+ * `copyImageToOsClipboard`/`degradedCopyImage` above for the two branches.
+ *
+ * Guarded by `node.__epsGridCopyMenuInstalled` (a plain instance flag,
+ * mirroring `installConfigureRefresh`'s `__epsGridConfigureWrapped`) so
+ * this wrap can only ever be installed once per node instance -- avoids a
+ * chain of stacked wrappers (each adding its own duplicate menu item) if
+ * anything ever re-triggers node setup for the same live instance; `attach`
+ * already guards against that via `attachedNodes`, this is belt-and-
+ * suspenders for the one thing that would visibly regress if it happened.
+ */
+function installCopyImageMenuItem(node) {
+  if (node.__epsGridCopyMenuInstalled) return
+  node.__epsGridCopyMenuInstalled = true
+
+  const original = node.getExtraMenuOptions
+  node.getExtraMenuOptions = function (canvas, options) {
+    const result = original ? original.call(this, canvas, options) : undefined
+    const img = currentMenuImage(node)
+    if (img) {
+      options.push({
+        content: 'Copy image',
+        callback: () => {
+          if (canUseOsClipboardImage()) {
+            copyImageToOsClipboard(img).catch((error) => {
+              console.warn(PREFIX, 'OS clipboard image copy failed', error)
+              notifyClipboard(node, `Copy image failed: ${error?.message || error}`)
+            })
+          } else {
+            degradedCopyImage(node, img)
+          }
+        }
+      })
+    }
+    return result
   }
 }
 
@@ -933,6 +1286,7 @@ export function attach(node) {
     hideGridUuidWidget(node)
     addClearButton(node)
     installPasteFiles(node)
+    installCopyImageMenuItem(node) // Mac-over-LAN-http Copy Image fix -- see its own docstring
     installConfigureRefresh(node) // undo/redo display fix -- see its own docstring
     // Makes `isImageNode(node)` (litegraphUtil.ts) true even before
     // anything has ever been collected, so a real Ctrl+V onto a

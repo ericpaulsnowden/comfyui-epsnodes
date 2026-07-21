@@ -269,15 +269,18 @@
  * `llsc-` class prefix (vs. Notebook's `llnb-`) so the two style sheets
  * never collide in the shared `document.head`.
  *
- * Clicking a list row IS the apply, unconditionally, even on the
- * already-selected row (FORMAT.md §6.3 — the exact semantics the combo had
- * per the 2026-07-19/2026-07-19c strength-persistence fixes above) —
- * because the row's click handler calls `_onSetPicked(entry.label)`
- * DIRECTLY, the very same method the old `LiteGraph.ContextMenu` callback
- * invoked, completely UNMODIFIED by this change (see its doc comment, only
- * re-worded to name the new caller — the body is byte-identical). There is
- * still no same-value branch anywhere in that path, so a re-click re-applies
- * exactly like a click on a different row. This is a STRENGTHENING of the
+ * Row-click semantics as FIRST built that day: clicking a list row WAS the
+ * apply, unconditionally, even on the already-selected row (the exact
+ * semantics the combo had per the 2026-07-19/2026-07-19c strength-
+ * persistence fixes above) — SUPERSEDED the SAME DAY by the owner's
+ * select-vs-apply split; see the 2026-07-21b section below for the
+ * two-step semantics `_onSetPicked()` implements now. What this paragraph
+ * still accurately records is the CLICK PLUMBING, which the split did not
+ * change: the row's plain DOM `click` handler calls `_onSetPicked(entry.
+ * label)` directly, and the APPLY branch inside it still reaches
+ * `_onSetSelected()`/`_doApply()` with no same-value branch anywhere in
+ * the path — an apply-click on the already-showing state re-applies
+ * exactly like the old combo pick did. This is a STRENGTHENING of the
  * 2026-07-19c hardening's own goal, not just a UI change:
  * `_hookSetWidgetMenu()`/`_openSetMenu()` are REMOVED OUTRIGHT this round
  * (not merely superseded — there is no combo left to hook a click onto),
@@ -361,6 +364,91 @@
  * reference the `set` widget's TYPE or the removed menu functions at all,
  * so none of them needed to change for this redesign to be, per the task's
  * own framing, "a UI swap, not a behavior change."
+ *
+ * 2026-07-21b (owner feedback on the same-day two-pane build; FORMAT.md
+ * §6.3 "Select vs. apply are SEPARATE clicks" + "Save State honors a
+ * changed name" — both amended there the same day). Two behavior changes,
+ * nothing else:
+ *
+ * (A) SELECT vs APPLY split (owner: "We should now have it be a second
+ * click to activate. Single click to select in case a user wants to update
+ * a name or delete without changing all of the nodes."). A SINGLE click on
+ * a list row now only SELECTS it — `_selectEntry()`: `_selectedSlug`, the
+ * hidden serialized `set` widget + highlight repaint (both via
+ * `_setSetValueSilently()`), and the `name` field loaded with the state's
+ * own name (`entryDisplayName()` — the NAME, never the `.label`, whose
+ * dedup "(slug)" suffix must not leak into the field and read as a rename)
+ * — and provably cannot touch a loader: the select branch of
+ * `_onSetPicked()` never reaches `_onSetSelected()`/`_doApply()`, and that
+ * pair now has NO caller other than the apply branch. Applying is the
+ * SECOND click — a click on the row that is ALREADY the current selection,
+ * which is also exactly what the second click of a double-click is by the
+ * time it lands. That branch keeps the old guarantee verbatim:
+ * unconditional `_onSetSelected()` -> `_doApply()`, no same-value branch,
+ * so re-applying the already-showing state still force-re-pushes strengths
+ * (the 2026-07-19/19c fixes, unchanged). MECHANISM — ONE plain `click`
+ * listener branching on "is this row the current selection?" (slug-
+ * anchored via `_selectedSetEntry()`, the same label-drift-proof
+ * resolution the delete confirm relies on), deliberately NOT a `dblclick`
+ * listener: (1) a double-click's two presses arrive as two ordinary
+ * `click` events — the first lands on a not-yet-selected row and selects,
+ * the second lands on the now-selected row and applies — so double-click
+ * works with zero double-click-specific code; (2) a `dblclick` listener ON
+ * TOP of that would double-fire the apply (dblclick follows the second
+ * click, which already applied); (3) FORMAT.md §6.3 spells the trigger as
+ * "a double-click, or a click on the row that is already highlighted" —
+ * the latter has no dblclick timing window at all (select now, apply
+ * minutes later still applies; likewise the highlight RESTORED from a
+ * saved workflow applies on its first click, by design). The mid-double-
+ * click list rebuild is safe: click #1's re-render runs synchronously
+ * inside its own handler (long before the second press can physically
+ * land), and rebuilds the same rows in the same geometry (only classes
+ * change — the active row's bold/border shifts no layout), so click #2's
+ * mousedown+mouseup both land on the fresh row element carrying the same
+ * listener and compose a normal `click` on it. Keyboard parity: Enter/
+ * Space run the same two-step handler, and `_renderStateList()` now
+ * restores focus (by row `data-slug`, `preventScroll: true`) onto the
+ * rebuilt row — without that, the select-branch rebuild would drop focus
+ * on the floor and a keyboard user could never deliver the second Enter;
+ * it also stops the background sets-poll (`_applySetsResponse()` ->
+ * `_renderStateList()`) from eating list focus mid-Tab. Any selection
+ * MOVEMENT still disarms a pending delete-confirm (`_selectEntry()` keeps
+ * `_onSetPicked()`'s old disarm and extends it to every selection write):
+ * `_doDelete()` deletes whatever `_selectedSetEntry()` resolves at confirm
+ * time, so a selection allowed to move under an armed button would aim the
+ * confirm at the WRONG state. Restore round-trip is UNCHANGED: workflow
+ * restore still writes the hidden widget via `configure()`'s plain
+ * `.value =` (never a DOM click), so a reopened workflow shows its saved
+ * selection highlighted without applying anything.
+ *
+ * (B) SAVE STATE HONORS A CHANGED NAME (owner: "Save does not save a new
+ * name if one of the elements is selected and the name has changed. This
+ * is key for creating new items."). `_saveAsNewName()` decides once per
+ * Save, up front in `_doUpdate()` (shared with `_updateComposite()`): the
+ * trimmed `name` field, when non-empty AND different from the selected
+ * entry's own name, makes this Save a SAVE-AS-NEW — the SAME
+ * `POST /lora_library/set` route in its NO-SLUG form (the exact create
+ * path `New State`/`_doCapture()` has always used; routes_sets.py
+ * `post_set` derives the slug from the new name and `sets_store.
+ * _unique_slug` de-duplicates it against existing files, so a new name
+ * that happens to collide with some OTHER state's name mints a fresh file
+ * rather than overwriting that state) — then selects the newly created
+ * state and toasts with the create verb ("Saved"), read-back included.
+ * Rows are the CURRENT capture either way (Save has always been a
+ * re-capture); trigger_words/notes are inherited from the SELECTED state
+ * (the same best-effort GET the overwrite path already did) — a spun-off
+ * variant keeps its parent's metadata rather than silently blanking it;
+ * only the name and slug are new. An UNCHANGED or EMPTY field is the
+ * byte-identical pre-existing overwrite (empty never means "rename to
+ * empty" — the field simply doesn't participate, exactly as every Save
+ * before this rule; it also means the post-New-State field state stays
+ * benign). `New State` itself is unchanged, including its field-clearing
+ * epilogue: `_doCapture()`/`_captureComposite()`'s explicit
+ * `name.value = ''` deliberately runs AFTER `_selectSetBySlug()` (which
+ * now loads the new state's name into the field via `_selectEntry()`), so
+ * New State still ends with an empty field — typing a name and pressing
+ * New State twice still yields one named state plus one auto-named
+ * "State N", never two same-named copies.
  *
  * This file binds to rgthree internals it does not own. Every binding is
  * cited below with the exact file + lines read (rgthree-comfy's COMPILED
@@ -1465,6 +1553,20 @@ function el(tag, options = {}, children = []) {
   return node
 }
 
+/**
+ * The human name a `_setsCache` entry answers to — what `_selectEntry()`
+ * loads into the `name` field on select and what `_saveAsNewName()`
+ * compares that field against (FORMAT.md §6.3, 2026-07-21b). `name` with a
+ * `slug` fallback, mirroring `_applySetsResponse()`'s own `s.name ||
+ * s.slug` label seed — deliberately NOT `.label`, which can carry a dedup
+ * "(slug)" suffix: a suffixed label loaded into the field would compare
+ * unequal to the entry's real name on the very next Save and mint a bogus
+ * copy named after the suffix.
+ */
+function entryDisplayName(entry) {
+  return entry?.name || entry?.slug || ''
+}
+
 // ------------------------------------------------------------ node registration
 
 /**
@@ -1764,6 +1866,17 @@ export function registerControllerNode() {
       _renderStateList() {
         const listEl = this._pane?.listEl
         if (!listEl) return
+        // 2026-07-21b keyboard parity (file header, section A): this rebuild
+        // replaces every row ELEMENT, which would silently drop focus to
+        // <body> if it sat on a row — fatal for the two-step Enter flow (the
+        // select-branch rebuild would eat the focus the second Enter needs)
+        // and mildly hostile from the background sets-poll. Remember which
+        // row held focus (by its stable `data-slug`, not its label — labels
+        // can drift a dedup suffix between rebuilds) and put focus back on
+        // the rebuilt row; `preventScroll` so restoration never yanks the
+        // list's scroll position mid-interaction.
+        const focused = document.activeElement
+        const focusedSlug = focused && listEl.contains(focused) ? focused.getAttribute('data-slug') : null
         listEl.replaceChildren()
 
         if (!this._setsCache.length) {
@@ -1777,14 +1890,16 @@ export function registerControllerNode() {
           const row = el('div', {
             className: active ? 'llsc-row llsc-row-active' : 'llsc-row',
             text: entry.label,
-            attrs: { tabindex: '0', title: entry.label }
+            attrs: { tabindex: '0', title: entry.label, 'data-slug': entry.slug }
           })
-          // Clicking a row IS the apply (FORMAT.md §6.3) — calls the SAME
-          // apply path the old combo's ContextMenu callback used
-          // (`_onSetPicked()`, unmodified by this redesign), unconditionally,
-          // so re-clicking the already-active row force-re-applies exactly
-          // like picking a different one. No litegraph widget internals
-          // involved at all — see the file header's 2026-07-21 section.
+          // FORMAT.md §6.3 select-vs-apply split (2026-07-21b): a click only
+          // SELECTS this row — unless it is already the current selection,
+          // in which case it APPLIES. Both steps live in `_onSetPicked()`,
+          // which branches on the current selection; see its doc comment
+          // for why ONE plain `click` listener (no `dblclick`) covers
+          // single-click select, double-click apply, AND click-the-already-
+          // highlighted-row apply. Still zero litegraph widget internals —
+          // the 2026-07-21 version-proofing argument holds unchanged.
           row.addEventListener('click', () => this._onSetPicked(entry.label))
           row.addEventListener('keydown', (event) => {
             if (event.key !== 'Enter' && event.key !== ' ') return
@@ -1792,6 +1907,7 @@ export function registerControllerNode() {
             this._onSetPicked(entry.label)
           })
           listEl.append(row)
+          if (focusedSlug && entry.slug === focusedSlug) row.focus({ preventScroll: true })
         }
       }
 
@@ -1962,25 +2078,52 @@ export function registerControllerNode() {
 
       _selectSetBySlug(slug) {
         const entry = this._setsCache.find((s) => s.slug === slug)
-        if (entry) {
-          this._selectedSlug = entry.slug
-          this._setSetValueSilently(entry.label)
-        }
+        if (entry) this._selectEntry(entry)
+      }
+
+      /**
+       * FORMAT.md §6.3 select-vs-apply split (2026-07-21b, file header
+       * section A): the ONE place a state becomes the current SELECTION,
+       * and everything selection now means — `_selectedSlug` (the
+       * drift-proof anchor `_selectedSetEntry()` falls back to), the hidden
+       * serialized `set` widget + list-highlight repaint (via
+       * `_setSetValueSilently()`), the `name` field loaded with the state's
+       * own name (`entryDisplayName()` — the rename/spin-off flows both
+       * start from that, see `_saveAsNewName()`; `loadName: false` is the
+       * apply-reclick's way of NOT clobbering a name the user may already
+       * have typed for a save-as-new), and disarming any pending
+       * delete-confirm (moved here from `_onSetPicked()` so EVERY selection
+       * movement — a user click, a post-save/capture auto-select, delete's
+       * fallback — disarms, not just user picks: `_doDelete()` deletes
+       * whatever `_selectedSetEntry()` resolves at confirm time, so a
+       * selection allowed to move under an armed button would aim the
+       * confirm at the WRONG state; disarm is idempotent, so the call
+       * sites that already disarmed at click entry lose nothing). NEVER
+       * applies anything — apply lives exclusively in `_onSetPicked()`'s
+       * reclick branch, which is the split's whole point.
+       */
+      _selectEntry(entry, { loadName = true } = {}) {
+        this._selectedSlug = entry.slug
+        this._setSetValueSilently(entry.label)
+        if (loadName && this._w.name) this._w.name.value = entryDisplayName(entry)
+        this._disarmDeleteButton()
+        this.setDirtyCanvas(true, false)
       }
 
       /**
        * The ONLY sanctioned way to write `this._w.set.value` from our own
-       * code (Capture/Update select the newly-touched set; Delete falls
-       * back to whatever is now first) — AND, since the 2026-07-21 two-pane
-       * redesign, the one place that repaints the two-pane list's highlight
-       * (`_renderStateList()`), so every selection-changing call site gets
-       * that repaint for free instead of needing its own call. A plain,
-       * UNGUARDED `.value =` assignment (2026-07-19c: it no longer needs to
-       * "silently" suppress anything, since selection never goes through a
-       * combo's callback/setValue at all — now doubly true, since there is
-       * no combo left, only a hidden text widget and a DOM list with its own
-       * click handlers). Kept as a named helper purely for readability at
-       * call sites, not for a guard it used to need.
+       * code — every selection movement funnels through `_selectEntry()`
+       * above (its only caller besides `_doDelete()`'s emptied-library
+       * clear) — AND, since the 2026-07-21 two-pane redesign, the one place
+       * that repaints the two-pane list's highlight (`_renderStateList()`),
+       * so every selection-changing call site gets that repaint for free
+       * instead of needing its own call. A plain, UNGUARDED `.value =`
+       * assignment (2026-07-19c: it no longer needs to "silently" suppress
+       * anything, since selection never goes through a combo's
+       * callback/setValue at all — now doubly true, since there is no combo
+       * left, only a hidden text widget and a DOM list with its own click
+       * handlers). Kept as a named helper purely for readability at call
+       * sites, not for a guard it used to need.
        */
       _setSetValueSilently(label) {
         if (!this._w.set) return
@@ -2013,38 +2156,54 @@ export function registerControllerNode() {
       // -------------------------------------------------------- button actions
 
       /**
-       * FORMAT.md §6.3 TWO-PANE layout (2026-07-21): fired by a two-pane
-       * list row's plain `click`/`keydown` handler (`_renderStateList()`) —
-       * i.e. a REAL user pick, always (workflow restore only ever does a
-       * plain `.value =` assignment on the hidden `set` widget, never
-       * touching the DOM list at all — see the file header's 2026-07-21
-       * section). `label` is always one of `_setsCache`'s own `.label`
-       * strings (the row's text IS the label), so the lookup below by exact
-       * match always succeeds here. UNCHANGED since the 2026-07-19c
-       * ContextMenu design this replaces (only this doc comment names the
-       * new caller — the body below is byte-identical): runs apply
-       * UNCONDITIONALLY — there is no same-value branch anywhere in this
-       * path, so re-picking the state already showing re-applies exactly
-       * like picking a different one.
+       * FORMAT.md §6.3 select-vs-apply split (owner ask 2026-07-21b —
+       * supersedes this method's original click-IS-apply body; see the file
+       * header's section A). Fired by a two-pane list row's plain
+       * `click`/`keydown` handler (`_renderStateList()`) and by nothing
+       * else — workflow restore still only plain-assigns the hidden `set`
+       * widget's `.value` and can never get here. TWO-STEP:
+       *
+       *  - A click on a row that is NOT the current selection only SELECTS
+       *    it (`_selectEntry()` — highlight, hidden `set` widget, `name`
+       *    field, delete-confirm disarm) and provably cannot touch a
+       *    loader: this branch never reaches `_onSetSelected()`, whose only
+       *    caller is the branch below. Selecting to rename or delete no
+       *    longer rewrites every wired PLL.
+       *  - A click on the row that IS already the current selection — the
+       *    second click of a double-click, or a plain later click on the
+       *    highlighted row (including a highlight restored from a saved
+       *    workflow) — is the APPLY, and keeps the pre-split guarantee
+       *    intact: unconditional `_onSetSelected()` -> `_doApply()`, no
+       *    same-value branch anywhere, so re-applying the already-showing
+       *    state force-re-pushes strengths (2026-07-19/19c fixes).
+       *
+       * "Is the current selection" is slug-anchored through
+       * `_selectedSetEntry()` (label-drift-proof — the same resolution the
+       * delete confirm relies on), and the apply branch still runs
+       * `_selectEntry()` first (with `loadName: false`, so it can't clobber
+       * a typed save-as-new name) — a dedup-suffix label drift self-heals
+       * into the serialized widget instead of surviving until the next
+       * save. `label` is always one of `_setsCache`'s own `.label` strings
+       * (the row's text IS the label), so the exact-match lookup below
+       * always succeeds for a live row.
        */
       _onSetPicked(label) {
         this._guarded('set picked', () => {
           const entry = this._setsCache.find((s) => s.label === label)
           if (!entry) return
-          this._selectedSlug = entry.slug
-          this._setSetValueSilently(label)
-          this.setDirtyCanvas(true, false)
-          // A genuine user pick means any pending delete-confirm is now
-          // about a DIFFERENT entry than what's on screen — disarm rather
-          // than let a stale confirm click land on the old pick.
-          this._disarmDeleteButton()
-          this._onSetSelected()
+          const previous = this._selectedSetEntry()
+          const isApplyClick = !!previous && previous.slug === entry.slug
+          this._selectEntry(entry, { loadName: !isApplyClick })
+          if (isApplyClick) this._onSetSelected()
         })
       }
 
       /**
-       * Shared apply trigger, called only from `_onSetPicked()` above. Kept
-       * as its own method purely for the `_runAction` wrapping/naming in
+       * Shared apply trigger, called ONLY from `_onSetPicked()`'s
+       * apply/reclick branch since the 2026-07-21b select-vs-apply split —
+       * the select branch structurally cannot reach it, which is the
+       * split's "a single click never rewrites loaders" guarantee. Kept as
+       * its own method purely for the `_runAction` wrapping/naming in
        * toasts, not because multiple call sites need it (2026-07-19c: there
        * used to be more, back when the combo's own callback and the
        * setValue-reselect shim both funneled through here).
@@ -2292,6 +2451,13 @@ export function registerControllerNode() {
         this._applySetsResponse(response)
         announceSetsChanged()
         this._selectSetBySlug(response.slug)
+        // Deliberately AFTER _selectSetBySlug(): selecting now loads the
+        // selected state's name into the `name` field (2026-07-21b,
+        // `_selectEntry()`), and New State's contract is that the field
+        // ends EMPTY — owner: New State "keeps working as before" — so this
+        // explicit clear must have the last word. (Pressing New State again
+        // right away therefore still auto-names "State N" instead of
+        // minting a same-named copy.)
         if (this._w.name) this._w.name.value = ''
         // FORMAT.md §6.3: "Show status" names the capture-source loader id +
         // row count on every capture/save.
@@ -2331,6 +2497,8 @@ export function registerControllerNode() {
         this._applySetsResponse(response)
         announceSetsChanged()
         this._selectSetBySlug(response.slug)
+        // Deliberately AFTER _selectSetBySlug() — same New State epilogue
+        // rule as _doCapture()'s, see the comment there (2026-07-21b).
         if (this._w.name) this._w.name.value = ''
         this._setStatusText(
           `Captured ${targets.length} loaders: ` +
@@ -2341,12 +2509,45 @@ export function registerControllerNode() {
       }
 
       /**
+       * FORMAT.md §6.3 "Save State honors a changed name" (owner bug
+       * 2026-07-21b — file header, section B): the NEW name this Save
+       * should CREATE a state under, or `null` for the plain
+       * overwrite-the-selected-state save. Non-null iff the trimmed `name`
+       * field holds a non-empty value that differs from the selected
+       * entry's own name (`entryDisplayName()` — the same string
+       * `_selectEntry()` loads into the field on select, so "unchanged"
+       * means exactly "the user didn't edit what selecting put there"). An
+       * EMPTY field never means "rename to empty": it keeps the overwrite
+       * byte-identical to every Save before this rule — the field simply
+       * doesn't participate — which also keeps the post-New-State state
+       * (selection set, field deliberately cleared) saving benignly.
+       */
+      _saveAsNewName(entry) {
+        const typed = (this._w.name?.value || '').trim()
+        if (!typed || typed === entryDisplayName(entry)) return null
+        return typed
+      }
+
+      /**
        * Same lowest-node-id source rule as _doCapture() — Update is a
        * re-capture. 2026-07-20 §4.1 composite extension: same
        * `targets.length > 1` guard/split as `_doCapture()` — see that
        * method's doc comment for why that can only mean "All Power Lora
        * Loaders (N)", N>=2, and why the single-target path below is
        * otherwise untouched by this addition.
+       *
+       * 2026-07-21b "Save State honors a changed name" (file header,
+       * section B): `_saveAsNewName()` decides ONCE, up front — shared by
+       * the single-target path below and `_updateComposite()` — whether
+       * this Save OVERWRITES the selected state (field empty/unchanged: the
+       * exact pre-existing slug'd POST) or CREATES a new state under the
+       * field's value (the no-slug form of the SAME POST /lora_library/set
+       * route `New State` uses — same backend save path, same per-state
+       * JSON files, slug de-duplicated server-side) and then selects the
+       * newly created state. Either way the rows are the CURRENT capture,
+       * and trigger_words/notes come from the selected state's file (a
+       * spin-off inherits its parent's metadata; the overwrite preserves
+       * its own — one GET serves both).
        */
       async _doUpdate() {
         const targets = resolveTargetNodes(this._w.target?.value)
@@ -2360,16 +2561,20 @@ export function registerControllerNode() {
           this._toast('warn', NODE_TITLE, 'Pick a saved state first.')
           return
         }
+        const newName = this._saveAsNewName(entry)
 
         if (targets.length > 1) {
-          await this._updateComposite(targets, entry)
+          await this._updateComposite(targets, entry, newName)
           return
         }
 
         const source = targets[0]
         const loras = await captureRows(source, { debugCapture: !!this.properties[PROP_DEBUG_CAPTURE] })
         // Preserve the existing name/trigger_words/notes; only the rows
-        // change on "Update" — best-effort GET, falls back to rows-only.
+        // change on a plain overwrite — best-effort GET, falls back to
+        // rows-only. The save-as-new path (2026-07-21b) reuses the same GET
+        // for trigger_words/notes: a spun-off state inherits the selected
+        // state's metadata, just never its name or slug.
         let name = entry.name
         let trigger_words = ''
         let notes = ''
@@ -2381,13 +2586,15 @@ export function registerControllerNode() {
         } catch (error) {
           api.warn(`${NODE_TITLE}: could not read existing set before update; overwriting rows only`, error)
         }
-        const response = await api.postJson('/lora_library/set', {
-          slug: entry.slug,
-          set: { format: 1, name, loras, trigger_words, notes }
-        })
+        const set = { format: 1, name: newName ?? name, loras, trigger_words, notes }
+        // 2026-07-21b: a changed name posts the NO-SLUG create form (see
+        // `_doUpdate()`'s doc comment); unchanged/empty posts the exact
+        // pre-existing overwrite, `entry.slug` and all.
+        const response = await api.postJson('/lora_library/set', newName ? { set } : { slug: entry.slug, set })
+        const savedSlug = newName ? response.slug : entry.slug
         this._applySetsResponse(response)
         announceSetsChanged()
-        this._selectSetBySlug(entry.slug)
+        this._selectSetBySlug(savedSlug)
         // FORMAT.md §6.3 strength-persistence fix, cause A (unchanged by
         // 2026-07-19c): re-apply the just-saved rows to every target
         // immediately, unconditionally. Redundant for the single-target
@@ -2407,7 +2614,9 @@ export function registerControllerNode() {
         this._setStatusText(
           `Captured ${loras.length} row${loras.length === 1 ? '' : 's'} from ${source.title || source.type} #${source.id}.`
         )
-        await this._toastRowsSaved('Updated', entry.slug, '')
+        // "Saved" is the create verb (`_doCapture()`'s), "Updated" the
+        // overwrite verb — the read-back toast names which one happened.
+        await this._toastRowsSaved(newName ? 'Saved' : 'Updated', savedSlug, '')
       }
 
       /**
@@ -2417,8 +2626,14 @@ export function registerControllerNode() {
        * rule the single-target half of `_doUpdate()` already follows;
        * preserves the existing name/trigger_words/notes exactly like that
        * single-target path (best-effort GET, falls back to rows-only).
+       * 2026-07-21b: `newName` (decided by `_doUpdate()`'s single up-front
+       * `_saveAsNewName()` call, passed through so both halves agree) flips
+       * this to the no-slug CREATE form of the same POST — a format-2
+       * save-as-new — mirroring the single-target path exactly: new
+       * name/slug, current rows, inherited trigger_words/notes, then select
+       * the new state.
        */
-      async _updateComposite(targets, entry) {
+      async _updateComposite(targets, entry, newName) {
         const debugCapture = !!this.properties[PROP_DEBUG_CAPTURE]
         const loadersRows = []
         for (const node of targets) {
@@ -2437,16 +2652,17 @@ export function registerControllerNode() {
         }
         const set = {
           format: 2,
-          name,
+          name: newName ?? name,
           loaders: loadersRows.map((rows) => ({ loras: rows })),
           loras: loadersRows[0] || [],
           trigger_words,
           notes
         }
-        const response = await api.postJson('/lora_library/set', { slug: entry.slug, set })
+        const response = await api.postJson('/lora_library/set', newName ? { set } : { slug: entry.slug, set })
+        const savedSlug = newName ? response.slug : entry.slug
         this._applySetsResponse(response)
         announceSetsChanged()
-        this._selectSetBySlug(entry.slug)
+        this._selectSetBySlug(savedSlug)
         // Re-apply immediately — same rationale the single-target half
         // documents above (keeps every OTHER target in sync, makes Save
         // State visibly "take"); composite-aware apply (loaders[i] ->
@@ -2460,7 +2676,7 @@ export function registerControllerNode() {
             targets.map((_node, i) => `L${i} ${loadersRows[i].length} row${loadersRows[i].length === 1 ? '' : 's'}`).join(', ') +
             '.'
         )
-        await this._toastCompositeRowsSaved('Updated', entry.slug)
+        await this._toastCompositeRowsSaved(newName ? 'Saved' : 'Updated', savedSlug)
       }
 
       async _doDelete() {
@@ -2472,9 +2688,18 @@ export function registerControllerNode() {
         const response = await api.postJson('/lora_library/set/delete', { slug: entry.slug })
         this._applySetsResponse(response)
         announceSetsChanged()
+        // Selection falls back to the first remaining state — through
+        // `_selectEntry()` (2026-07-21b), so the `name` field follows the
+        // selection like every other selection movement; an emptied library
+        // clears all three (slug anchor, hidden widget, name field).
         const nextEntry = this._setsCache[0] || null
-        this._selectedSlug = nextEntry?.slug || null
-        this._setSetValueSilently(nextEntry?.label || '')
+        if (nextEntry) {
+          this._selectEntry(nextEntry)
+        } else {
+          this._selectedSlug = null
+          this._setSetValueSilently('')
+          if (this._w.name) this._w.name.value = ''
+        }
         this._toast('success', NODE_TITLE, `Deleted "${entry.name}".`)
       }
 
