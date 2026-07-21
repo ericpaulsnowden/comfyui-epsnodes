@@ -642,8 +642,15 @@ is the functional core WITHOUT the grid.
     implementation — the pack's proven Notebook / premiere-buttons pattern —
     which sidesteps exactly the dual-backend risk the roadmap flags for a
     canvas widget. Size it with the premiere lesson (widget
-    `computeSize = (w) => [w, H]` + `computedHeight` + explicit element
-    height) so it can never collapse to a sliver.
+    `computeSize` + `computedHeight` + explicit element height) so it can
+    never collapse to a sliver. **The pad FILLS the node (fix 2026-07-21,
+    owner-reported "too small"):** a floor of `GRID_MIN_H` (210) with NO
+    ceiling (`getMaxHeight → Infinity`, the Notebook's fill idiom), a live
+    `computeGridHeight = floor + max(0, node.size[1] − naturalMin)`, and an
+    `onResize` hook — so dragging the node taller grows the square pad
+    (easier fine navigation), and a manually-tall size survives reload
+    (grow-never-shrink on load); the centered-square math is unchanged, the
+    square just gets bigger.
   - **Interaction:** drag anywhere on the pad to set the target — x maps to
     `width`, y to `height`, over a 64..`Grid max` range (node property,
     default **2048** — owner ask 2026-07-20). Dragging SNAPS to `multiple_of`

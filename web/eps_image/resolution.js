@@ -95,17 +95,66 @@
  * renderer with one implementation — sidestepping the dual-backend risk a
  * canvas custom-widget would carry.
  *
- * Sizing follows the premiere-bridge lesson exactly (`nodes.js`'s
+ * Sizing started from the premiere-bridge lesson (`nodes.js`'s
  * `BAR_HEIGHT`/`attachBarWidget`, verified live there 2026-07-19):
  * `getMinHeight`/`getMaxHeight` ALONE are ignored for a small standalone DOM
  * widget on at least one rendering path, collapsing it to a ~7px sliver. The
- * robust fix sets all of: `domWidget.computeSize = (w) => [w, H]`,
- * `domWidget.computedHeight = H`, AND the element's own `style.height`/
- * `minHeight` — belt-and-suspenders, all four (plus `getMinHeight`/
- * `getMaxHeight` closures, kept for the classic-canvas `computeLayoutSize()`
- * path in `scripts/domWidget.ts`) driven from one `applyGridVisibility()` so
- * "Show grid" off (FORMAT.md's `element display:none` + `computedHeight 0` +
- * resync) reuses the identical plumbing instead of a second code path.
+ * robust fix sets all of: `domWidget.computeSize`, `domWidget.computedHeight`,
+ * AND the element's own `style.height`/`minHeight` — belt-and-suspenders, all
+ * four (plus `getMinHeight`/`getMaxHeight` closures, kept for the
+ * classic-canvas `computeLayoutSize()` path in `scripts/domWidget.ts`).
+ *
+ * ---- M2 fix: the grid now FILLS the node (2026-07-21, owner-reported) ----
+ *
+ * v0.16.0 (M2's initial ship) used the lesson above to build a FIXED pad —
+ * every one of those four knobs reported the same constant, `GRID_MIN_H`
+ * (then named `GRID_H`). Owner: "the grid is much too small. if you resize
+ * the panel the grid should grow to take up whatever space it can." The fix
+ * keeps every one of the four sliver-proofing knobs — none of that lesson
+ * stops applying — but makes each report a FLEXIBLE height instead of a
+ * constant. `getMinHeight`/`getMaxHeight` become `() => GRID_MIN_H` / `() =>
+ * Infinity` while visible: a floor with no ceiling, `web/lora_library/
+ * notebook.js`'s OWN idiom (`attachDomWidget()`: `getMinHeight` returns a
+ * floor, `getMaxHeight` is simply never given, so litegraph's
+ * `_arrangeWidgets`/`distributeSpace()` hands the widget whatever vertical
+ * space is left — see that file's header, "the widget fills available
+ * height") — NOT premiere's degenerate `min === max` shape, which is the
+ * one actually implicated in the ~7px-collapse finding above. Unlike
+ * notebook.js, this widget ALSO keeps computeSize/computedHeight actively
+ * maintained (rather than left unset) as a second, independent path to the
+ * same answer, since those are the knob the ~7px finding says at least one
+ * render backend treats as authoritative instead of getMinHeight/
+ * getMaxHeight — belt-and-suspenders again, just aimed at "flexible" this
+ * time instead of "fixed."
+ *
+ * `computeGridHeight(node)` is the one function that decides the current
+ * answer: `GRID_MIN_H + max(0, node.size[1] - <the node's natural minimum
+ * height>)` — the floor, plus however far the user has manually dragged the
+ * NODE taller than it needs to be. `applyGridHeight()` pushes that number
+ * into computeSize/computedHeight/the element's own style.height/minHeight
+ * together, exactly like the old fixed-H code did, just with a live number.
+ * A `node.onResize` hook (litegraph's live-drag notification; unproven
+ * elsewhere in this pack, so re-verify on any frontend upgrade) re-runs
+ * `applyGridHeight()` on every frame of an actual resize drag — needed
+ * because, unlike getMinHeight/getMaxHeight (re-invoked by `_arrangeWidgets`
+ * on its own), nothing re-computes a plain `computedHeight` field for us on
+ * a bare drag. "The node's natural minimum height" is `computeNaturalSize()`,
+ * which temporarily pins the grid's OWN computeSize/computedHeight to its
+ * floor for one synchronous `node.computeSize()` call — the pin is what
+ * lets the measurement read "everything BUT the grid" without recursing into
+ * these same functions (which only ever read a CACHED result of it, never
+ * call it back) or being thrown off by whatever computedHeight a previous
+ * drag left behind. `growToNatural()` (attach, reload) raises the node up
+ * to that minimum WITHOUT ever shrinking a larger current/saved size — the
+ * piece that lets a manually-dragged-tall grid survive a workflow
+ * save/reload instead of snapping back small on every load, since a DOM
+ * widget's own height was never itself part of the serialized workflow
+ * (only `node.size` is). `resyncSize()` (the property-toggle path: Show
+ * grid, Show original size, Show passthrough image) stays the pre-existing
+ * ABSOLUTE reset — hiding the grid still reclaims its space exactly as
+ * before; re-showing lands back on the floor rather than restoring whatever
+ * height it had before being hidden, an accepted minor tradeoff shared with
+ * how the output-visibility properties already behaved pre-fix.
  *
  * Pointer handling mirrors `notebook.js`'s `wireSplitter`/row-drag
  * (pointerdown → best-effort `setPointerCapture` in a try/catch →
@@ -174,11 +223,21 @@ function toast(node, severity, detail) {
 }
 
 /** Recompute layout after an outputs-array change: grow freely, but also
- * allow the height to shrink back down (arrange() on its own only grows). */
+ * allow the height to shrink back down (arrange() on its own only grows).
+ * The ABSOLUTE reset every property toggle in this file uses (contrast
+ * growToNatural(), the M2 grid's grow-ONLY variant for attach/reload —
+ * defined in the M2 section below). Also refreshes the grid's fill baseline
+ * so a subsequent drag measures "extra" height against the CURRENT natural
+ * size rather than a stale one; both referenced functions are hoisted, so
+ * the forward reference from here is safe. */
 function resyncSize(node) {
-  const computed = node.computeSize()
+  const computed = computeNaturalSize(node)
   node.setSize([Math.max(node.size[0], computed[0]), computed[1]])
   node.setDirtyCanvas(true, true)
+  if (node._epsGrid) {
+    refreshGridBaseline(node)
+    applyGridHeight(node)
+  }
 }
 
 function widgetByName(node, name) {
@@ -289,7 +348,9 @@ function installPassthroughVisibility(node) {
 const GRID_WIDGET_NAME = 'eps_resolution_grid'
 const GRID_WIDGET_TYPE = 'eps_resolution_grid'
 
-const GRID_H = 210 // fixed pad height, CSS px (FORMAT.md §6.5 M2: 200-220)
+const GRID_MIN_H = 210 // FLOOR pad height, CSS px (FORMAT.md §6.5 M2: 200-220) — the pad now
+// FILLS the node's available height above this floor as the node is dragged taller (owner-
+// reported 2026-07-21 fix; see computeGridHeight()/file header). No fixed ceiling.
 const GRID_MIN_SIZE = 64 // pad's logical minimum on both axes
 const GRID_MAX_DEFAULT = 2048 // node property seed; FORMAT.md §6.5 M2 (owner ask 2026-07-20: "make 2048 the
 // default max size" — was 4096 in v0.15.0. NEW nodes only: attach() seeds this via addProperty(), which is a
@@ -453,25 +514,139 @@ function isGridVisible(node) {
   return node.properties?.[PROP_SHOW_GRID] !== false
 }
 
-/** Applies "Show grid": element display + computeSize/computedHeight (all
- * four knobs from the file header's sizing lesson) + node resync. Also the
- * one-shot call that establishes those knobs right after the widget is
- * created, whether or not the property is actually changing. */
-function applyGridVisibility(node) {
+/** Toggles just the DOM-level show/hide (element display + widget.hidden).
+ * Split out from resync so both the property-toggle path
+ * (applyGridVisibility, below — an ABSOLUTE resync that can shrink) and the
+ * attach/reload path (growToNatural, below — which never shrinks a
+ * current/saved size, see file header) can share it without pulling in each
+ * other's resync semantics. */
+function applyGridShowHide(node) {
   const state = node._epsGrid
   if (!state) return
   const show = isGridVisible(node)
-  const height = show ? GRID_H : 0
-
   state.canvas.style.display = show ? '' : 'none'
-  state.canvas.style.height = `${height}px`
-  state.canvas.style.minHeight = `${height}px`
-  state.domWidget.computeSize = (width) => [width, height]
-  state.domWidget.computedHeight = height
   state.domWidget.hidden = !show
+}
 
+/**
+ * The node's natural/minimum total size with the grid pinned to its OWN
+ * floor contribution (GRID_MIN_H visible, 0 hidden) for this one
+ * synchronous `node.computeSize()` call, then restored — i.e. "header +
+ * every other widget/output row + the grid's floor," independent of
+ * whatever height a PRIOR drag left sitting in computeSize/computedHeight.
+ * Every resync in this file is built from this measurement; pinning first
+ * is what keeps it from either recursing into computeGridHeight() (which
+ * only ever reads a CACHED result of this function, never calls it back) or
+ * reading drag-inflated state.
+ */
+function computeNaturalSize(node) {
+  const state = node._epsGrid
+  if (!state) return node.computeSize()
+
+  const floor = isGridVisible(node) ? GRID_MIN_H : 0
+  const prevComputeSize = state.domWidget.computeSize
+  const prevComputedHeight = state.domWidget.computedHeight
+  state.domWidget.computeSize = (width) => [width, floor]
+  state.domWidget.computedHeight = floor
+  try {
+    const computed = node.computeSize()
+    return Array.isArray(computed) && Number.isFinite(computed[1]) ? computed : [node.size[0], floor]
+  } catch (error) {
+    console.warn(PREFIX, 'grid natural-size measurement failed', error)
+    return [node.size[0], floor]
+  } finally {
+    state.domWidget.computeSize = prevComputeSize
+    state.domWidget.computedHeight = prevComputedHeight
+  }
+}
+
+/** Caches computeNaturalSize()'s height as the fill baseline computeGridHeight()
+ * (below) measures "extra" against. Call whenever the natural minimum could
+ * have changed — grid show/hide or an outputs-array change (both via
+ * resyncSize()), or attach/reload (growToNatural()) — never from a live
+ * drag, where the baseline must stay put while node.size moves underneath
+ * it. */
+function refreshGridBaseline(node) {
+  const state = node._epsGrid
+  if (!state) return
+  state.baseNodeHeight = computeNaturalSize(node)[1]
+}
+
+/**
+ * The grid's CURRENT target height (FORMAT.md §6.5 M2, owner-reported
+ * 2026-07-21 "grid should grow to take up whatever space it can"): the
+ * floor PLUS however far the user has dragged the NODE taller than its
+ * natural minimum. This — not a constant — is what computeSize/
+ * computedHeight/the element's own style.height now report, so the pad
+ * genuinely grows with the node instead of reserving a fixed 210px forever.
+ */
+function computeGridHeight(node) {
+  if (!isGridVisible(node)) return 0
+  const state = node._epsGrid
+  const base = state?.baseNodeHeight
+  if (!Number.isFinite(base)) return GRID_MIN_H // baseline not established yet
+  const extra = Math.max(0, node.size[1] - base)
+  return GRID_MIN_H + extra
+}
+
+/**
+ * Pushes computeGridHeight()'s CURRENT answer into every sizing knob this
+ * widget uses (file header's belt-and-suspenders four) — the element's own
+ * CSS height/minHeight, plus computeSize/computedHeight for whichever
+ * render path treats those as authoritative rather than getMinHeight/
+ * getMaxHeight (file header). Never touches node.size itself: safe to call
+ * from a live drag (onResize, below — node.size already IS the drag) or
+ * right after a resync that owns node.size separately.
+ */
+function applyGridHeight(node) {
+  const state = node._epsGrid
+  if (!state) return
+  const show = isGridVisible(node)
+  const height = computeGridHeight(node)
+  state.canvas.style.height = `${height}px`
+  state.canvas.style.minHeight = show ? `${GRID_MIN_H}px` : '0px'
+  state.domWidget.computeSize = (width) => [width, computeGridHeight(node)]
+  state.domWidget.computedHeight = height
+  return height
+}
+
+/** Property-toggle path (Show grid flips; also reused, via resyncSize(),
+ * whenever an outputs-array change fires applyOriginalSizeVisibility/
+ * applyPassthroughVisibility): an ABSOLUTE resync, matching every other
+ * property toggle in this file — hiding the grid reclaims its space exactly
+ * as before; (re)showing lands back on the floor rather than restoring
+ * whatever height it had before being hidden (an accepted, pre-existing-
+ * pattern tradeoff — see file header). */
+function applyGridVisibility(node) {
+  if (!node._epsGrid) return
+  applyGridShowHide(node)
   resyncSize(node)
-  if (show) renderGrid(node)
+  if (isGridVisible(node)) renderGrid(node)
+}
+
+/**
+ * Attach/reload path (attachSizeGrid's initial setup, and onConfigure):
+ * raises the node up to its natural minimum WITHOUT ever shrinking a size
+ * that's already at or above it. This is the fix that lets a manually
+ * dragged-tall grid survive a workflow save/reload — resyncSize()'s
+ * absolute reset (used for live property toggles) would otherwise snap
+ * every reload back down to the floor, since a DOM widget's own height was
+ * never itself part of the serialized workflow (only node.size is, and only
+ * this function respects a size already at/above natural rather than
+ * overwriting it).
+ */
+function growToNatural(node) {
+  const state = node._epsGrid
+  if (!state) return
+  const computed = computeNaturalSize(node)
+  const width = Math.max(node.size[0], computed[0])
+  const height = Math.max(node.size[1], computed[1])
+  if (width !== node.size[0] || height !== node.size[1]) {
+    node.setSize([width, height])
+    node.setDirtyCanvas(true, true)
+  }
+  refreshGridBaseline(node)
+  applyGridHeight(node)
 }
 
 /**
@@ -482,8 +657,11 @@ function applyGridVisibility(node) {
  * ONE scale (`side / span`) instead of the old two independent per-axis
  * scales — the fix, in full, IS this shared side value. The square anchors
  * to the top-left inset and is letterboxed (centered) across any LEFTOVER
- * horizontal space, since `availW > availH` is the common case (a wide
- * node, GRID_H's fixed 210px height budget). Shared by drawGrid() (so the
+ * space on the wider axis — historically always horizontal (a wide node,
+ * GRID_MIN_H's ~210px floor), but now that the pad FILLS added node height
+ * (see computeGridHeight()), a node dragged taller than it is wide flips
+ * which axis has the leftover margin; the same `side = min(availW, availH)`
+ * letterbox math handles either direction identically. Shared by drawGrid() (so the
  * visual gridlines/diagonal/crosshair are square) AND attachGridDrag()'s
  * pointer mapping (so a drag along the visible diagonal actually produces
  * width == height) — one function, two callers, so they can never drift
@@ -780,8 +958,11 @@ function attachSizeGrid(node) {
     const domWidget = node.addDOMWidget(GRID_WIDGET_NAME, GRID_WIDGET_TYPE, canvasEl, {
       hideOnZoom: true,
       serialize: false,
-      getMinHeight: () => (isGridVisible(node) ? GRID_H : 0),
-      getMaxHeight: () => (isGridVisible(node) ? GRID_H : 0)
+      // Floor, no ceiling, while visible — notebook.js's "fill available
+      // height" shape (file header), not a fixed min===max. Hidden still
+      // collapses to a hard 0/0.
+      getMinHeight: () => (isGridVisible(node) ? GRID_MIN_H : 0),
+      getMaxHeight: () => (isGridVisible(node) ? Number.POSITIVE_INFINITY : 0)
     })
     // Same two independent non-serialization flags as notebook.js's
     // attachDomWidget()/premiere-bridge's attachBarWidget() — see either
@@ -790,12 +971,19 @@ function attachSizeGrid(node) {
     domWidget.serialize = false
     domWidget.serializeValue = () => undefined
 
-    node._epsGrid = { canvas: canvasEl, domWidget, resizeObserver: null, cancelDrag: null }
+    node._epsGrid = {
+      canvas: canvasEl,
+      domWidget,
+      resizeObserver: null,
+      cancelDrag: null,
+      baseNodeHeight: null // fill baseline — see refreshGridBaseline()/computeGridHeight()
+    }
 
     node.addProperty(PROP_SHOW_GRID, true, 'boolean')
     node.addProperty(PROP_GRID_MAX, GRID_MAX_DEFAULT, 'number')
 
-    applyGridVisibility(node) // establishes computeSize/computedHeight/element height up front
+    applyGridShowHide(node)
+    growToNatural(node) // establishes the fill baseline + grows the fresh node to fit the widget's floor
 
     node._epsGrid.cancelDrag = attachGridDrag(node, canvasEl)
 
@@ -805,7 +993,13 @@ function attachSizeGrid(node) {
       node._epsGrid.resizeObserver = observer
     } // else: renderGrid() always re-reads getBoundingClientRect() at draw
     // time, so anything else that triggers a repaint (widget edits,
-    // configure) still draws at the correct, current width.
+    // configure, a resize) still draws at the correct, current size. With it
+    // present, this is ALSO what repaints the enlarged pad once onResize
+    // (below) or applyGridHeight() changes the canvas element's own CSS
+    // height — belt-and-suspenders with onResize's own direct renderGrid()
+    // call, not a substitute for it (this observer never fires from a
+    // change to computeSize/computedHeight alone on a render backend that
+    // doesn't reflect those into the element's actual CSS box).
 
     // "editing the numbers moves the dot" — wrap width/height so any
     // programmatic OR user-typed change repaints. try/finally (not catch):
@@ -826,18 +1020,38 @@ function attachSizeGrid(node) {
       }
     }
 
+    // Live resize drag (litegraph's own resize-handle interaction calls this
+    // directly, continuously, as node.size changes — unproven elsewhere in
+    // THIS pack, so re-verify live on any frontend upgrade, 0.28.1 included).
+    // Unlike getMinHeight/getMaxHeight (which _arrangeWidgets re-invokes on
+    // its own, file header), nothing re-computes a plain computedHeight
+    // field for us on a bare drag, so this is what actually makes the pad
+    // grow in real time as the user drags the node taller (owner-reported
+    // 2026-07-21). Deliberately never calls resyncSize/setSize here — the
+    // drag itself already owns node.size; this only refreshes the grid's
+    // OWN knobs (and repaints) to match it.
+    const originalOnResize = node.onResize
+    node.onResize = function (size) {
+      const result = originalOnResize?.call(this, size)
+      applyGridHeight(this)
+      renderGrid(this)
+      return result
+    }
+
     // configure() restores widgets_values with a bare assignment (no
     // callback — see file header), so a reloaded workflow needs its own
-    // repaint hook; also re-applies Show grid/Grid max defensively in case
-    // ordering ever left them stale.
+    // repaint hook; growToNatural() (not the property-toggle path's
+    // resyncSize) is what lets a saved tall size survive the reload instead
+    // of snapping back down to the floor every time a workflow loads.
     const originalOnConfigure = node.onConfigure
     node.onConfigure = function (info) {
       let result
       try {
         result = originalOnConfigure?.call(this, info)
       } finally {
-        applyGridVisibility(this)
-        renderGrid(this)
+        applyGridShowHide(this)
+        growToNatural(this)
+        if (isGridVisible(this)) renderGrid(this)
       }
       return result
     }

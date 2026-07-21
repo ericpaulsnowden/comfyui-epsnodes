@@ -175,6 +175,7 @@ dimensions. It replaces a resize node + a reroute + a get-image-size node.
 
 - **The size grid:** a drag pad right on the node — drag anywhere and
   `width`/`height` follow, snapping to `multiple_of` (or 64 when it's off).
+  Drag the node taller and the pad grows to fill it, for finer control.
   Hold **Shift** for a 1:1 square, **Ctrl/Cmd** to keep the aspect ratio the
   box had when you started dragging. The pad is square, so a 1:1 target sits
   on the diagonal. The
