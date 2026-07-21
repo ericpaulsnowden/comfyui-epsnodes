@@ -675,12 +675,19 @@ is the functional core WITHOUT the grid.
       grow-never-shrink / `getMaxHeight → Infinity` floor-only logic — that was
       the cause of the stuck-tall bug. Round-trips through save/reload at the
       saved width.
-    - **Readout text (owner bug 2026-07-21).** The two lines below the pad must
-      be the SAME (small) font size — the pixel-dimension line was too large.
-      The megapixels reading is RIGHT-ALIGNED on the SAME line as the
-      dimensions (not wrapped onto its own second line): line 1 = `W x H`
-      (left) · `N.N MP` (right-aligned); line 2 = the reduced aspect (e.g.
-      `3:2`), same small size, muted.
+    - **Readout is ONE line (owner asks 2026-07-21).** All at the same small
+      font size (the pixel-dimension line was too large): `W x H` (left,
+      strong) then the reduced aspect (e.g. `3:2`) immediately BESIDE it (muted
+      — owner: "the ratio should be next to the pixel dimensions, not below
+      them"), and `N.N MP` right-aligned on that same line. No second line;
+      `TEXT_STRIP_H` shrank to match (which also shortens the node slightly).
+    - **Crosshair stops AT the dot (owner ask 2026-07-21).** The target
+      crosshair is drawn only from the origin edges (top + left; origin =
+      smallest size, since `mapX`/`mapY` grow right/down) TO the dot — never
+      past it. The segments that used to continue to the right of the dot and
+      below it are hidden: those are sizes LARGER than the chosen W/H, outside
+      the image rectangle the user is defining. What remains traces the right +
+      bottom edges of that rectangle, meeting at the dot (its far corner).
   - **Interaction:** drag anywhere on the pad to set the target — x maps to
     `width`, y to `height`, over a 64..`Grid max` range (node property,
     default **2048** — owner ask 2026-07-20). Dragging SNAPS to `multiple_of`

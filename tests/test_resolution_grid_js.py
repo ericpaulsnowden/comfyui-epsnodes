@@ -216,9 +216,12 @@ def test_pointer_edges_clamp_to_the_64_to_gridmax_range(grid_api: dict) -> None:
 # ----------------------------------------------------------- readout strip
 
 
-def test_readout_puts_mp_on_line_one_and_aspect_on_line_two(grid_api: dict) -> None:
-    """Owner fix 2026-07-21: line 1 = dims (left) + megapixels (right-aligned,
-    SAME line — never wrapped to its own line); line 2 = the reduced aspect."""
+def test_readout_lines_expose_dims_mp_and_aspect(grid_api: dict) -> None:
+    """getReadoutLines exposes the three fields the (now single-line) readout
+    draws: dims (left), the reduced aspect right beside it (owner ask
+    2026-07-21 — next to the dimensions, no longer its own line below), and
+    megapixels right-aligned. This asserts the DATA; the one-line layout is a
+    draw concern verified live on the rig."""
     landscape = grid_api["readout"]["landscape"]
     assert landscape == {"dims": "1024 x 512", "mp": "0.52 MP", "aspect": "2:1"}
     square = grid_api["readout"]["square"]

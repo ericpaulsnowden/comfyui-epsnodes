@@ -197,11 +197,12 @@ dimensions. It replaces a resize node + a reroute + a get-image-size node.
   diagonal. **Make it bigger by dragging the node wider** — the square (and the
   node's height) grow to match; narrow the node and it shrinks back. Hold
   **Shift** for a 1:1 square, **Ctrl/Cmd** to keep the aspect ratio the box had
-  when you started dragging. The typed fields and the grid stay in sync (edit
-  either); a compact readout under the pad shows `W x H` with the megapixels
-  right-aligned on the same line and the reduced aspect (3:2) below it, and
-  right-click Properties offers `Grid max` (range) and `Show grid` (hide the
-  pad
+  when you started dragging. The crosshair is drawn only up to the dot — the
+  lines don't run past it, so the marked-out rectangle reads as the image
+  you're sizing. The typed fields and the grid stay in sync (edit either); a
+  one-line readout under the pad shows `W x H` with the ratio (3:2) right next
+  to it and the megapixels right-aligned, and right-click Properties offers
+  `Grid max` (range) and `Show grid` (hide the pad
   entirely if you only want the numbers).
 - **Four resize modes:** `stretch`, `keep aspect (fit)`, `crop to fill`,
   and `pad` (black), with a choice of interpolation. `multiple_of` snaps the

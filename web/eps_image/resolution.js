@@ -389,12 +389,12 @@ const ACCENT_COLOR = 'rgb(66, 133, 244)' // house accent, lora_library/notebook.
 // onto its own line). Line 1 = dims (left) + MP (right-aligned, same line);
 // line 2 = reduced aspect, muted. Exported constants are consumed by
 // tests/test_resolution_grid_js.py; the app entry uses only init()/attach().
-export const TEXT_STRIP_H = 34 // total strip height, CSS px
-export const READOUT_FONT_SIZE = 11 // px — the ONE size both lines share
+export const TEXT_STRIP_H = 22 // total strip height, CSS px — ONE readout line
+export const READOUT_FONT_SIZE = 11 // px — the ONE size the whole readout shares
 export const READOUT_FONT = `${READOUT_FONT_SIZE}px ui-monospace, "SF Mono", Menlo, Consolas, monospace`
 export const READOUT_FONT_STRONG = `600 ${READOUT_FONT}`
 const READOUT_LINE1_BASELINE = 15 // px below the square's bottom edge
-const READOUT_LINE2_BASELINE = 29
+const READOUT_ASPECT_GAP = 8 // px between the dims and the aspect on the one line
 const READOUT_INSET_X = 4 // text inset from the pad's flush left/right edges
 const DOM_WIDGET_MARGIN_FALLBACK = 10 // BaseDOMWidgetImpl.DEFAULT_MARGIN (frontend scripts/domWidget.ts)
 
@@ -759,18 +759,26 @@ function drawGrid(node, ctx, cssW) {
   ctx.stroke()
   ctx.restore()
 
-  // Crosshair through the current target.
+  // Crosshair — drawn ONLY from the origin edges (top + left; origin =
+  // smallest size, since mapX/mapY grow right/down) TO the dot, never past it
+  // (owner ask 2026-07-21). The segments beyond the dot (x to its right, y
+  // below it) would lie OUTSIDE the target rectangle the user is defining —
+  // they'd be sizes LARGER than the chosen W/H — so hiding them leaves the two
+  // lines tracing the right + bottom edges of the image rectangle, meeting at
+  // the dot (the rectangle's far corner).
   const tx = mapX(disp.dispW)
   const ty = mapY(disp.dispH)
+  const txPx = Math.round(tx) + 0.5
+  const tyPx = Math.round(ty) + 0.5
   ctx.save()
   ctx.strokeStyle = ACCENT_COLOR
   ctx.globalAlpha = 0.45
   ctx.lineWidth = 1
   ctx.beginPath()
-  ctx.moveTo(Math.round(tx) + 0.5, plotY)
-  ctx.lineTo(Math.round(tx) + 0.5, plotY + side)
-  ctx.moveTo(plotX, Math.round(ty) + 0.5)
-  ctx.lineTo(plotX + side, Math.round(ty) + 0.5)
+  ctx.moveTo(txPx, plotY) // vertical: top edge down to the dot (hidden below it)
+  ctx.lineTo(txPx, tyPx)
+  ctx.moveTo(plotX, tyPx) // horizontal: left edge across to the dot (hidden right of it)
+  ctx.lineTo(txPx, tyPx)
   ctx.stroke()
   ctx.restore()
 
@@ -794,19 +802,23 @@ function drawGrid(node, ctx, cssW) {
   // strip sits directly below the square (which ends at plotY + side) and
   // spans the pad's full width, matching the square's flush edges.
   const lines = getReadoutLines(disp)
-  const textBaseY = plotY + side
+  const baseY = plotY + side + READOUT_LINE1_BASELINE
   ctx.save()
   ctx.textBaseline = 'alphabetic'
+  // ONE line (owner ask 2026-07-21 — the ratio goes NEXT TO the pixel
+  // dimensions, not on its own line below): dims (strong) then the reduced
+  // aspect (muted) immediately after it on the left; megapixels (muted)
+  // right-aligned on the same line.
   ctx.textAlign = 'left'
-  ctx.fillStyle = colors.text
   ctx.font = READOUT_FONT_STRONG
-  ctx.fillText(lines.dims, READOUT_INSET_X, textBaseY + READOUT_LINE1_BASELINE)
-  ctx.fillStyle = colors.muted
+  ctx.fillStyle = colors.text
+  ctx.fillText(lines.dims, READOUT_INSET_X, baseY)
+  const dimsWidth = ctx.measureText(lines.dims).width
   ctx.font = READOUT_FONT
+  ctx.fillStyle = colors.muted
+  ctx.fillText(lines.aspect, READOUT_INSET_X + dimsWidth + READOUT_ASPECT_GAP, baseY)
   ctx.textAlign = 'right'
-  ctx.fillText(lines.mp, cssW - READOUT_INSET_X, textBaseY + READOUT_LINE1_BASELINE)
-  ctx.textAlign = 'left'
-  ctx.fillText(lines.aspect, READOUT_INSET_X, textBaseY + READOUT_LINE2_BASELINE)
+  ctx.fillText(lines.mp, cssW - READOUT_INSET_X, baseY)
   ctx.restore()
 }
 
