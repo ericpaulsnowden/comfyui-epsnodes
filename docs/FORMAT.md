@@ -938,13 +938,20 @@ for a separate standalone `LORA_STACK` applier — the owner's use case never
 needs a stack outside sweeping, so a second node would only be one more
 thing to wire with no benefit; see the roadmap for the full tradeoff.
 
-- **Inputs (all required):** `model` (MODEL), `clip` (CLIP), `lora_stack`
-  (LORA_STACK — wire in any producer's output, most commonly Apply LoRA
-  Set's own `lora_stack`; "activated" = however many rows the wired stack
-  already contains, since a producer like Apply LoRA Set already excludes
-  its own disabled rows). Unlike Apply LoRA Set, `model`/`clip` are NOT
-  optional here — this node is a lora *tester*, it needs a model to be
-  useful; an optional pure-stack-source mode is a possible future, not M1.
+- **Inputs:** `model` (MODEL, required) + `lora_stack` (LORA_STACK, required
+  — wire in any producer's output, most commonly Apply LoRA Set's own
+  `lora_stack`; "activated" = however many rows the wired stack already
+  contains, since a producer like Apply LoRA Set already excludes its own
+  disabled rows), plus `clip` (CLIP, **OPTIONAL** — owner ask 2026-07-22).
+  `model` is required because a lora *tester* needs a model to patch (no
+  pure-stack-source mode). `clip` is NOT required: many models neither
+  require nor ship a text-encoder CLIP, so an unwired `clip` means each step
+  patches the MODEL only — `_apply_stack` → `comfy.sd.load_lora_for_models`
+  already tolerates `clip=None` (patches only the wired side, exactly core's
+  `LoraLoaderModelOnly`; the lora's clip-side weights, if any, are skipped),
+  and the `clip` OUTPUT then passes through `None`. (Original M1 made both
+  required, lumping `clip` in with `model`; there was never a clip-specific
+  reason — corrected to optional.)
 - **Widgets:** `min` / `max` (FLOAT, default 0.0/1.0, range −10.0..10.0,
   step 0.05), `increment` (FLOAT, default 0.1, range 0.01..10.0, step
   0.01), `mode` (COMBO: `Each lora independently` default / `All

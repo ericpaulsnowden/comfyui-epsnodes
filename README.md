@@ -168,9 +168,15 @@ wire in a `LORA_STACK`, set `min` / `max` / `increment`, queue once, and
 the rest of your workflow runs at every step.
 
 - **Wire `Apply LoRA Set`'s `lora_stack` output straight in**, alongside
-  the same `model`/`clip` you'd normally pass through the loader — EPS LoRA
+  the `model` (and `clip`) you'd normally pass through the loader — EPS LoRA
   Sweep does its own applying internally, so no separate "apply the stack"
   node sits between them. Any other `LORA_STACK` producer works too.
+- **`clip` is optional.** Models without a text encoder (or any workflow
+  where you only want to patch the model) can leave `clip` unwired — the
+  sweep then patches the **model only** (the lora's clip-side weights, if
+  any, are skipped, exactly like ComfyUI's own model-only lora loader) and
+  the `clip` output passes through empty. `model` is still required — a
+  strength tester needs a model to patch.
 - **Two modes:** `Each lora independently` (the default) sweeps one lora at
   a time across the range while every other active lora holds its own
   saved strength; `All together` moves every active lora to the same value

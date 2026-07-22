@@ -344,22 +344,28 @@ class TestClassShapeMatchesFormatMdSection6_8:
         # set-of-names list -- no VALIDATE_INPUTS escape hatch needed.
         assert "VALIDATE_INPUTS" not in LoraLibrarySweep.__dict__
 
-    def test_required_inputs_are_model_clip_lora_stack_and_the_four_widgets(self) -> None:
+    def test_required_inputs_are_model_lora_stack_and_the_four_widgets(self) -> None:
         required = LoraLibrarySweep.INPUT_TYPES()["required"]
         assert set(required.keys()) == {
             "model",
-            "clip",
             "lora_stack",
             "min",
             "max",
             "increment",
             "mode",
         }
-        # Unlike Apply LoRA Set, model/clip are REQUIRED here (a lora
-        # *tester* needs a model to be useful -- no pure-stack-source mode).
+        # `model` stays REQUIRED (a lora *tester* needs a model to patch -- no
+        # pure-stack-source mode). `clip` is OPTIONAL (owner ask 2026-07-22):
+        # many models have no text encoder, and load_lora_for_models patches
+        # the model only when clip is None (like core's LoraLoaderModelOnly).
         assert required["model"] == ("MODEL",)
-        assert required["clip"] == ("CLIP",)
         assert required["lora_stack"] == ("LORA_STACK",)
+        assert "clip" not in required
+
+    def test_clip_is_optional_not_required(self) -> None:
+        types = LoraLibrarySweep.INPUT_TYPES()
+        assert "clip" not in types["required"]
+        assert types.get("optional", {}).get("clip") == ("CLIP",)
 
     def test_min_max_increment_widget_specs(self) -> None:
         required = LoraLibrarySweep.INPUT_TYPES()["required"]
@@ -424,6 +430,25 @@ class TestSweepWithNoContextConfigured:
         )
         assert models == [model_sentinel]
         assert clips == [clip_sentinel]
+        assert labels == ["(no context configured)"]
+
+    def test_clip_omitted_defaults_to_none(self) -> None:
+        # An unwired optional CLIP input means ComfyUI never passes `clip`, so
+        # the signature default (None) must apply and the clip output be [None]
+        # -- the owner's "clip should be optional" case, exercised without
+        # torch via the no-context passthrough.
+        node = LoraLibrarySweep()
+        model_sentinel = object()
+        models, clips, labels = node.sweep(
+            model=model_sentinel,
+            lora_stack=_stack(("a.safetensors", 0.5, 0.5)),
+            min=0.0,
+            max=1.0,
+            increment=0.1,
+            mode=MODE_INDEPENDENT,
+        )
+        assert models == [model_sentinel]
+        assert clips == [None]
         assert labels == ["(no context configured)"]
 
     def test_logs_a_warning(self, caplog: pytest.LogCaptureFixture) -> None:

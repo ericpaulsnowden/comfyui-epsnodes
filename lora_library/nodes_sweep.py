@@ -264,7 +264,10 @@ class LoraLibrarySweep:
     DESCRIPTION = (
         "Sweeps a LORA_STACK's strengths from min to max (BOTH ends "
         "inclusive -- 0.0 to 1.0 at 0.1 is 11 runs, not 10) and applies each "
-        "step to model/clip, fanning out one run per step. 'Each lora "
+        "step to the model (and clip, if wired), fanning out one run per step. "
+        "CLIP is OPTIONAL -- leave it unwired for models with no text encoder "
+        "and each step patches the MODEL only (the lora's clip-side weights, if "
+        "any, are skipped, like core's model-only loader). 'Each lora "
         "independently' (default) sweeps one lora at a time while every "
         "other lora holds its own configured strength: n_loras x n_steps "
         "runs total. 'All together' moves every lora to the same value at "
@@ -283,7 +286,6 @@ class LoraLibrarySweep:
         return {
             "required": {
                 "model": ("MODEL",),
-                "clip": ("CLIP",),
                 "lora_stack": ("LORA_STACK",),
                 "min": ("FLOAT", {"default": 0.0, "min": -10.0, "max": 10.0, "step": 0.05}),
                 "max": ("FLOAT", {"default": 1.0, "min": -10.0, "max": 10.0, "step": 0.05}),
@@ -296,17 +298,28 @@ class LoraLibrarySweep:
                     {"default": MODE_INDEPENDENT},
                 ),
             },
+            "optional": {
+                # CLIP is OPTIONAL (owner ask 2026-07-22): plenty of models
+                # neither require nor ship a text-encoder CLIP, and a LoRA's
+                # MODEL-side weights sweep perfectly well without one. When it's
+                # unwired, `_apply_stack` -> `load_lora_for_models` patches the
+                # MODEL only (exactly core's `LoraLoaderModelOnly`; the LoRA's
+                # clip-side weights, if any, are simply skipped) and the `clip`
+                # OUTPUT passes through `None`. `model` stays REQUIRED -- a
+                # strength tester with no model to patch has nothing to sweep.
+                "clip": ("CLIP",),
+            },
         }
 
     def sweep(
         self,
         model: Any,
-        clip: Any,
         lora_stack: list[tuple[str, float, float]],
         min: float,
         max: float,
         increment: float,
         mode: str,
+        clip: Any = None,
     ) -> tuple[list[Any], list[Any], list[str]]:
         context = _context
         if context is None:
