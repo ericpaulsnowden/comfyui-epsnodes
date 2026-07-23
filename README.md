@@ -282,24 +282,32 @@ dimensions. It replaces a resize node + a reroute + a get-image-size node.
 Runs** into a buffer and then fans them out — wire a loader in, run it a few
 times to gather images, then send the whole set through a workflow at once.
 
-- **Collect / Emit:** in **Collect** mode each Run adds the current input
-  image to the buffer (it *keeps* them — unlike a Preview node that replaces);
-  switch to **Emit** and a Run just sends the buffer out without adding.
+- **Flow-through, always:** whatever's wired into the node always continues
+  downstream. **Collect** mode ALSO records it into the buffer (only that
+  Run's own image(s) continue downstream — Collect doesn't replay the whole
+  buffer). Switch to **Emit** and Run once to send the WHOLE buffer
+  downstream instead, with whatever's currently wired appended as the final
+  image(s) (10 buffered + 1 wired → 11 runs).
 - **Navigable grid:** the collected images show as a clickable thumbnail grid
   right on the node (ComfyUI's own image viewer — click to enlarge, arrow
   through them).
-- **Fan-out outputs:** `image`, `width`, `height` — wire them downstream and
-  the workflow runs once per collected image (10 images → 10 runs, e.g. to
-  put a logo on 10 models' shirts). All-empty runs are skipped cleanly, never
-  a crash.
+- **Fan-out outputs (Emit mode):** `image`, `width`, `height` — wire them
+  downstream in **Emit** mode and the workflow runs once per buffered image,
+  plus once more for anything currently wired (10 images → 10 runs, e.g. to
+  put a logo on 10 models' shirts). Nothing to send (Collect with nothing
+  wired, or Emit with an empty buffer and nothing wired) is skipped cleanly,
+  never a crash. Runs no longer re-list the whole buffer in the generated
+  output panel — only newly collected images show up there.
 - **Survives restarts:** the buffer lives on disk (under ComfyUI's output
   folder, keyed to that node), so it's still there after you close and reopen
   ComfyUI. A **Clear** button wipes it; deleting the node abandons it. No cap.
 - Each node keeps its own independent buffer, even after copy/paste.
 - **Copy/paste:** right-click a collected image → Copy image (to the OS
   clipboard, for Photoshop/etc.) or Copy (Clipspace) (into the mask editor or
-  another node); and with the node selected, **Ctrl+V** an image to add it to
-  the buffer.
+  another node). Three ways to ADD an image: with the node selected,
+  **Ctrl+V**; **right-click → Paste (Clipspace)**; or **drag a file (or an
+  assets-panel image) straight onto the node** — all three append to the
+  buffer without losing what's already there.
   - *Viewing ComfyUI on another machine over plain `http://` (e.g. a Mac
     pointed at a PC's LAN address)?* Browsers block writing an image to the OS
     clipboard outside a "secure context", so **Copy image** can't reach the OS

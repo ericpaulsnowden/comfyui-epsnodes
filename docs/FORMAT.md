@@ -760,11 +760,16 @@ add; single batch-aware IMAGE input; disk-backed, survive-restart, NO cap.
   `grid_uuid` (STRING, HIDDEN — the per-node identity mirrored from
   `node.properties.uuid`, the `EPSSwitcher.toggles` serialized-hidden-widget
   trick, so the backend can key the buffer; frontend generates + dedupes it).
-- **Outputs (fan-out):** `image`, `width` (INT), `height` (INT);
-  `RETURN_NAMES=("image","width","height")`, `OUTPUT_IS_LIST=(True,True,True)`
-  — N buffered images make the workflow run N times, each with its paired
-  width/height. Each emitted image is a `[1,H,W,C]` batch-of-one in a plain
-  Python list (NEVER stacked — buffered images may differ in size).
+- **Outputs (flow-through tee / fan-out, 2026-07-22):** `image`, `width`
+  (INT), `height` (INT); `RETURN_NAMES=("image","width","height")`,
+  `OUTPUT_IS_LIST=(True,True,True)`. Whatever's wired to `image` ALWAYS
+  flows straight through. **Collect** mode's downstream result is ONLY this
+  Run's just-recorded frame(s) — a tee, not a fan-out of the whole buffer.
+  **Emit** mode's downstream result is the WHOLE buffer (chronological)
+  with whatever's currently wired appended at the end (10 buffered + 1
+  wired → 11 runs). Each image is a `[1,H,W,C]` batch-of-one (NEVER
+  stacked — buffered images may differ in size); width/height pair 1:1
+  with the emitted list in both modes.
   **Empty buffer emits `[ExecutionBlocker(None)]` for each output, NOT bare
   `[]`:** a bare empty list `IndexError`s in execution.py's `slice_dict`
   (`v[-1]`) the moment it feeds a downstream node that also has any ordinary
@@ -772,13 +777,22 @@ add; single batch-aware IMAGE input; disk-backed, survive-restart, NO cap.
   silently skip the downstream branch (the same fix `EPSSwitcher` uses for
   all-off). Verified live 2026-07-20.
 - **Execution model:** `OUTPUT_NODE = True` (so it runs even with nothing
-  wired downstream — collect phase) + `IS_CHANGED` returns an
-  always-different token (`float("nan")`) so caching never skips it → exactly
-  one execution (= at most one append of the batch) per queued prompt. In
-  `Collect` mode `execute()` appends the present input (if any) to the buffer
-  then emits the whole buffer; in `Emit` mode it appends nothing, only emits.
-  Returns the `{"ui":{"images":[…whole buffer…]}}` shape so ComfyUI core
-  renders the navigable thumbnail grid + pager FOR FREE (no custom widget).
+  wired downstream — collect phase; NOTE this also means the node executes
+  every queue even when a downstream lazy consumer like EPS Switcher has
+  its branch toggled off) + `IS_CHANGED` returning `float("nan")` → exactly
+  one execution (= at most one append of the batch) per queued prompt;
+  `Emit` simply skips the append. **2026-07-22:** `ui.images` now reports
+  ONLY the refs a Run actually appended — omitted entirely when nothing was
+  (Collect with nothing wired, or an invalid `grid_uuid`), and `Emit` never
+  reports `"ui"` at all (previously every Run reported the whole buffer,
+  which polluted ComfyUI's generated-output panel with the same images on
+  every single Run — the owner-reported "10 new + the 10 original images,
+  every run"). **The thumbnail grid is therefore no longer free from
+  core** — `image_grid.js` keeps it in sync itself, refreshing from
+  `GET /eps_image_grid/list` on this node's own execution-complete signal
+  (a `progress_state` "finished" transition, chosen because core sends NO
+  `executed` event at all for a run whose result carries no `ui` —
+  execution.py gates both the event and the cache on non-empty ui).
 - **Buffer store (disk, survives restart):** under ComfyUI's OUTPUT dir so
   core's `/view` serves the thumbnails AND it survives restart —
   `<comfy output>/eps_image_grid/<grid_uuid>/NNNN.png` + a `manifest.json`
@@ -848,6 +862,26 @@ add; single batch-aware IMAGE input; disk-backed, survive-restart, NO cap.
   pattern) AND to ComfyUI clipspace (populate `node.images`/`imgs`); Ctrl+V
   on the selected node uploads the pasted image (`POST /upload/image`) and
   appends it (`POST /eps_image_grid/add`).
+- **Clipspace paste appends too (2026-07-22, owner bug "second paste
+  overwrites the first"):** core's own "Paste (Clipspace)" right-click item
+  is wrapped (`installClipspacePasteOverride`, per-instance guard) so it
+  ALSO appends the pasted image(s) to the durable buffer via the same
+  add-route pipeline as Ctrl+V, then refreshes to show the FULL buffer —
+  core's `ComfyApp.pasteFromClipspace` only does a bare `node.imgs = [img]`
+  replace (never touching our routes), which is why the second paste
+  appeared to discard the first. Ref-reuse: an image whose src is already a
+  ComfyUI `/view?...` URL is appended by `{filename,subfolder,type}` ref
+  with NO re-upload; anything else falls back to fetch + `/upload/image`.
+  Fails soft if a future frontend renames the menu label.
+- **Drop-to-add (2026-07-22, owner ask):** dropping onto the node adds to
+  the buffer and pre-empts core's "load workflow from dropped image"
+  (core's own drop handler early-returns when a node's `onDragDrop`
+  resolves truthy). Handles, in order: real OS files (Finder/Explorer →
+  upload + add), the assets-panel drag payload
+  (`application/x-comfy-asset-info` JSON — a server-side ref, added with NO
+  upload; the panel never carries real File objects), and a same-origin
+  `text/uri-list` fallback. Non-image drops return false so core's normal
+  behavior (e.g. workflow load) still applies.
 - **Mac / insecure-context fixes (owner reports 2026-07-21, both fail ONLY on
   his Mac; ComfyUI runs on his Windows PC and the Mac views it over
   `http://<pc-ip>` — plain http, so `window.isSecureContext === false`

@@ -4,18 +4,22 @@
  * each no-ops for every node type other than `EPSImageGrid`.
  *
  * M1: identity/dedup for the hidden `grid_uuid` widget, and a `Clear`
- * button. The thumbnail GRID ITSELF IS FREE from ComfyUI core — the backend
- * (`nodes_image_grid.py`) returns `{"ui": {"images": [...whole buffer...]}}`
- * on every Run, which core turns into `node.imgs` (its normal, unconditional
- * per-run image-preview handling — no different for an `OUTPUT_NODE` than
- * for `SaveImage`/`PreviewImage`). Because we always send the COMPLETE
- * current buffer rather than just what THIS run added, that ordinary
- * replace-per-run behavior is what makes the grid look like it's growing
- * across separate Runs — no custom widget, no code here at all for the grid
- * proper.
+ * button. ORIGINALLY (M1) the thumbnail grid was free from ComfyUI core —
+ * the backend returned `{"ui": {"images": [...whole buffer...]}}` on every
+ * Run, which core turned into `node.imgs` unconditionally (no different for
+ * an `OUTPUT_NODE` than for `SaveImage`/`PreviewImage`) — because that
+ * response always carried the COMPLETE current buffer, core's own ordinary
+ * replace-per-run handling was all it took to make the grid look like it
+ * was growing across separate Runs.
  *
- * M2 (this round): copy OUT (OS clipboard + ComfyUI clipspace) and paste IN
- * (Ctrl+V adds to the buffer).
+ * **This stopped being true 2026-07-22** (see the dated section below,
+ * "Execution-complete refresh") — the backend now reports only what THIS
+ * Run actually appended (nothing at all for an Emit Run), so the grid is no
+ * longer free: this file now owns keeping it in sync, via its own explicit
+ * refresh triggered off this node's execution-complete signal.
+ *
+ * M2: copy OUT (OS clipboard + ComfyUI clipspace) and paste IN (Ctrl+V adds
+ * to the buffer).
  *
  * ---- Copy OUT is entirely free from core — verified against the actual
  * installed frontend source, not assumed ----
@@ -355,6 +359,212 @@
  *    included even though only Eric's Mac can fully confirm it firing
  *    fixes the report.
  *
+ * ---- Execution-complete refresh (2026-07-22 owner fix: output-panel
+ * pollution) -- the grid is no longer free ----
+ *
+ * Owner report: "If I run a grid with 10 images through an image editor, I
+ * see 10 new images AND the 10 original images in the generated output
+ * panel, every run." Root cause was `nodes_image_grid.py` reporting
+ * `ui.images` = the WHOLE buffer on EVERY execution (the M1 "free grid"
+ * design, file header above) -- core's own `/history`-output bookkeeping
+ * (what the generated-images panel renders) faithfully recorded that whole
+ * buffer again on every single Run, not just what was actually new.
+ *
+ * `nodes_image_grid.py`'s fix (see its own module docstring) narrows
+ * `ui.images` to ONLY the refs a Run actually appended -- omitted entirely
+ * when nothing was (Collect with nothing wired, or an invalid/not-yet-
+ * minted `grid_uuid`), and NEVER present at all for an Emit Run. Confirmed
+ * against this repo's `execution.py`: a return dict with no `"ui"` key
+ * means `get_output_from_returns` never populates its `uis` list, so
+ * `output_ui` stays `{}`, and `if len(output_ui) > 0` (the SAME condition
+ * gating both the `ui_outputs[unique_id]` cache write and the
+ * `server.send_sync("executed", ...)` call) is false -- NO `"executed"`
+ * websocket event reaches the frontend for that Run at all, not even one
+ * with an empty `images` list.
+ *
+ * That leaves nothing to keep `node.imgs` in sync for those Runs -- core's
+ * own `"executed"` handling (`scripts/app.ts`'s `addApiUpdateHandlers`:
+ * `nodeOutputStore.setNodeOutputsByExecutionId(executionId, detail.output,
+ * {merge: detail.merge})`, feeding `composables/node/useNodeImage.ts`'s
+ * reactive `showPreview()`, which does `node.imgs = elements` -- a full
+ * REPLACE, never a merge, confirmed both by that assignment itself and by
+ * `stores/nodeOutputStore.ts`'s `setOutputsByLocatorId` never actually
+ * receiving a true `merge` flag from THIS backend: `zExecutedWsMessage
+ * .merge` is a real, documented optional field on the message, but nothing
+ * in this repo's Python backend ever sets it -- `execution.py`'s two
+ * `send_sync("executed", ...)` call sites are the ONLY senders) simply
+ * never fires for those Runs. Confirmed the other direction too: when it
+ * DOES fire (Collect with something newly appended), `setOutputsByLocatorId`
+ * REPLACES `app.nodeOutputs[locatorId]` with JUST those new refs (no
+ * merge), so core's own handling would show ONLY the newest image(s), not
+ * the whole buffer, if left alone -- confirming `node.imgs` needs this
+ * file's OWN correction either way a Run's `ui` result can now look.
+ *
+ * Fix: `installExecutionRefreshListener()` below installs ONE module-scope
+ * `api.addEventListener('progress_state', ...)`. Unlike `"executed"`,
+ * `progress_state` is sent UNCONDITIONALLY on every successful node
+ * completion -- `comfy_execution/progress.py`'s
+ * `ProgressRegistry.finish_progress()`, called from BOTH of
+ * `execution.py`'s `execute()` success paths (the cached-result early
+ * return AND the normal fresh-execution tail) right before each returns
+ * `ExecutionResult.SUCCESS`, with no dependency on `ui`/`output_ui`
+ * whatsoever. Its payload shape (`apiSchema.ts`'s `zProgressStateWsMessage`:
+ * `{prompt_id, nodes: {[nodeId]: {state: 'pending'|'running'|'finished'|
+ * 'error', ...}}}`, matching `progress.py`'s `_send_progress_state` field
+ * for field) reports every node that has started so far in the CURRENT
+ * prompt, so the listener checks specifically for each live EPSImageGrid
+ * node's OWN id transitioning into `'finished'`, then calls the existing
+ * `scheduleRefresh()` (unchanged, M1/M2-era) -- the SAME "fetch `/list`,
+ * repopulate `node.imgs` from the WHOLE buffer" primitive the 2026-07-20/21
+ * load/undo fixes already use -- so the grid ends up correct (the full
+ * buffer, always) regardless of what that Run's own `ui` result happened to
+ * contain. `lastKnownProgressState` (a `WeakMap`) additionally skips a node
+ * already known `'finished'` -- the registry resends every non-pending
+ * node's state on EVERY change for the rest of that prompt (`progress.py`'s
+ * `active_nodes` comprehension includes anything not `Pending`), so without
+ * this a later, unrelated node finishing later in the same prompt would
+ * re-trigger an extra (harmless, but pointless once outside
+ * `scheduleRefresh`'s own settle window) `/list` fetch.
+ *
+ * Verified against this rig's installed `comfyui-frontend-package` 1.45.21:
+ * `scripts/api.ts`'s socket message handler dispatches `progress_state` as
+ * a plain `CustomEvent` with `detail` = the raw message payload verbatim
+ * (`case 'progress_state': ... this.dispatchCustomEvent(msg.type,
+ * msg.data)`) -- the exact event `stores/executionStore.ts`'s own
+ * `handleProgressState` consumes for the app's built-in per-node progress
+ * UI, so this listens to the same public signal core's own indicators use,
+ * not an undocumented internal.
+ *
+ * ---- Clipspace paste appends, doesn't replace (2026-07-22 owner fix) ----
+ *
+ * Owner report: paste one image into an empty grid via clipspace, fine;
+ * paste a SECOND one and it appears to overwrite the first ("there should
+ * be some way to see both"). This is a DIFFERENT path from the M2 Ctrl+V
+ * paste above -- confirmed against frontend source, not guessed.
+ *
+ * "Paste (Clipspace)" is a context-menu item added by core's OWN
+ * `getExtraMenuOptions` (`services/litegraphService.ts`'s
+ * `addNodeContextMenuHandler`, installed once on the node CLASS's
+ * prototype at registration -- the exact method this file's OWN
+ * `installCopyImageMenuItem` below already wraps per-instance), gated on
+ * `ComfyApp.clipspace != null` (something has been copied by ANY node),
+ * with callback `() => { ComfyApp.pasteFromClipspace(this) }`. Confirmed
+ * this is the ONLY place in the installed frontend that adds a clipspace-
+ * paste item at all -- the Vue "More Options" popover's own image menu
+ * (`composables/graph/useImageMenuOptions.ts`'s `getImageMenuOptions`) has
+ * no clipspace equivalent, only "Paste Image" (the OS-clipboard path,
+ * `node.pasteFiles`, already covered by `installPasteFiles` above).
+ *
+ * `ComfyApp.pasteFromClipspace(node)` (`scripts/app.ts`), for the plain
+ * "one image, default paste mode" case that reproduces the report, does
+ * exactly this to `node.imgs`:
+ * ```
+ * const img = new Image()
+ * img.src = ComfyApp.clipspace.imgs[ComfyApp.clipspace.selectedIndex].src
+ * node.imgs = [img]          // <- REPLACE, never append
+ * node.imageIndex = 0
+ * ```
+ * (`img_paste_mode: 'all'` -- reachable via the Clipspace dialog's own
+ * paste-mode selector, `extensions/core/clipspace.ts` -- does the same
+ * REPLACE with the whole clipspace set instead of one image; there is no
+ * append branch either way.) This whole block is gated on `node.imgs`
+ * being truthy -- an EMPTY array (`[]`, what `setNodeImagesFromRefs` leaves
+ * an empty buffer showing) still satisfies that gate in plain JS, which is
+ * exactly why the owner's FIRST paste onto a genuinely empty grid "works"
+ * (`node.imgs` goes `[] -> [img1]`) and the SECOND one silently clobbers it
+ * (`[img1] -> [img2]`) -- reproducing the report precisely. Crucially, none
+ * of this touches ANY of our routes -- no upload, no `/eps_image_grid/add`
+ * -- so even the first successful-LOOKING paste was never actually
+ * durable; only the in-memory preview looked right.
+ *
+ * Fix: `installClipspacePasteOverride()` below WRAPS (never replaces)
+ * `getExtraMenuOptions` -- the same idiom `installCopyImageMenuItem` uses
+ * -- calling the original FIRST (so core's own "Paste (Clipspace)" item
+ * still gets pushed into `options` exactly as before, and this file's own
+ * "Copy image" item from `installCopyImageMenuItem` still gets added too,
+ * regardless of install order), then finds that pushed item by its exact
+ * label and wraps ITS `callback`: the original callback still runs FIRST
+ * (so `node.imgs`/`node.images`/widgets update precisely as core intends --
+ * this override is strictly additive, never a replacement of core's own
+ * behavior), followed by `addClipspaceToBuffer()`, which re-derives the
+ * actual image(s) from `ComfyApp.clipspace` (respecting `img_paste_mode`
+ * the same way core's own callback does) and appends each to the durable
+ * buffer via the SAME add-route pipeline (`addUploadToBuffer`) the Ctrl+V
+ * path already uses -- preferring a cheap ref-reuse (`refFromImageSrc`:
+ * parse `{filename, subfolder, type}` straight out of the pasted image's
+ * own `/view?...` URL, since it already names a file the server has -- no
+ * re-upload needed) and only re-uploading actual pixels when that URL
+ * carries no `filename` param. Every successful add refreshes the node
+ * from the FULL buffer (`setNodeImagesFromRefs`), so the grid always shows
+ * everything ever pasted or collected, never just the latest clipspace
+ * paste. A plain Ctrl+V is a completely separate code path (`usePaste.ts`
+ * -> `node.pasteFiles`, the M2 section above) and is untouched by any of
+ * this.
+ *
+ * ---- Drag onto the node wins over workflow-load (2026-07-22 owner fix)
+ * ----
+ *
+ * Owner report: dragging an image from the app's left ASSETS PANEL onto the
+ * grid node loads the workflow embedded in that image instead of adding it
+ * to the grid.
+ *
+ * Confirmed against frontend source exactly how a canvas-level drop is
+ * routed, and that a node-level hook fully pre-empts the workflow-load
+ * fallback (`scripts/app.ts`'s `addDropHandler` -- NOT litegraph's own
+ * built-in `onDropFile`; core's own comment there calls that one "buggy" --
+ * fires once per file with the SAME file on a multi-file drop -- and
+ * deliberately bypasses it):
+ *   - a `dragover` listener on the canvas element hit-tests the node under
+ *     the cursor (`this.canvas.graph?.getNodeOnPos(event.canvasX,
+ *     event.canvasY)`) and calls `node.onDragOver(event)`; a truthy return
+ *     remembers it as `this.dragOverNode` for the drop that follows.
+ *   - the GLOBAL `document` `'drop'` listener calls
+ *     `dragOverNode.onDragDrop(event)` FIRST and returns immediately if
+ *     that resolves truthy: `if (await n?.onDragDrop?.(event)) return` --
+ *     entirely skipping everything below it (`extractFilesFromDragEvent` +
+ *     `this.handleFile(file, 'file_drop', ...)`, which is what loads a
+ *     dropped image's embedded workflow). A drop this node claims therefore
+ *     CANNOT also be interpreted as a workflow load -- winning is
+ *     structural (an early `return`), not a race that could be lost.
+ *
+ * `installDragAndDrop()` below installs `node.onDragOver`/`node.onDragDrop`
+ * mirroring `composables/node/useNodeDragAndDrop.ts` exactly (no stable
+ * import path for a plain extension script -- the same constraint the M2
+ * paste section above already documents; this is the SAME composable
+ * `composables/node/useNodeImageUpload.ts` wires up for core's own upload-
+ * capable nodes, e.g. LoadImage, so this node now accepts drops the same
+ * way those do).
+ *
+ * What the assets panel's drag ACTUALLY carries -- verified, not assumed:
+ * `platform/assets/components/MediaAssetCard.vue`'s `dragStart()` sets TWO
+ * `dataTransfer` entries, never a real `File`:
+ *   1. `dataTransfer.items.add(JSON.stringify({filename, subfolder, type}),
+ *      MIME_ASSET_INFO)` (`MIME_ASSET_INFO = 'application/x-comfy-asset-
+ *      info'`, `platform/assets/schemas/mediaAssetSchema.ts`) -- a
+ *      `ResultItem`-shaped (`schemas/apiSchema.ts`'s `zResultItem`)
+ *      reference to a file the server ALREADY has, when the asset's output
+ *      metadata resolves one.
+ *   2. `dataTransfer.items.add(url.toString(), 'text/uri-list')` --
+ *      UNCONDITIONALLY (whenever the asset's `preview_url` parses), the
+ *      asset's own preview URL.
+ * Since a `DataTransferItem` added via `.items.add(string, type)` has
+ * `kind: 'string'`, never `'file'`, `dataTransfer.files` is empty for this
+ * drag -- but (2) means `isDraggingFiles` (installed as `onDragOver`,
+ * mirroring `useNodeDragAndDrop.ts`'s own check for
+ * `types.includes('text/uri-list')`) still returns `true`, so
+ * `dragOverNode` DOES get set, and `onDragDrop` below finds (1) via
+ * `getData(MIME_ASSET_INFO)` and adds it directly through the existing
+ * add-route pipeline (`addResultItemToBuffer` -> `addUploadToBuffer`, no
+ * upload step needed -- it already names a server-side file) with a full-
+ * buffer refresh afterward. This is confirmed WORKING end to end from
+ * source, not a suspected gap that needed a fallback -- see the final
+ * report for the complete citation chain. Real OS files (Finder/Explorer)
+ * carry genuine `File` objects and are checked FIRST, reusing
+ * `addFilesToBuffer` (the SAME function the Ctrl+V/paste-file path already
+ * uses) unchanged. A bare `text/uri-list` with no usable asset-info (some
+ * other drag source) falls back to fetching that URL and adding it as a
+ * file, same-origin only.
+ *
  * ---- Clear button ----
  *
  * A plain `addWidget('button', ...)` (not a DOM widget — no layout beyond a
@@ -370,7 +580,7 @@
  */
 
 import { api } from '../../../scripts/api.js'
-import { app } from '../../../scripts/app.js'
+import { app, ComfyApp } from '../../../scripts/app.js'
 
 const CLASS_ID = 'EPSImageGrid'
 const PREFIX = '[eps_image:image_grid]'
@@ -838,6 +1048,146 @@ function installPasteFiles(node) {
 }
 
 // ---------------------------------------------------------------------------
+// Drag-and-drop onto the node (2026-07-22 owner fix: dropping an image from
+// the assets panel loaded its embedded workflow instead of adding it to the
+// grid) -- see file header "Drag onto the node wins over workflow-load" for
+// the full writeup + citations.
+// ---------------------------------------------------------------------------
+
+//: Custom MIME type the assets panel's own drag-start sets
+//: (`platform/assets/schemas/mediaAssetSchema.ts`'s `MIME_ASSET_INFO`,
+//: confirmed set by `platform/assets/components/MediaAssetCard.vue`'s
+//: `dragStart()` -- file header) -- a JSON-encoded `{filename, subfolder,
+//: type}` (core's `ResultItem` shape) pointing at a file the server
+//: ALREADY has (an output or input asset), not raw bytes.
+const MIME_ASSET_INFO = 'application/x-comfy-asset-info'
+
+/**
+ * Whether *e* (a `dragover`/`dragenter` `DragEvent`) looks like it's
+ * carrying something this node can accept -- mirrors
+ * `composables/node/useNodeDragAndDrop.ts`'s own `isDraggingFiles` exactly
+ * (no stable import path for a plain extension script, file header): a
+ * real file item, OR a `text/uri-list` entry (which the assets panel
+ * ALWAYS also sets alongside its own `MIME_ASSET_INFO` -- confirmed
+ * against `MediaAssetCard.vue`'s `dragStart()`, file header). Installed
+ * directly as `node.onDragOver`; `scripts/app.ts`'s own canvas-level
+ * `dragover` listener calls this to decide whether to remember this node
+ * as the active drop target for the `drop` event that follows.
+ */
+function isDraggingFiles(e) {
+  if (!e?.dataTransfer?.items) return false
+  const hasFileItem = Array.from(e.dataTransfer.items).some((item) => item.kind === 'file')
+  return hasFileItem || Boolean(e.dataTransfer.types?.includes('text/uri-list'))
+}
+
+/**
+ * Best-effort `{filename, subfolder, type}` parse of *raw* (the JSON
+ * string `dataTransfer.getData(MIME_ASSET_INFO)` returns) -- `null` for
+ * anything that isn't valid JSON or lacks a usable `filename`, so a drag
+ * from anywhere else that happens to reuse this MIME type is never
+ * mistaken for an asset reference.
+ */
+function parseAssetInfo(raw) {
+  if (!raw) return null
+  try {
+    const parsed = JSON.parse(raw)
+    if (parsed && typeof parsed.filename === 'string' && parsed.filename) return parsed
+  } catch {
+    // not JSON -- fall through to null
+  }
+  return null
+}
+
+/**
+ * Adds a `{filename, subfolder, type}` asset reference (the assets-panel
+ * drop payload -- already a file the server has) directly to *node*'s
+ * buffer, no upload needed -- the same ref-reuse idiom
+ * `addClipspaceImageToBuffer` below uses.
+ */
+async function addResultItemToBuffer(node, item) {
+  const result = await addUploadToBuffer(node, {
+    name: item.filename,
+    subfolder: item.subfolder || '',
+    type: item.type || 'input'
+  })
+  if (result && Array.isArray(result.images)) {
+    setNodeImagesFromRefs(node, result.images)
+  }
+  app.graph?.setDirtyCanvas(true, true)
+}
+
+/**
+ * Fallback for a `text/uri-list` drop with no usable `MIME_ASSET_INFO`
+ * (some other same-origin drag source entirely): fetches the first URI in
+ * the list and, if it's actually an image, uploads+adds it exactly like
+ * any other dropped file. `false` for anything that doesn't resolve to a
+ * same-origin, fetchable image -- callers treat that as "not ours to
+ * handle" (falls through to core's own workflow-load handling).
+ */
+async function addUriListToBuffer(node, dataTransfer) {
+  const raw = dataTransfer?.getData('text/uri-list') ?? ''
+  const firstLine = raw
+    .split('\n')
+    .map((line) => line.trim())
+    .find((line) => line && !line.startsWith('#'))
+  if (!firstLine) return false
+
+  let url
+  try {
+    url = new URL(firstLine, location.href)
+  } catch {
+    return false
+  }
+  if (url.origin !== location.origin) return false
+
+  try {
+    const response = await fetch(url)
+    if (!response.ok) return false
+    const blob = await response.blob()
+    if (!blob.type.startsWith('image/')) return false
+    const fileName =
+      url.searchParams.get('filename') || firstLine.split('/').pop() || 'dropped-image'
+    const file = new File([blob], fileName, { type: blob.type })
+    return addFilesToBuffer(node, [file])
+  } catch (error) {
+    console.warn(PREFIX, 'uri-list drop failed', error)
+    return false
+  }
+}
+
+/**
+ * Installs `node.onDragOver`/`node.onDragDrop` -- see file header for the
+ * full writeup of why these two hooks (and not litegraph's own
+ * `onDropFile`, which core's own comment calls "buggy") are what actually
+ * gate a canvas-level drop, and exactly why a drop this node claims cannot
+ * also fall through to core's workflow-load handling.
+ *
+ * Checks, in order: real OS files (`dataTransfer.files`, e.g. a drag from
+ * Finder/Explorer) via the SAME `addFilesToBuffer` the Ctrl+V/paste-file
+ * path already uses; then an assets-panel reference
+ * (`MIME_ASSET_INFO` -> `addResultItemToBuffer`, no upload needed); then a
+ * bare `text/uri-list` fallback (`addUriListToBuffer`). Returns `false`
+ * (never handled) only when NONE of those resolve, letting core's own
+ * fallback (workflow-load from a dropped file) run exactly as before for
+ * anything genuinely unrelated to this node.
+ */
+function installDragAndDrop(node) {
+  node.onDragOver = isDraggingFiles
+  node.onDragDrop = async (e) => {
+    const files = Array.from(e?.dataTransfer?.files || [])
+    if (files.length) {
+      return addFilesToBuffer(node, files)
+    }
+    const asset = parseAssetInfo(e?.dataTransfer?.getData(MIME_ASSET_INFO))
+    if (asset) {
+      await addResultItemToBuffer(node, asset)
+      return true
+    }
+    return addUriListToBuffer(node, e?.dataTransfer)
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Copy image (Mac-only fix 2026-07-21): OS-clipboard image copy needs a
 // secure context core doesn't have on Eric's Mac-over-LAN-http setup -- see
 // file header for the full writeup.
@@ -1103,6 +1453,139 @@ function installCopyImageMenuItem(node) {
 }
 
 // ---------------------------------------------------------------------------
+// Clipspace paste appends, doesn't replace (2026-07-22 owner fix: a second
+// clipspace paste appeared to overwrite the first) -- see file header for
+// the full writeup + citations.
+// ---------------------------------------------------------------------------
+
+//: Exact label core's own `getExtraMenuOptions` pushes for this item
+//: (`services/litegraphService.ts`) -- matched literally rather than by
+//: position, since this file's own `installCopyImageMenuItem` above (and
+//: potentially other extensions) may have already added items before this
+//: one runs.
+const CLIPSPACE_PASTE_MENU_LABEL = 'Paste (Clipspace)'
+
+/**
+ * Extracts `{name, subfolder, type}` (the shape `addUploadToBuffer` expects
+ * -- `uploaded.name`/`.subfolder`/`.type`) straight out of a
+ * `/view?filename=...&subfolder=...&type=...` URL -- the SAME query-param
+ * shape this file's own `imageUrlForRef` produces, and the one core's own
+ * thumbnail/preview URLs already carry. `null` when *src* carries no
+ * `filename` param (e.g. a `data:`/`blob:` URL) -- not a ComfyUI-native
+ * file reference, so the caller must fall back to re-uploading the actual
+ * pixels instead.
+ */
+function refFromImageSrc(src) {
+  try {
+    const url = new URL(src)
+    const filename = url.searchParams.get('filename')
+    if (!filename) return null
+    return {
+      name: filename,
+      subfolder: url.searchParams.get('subfolder') || '',
+      type: url.searchParams.get('type') || 'input'
+    }
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Adds ONE clipspace image element to *node*'s buffer. Tries the cheap
+ * ref-reuse path first (`refFromImageSrc` above -- no re-upload needed,
+ * straight to `POST /eps_image_grid/add`, since a ComfyUI-native `/view`
+ * URL already names a file the server has), and only re-uploads actual
+ * pixels (fetch -> Blob -> File -> `uploadImageFile`, mirroring the Ctrl+V
+ * path) when *img*'s `.src` carries no `filename` param.
+ */
+async function addClipspaceImageToBuffer(node, img) {
+  const ref = refFromImageSrc(img.src)
+  if (ref) return addUploadToBuffer(node, ref)
+
+  const response = await fetch(img.src)
+  if (!response.ok) throw new Error(`fetch failed (HTTP ${response.status})`)
+  const blob = await response.blob()
+  const ext = (blob.type.split('/')[1] || 'png').split('+')[0]
+  const file = new File([blob], `clipspace-paste.${ext}`, { type: blob.type || 'image/png' })
+  const uploaded = await uploadImageFile(file)
+  return addUploadToBuffer(node, uploaded)
+}
+
+/**
+ * Appends whatever `ComfyApp.clipspace` currently holds to *node*'s buffer
+ * -- respecting `img_paste_mode` (`'selected'`, the default: just the
+ * currently-selected clipspace image; `'all'`: every image in it) --
+ * refreshing the displayed grid after each successful add so the FULL
+ * buffer (every already-buffered image plus the new one(s)) stays visible.
+ * Never throws -- fails soft per image, the same convention
+ * `addFilesToBuffer` already uses; a missing/empty clipspace is a silent
+ * no-op.
+ */
+async function addClipspaceToBuffer(node) {
+  const clipspace = ComfyApp.clipspace
+  const imgs = clipspace && clipspace.imgs
+  if (!imgs || !imgs.length) return
+
+  const selected = imgs[clipspace.selectedIndex] ? [imgs[clipspace.selectedIndex]] : []
+  const targets = clipspace.img_paste_mode === 'all' ? imgs : selected
+  if (!targets.length) return
+
+  let addedAny = false
+  for (const img of targets) {
+    if (!img || !img.src) continue
+    try {
+      const result = await addClipspaceImageToBuffer(node, img)
+      if (result && Array.isArray(result.images)) {
+        setNodeImagesFromRefs(node, result.images)
+        addedAny = true
+      }
+    } catch (error) {
+      console.warn(PREFIX, 'clipspace-paste-to-add failed for one image', error)
+    }
+  }
+  if (addedAny) app.graph?.setDirtyCanvas(true, true)
+}
+
+/**
+ * Overrides core's own "Paste (Clipspace)" context-menu item so it ALSO
+ * appends to this node's durable buffer (file header has the full root-
+ * cause writeup: `ComfyApp.pasteFromClipspace` does a bare `node.imgs =
+ * [img]` REPLACE, never an append, and never calls any of our routes).
+ *
+ * WRAPS (never replaces) `getExtraMenuOptions` -- the identical "wrap,
+ * don't replace" idiom `installCopyImageMenuItem`/`installPasteFiles`
+ * already use -- calling the original FIRST so core's own item still gets
+ * pushed into `options` unchanged, THEN finds that pushed item by its
+ * exact label and wraps ITS callback: the original callback still runs
+ * first (so `node.imgs`/`node.images`/widgets update exactly as core
+ * intends -- this override is strictly additive), followed by
+ * `addClipspaceToBuffer` above, which re-fetches the FULL buffer
+ * afterward so both (or all) images stay visible -- never losing whatever
+ * was already buffered. A no-op (nothing to wrap) if `ComfyApp.clipspace`
+ * is empty -- core's own `getExtraMenuOptions` never adds the item in that
+ * case either, so `options.find` below simply finds nothing.
+ */
+function installClipspacePasteOverride(node) {
+  if (node.__epsGridClipspaceOverrideInstalled) return
+  node.__epsGridClipspaceOverrideInstalled = true
+
+  const original = node.getExtraMenuOptions
+  node.getExtraMenuOptions = function (canvas, options) {
+    const result = original ? original.call(this, canvas, options) : undefined
+    const pasteItem = options.find((opt) => opt && opt.content === CLIPSPACE_PASTE_MENU_LABEL)
+    if (pasteItem && typeof pasteItem.callback === 'function') {
+      const originalCallback = pasteItem.callback
+      pasteItem.callback = (...args) => {
+        const returned = originalCallback(...args)
+        void addClipspaceToBuffer(node)
+        return returned
+      }
+    }
+    return result
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Bug fixes 2026-07-20: buffer refresh (display-on-load/undo) + clone-on-
 // collision (copy independence) -- see file header for the full writeup.
 // ---------------------------------------------------------------------------
@@ -1256,13 +1739,65 @@ function installConfigureRefresh(node) {
 }
 
 // ---------------------------------------------------------------------------
+// Execution-complete refresh (2026-07-22 owner fix: output-panel pollution)
+// -- see file header for the full writeup + citations.
+// ---------------------------------------------------------------------------
+
+//: node -> the last `progress_state` state seen for it ('running'/
+//: 'finished'/etc, or absent before the first sighting) -- so a refresh
+//: fires only on the TRANSITION into 'finished', not on every LATER
+//: `progress_state` message that still happens to list this node (the
+//: registry resends every non-pending node's state on every change for
+//: the rest of that prompt, per `progress.py`'s `_send_progress_state`).
+const lastKnownProgressState = new WeakMap()
+
+//: Guards `installExecutionRefreshListener` so the module-scope
+//: `api.addEventListener` below is only ever attached once, no matter how
+//: many times `init()` runs (mirrors this file's other one-time-install
+//: guards, e.g. `attachedNodes`).
+let executionRefreshListenerInstalled = false
+
+/**
+ * Installs ONE module-scope `api.addEventListener('progress_state', ...)`
+ * listener (not one per node -- every live EPSImageGrid node is checked
+ * against the same event) that refreshes a node from its on-disk buffer
+ * the moment ITS OWN execution finishes -- regardless of whether that
+ * Run's result carried a `"ui"` key at all. See file header for why
+ * `progress_state`, not `"executed"`, is the signal used here.
+ */
+function installExecutionRefreshListener() {
+  if (executionRefreshListenerInstalled) return
+  executionRefreshListenerInstalled = true
+
+  api.addEventListener('progress_state', (event) => {
+    const nodes = event?.detail?.nodes
+    if (!nodes) return
+    const graphNodes = app.graph?._nodes || app.graph?.nodes || []
+    for (const node of graphNodes) {
+      if (nodeClassOf(node) !== CLASS_ID) continue
+      const entry = nodes[String(node.id)]
+      const state = entry ? entry.state : undefined
+      const previous = lastKnownProgressState.get(node)
+      if (state !== undefined) lastKnownProgressState.set(node, state)
+      if (state === 'finished' && previous !== 'finished') {
+        void scheduleRefresh(node)
+      }
+    }
+  })
+}
+
+// ---------------------------------------------------------------------------
 // Public entry points (called from web/eps_image.js)
 // ---------------------------------------------------------------------------
 
 /** EPSImageGrid is a real backend node (no frontend-only type registration
- * needed) -- everything here is per-instance, done in attach(). Kept as an
- * export because eps_image.js calls it unconditionally. */
-export function init() {}
+ * needed) -- everything PER-NODE here is done in attach(). Kept as an
+ * export because eps_image.js calls it unconditionally -- also the one
+ * place a module-scope (not per-node) listener belongs, since this runs
+ * exactly once per extension load. */
+export function init() {
+  installExecutionRefreshListener()
+}
 
 /** Per-node-instance attach; no-op unless *node* is an EPSImageGrid. */
 export function attach(node) {
@@ -1286,7 +1821,9 @@ export function attach(node) {
     hideGridUuidWidget(node)
     addClearButton(node)
     installPasteFiles(node)
+    installDragAndDrop(node) // assets-panel/Finder drop-to-add -- see its own docstring
     installCopyImageMenuItem(node) // Mac-over-LAN-http Copy Image fix -- see its own docstring
+    installClipspacePasteOverride(node) // clipspace paste-to-add -- see its own docstring
     installConfigureRefresh(node) // undo/redo display fix -- see its own docstring
     // Makes `isImageNode(node)` (litegraphUtil.ts) true even before
     // anything has ever been collected, so a real Ctrl+V onto a
