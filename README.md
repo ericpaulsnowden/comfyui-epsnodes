@@ -30,14 +30,16 @@ Current capabilities, no dependencies:
   passed through) so one node replaces a resize + a reroute + a get-size;
   **EPS Image Grid** collects images across separate Runs into a navigable
   grid and fans the whole set out (gather 10, then run them through a
-  workflow at once); **EPS Frame Saver** loads a video by path, lets you
+  workflow at once); **EPS Cross Product** pairs every image with every
+  text (2 images × 4 prompts = 8 runs — ComfyUI's own list pairing zips
+  instead); **EPS Frame Saver** loads a video by path, lets you
   scrub/play to a frame, and outputs that frame as an image.
 
-> **Status: pre-release. Eight capabilities ship today:** the **Prompt
+> **Status: pre-release. Nine capabilities ship today:** the **EPS Prompt
 > Notebook**, **EPS Apply LoRA Set**, the **EPS Lora Loader State Controller**,
 > **EPS LoRA Sweep**, **EPS Switcher**, **EPS Resolution**, **EPS Image
-> Grid**, and **EPS Frame Saver** (each described below). Contracts live in
-> [docs/FORMAT.md](docs/FORMAT.md).
+> Grid**, **EPS Cross Product**, and **EPS Frame Saver** (each described
+> below). Contracts live in [docs/FORMAT.md](docs/FORMAT.md).
 
 ## EPS Prompt Notebook (shipped)
 
@@ -315,6 +317,24 @@ times to gather images, then send the whole set through a workflow at once.
     in a new tab (right-click → Copy Image there for a true copy), and tells
     you so. **Copy (Clipspace)** works everywhere. For real OS image-copy, use
     the ComfyUI desktop app or open ComfyUI via `localhost`/`https`.
+
+## EPS Cross Product (shipped)
+
+`EPSNodes → EPS Cross Product`: pair **every image with every text** — 2
+images × 4 prompts = 8 runs, not 4.
+
+- **Why you need it:** wiring two fanned lists (say, an EPS Image Grid and a
+  multi-select EPS Prompt Notebook) into the same path does NOT multiply
+  them — ComfyUI pairs lists index-by-index and repeats the shorter list's
+  last entry. Two images + four prompts comes out as four runs, three of
+  them reusing the last image. This node produces all the combinations
+  instead.
+- **How to wire it:** grid `image` → `images`, notebook `text` → `texts`;
+  then use this node's `image`/`text` outputs downstream in place of the
+  originals. They stay paired index-for-index (image 1 with each prompt in
+  order, then image 2, …).
+- **Empty inputs** (an empty grid, no prompts selected) skip the branch
+  cleanly — never a crash.
 
 ## EPS Frame Saver (shipped)
 

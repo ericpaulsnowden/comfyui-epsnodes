@@ -1115,6 +1115,32 @@ thing to wire with no benefit; see the roadmap for the full tradeoff.
   per node, never per swept step. `min`/`max` apply UNCLAMPED (−10..10) —
   deliberate over/under-strength testing is allowed.
 
+### §6.9 `EPSCrossProduct` (display: "EPS Cross Product") — every-with-every pairing
+
+NON-lora node in `eps_image/`, category "EPSNodes". Class id `EPSCrossProduct`
+frozen once shipped (§8). Born from an owner report 2026-07-23: a 2-image EPS
+Image Grid feeding the same path as 4 selected EPS Prompt Notebook entries
+produced 4 downstream runs — (img1,p1), (img2,p2), (img2,p3), (img2,p4) —
+because core list execution ZIPS index-by-index and repeats the shorter
+list's last element (`execution.py` `slice_dict`, `v[i if len(v) > i else
+-1]`). Core has no cross-product mechanism; this node is it.
+
+- **Inputs (both required):** `images` (IMAGE) + `texts` (STRING,
+  `forceInput` — wire-only, there is nothing sensible to type here).
+  `INPUT_IS_LIST = True` for the same reason as §6.4's switcher: without it
+  core would map THIS node over the longer list, zipping the very lists it
+  exists to multiply.
+- **Outputs:** `image` + `text`, both `OUTPUT_IS_LIST`, length N×M,
+  IMAGE-MAJOR (image 1 with every text in order, then image 2 with every
+  text, …), index-aligned by construction — wire them onward in place of
+  the two originals and downstream runs N×M times with the pairs intact.
+  A `[B,H,W,C]` batch element stays ONE element (switcher-consistent; the
+  node never unpacks upstream batches).
+- **Empty side** (either list empty after dropping `None`s) → the §6.4
+  `[ExecutionBlocker(None)]` pattern on BOTH outputs: the branch silently
+  skips, the queue succeeds. No `IS_CHANGED` (pure function of inputs).
+  No torch/ComfyUI import at module scope (elements are opaque).
+
 ## §7 Frontend surfaces
 
 - **§7.1 Extension entry** `web/lora_library.js`: exactly one

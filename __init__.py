@@ -89,6 +89,7 @@ _NODE_SPECS = [
     ("eps_image.nodes_resolution", "EPSResolution", "EPS Resolution"),
     ("eps_image.nodes_image_grid", "EPSImageGrid", "EPS Image Grid"),
     ("eps_image.nodes_frame_saver", "EPSFrameSaver", "EPS Frame Saver"),
+    ("eps_image.nodes_cross", "EPSCrossProduct", "EPS Cross Product"),
 ]
 
 NODE_CLASS_MAPPINGS = {}
