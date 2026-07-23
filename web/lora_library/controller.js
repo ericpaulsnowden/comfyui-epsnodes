@@ -1576,6 +1576,48 @@ function entryDisplayName(entry) {
 // ------------------------------------------------------------ node registration
 
 /**
+ * Make the node library / search show NODE_TITLE instead of the class id.
+ *
+ * The Vue frontend synthesizes node defs for frontend-registered litegraph
+ * types with `display_name` HARDCODED to the registration name (app.ts
+ * registerNodes, "frontendOnlyDefs", observed in comfyui-frontend-package
+ * 1.45.21): it reads the class's `category` and `description` statics but
+ * NOT `title`, so this node showed up as "LoraLibrarySetController" and a
+ * gallery search for "EPS" missed it entirely (owner report, 2026-07-22 —
+ * rgthree never hits this because its registration NAMES are already
+ * human-readable titles). Until the frontend consults `title`, patch the
+ * synthesized def in the nodeDef store after it exists. Live-verified on
+ * the rig: the store's own nodeSearchService then returns this node for
+ * "EPS". Every hop is guarded — if any frontend internal here moves, we
+ * silently keep today's id-as-name behavior rather than break anything.
+ *
+ * The def is synthesized in registerNodes AFTER extensions register their
+ * node types, so this retries (250ms, up to 10s) instead of assuming order.
+ */
+function _fixLibraryDisplayName() {
+  let attempts = 0
+  const tryPatch = () => {
+    attempts += 1
+    let done = false
+    try {
+      const el = document.querySelector('#vue-app') || document.querySelector('#app')
+      const vue = el && el.__vue_app__
+      const props = vue && vue.config && vue.config.globalProperties
+      const pinia = props && props.$pinia
+      const state = pinia && pinia.state && pinia.state.value
+      const byName = state && state.nodeDef && state.nodeDef.nodeDefsByName
+      const def = byName ? byName[NODE_TYPE] : null
+      if (def && def.display_name !== NODE_TITLE) def.display_name = NODE_TITLE
+      done = !!(def && def.display_name === NODE_TITLE)
+    } catch (error) {
+      done = false // frontend internals moved; keep the id-as-name status quo
+    }
+    if (!done && attempts < 40) setTimeout(tryPatch, 250)
+  }
+  tryPatch()
+}
+
+/**
  * Register the `LoraLibrarySetController` virtual node type with LiteGraph.
  * Called once from the extension's `init()` hook (lora_library.js), which
  * already wraps this call in its own try/catch — we still guard everything
@@ -1593,6 +1635,14 @@ export function registerControllerNode() {
 
     class LoraLibrarySetController extends LGraphNode {
       static title = NODE_TITLE
+
+      // Surfaced in the node library / search results: the frontend's
+      // frontend-only def synthesis reads `node.description` (unlike
+      // `title` — see _fixLibraryDisplayName below), so without this the
+      // entry says "Frontend only node for LoraLibrarySetController".
+      static description =
+        'Drives a Power Lora Loader (rgthree): capture its rows as named ' +
+        'states, re-apply or push them, and keep EPS Apply LoRA Set nodes in sync.'
 
       constructor(title = NODE_TITLE) {
         super(title)
@@ -2783,6 +2833,7 @@ export function registerControllerNode() {
 
     LiteGraph.registerNodeType(NODE_TYPE, LoraLibrarySetController)
     LoraLibrarySetController.category = NODE_CATEGORY
+    _fixLibraryDisplayName()
   } catch (error) {
     api.warn('registerControllerNode failed', error)
   }
