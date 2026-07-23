@@ -222,6 +222,17 @@ off means three runs.
   ComfyUI iterate. (A scalar wired downstream — e.g. a seed — repeats
   identically across the runs; use a per-image list for per-image
   variation.)
+- **A list-producing input (like EPS Image Grid) counts every image it
+  holds:** wiring a grid into a slot merges its whole buffer into the run
+  count element-by-element, same as if each image were wired in
+  separately — three grid images + one ordinary image enabled means four
+  runs, not two.
+- **Disabled branches don't run at all:** toggle a slot off and whatever
+  feeds it — even a slow loader or another grid — never executes for that
+  queue, not just gets dropped from the output afterward. (One quirk to
+  know: an *enabled* slot fed by an *empty* grid with nothing wired into
+  the grid skips the whole switcher branch for that queue — toggle the
+  empty grid off, or put something in it.)
 - **All off is allowed:** toggle everything off (or wire nothing) and the
   queue still succeeds — the image branch simply doesn't run that time. No
   error, no downstream crash.

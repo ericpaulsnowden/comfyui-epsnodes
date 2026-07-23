@@ -556,9 +556,25 @@ per-input toggle + toggle-all header + N-enabled→N-runs fan-out.
   Renaming to an empty string resets the label back to the socket name.
 - **Output:** single `IMAGE` declared `OUTPUT_IS_LIST` — emits the ENABLED
   images in slot order; downstream runs once per enabled image (N enabled →
-  N runs) via core list execution. Disabled inputs are simply omitted from
-  the list (v1 = simple filter; their upstreams still execute — lazy-skip is
-  the tracked M3 future, `research-eps-nodes.md` § lazy backlog).
+  N runs) via core list execution. A list-producing upstream (e.g. EPS
+  Image Grid, itself `OUTPUT_IS_LIST`) merges element-wise into that count
+  instead of counting as one image — the node also declares
+  `INPUT_IS_LIST = True` so core merges correctly instead of silently
+  re-running EPSSwitcher once per upstream element with every OTHER input
+  broadcast-repeated (the shipped bug this fixed 2026-07-22: a disabled
+  Image Grid input still forced the downstream branch to run once per grid
+  element, duplicating the one enabled image). Disabled inputs are omitted
+  from the list AND their upstreams never execute: every `image_N` is
+  `lazy`, and `check_lazy_status` only requests enabled, connected slots,
+  so a toggled-off branch is skipped before it runs, not filtered out
+  after (supersedes the M1 "their upstreams still execute" limitation and
+  closes the M3 lazy-skip backlog item). KNOWN CORE SEMANTIC (execution.py
+  `_async_map_node_over_list`, list-input blocker scan): if any ENABLED
+  input's resolved list contains an `ExecutionBlocker` element — e.g. an
+  enabled EPS Image Grid that is EMPTY with nothing wired into it — core
+  blocks the ENTIRE switcher before it runs, silently skipping the whole
+  branch (queue still succeeds). Toggle an empty grid off (its branch then
+  never even executes) or collect into it first.
 - **All-off / none-connected is a VALID state** (owner decision 2026-07-20,
   supersedes the v0.14.0 queue-time error — "there will be times when a user
   might want to turn them all off"): queueing with every input toggled off,
@@ -584,12 +600,20 @@ per-input toggle + toggle-all header + N-enabled→N-runs fan-out.
   optional dict, which also carries the `toggles` STRING bridge (in `optional`,
   NOT `required` — a required input absent from a hand-built `/prompt` is
   rejected before the node runs, breaking the no-frontend API path;
-  `execute`'s default covers omission). `execute(**kwargs)` collects
-  present-and-enabled `image_N` in ascending N into a list — a slot is enabled
-  unless `toggles` records it as the literal boolean `false` (matching the
-  frontend's `!== false`); `RETURN_TYPES=("IMAGE",)`, `OUTPUT_IS_LIST=(True,)`.
-  No ComfyUI imports at module scope (torch only if needed, lazy).
-  `set_context` optional (not needed for M1).
+  `execute`'s default covers omission). `INPUT_IS_LIST = True`: every input
+  — `toggles` included — arrives wrapped in a list; `execute` unwraps
+  `toggles` and, for each present-and-enabled `image_N` in ascending N,
+  extends the output with that slot's list elements (one level of
+  flattening, so a list-producing upstream merges element-wise) — a slot is
+  enabled unless `toggles` records it as the literal boolean `false`
+  (matching the frontend's `!== false`). Every `image_N`, including
+  dynamically-grown ones, also carries `lazy: True`; `check_lazy_status`
+  returns only enabled, connected slot names, so a toggled-off branch's
+  upstream is never requested and never runs. `toggles` itself stays
+  non-lazy — `check_lazy_status` needs it immediately to decide.
+  `RETURN_TYPES=("IMAGE",)`, `OUTPUT_IS_LIST=(True,)`. No ComfyUI imports at
+  module scope (torch only if needed, lazy). `set_context` optional (not
+  needed for M1).
 - **Docs caveat:** a scalar seed downstream repeats identically across the N
   fanned runs — surface this in the node description (per-image variation
   needs an explicit seed list).
