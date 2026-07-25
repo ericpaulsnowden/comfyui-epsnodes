@@ -45,7 +45,8 @@ Current capabilities, no dependencies:
 > [docs/FORMAT.md](docs/FORMAT.md). Want to see everything working
 > together? Load
 > [examples/eps-full-pipeline.json](examples/eps-full-pipeline.json) —
-> all ten nodes stitched into one annotated workflow.
+> all ten nodes stitched into one annotated workflow — or one of the two
+> ready-to-run test graphs beside it ([examples/](examples/)).
 
 ## EPS Prompt Notebook (shipped)
 
