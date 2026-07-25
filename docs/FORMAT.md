@@ -280,6 +280,10 @@ execution — **the file is the truth; the UI is a view.**
 
 ### §6.1 `LoraLibraryNotebook` (display: "EPS Prompt Notebook")
 
+- **List scroll position is preserved across re-renders (2026-07-24 owner
+  fix):** `renderList()` rebuilds the left column on every selection,
+  save, poll refresh, drag, and collapse — the rebuild now restores the
+  prior `scrollTop` instead of resetting to the top.
 - Widgets: `file` (STRING, default `"loras.md"`), `entry` (STRING — the
   SELECTION; the DOM widget UI sets it, but it stays a plain serialized
   STRING so workflows and the API can drive it without our JS). Multi-
@@ -862,6 +866,24 @@ add; single batch-aware IMAGE input; disk-backed, survive-restart, NO cap.
   pattern) AND to ComfyUI clipspace (populate `node.images`/`imgs`); Ctrl+V
   on the selected node uploads the pasted image (`POST /upload/image`) and
   appends it (`POST /eps_image_grid/add`).
+- **Identity hardening (2026-07-24, owner bug "a copied grid ran with the
+  original's buffer"):** (1) the `grid_uuid` widget carries a
+  `serializeValue()` returning `currentUuid(node)` (properties-first) — the
+  /prompt build and workflow saves both prefer `serializeValue`, so a stale
+  widget value can never make a RUN diverge from what the node displays;
+  (2) a debounced **settled-collision sweep** runs after the graph goes
+  quiet — two live grids still sharing a uuid at settle time is a genuine
+  PERSISTED duplicate (e.g. an undo snapshot captured between a paste and
+  its deferred remint), and the higher-id node gets the normal mint+clone
+  (lowest-id keeps the identity; clones copy the buffer, never a loss).
+  Transient rebuild collisions still remain untouched (the v0.19.2 rule).
+- **Empty-grid visibility (2026-07-24):** a run of an ENABLED grid with an
+  EMPTY buffer and nothing wired in raises a warning toast naming the node
+  — that state emits an ExecutionBlocker and silently skips every
+  downstream branch (§6.4 list semantics), which owners read as "my
+  workflow won't run". Post-run refresh also fires a second, DELAYED
+  refresh (~800ms) so core's async `executed` imgs-replace can't win the
+  race and strand the node showing only the newest image.
 - **Clipspace paste appends too (2026-07-22, owner bug "second paste
   overwrites the first"):** core's own "Paste (Clipspace)" right-click item
   is wrapped (`installClipspacePasteOverride`, per-instance guard) so it
