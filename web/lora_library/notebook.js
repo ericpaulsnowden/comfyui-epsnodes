@@ -2004,6 +2004,15 @@ function updateModeHint(state) {
  * group (see list_categories()'s doc comment on the Python side).
  */
 function renderList(state) {
+  // 2026-07-24 (owner report: "the left column should not scroll to the
+  // top of the list"): `replaceChildren()` resets the list's scrollTop to
+  // 0, and renderList() runs on every selection click, save, poll refresh,
+  // drag-reorder, collapse toggle, ... -- so any interaction anywhere in a
+  // long list yanked the view back to the top. Capture the scroll position
+  // before the rebuild and restore it after (the browser clamps it if the
+  // list shrank). Restoring is skipped only when there's nothing to scroll
+  // (the empty-state early return below).
+  const previousScrollTop = state.listEl.scrollTop
   state.listEl.replaceChildren()
   state.dragRows = []
 
@@ -2058,6 +2067,9 @@ function renderList(state) {
   while (entryIndex < entries.length) {
     appendEntry(entries[entryIndex])
   }
+
+  // See the capture at the top of this function (2026-07-24 owner fix).
+  state.listEl.scrollTop = previousScrollTop
 }
 
 /** The normal (non-renaming) row: click/ctrl/shift-click selection,
