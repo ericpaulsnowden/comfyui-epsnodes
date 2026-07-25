@@ -1733,8 +1733,119 @@ function installConfigureRefresh(node) {
       if (!isGraphConfiguring()) {
         void scheduleRefresh(this)
       }
+      // 2026-07-24: every configure pass (load, undo, redo, paste-restore)
+      // re-arms the settled-collision sweep below -- the sweep only acts
+      // AFTER the graph has been quiet, so transient rebuild states never
+      // trigger it (the v0.19.2 lesson), but a PERSISTED duplicate does.
+      scheduleSettledCollisionSweep()
     }
     return result
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Identity hardening (2026-07-24, owner report: "I copied a grid, cleared
+// it, pasted two images -- running it output all of the images from the
+// node I copied FROM"). Two independent guards:
+//
+// 1. `installUuidSerializeGuard` -- at serialization time (both the /prompt
+//    build and workflow saves prefer `widget.serializeValue()` over the raw
+//    `.value`; the same frontend fact the rgthree capture fix, v0.14.1,
+//    established) the hidden `grid_uuid` widget now ALWAYS emits
+//    `currentUuid(node)` -- `properties.uuid` first, the exact same
+//    authoritative source every display/route path already uses. So even
+//    if some paste/undo interleaving leaves the widget's `.value` carrying
+//    the SOURCE node's uuid while `properties.uuid` holds this node's own,
+//    the RUN and the SAVE can no longer diverge from what the node shows.
+//
+// 2. `scheduleSettledCollisionSweep` -- the load-pass rules deliberately
+//    never remint during configure (saved uuids are authoritative there;
+//    v0.19.2), which is correct for TRANSIENT rebuild states but leaves one
+//    real gap: a PERSISTED duplicate -- e.g. an undo snapshot captured
+//    between an interactive paste and its deferred remint, then restored --
+//    shares its buffer with the original forever. The sweep runs only
+//    after the graph has been QUIET for a while, so it can tell the two
+//    apart: if two live grids STILL share a uuid at settle time, that is a
+//    genuine persisted duplicate -- the lowest-id node keeps the identity,
+//    every other gets the normal mint+clone (never a data loss: clones
+//    copy the buffer).
+// ---------------------------------------------------------------------------
+
+function installUuidSerializeGuard(node) {
+  const widget = getGridUuidWidget(node)
+  if (!widget || widget.__epsGridSerializeGuard) return
+  widget.__epsGridSerializeGuard = true
+  widget.serializeValue = () => currentUuid(node) || widget.value || ''
+}
+
+let settledSweepTimer = 0
+
+function scheduleSettledCollisionSweep() {
+  clearTimeout(settledSweepTimer)
+  settledSweepTimer = setTimeout(async () => {
+    try {
+      const nodes = (app.graph?._nodes || app.graph?.nodes || []).filter(
+        (n) => nodeClassOf(n) === CLASS_ID
+      )
+      const byUuid = new Map()
+      for (const n of nodes) {
+        const uuid = currentUuid(n)
+        if (!GRID_UUID_RE.test(uuid)) continue
+        if (!byUuid.has(uuid)) byUuid.set(uuid, [])
+        byUuid.get(uuid).push(n)
+      }
+      for (const [uuid, group] of byUuid) {
+        if (group.length < 2) continue
+        group.sort((a, b) => (a.id || 0) - (b.id || 0))
+        for (const duplicate of group.slice(1)) {
+          console.log(
+            PREFIX,
+            `settled duplicate: nodes share uuid ${uuid} after the graph went ` +
+              `quiet -- reminting node #${duplicate.id} (buffer cloned, ` +
+              'lowest-id node keeps the identity)'
+          )
+          // The collision re-check + mint + clone all live in
+          // ensureUniqueUuid's own collision branch.
+          await ensureUniqueUuid(duplicate, { allowCollisionMint: true })
+        }
+      }
+    } catch (error) {
+      console.warn(PREFIX, 'settled collision sweep failed', error)
+    }
+  }, 1500)
+}
+
+/**
+ * 2026-07-24 (owner: "something seems broken where I can't get a full
+ * workflow to run even when I have all of the items checked in the
+ * switcher"): an ENABLED but EMPTY grid with nothing wired in emits an
+ * ExecutionBlocker, and core then silently skips every downstream branch
+ * it touches (FORMAT.md §6.4's documented list-input semantics) -- the
+ * queue "succeeds" with nothing to show and no explanation. This makes
+ * the silence visible: right after such a run, a warning toast names the
+ * node. Advisory only -- every failure path here is swallowed.
+ */
+async function warnIfEmptyAfterRun(node) {
+  try {
+    const uuid = currentUuid(node)
+    if (!GRID_UUID_RE.test(uuid)) return
+    const imageInput = (node.inputs || []).find((input) => input.name === 'image')
+    if (imageInput && imageInput.link != null) return // live input -> flow-through ran
+    const response = await api.fetchApi(`${LIST_ROUTE}?uuid=${encodeURIComponent(uuid)}`)
+    if (!response.ok) return
+    const body = await response.json()
+    if ((body.refs || []).length) return
+    app.extensionManager?.toast?.add?.({
+      severity: 'warn',
+      summary: 'EPS Image Grid',
+      detail:
+        `"${node.title || 'EPS Image Grid'}" ran with an empty buffer and ` +
+        'nothing wired in -- downstream nodes fed from it were skipped this ' +
+        'run. Collect or paste something into it, or toggle its branch off.',
+      life: 6000
+    })
+  } catch {
+    // Advisory only -- never let the warning path break anything.
   }
 }
 
@@ -1781,6 +1892,17 @@ function installExecutionRefreshListener() {
       if (state !== undefined) lastKnownProgressState.set(node, state)
       if (state === 'finished' && previous !== 'finished') {
         void scheduleRefresh(node)
+        // 2026-07-24 (owner: a Collect run sometimes showed ONLY the newest
+        // image until later runs "flashed" the full grid): core's own
+        // 'executed' handler replaces node.imgs with just this run's
+        // reported refs, and it lands ASYNCHRONOUSLY (imgs are assigned
+        // only after the <img> elements finish loading) -- so it can
+        // arrive AFTER the refresh above and win the race. A second,
+        // delayed refresh outlasts it and settles on the full buffer.
+        setTimeout(() => {
+          void scheduleRefresh(node)
+        }, 800)
+        void warnIfEmptyAfterRun(node) // see its docstring (2026-07-24)
       }
     }
   })
@@ -1831,6 +1953,7 @@ export function attach(node) {
     // core creating a fresh LoadImage node (see file header's "Paste IN"
     // section for the exact check this satisfies).
     node.previewMediaType = 'image'
+    installUuidSerializeGuard(node) // 2026-07-24 identity hardening -- see its block comment
 
     // Deferred one tick -- the paste-collision path. See file header
     // point 1 for exactly why this can't run synchronously here. Awaiting
@@ -1844,6 +1967,8 @@ export function attach(node) {
       } catch (error) {
         console.warn(PREFIX, 'deferred uuid dedup failed', error)
       } finally {
+        installUuidSerializeGuard(node) // in case the widget appeared late
+        scheduleSettledCollisionSweep() // 2026-07-24 -- persisted-duplicate net
         await scheduleRefresh(node)
       }
     }, 0)
@@ -1862,9 +1987,13 @@ export function loadedGraphNode(node) {
   try {
     if (!node) return
     if (nodeClassOf(node) !== CLASS_ID) return
+    installUuidSerializeGuard(node) // 2026-07-24 identity hardening
     ensureUniqueUuid(node, { allowCollisionMint: false })
       .catch((error) => console.warn(PREFIX, 'loadedGraphNode dedup failed', error))
-      .finally(() => scheduleRefresh(node))
+      .finally(() => {
+        scheduleSettledCollisionSweep() // 2026-07-24 -- persisted-duplicate net
+        return scheduleRefresh(node)
+      })
   } catch (error) {
     console.warn(PREFIX, 'loadedGraphNode dedup failed', error)
   }
