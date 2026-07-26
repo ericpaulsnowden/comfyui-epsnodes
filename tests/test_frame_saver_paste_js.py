@@ -17,10 +17,26 @@ This doubles as a regression test that the relative import depth itself is
 correct. Skips cleanly when Node isn't installed; the LIVE event mechanics
 (sole-selection gating, focused-field bail-out, capture-phase consumption,
 listener removal on node delete) are verified on the rig, not here.
+
+Also covers the 2026-07-26 five-button transport strip + press-and-hold
+auto-repeat (owner ask: "+5/-5 and a jump-to-start button; holding
+-5/-1/+1/+5 should keep moving you through the timeline"). None of THAT
+code is pure/exported -- it only runs inside ``attach()``/
+``buildControlStrip()`` against a real DOM widget, which this repo has no
+browser harness to simulate -- so those assertions match directly on the
+module's SOURCE TEXT (button order/glyphs, which buttons are wired to the
+hold-repeat helper, every teardown path, and the ``MIN_NODE_WIDTH`` floor)
+via the ``frame_saver_source`` fixture below, robust to incidental
+whitespace but strict on identifiers/structure. The live event mechanics
+(an actual press-and-hold, pointer capture, window blur) are verified on
+the rig, not here -- see this change's manual-verification notes.
 """
 
-# ruff: noqa: E501 — case tables and descriptive assert messages read better
-# on one line here than wrapped; this exemption is scoped to this test file.
+# ruff: noqa: E501, RUF001, RUF002, RUF003 — case tables and descriptive
+# assert messages read better unwrapped (E501); several assertions below
+# also hold the EXACT glyphs frame_saver.js's buttons use verbatim -- e.g.
+# the real U+2212 MINUS SIGN in '−1'/'−5', matching the button text itself,
+# not an accidental look-alike (RUF001-3). All four scoped to this file.
 
 from __future__ import annotations
 
@@ -203,6 +219,50 @@ def paste_api(tmp_path_factory: pytest.TempPathFactory) -> dict:
     return json.loads(result.stdout)
 
 
+@pytest.fixture(scope="module")
+def frame_saver_source() -> str:
+    """The raw text of frame_saver.js -- for assertions about SOURCE
+    STRUCTURE (transport-button order/wiring/teardown/layout constants) that
+    can't be driven through the Node probe above, since none of it is
+    pure/exported: it only runs inside ``attach()``/``buildControlStrip()``
+    against a real DOM widget, which this repo has no browser harness to
+    simulate. Kept as its own fixture (rather than folded into ``paste_api``)
+    so a failure here reads as "the file's TEXT doesn't say what we expect",
+    not "the runtime behavior differs" -- two different failure modes worth
+    telling apart.
+    """
+    return FRAME_SAVER_JS.read_text(encoding="utf-8")
+
+
+def _function_body(source: str, signature: str) -> str:
+    """The body of a top-level ``function <signature> {`` declaration, up to
+    its closing brace at column 0. This file's top-level functions are
+    always 2-space-indented internally with the closing ``}`` alone on its
+    own unindented line, so a bare ``\\n}\\n`` reliably marks the end --
+    used below to scope assertions to one function's body rather than
+    matching anywhere in the file.
+    """
+    start_match = re.search(re.escape(f"function {signature} {{") + r"\n", source)
+    assert start_match, f"function {signature} {{ not found"
+    start = start_match.end()
+    end_match = re.search(r"\n\}\n", source[start:])
+    assert end_match, f"function {signature}'s closing brace not found"
+    return source[start : start + end_match.start()]
+
+
+def _button_glyph(source: str, state_field: str) -> str:
+    """The literal ``text:`` glyph assigned to ``state.<state_field>`` in
+    buildControlStrip -- e.g. ``_button_glyph(src, "jumpStartBtn")`` -> '⏮'.
+    """
+    pattern = re.compile(
+        r"state\." + re.escape(state_field) + r"\s*=\s*el\('button',\s*\{.*?text:\s*'([^']*)'",
+        re.DOTALL,
+    )
+    match = pattern.search(source)
+    assert match, f"could not find state.{state_field}'s button literal"
+    return match.group(1)
+
+
 def test_frame_saver_js_parses() -> None:
     """`node --check` — the file must at minimum be valid ES module syntax."""
     result = subprocess.run(
@@ -309,3 +369,230 @@ def test_is_text_entry_element_duck_typing(paste_api: dict) -> None:
     typing surfaces the paste handler must never hijack; canvas/div/null
     are fair game."""
     assert paste_api["textEntry"] == TEXT_ENTRY_EXPECTED
+
+
+# ------------------------------------------- transport strip + hold-repeat
+# 2026-07-26 owner ask: "+5/-5 and a jump-to-start button; holding down the
+# -5/-1/+1/+5 should keep moving you through the timeline". Source-text
+# assertions only -- see frame_saver_source's docstring for why.
+
+#: state field name -> its documented button glyph (buildControlStrip).
+#: Proper Unicode minus for negative deltas (matching the pre-existing −1,
+#: NOT an ASCII hyphen), plain ASCII plus for positive (matching +1) --
+#: this file's own established convention, not a new one.
+BUTTON_GLYPHS = {
+    "jumpStartBtn": "⏮",
+    "stepBack5Btn": "−5",
+    "stepBackBtn": "−1",
+    "stepFwdBtn": "+1",
+    "stepFwd5Btn": "+5",
+}
+
+
+def test_transport_button_glyphs(frame_saver_source: str) -> None:
+    """Compact, unambiguous glyphs matching the file's existing convention
+    (real Unicode transport glyphs -- ▶/⏸ already shipped -- not ASCII
+    approximations or an icon font)."""
+    for field, expected in BUTTON_GLYPHS.items():
+        assert _button_glyph(frame_saver_source, field) == expected, (
+            f"state.{field}'s button glyph changed"
+        )
+
+
+def test_control_strip_five_buttons_in_documented_order(frame_saver_source: str) -> None:
+    """buildControlStrip's returned epsfs-strip children must read, left to
+    right: jump-to-start, −5, −1, PLAY/PAUSE, +1, +5, then the frame field
+    and the counter.
+
+    Owner ask 2026-07-26 added the five transport buttons; play/pause keeps
+    the middle position it has always had, so the strip reads symmetrically
+    (big-step / small-step / play / small-step / big-step) and the control
+    the owner already reaches for does not move."""
+    match = re.search(
+        r"return el\('div',\s*\{\s*className:\s*'epsfs-strip'\s*\},\s*\[(.*?)\]\s*\)\s*\n\}",
+        frame_saver_source,
+        re.DOTALL,
+    )
+    assert match, "could not find buildControlStrip's returned epsfs-strip children array"
+    children = [c.strip() for c in match.group(1).split(",")]
+    children = [c for c in children if c]
+    assert children == [
+        "state.jumpStartBtn",
+        "state.stepBack5Btn",
+        "state.stepBackBtn",
+        "state.playPauseBtn",
+        "state.stepFwdBtn",
+        "state.stepFwd5Btn",
+        "state.frameInputEl",
+        "state.counterEl",
+    ]
+
+
+def test_four_step_buttons_wired_to_hold_repeat_helper(frame_saver_source: str) -> None:
+    """−5/−1/+1/+5 must each be wired through attachStepButton (the shared
+    click + press-and-hold-repeat helper), with the matching delta -- "the
+    new ones are the same operation with a different delta"."""
+    for field, delta in [
+        ("stepBack5Btn", "-5"),
+        ("stepBackBtn", "-1"),
+        ("stepFwdBtn", "1"),
+        ("stepFwd5Btn", "5"),
+    ]:
+        pattern = rf"attachStepButton\(state,\s*state\.{field},\s*{re.escape(delta)}\)"
+        assert re.search(pattern, frame_saver_source), (
+            f"state.{field} must be wired via attachStepButton(state, state.{field}, {delta})"
+        )
+
+
+def test_jump_start_button_excluded_from_hold_repeat(frame_saver_source: str) -> None:
+    """Jump-to-start is idempotent -- it must be driven by a plain click
+    only, never routed through attachStepButton()/the repeat machinery."""
+    assert "attachStepButton(state, state.jumpStartBtn" not in frame_saver_source
+    assert re.search(
+        r"state\.jumpStartBtn\.addEventListener\('click',.*?setFrame\(state,\s*0\)",
+        frame_saver_source,
+        re.DOTALL,
+    ), "jumpStartBtn must plain-click straight to setFrame(state, 0)"
+
+
+def test_step_repeaters_are_exactly_the_four_step_buttons(frame_saver_source: str) -> None:
+    """state.stepRepeaters (what the window-blur handler and onRemoved both
+    iterate to force-stop) must hold exactly the four step buttons'
+    stopRepeat -- jump-to-start and play/pause are not hold-repeat controls
+    and must never end up in this list."""
+    match = re.search(r"state\.stepRepeaters\s*=\s*\[(.*?)\]", frame_saver_source, re.DOTALL)
+    assert match, "state.stepRepeaters assignment not found"
+    listed = match.group(1)
+    for field in ("stepBack5Btn", "stepBackBtn", "stepFwdBtn", "stepFwd5Btn"):
+        assert field in listed, f"state.{field} missing from state.stepRepeaters"
+    for excluded in ("jumpStartBtn", "playPauseBtn"):
+        assert excluded not in listed, f"state.{excluded} must not be in state.stepRepeaters"
+
+
+def test_step_frame_is_the_single_shared_clamp_path(frame_saver_source: str) -> None:
+    """attachStepButton must never clamp or commit on its own -- every
+    trigger (the pointerdown's own first step, every repeat tick, and the
+    keyboard-click guard) reaches the frame only through stepFrame(), which
+    itself goes through the exact same clampFrame()/setFrame() every other
+    frame change already uses (no bypass of the total-frames clamp)."""
+    body = _function_body(frame_saver_source, "attachStepButton(state, button, delta)")
+    assert "clampFrame(" not in body, "attachStepButton must not clamp directly -- go through stepFrame()"
+    assert "setFrame(" not in body, "attachStepButton must not call setFrame directly -- go through stepFrame()"
+    call_count = body.count("stepFrame(state, delta)")
+    assert call_count == 3, (
+        "expected exactly 3 `stepFrame(state, delta)` call sites in "
+        f"attachStepButton (pointerdown's press, repeatTick, the keyboard "
+        f"click guard); found {call_count}"
+    )
+
+
+def test_step_frame_skips_redundant_setframe_at_clamp_boundary(frame_saver_source: str) -> None:
+    """stepFrame() must clamp via clampFrame() and bail out BEFORE calling
+    setFrame() (which seeks the preview) when a step would not actually
+    move the frame -- no redundant seek at the boundary, and the
+    return-false lets the repeat loop stop itself."""
+    body = _function_body(frame_saver_source, "stepFrame(state, delta)")
+    assert "clampFrame(state," in body
+    bail_pos = body.index("if (next === current) return false")
+    set_frame_pos = body.index("setFrame(state, next)")
+    assert bail_pos < set_frame_pos, "the no-op-boundary bailout must come BEFORE setFrame() is called"
+
+
+def test_repeat_interval_guarded_against_boundary_hit_at_initial_delay(frame_saver_source: str) -> None:
+    """If the very FIRST repeat tick (fired when the initial delay elapses)
+    already lands on a clamp boundary -- e.g. holding −1 starting at frame
+    0 -- that tick's stepFrame() return routes through stopRepeat() (which
+    clears activePointerId) before the interval would otherwise be created.
+    Creating `repeatInterval` must be conditioned on the gesture STILL being
+    active at that point, not run unconditionally right after the first
+    tick -- otherwise a boundary hit exactly at the delay would still arm
+    one dead interval tick before self-cancelling on its own next firing,
+    instead of never being created at all. Caught live on the rig: holding
+    −1 from frame 0 was confirmed to stay at 0 for the whole hold, but the
+    source still needed this guard to avoid that one extra wasted tick."""
+    body = _function_body(frame_saver_source, "attachStepButton(state, button, delta)")
+    hold_timer_match = re.search(
+        r"holdTimer = setTimeout\(\(\) => \{(.*?)\}, HOLD_INITIAL_DELAY_MS\)", body, re.DOTALL
+    )
+    assert hold_timer_match, "holdTimer's setTimeout callback not found"
+    callback_body = hold_timer_match.group(1)
+    assert "repeatTick()" in callback_body
+    guarded = re.search(
+        r"if \(activePointerId !== null\)\s*\{\s*"
+        r"repeatInterval = setInterval\(repeatTick, HOLD_REPEAT_INTERVAL_MS\)\s*\}",
+        callback_body,
+    )
+    assert guarded, "setInterval(repeatTick, ...) must be guarded by `if (activePointerId !== null)`"
+    assert callback_body.index("repeatTick()") < callback_body.index("activePointerId !== null"), (
+        "the guard must check the state repeatTick() just set, so it must come AFTER repeatTick()"
+    )
+
+
+def test_attach_step_button_stops_on_pointer_release_events(frame_saver_source: str) -> None:
+    """pointerup/pointercancel/pointerleave must all reach the same release
+    (-> stopRepeat) handler -- gallery.js's attachHoldToCompare's identical
+    three-event trio, so a hold that drifts off or releases outside the
+    button still stops cleanly."""
+    body = _function_body(frame_saver_source, "attachStepButton(state, button, delta)")
+    for event_name in ("pointerup", "pointercancel", "pointerleave"):
+        assert re.search(rf"button\.addEventListener\('{event_name}',\s*release\)", body), (
+            f"attachStepButton must stop the repeat on {event_name}"
+        )
+    assert re.search(r"const release = .*?stopRepeat\(\)", body, re.DOTALL), (
+        "release must actually call stopRepeat()"
+    )
+
+
+def test_hold_repeat_stops_on_window_blur(frame_saver_source: str) -> None:
+    """Losing the window mid-hold must force every button's stopRepeat --
+    otherwise a hold with no pointerup (e.g. Cmd/Alt-Tab away) leaks an
+    interval forever."""
+    assert re.search(
+        r"state\.windowBlurHandler\s*=\s*\(\)\s*=>\s*\{\s*"
+        r"for\s*\(const stop of state\.stepRepeaters\)\s*stop\(\)\s*\}",
+        frame_saver_source,
+    ), "windowBlurHandler must stop every button's repeat"
+    assert "window.addEventListener('blur', state.windowBlurHandler)" in frame_saver_source
+
+
+def test_hold_repeat_stops_on_node_removed(frame_saver_source: str) -> None:
+    """wireNodeCleanup's onRemoved wrap must stop every in-flight repeat AND
+    remove the window blur listener -- matching this file's existing
+    cleanup discipline for the picker's keydown listener and the paste
+    handler (both torn down in the same wrap)."""
+    body = _function_body(frame_saver_source, "wireNodeCleanup(state)")
+    assert "for (const stop of state.stepRepeaters) stop()" in body, (
+        "onRemoved must force-stop every button's in-flight repeat"
+    )
+    assert "window.removeEventListener('blur', state.windowBlurHandler)" in body, (
+        "onRemoved must remove the window blur listener"
+    )
+
+
+def test_min_node_width_meets_derived_floor(frame_saver_source: str) -> None:
+    """MIN_NODE_WIDTH must be at least the CSS-exact sum the six-button
+    strip needs: 6 buttons x 48px (30px content min-width + 16px padding +
+    2px border, per `.epsfs-btn.epsfs-btn-icon`) + the frame field's 56px
+    border-box floor + 7 gaps x 6px (8 flex children) + the strip's own 14px
+    padding/border (12px + 2px, also border-box) = 400px -- see the
+    constant's own docstring for the full derivation. Not pinned to an EXACT
+    value on purpose: any width at/above the derived floor is a legitimate
+    layout choice; below it is a guaranteed overflow."""
+    match = re.search(r"const MIN_NODE_WIDTH = (\d+)", frame_saver_source)
+    assert match, "MIN_NODE_WIDTH declaration not found"
+    derived_floor = 6 * 48 + 56 + 7 * 6 + 14  # == 400
+    assert int(match.group(1)) >= derived_floor, (
+        f"MIN_NODE_WIDTH ({match.group(1)}) is below the derived floor ({derived_floor})"
+    )
+
+
+def test_no_hardcoded_pixel_width_in_css(frame_saver_source: str) -> None:
+    """No `width: <N>px` on any CSS rule (min-width/max-width floors are
+    fine and expected) -- the v0.30.3 Linux-overflow lesson this change must
+    not regress: size to content with a min-width FLOOR, never a hard
+    width, for anything that holds text."""
+    css_match = re.search(r"const CSS_TEXT = `(.*?)`\n", frame_saver_source, re.DOTALL)
+    assert css_match, "CSS_TEXT template literal not found"
+    css = css_match.group(1)
+    hardcoded = re.findall(r"(?<!min-)(?<!max-)\bwidth:\s*[\d.]+px", css)
+    assert hardcoded == [], f"hardcoded pixel width(s) found in CSS: {hardcoded}"

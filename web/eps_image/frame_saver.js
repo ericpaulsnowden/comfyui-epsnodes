@@ -178,6 +178,78 @@
  * `test_resolution_grid_js.py` fixture pattern) and locks the JS ext
  * allowlist to `routes_frame_saver.py`'s tuple.
  *
+ * **Five-button transport + press-and-hold auto-repeat (owner ask
+ * 2026-07-26: "+5/-5 and a jump-to-start button; holding -5/-1/+1/+5 should
+ * keep moving you through the timeline instead of having to click
+ * repeatedly").** `buildControlStrip()`'s strip now reads, left to right:
+ * jump-to-start (`⏮`, `setFrame(state, 0)`, plain click ONLY -- no hold
+ * wiring, since it's idempotent and a repeat would mean nothing), `−5`/`−1`/
+ * `+1`/`+5` (the exact same `stepFrame()` the old −1/+1 always used, just a
+ * different delta), play/pause, the frame number box, and the counter.
+ *   - **Pointer Events, not mouse events** (`pointerdown`/`pointerup`/
+ *     `pointercancel`/`pointerleave` + `setPointerCapture`), so a hold that
+ *     drifts off the button, or releases outside it entirely, still stops
+ *     cleanly. This pack already has proven precedent for exactly this
+ *     shape: `comfyui-photoshop-bridge/web/cpsb/gallery.js`'s
+ *     `attachHoldToCompare` (press-and-hold a thumbnail to reveal its
+ *     original) captures the pointer on `pointerdown` and releases/cleans up
+ *     on the SAME `pointerup`/`pointercancel`/`pointerleave` trio, wrapped in
+ *     try/catch for partial Pointer Events support -- `attachStepButton()`
+ *     below follows that idiom directly (including skipping
+ *     `preventDefault()`, which gallery.js's press-reveal also never needed
+ *     -- unlike `lora_library/notebook.js`'s pane-splitter DRAG, which does
+ *     call it to suppress text-selection/scroll during a drag, a step button
+ *     has no such default action worth suppressing, and doing so risked
+ *     swallowing the browser's own focus-shift-commits-the-frame-box
+ *     behavior when a user clicks a step button right after typing a frame
+ *     number).
+ *   - **Click vs. hold, one function, no double-stepping.** `pointerdown`
+ *     performs the first step immediately (this IS "a click" for a mouse/
+ *     touch/pen press) and arms a `HOLD_INITIAL_DELAY_MS` timer; if still
+ *     held when it fires, a `HOLD_REPEAT_INTERVAL_MS` interval takes over.
+ *     Browsers still also dispatch an ordinary `click` once a real pointer
+ *     press-release completes (unrelated to anything this file asks for --
+ *     just how `click` always works) -- but that event's `event.detail` is
+ *     always >= 1 for a pointer-originated click and exactly 0 ONLY for a
+ *     click synthesized by KEYBOARD activation (Enter/Space on a focused
+ *     button -- the standard cross-browser tell for this, needing no
+ *     browser-sniffing). The `click` listener acts ONLY when `detail === 0`,
+ *     so a real pointer click is handled exactly once (by `pointerdown`) and
+ *     a keyboard activation is handled exactly once (by `click`) -- the two
+ *     paths can never both fire for the same press. Holding Enter/Space
+ *     auto-repeats NATIVELY (the browser re-fires `click`/`keydown` on its
+ *     own key-repeat cadence) straight through this same `detail === 0`
+ *     branch, so keyboard users get the identical "hold to keep moving"
+ *     behavior for free, with no separate keydown handler to keep in sync
+ *     (and so nothing here can "double-step or break" that native repeat --
+ *     there simply is no keydown listener on these buttons to conflict).
+ *   - **Same clamp every path, and no runaway interval.** `stepFrame()` is
+ *     the ONE function every trigger calls -- a plain click, the
+ *     pointerdown's own first step, and every repeat tick alike -- and it
+ *     clamps through the exact same `clampFrame()`/`setFrame()` every other
+ *     frame change (typed number, probe-time reclamp) already used: no
+ *     parallel clamp logic to drift out of sync. It returns `false` WITHOUT
+ *     calling `setFrame` at all (so no redundant seek/commit) the instant a
+ *     step would not actually move the frame -- already at 0 for a negative
+ *     delta, already at the last frame for a positive one. The repeat
+ *     interval checks that return value and stops ITSELF the first time a
+ *     tick is a no-op, rather than continuing to poll a boundary it can
+ *     never cross every `HOLD_REPEAT_INTERVAL_MS` for as long as the button
+ *     stays held -- "never leave a runaway interval."
+ *   - **Every stop path actually stops it.** `pointerup`/`pointercancel`/
+ *     `pointerleave` (gallery.js's own three), losing the window (`blur` --
+ *     a hold gesture never fires pointerup at all if e.g. Cmd/Alt-Tab swaps
+ *     the app away mid-hold), and the node's `onRemoved` (undo-deleting the
+ *     node mid-hold) all reach the same per-button `stopRepeat()` -- matching
+ *     this file's existing cleanup discipline (`wireNodeCleanup`'s
+ *     `onRemoved` wrap already tears down the picker's keydown listener and
+ *     the paste listener the identical way; the `blur` listener and every
+ *     button's `stopRepeat()` join that same wrap here).
+ * **`MIN_NODE_WIDTH` raised alongside it** (2026-07-26) -- three buttons
+ * became six (five transport buttons + play/pause), which needs a taller
+ * floor than the v0.30.3 Linux-overflow fix originally set; see the
+ * constant's own docstring for the arithmetic.
+ *
  * Vanilla ES modules, no build step, matching the rest of this pack.
  */
 
@@ -202,6 +274,17 @@ const STRIP_WIDGET_TYPE = 'eps_frame_saver_strip'
  * sizing section) -- kept small and constant, like cprb's own `BAR_HEIGHT`. */
 const PATH_BAR_HEIGHT = 32
 const STRIP_HEIGHT = 36
+
+/** Press-and-hold auto-repeat timing for the four frame-step buttons (owner
+ * ask 2026-07-26: "holding down the -5/-1/+1/+5 should keep moving you
+ * through the timeline instead of having to click repeatedly"). ~400ms
+ * initial delay before the first repeat -- long enough that an ordinary
+ * click never feels like it "double-moved" -- then a steady ~90ms cadence
+ * (within the owner's requested 80-120ms band) fast enough to read as
+ * scrubbing rather than a slideshow. One shared cadence for all four
+ * buttons (not tuned per delta) -- see `attachStepButton()` / file header. */
+const HOLD_INITIAL_DELAY_MS = 400
+const HOLD_REPEAT_INTERVAL_MS = 90
 
 /** Floor for the flexible video area -- enough to see a usable preview even
  * on a freshly-dropped, not-yet-resized node; grows to fill a taller node. */
@@ -723,11 +806,20 @@ function createState(node, pathWidget, frameWidget) {
     pathTextEl: null,
     hostNoteEl: null,
     pathStatusEl: null,
+    jumpStartBtn: null,
+    stepBack5Btn: null,
     stepBackBtn: null,
-    playPauseBtn: null,
     stepFwdBtn: null,
+    stepFwd5Btn: null,
+    playPauseBtn: null,
     frameInputEl: null,
     counterEl: null,
+    // stopRepeat() for each of the four hold-repeat buttons (−5/−1/+1/+5),
+    // and the window `blur` listener that force-stops all of them -- both
+    // filled in by buildControlStrip(), both torn down by wireNodeCleanup's
+    // onRemoved wrap (file header's "press-and-hold" section).
+    stepRepeaters: [],
+    windowBlurHandler: null,
     // The Browse picker's window-level Escape-key listener while open (the
     // picker lives on document.body, not inside this widget's own DOM).
     pickerKeydownHandler: null,
@@ -744,14 +836,49 @@ function createState(node, pathWidget, frameWidget) {
 // which of these two shapes each of the three widgets below uses, and why).
 // ---------------------------------------------------------------------------
 
-/** The narrowest this node may be (2026-07-26, owner report from Linux:
- * containers smaller than their content). The three bars here clamp HEIGHT
- * exhaustively (see the header's sizing section) but nothing clamped WIDTH,
- * so the transport strip -- four buttons plus the frame field and its
- * "Frame X/N" counter -- could be squeezed past what it can render. Linux's
- * wider default fonts make that reachable at widths that looked fine on
- * macOS/Windows. 260 fits the strip with margin; only ever GROWS a node. */
-const MIN_NODE_WIDTH = 260
+/** The narrowest this node may be. First set 2026-07-26 (owner report from
+ * Linux: "it is possible for the container to be smaller than the content")
+ * at 260 for a three-button strip; raised the SAME day when the owner's next
+ * ask turned three buttons into six (jump-to-start, −5, −1, +1, +5, and
+ * play/pause) -- 260 was sized for half as many and would clip the new ones.
+ *
+ * The three bars here clamp HEIGHT exhaustively (see the header's sizing
+ * section) but nothing clamps WIDTH, so this constant is the one thing
+ * standing between a narrow node and a strip that can't render its own
+ * buttons. Derivation, CSS-exact terms first:
+ *   - Every `.epsfs-btn.epsfs-btn-icon` has a guaranteed floor, not an
+ *     estimate: that class sets no `box-sizing`, so its `min-width: 30px`
+ *     applies to the CONTENT box alone, with `.epsfs-btn`'s `padding: 3px
+ *     8px` (16px horizontal) and 1px border each side (2px) added on top --
+ *     30 + 16 + 2 = 48px per button, regardless of how few characters it
+ *     holds. True for all SIX buttons here: `⏮ − 5 − 1 + 1 + 5 ▶` are each
+ *     1-2 characters, comfortably under the 30px content floor even on
+ *     Linux's wider default fonts, so 48px is what actually renders, not a
+ *     smaller number this padded up front. 6 x 48 = 288px.
+ *   - `.epsfs-frame-input`'s `min-width: 56px` is already its TOTAL
+ *     (border-box) floor -- 56px, unchanged from the three-button strip.
+ *   - `.epsfs-strip`'s `gap: 6px` applies between all 8 flex children now
+ *     (6 buttons + the frame field + the counter) = 7 gaps = 42px.
+ *   - `.epsfs-strip` is border-box too: its `padding: 4px 6px` (12px
+ *     horizontal) plus a 1px border each side (2px) = 14px is carved OUT of
+ *     whatever width the node gives the widget, so it has to be ADDED to
+ *     reach the required NODE width.
+ *   - 288 + 56 + 42 + 14 = 400px of CSS-exact floors. `.epsfs-counter` has
+ *     NO min-width (`min-width: 0`, `flex: 1 1 auto`) and is deliberately
+ *     the one element allowed to shrink toward nothing at the floor (file
+ *     header's layout note) -- so 400px is the width where the counter is
+ *     squeezed to ~0, not a width that overflows.
+ *   - The shipped 260 for the OLD three-button strip decomposes the
+ *     identical way to 238px of CSS-exact floors (3x48 + 56 + 4x6 + 14),
+ *     meaning 260 carried a ~22px allowance beyond bare survival -- for a
+ *     visible sliver of counter, and for whatever litegraph node-chrome
+ *     inset isn't visible in this file's own CSS (never independently
+ *     measured; see this change's verification notes). Carrying a
+ *     comparable allowance forward, and rounding up since this is a
+ *     proportionally bigger jump (twice the buttons) than that ~22px was
+ *     ever stress-tested against, lands on 440.
+ * Enforced by `installMinWidth` below, which only ever GROWS a node. */
+const MIN_NODE_WIDTH = 440
 
 /** Twin of notebook.js/controller.js's installMinWidth (same rationale and
  * shape; each web module stays self-contained). */
@@ -842,20 +969,35 @@ function buildVideoArea(state) {
 }
 
 function buildControlStrip(state) {
+  state.jumpStartBtn = el('button', {
+    className: 'epsfs-btn epsfs-btn-icon',
+    text: '⏮',
+    attrs: { title: 'Jump to the first frame' }
+  })
+  state.stepBack5Btn = el('button', {
+    className: 'epsfs-btn epsfs-btn-icon',
+    text: '−5',
+    attrs: { title: 'Step back 5 frames (hold to keep stepping)' }
+  })
   state.stepBackBtn = el('button', {
     className: 'epsfs-btn epsfs-btn-icon',
     text: '−1',
-    attrs: { title: 'Step back one frame' }
+    attrs: { title: 'Step back one frame (hold to keep stepping)' }
+  })
+  state.stepFwdBtn = el('button', {
+    className: 'epsfs-btn epsfs-btn-icon',
+    text: '+1',
+    attrs: { title: 'Step forward one frame (hold to keep stepping)' }
+  })
+  state.stepFwd5Btn = el('button', {
+    className: 'epsfs-btn epsfs-btn-icon',
+    text: '+5',
+    attrs: { title: 'Step forward 5 frames (hold to keep stepping)' }
   })
   state.playPauseBtn = el('button', {
     className: 'epsfs-btn epsfs-btn-icon',
     text: '▶',
     attrs: { title: 'Play preview' }
-  })
-  state.stepFwdBtn = el('button', {
-    className: 'epsfs-btn epsfs-btn-icon',
-    text: '+1',
-    attrs: { title: 'Step forward one frame' }
   })
   state.frameInputEl = el('input', {
     className: 'epsfs-frame-input',
@@ -863,12 +1005,20 @@ function buildControlStrip(state) {
   })
   state.counterEl = el('div', { className: 'epsfs-counter', text: 'No video selected' })
 
-  state.stepBackBtn.addEventListener('click', () => {
-    setFrame(state, Number(state.frameWidget.value) - 1)
+  state.jumpStartBtn.addEventListener('click', () => {
+    if (state.jumpStartBtn.disabled) return
+    setFrame(state, 0) // idempotent -- no hold-repeat wired (file header)
   })
-  state.stepFwdBtn.addEventListener('click', () => {
-    setFrame(state, Number(state.frameWidget.value) + 1)
-  })
+  // −5/−1/+1/+5 all share attachStepButton()'s click + press-and-hold-repeat
+  // wiring (file header's "press-and-hold" section); collecting each
+  // button's stopRepeat lets a window blur or node removal force any
+  // in-flight hold to stop (below / wireNodeCleanup).
+  state.stepRepeaters = [
+    attachStepButton(state, state.stepBack5Btn, -5),
+    attachStepButton(state, state.stepBackBtn, -1),
+    attachStepButton(state, state.stepFwdBtn, 1),
+    attachStepButton(state, state.stepFwd5Btn, 5)
+  ]
   state.playPauseBtn.addEventListener('click', () => togglePlayPause(state))
   state.frameInputEl.addEventListener('change', () => commitFrameInputValue(state))
   state.frameInputEl.addEventListener('keydown', (event) => {
@@ -880,10 +1030,30 @@ function buildControlStrip(state) {
     }
   })
 
+  // Losing the window mid-hold (Cmd/Alt-Tab away, a devtools focus steal,
+  // ...) never fires pointerup/pointercancel/pointerleave on the button --
+  // without this, the repeat interval would keep stepping a node the user
+  // can no longer see or interact with. One listener covers all four
+  // buttons; removed by wireNodeCleanup's onRemoved wrap.
+  state.windowBlurHandler = () => {
+    for (const stop of state.stepRepeaters) stop()
+  }
+  window.addEventListener('blur', state.windowBlurHandler)
+
+  // Order (owner ask 2026-07-26 + the conventional transport layout every
+  // video tool uses): jump-to-start, then the two REVERSE steps, play/pause
+  // in the MIDDLE, then the two FORWARD steps, then the frame field and the
+  // counter. Play/pause deliberately keeps the position it has always had
+  // (between -1 and +1) -- the owner asked to ADD buttons, not to move the
+  // control he already reaches for, and centering it makes the strip read
+  // symmetrically: big-step / small-step / play / small-step / big-step.
   return el('div', { className: 'epsfs-strip' }, [
+    state.jumpStartBtn,
+    state.stepBack5Btn,
     state.stepBackBtn,
     state.playPauseBtn,
     state.stepFwdBtn,
+    state.stepFwd5Btn,
     state.frameInputEl,
     state.counterEl
   ])
@@ -977,6 +1147,26 @@ function setFrame(state, frame) {
   seekVideoToFrame(state, clamped)
 }
 
+/** One frame-step in *delta*'s direction -- the −5/−1/+1/+5 buttons' shared
+ * implementation (file header's "press-and-hold" section). Goes through the
+ * exact same `clampFrame()`/`setFrame()` every other frame change already
+ * uses (no parallel clamp logic), so a plain click, the first press of a
+ * hold gesture, and every subsequent auto-repeat tick can never disagree
+ * with each other -- or with the typed-number/probe-clamp paths -- about
+ * where 0 or the last frame is. Returns `false` WITHOUT calling `setFrame`
+ * at all (so no redundant commit/seek) when *delta*'s direction is already
+ * exhausted -- frame 0 for a negative delta, the last frame for a positive
+ * one -- so `attachStepButton()`'s repeat loop can stop ITSELF the instant
+ * it reaches a clamp boundary instead of continuing to poll a no-op every
+ * tick for as long as the button stays held. */
+function stepFrame(state, delta) {
+  const current = Number(state.frameWidget.value)
+  const next = clampFrame(state, (Number.isFinite(current) ? current : 0) + delta)
+  if (next === current) return false
+  setFrame(state, next)
+  return true
+}
+
 /** Playback-driven sync (`timeupdate` while playing) -- derives the frame
  * from the video's OWN current position and commits it, WITHOUT seeking
  * (the video is already there -- see file header). */
@@ -1019,6 +1209,98 @@ function clampFrameToProbeBounds(state) {
 function commitFrameInputValue(state) {
   const parsed = Number.parseInt(state.frameInputEl.value, 10)
   setFrame(state, Number.isFinite(parsed) ? parsed : 0)
+}
+
+// ---------------------------------------------------------------------------
+// Press-and-hold auto-repeat for the −5/−1/+1/+5 buttons (owner ask
+// 2026-07-26) -- see file header for the full citation/rationale. NOT wired
+// onto jump-to-start (buildControlStrip) -- it's idempotent, so "repeat"
+// wouldn't mean anything.
+// ---------------------------------------------------------------------------
+
+/**
+ * Wires *button* so a plain press (a click, or a tap/press released before
+ * the initial delay) performs exactly ONE `stepFrame(state, delta)`, and a
+ * longer press auto-repeats it every `HOLD_REPEAT_INTERVAL_MS` once
+ * `HOLD_INITIAL_DELAY_MS` has elapsed -- see file header for the full
+ * click-vs-hold / Pointer Events rationale. Returns `stopRepeat` so the
+ * caller can force a stop from outside the gesture itself (a window `blur`,
+ * or the node's own `onRemoved`).
+ * @param {object} state
+ * @param {HTMLButtonElement} button
+ * @param {number} delta
+ * @returns {() => void} stopRepeat -- idempotent, safe to call any number of
+ * times (including when nothing is in flight).
+ */
+function attachStepButton(state, button, delta) {
+  let holdTimer = null
+  let repeatInterval = null
+  let activePointerId = null
+
+  const stopRepeat = () => {
+    if (holdTimer !== null) {
+      clearTimeout(holdTimer)
+      holdTimer = null
+    }
+    if (repeatInterval !== null) {
+      clearInterval(repeatInterval)
+      repeatInterval = null
+    }
+    activePointerId = null
+  }
+
+  const repeatTick = () => {
+    if (!stepFrame(state, delta)) stopRepeat() // clamp boundary reached -- see stepFrame's doc
+  }
+
+  button.addEventListener('pointerdown', (event) => {
+    if (button.disabled) return
+    if (event.pointerType === 'mouse' && event.button !== 0) return
+    stopRepeat() // at most one gesture in flight per button
+    activePointerId = event.pointerId
+    try {
+      button.setPointerCapture(event.pointerId)
+    } catch {
+      // Older/partial Pointer Events: degrade to press-and-release-in-place
+      // (gallery.js's attachHoldToCompare's identical fallback).
+    }
+    stepFrame(state, delta) // the press itself -- the same single step a plain click gives
+    holdTimer = setTimeout(() => {
+      holdTimer = null
+      repeatTick() // first repeat tick right at the delay boundary
+      // repeatTick() may have already called stopRepeat() (the very first
+      // tick landed on a clamp boundary -- e.g. holding −1 from frame 0) --
+      // activePointerId is null in exactly that case (nothing else clears
+      // it between here and the check), and NOT creating the interval at
+      // all is what keeps this a true zero-extra-ticks stop rather than
+      // one wasted tick that then cancels itself on ITS OWN next firing.
+      if (activePointerId !== null) {
+        repeatInterval = setInterval(repeatTick, HOLD_REPEAT_INTERVAL_MS)
+      }
+    }, HOLD_INITIAL_DELAY_MS)
+  })
+
+  const release = (event) => {
+    if (activePointerId === null || event.pointerId !== activePointerId) return
+    stopRepeat()
+  }
+  button.addEventListener('pointerup', release)
+  button.addEventListener('pointercancel', release)
+  button.addEventListener('pointerleave', release)
+
+  // Keyboard activation only: Enter fires 'click' on every repeated keydown
+  // while held, Space fires it once on release -- both arrive here as an
+  // ordinary 'click' with `detail === 0` (the standard cross-browser tell
+  // for a keyboard-synthesized click; a real pointer click's detail is >= 1
+  // and was ALREADY stepped by pointerdown above -- acting on it again here
+  // would double-step, which is exactly what this guard prevents).
+  button.addEventListener('click', (event) => {
+    if (button.disabled) return
+    if (event.detail !== 0) return
+    stepFrame(state, delta)
+  })
+
+  return stopRepeat
 }
 
 // ---------------------------------------------------------------------------
@@ -1093,13 +1375,16 @@ function updateOverlayUi(state) {
 
 function updateControlsEnabled(state) {
   const hasPath = Boolean(state.path)
-  // Step/number-input stay enabled whenever a path is set, REGARDLESS of
-  // preview playability -- they only need the PROBED fps/frame_count
+  // Jump/step/number-input stay enabled whenever a path is set, REGARDLESS
+  // of preview playability -- they only need the PROBED fps/frame_count
   // (decoded server-side, independent of what this browser can render), so
   // they keep working even when the <video> preview itself has degraded.
   if (state.frameInputEl) state.frameInputEl.disabled = !hasPath
+  if (state.jumpStartBtn) state.jumpStartBtn.disabled = !hasPath
+  if (state.stepBack5Btn) state.stepBack5Btn.disabled = !hasPath
   if (state.stepBackBtn) state.stepBackBtn.disabled = !hasPath
   if (state.stepFwdBtn) state.stepFwdBtn.disabled = !hasPath
+  if (state.stepFwd5Btn) state.stepFwd5Btn.disabled = !hasPath
   // Play/pause is the one control that genuinely needs a playable preview.
   if (state.playPauseBtn) state.playPauseBtn.disabled = !hasPath || state.videoPlayable !== true
 }
@@ -1636,6 +1921,15 @@ function wireNodeCleanup(state) {
     try {
       closePicker(state)
       removePastePathHandler(state)
+      // Force-stop any in-flight hold-repeat before tearing down the window
+      // listener that would otherwise do it (file header's "press-and-hold"
+      // section) -- a node deleted mid-hold must never leave a repeat
+      // interval running against widgets that are about to be gone.
+      for (const stop of state.stepRepeaters) stop()
+      if (state.windowBlurHandler) {
+        window.removeEventListener('blur', state.windowBlurHandler)
+        state.windowBlurHandler = null
+      }
       nodeStates.delete(node)
     } catch (error) {
       warn('frame_saver teardown failed', error)

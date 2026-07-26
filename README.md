@@ -375,9 +375,12 @@ as an image.
   "Copy as Pathname" / Explorer's "Copy as path"), select the node, and press
   **Ctrl/Cmd+V** — it loads that video. (Quotes and `file://` wrappers are
   handled; pasting into a text field still pastes normally.)
-- **Scrub to the frame you want:** the node shows the video with play/pause,
-  step −1/+1 one frame at a time, a frame-number box, and a live
-  **Frame X / N** counter (total frames included).
+- **Scrub to the frame you want:** the node shows the video with a transport
+  strip — **jump to start**, **−5**, **−1**, **play/pause**, **+1**, **+5** —
+  plus a frame-number box and a live **Frame X / N** counter (total frames
+  included). **Hold** any of the step buttons and it keeps moving through the
+  timeline instead of making you click repeatedly; it stops the moment you
+  release, slide off the button, or switch away from the window.
 - **Outputs** `image`, `width`, `height` for the selected frame. The on-screen
   preview is best-effort (browser video seeking isn't always frame-perfect);
   the frame extracted on Run is exact (decoded server-side with PyAV).

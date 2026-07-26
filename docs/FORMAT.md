@@ -1017,8 +1017,20 @@ single-frame output (NOT a list); "close-enough preview, EXACT on output".
   regardless. Both routes on `PromptServer.instance.routes`.
 - **Frontend player** (DOM widget, notebook/premiere fill-height + fixed-bar
   sizing patterns): a `<video>` for smooth play/pause/loop preview + a control
-  strip — step −/＋ (currentTime ± 1/fps), play/pause, a bounded `frame`
-  number input, and a live "Frame X / N" counter — all driven by
+  strip — in order: jump-to-start, step −5, step −1, play/pause (kept in the
+  MIDDLE so the strip reads symmetrically and the long-shipped control never
+  moves), step +1, step +5, a bounded `frame` number input, and a live
+  "Frame X / N" counter. The four step buttons **press-and-hold to
+  auto-repeat** (~400ms before the first repeat, then ~90ms per step) so a
+  held button scrubs the timeline; jump-to-start is idempotent and
+  deliberately has no repeat. Every trigger — click, press, repeat tick —
+  goes through the SAME clamp as a single click, and a repeat that reaches
+  frame 0 or the last frame stops rather than spinning. The repeat is torn
+  down on pointerup/pointercancel/pointerleave, window blur (Cmd/Alt-Tab
+  away mid-hold), and `onRemoved`. Six buttons plus the field and counter set
+  this node's width floor (`MIN_NODE_WIDTH`, §7.2's no-hard-coded-px rule);
+  the counter is the element that gives way when the node is at that floor.
+  All of it driven by
   `currentTime = frame/fps` against the PROBED fps/frame_count (the LNL /
   core / cprb split: preview approximate, run-time extraction authoritative).
   Selecting/stepping writes the `frame` INT widget. Clean-room — do NOT copy
