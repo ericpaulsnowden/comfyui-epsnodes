@@ -58,16 +58,21 @@ captions).
   paths (including NAS shares) work as-is. Edit it in ComfyUI, VS Code, or
   on the other machine; the node re-reads the file every run, so external
   edits are picked up automatically (`IS_CHANGED` hashes the file).
-- **Putting it on a NAS:** point the node at the share's **mount point**,
-  not its network address. A `smb://…` (or `nfs://…`) URL is what a file
-  manager's address bar takes — it isn't a path any program can open, and
-  the node will tell you so. Mount the share first, then use the path it
-  appears at: `/mnt/nas/loras.md` or `/run/user/1000/gvfs/smb-share:server=…`
-  on Linux, `/Volumes/share/loras.md` on macOS, `Z:\loras.md` or
-  `\\server\share\loras.md` on Windows. **Browse…** lists the mount
-  parents for your OS (drives on Windows, `/Volumes` on macOS, `/`, `/mnt`,
-  `/media`, and the GVFS folder on Linux), so a mounted share is reachable
-  by clicking.
+- **Putting it on a NAS — just click it in Browse…:** the picker lists the
+  shares and drives your machine already has mounted, **wherever they
+  live**, named for humans (`personal_folder on my-nas.local`,
+  `nas (network)`, `USB-STICK (exfat)`) with network shares first. On Linux
+  it reads the system mount table, so a share mounted by your file manager,
+  by `/etc/fstab`, or by an admin at some path nobody would guess all show
+  up on their own — you never have to know or type a path. macOS lists
+  `/Volumes`, Windows lists drive letters.
+- **What won't work is a `smb://…` URL** typed into the file box. That's a
+  file-manager *address*, not a filesystem path — no program (ComfyUI
+  included) can open one, and the node says so plainly instead of failing
+  silently. If a share isn't in the Browse… list yet, it isn't mounted on
+  the machine ComfyUI runs on; mount it once (clicking it in your file
+  manager is enough on most desktops) and it appears. This is the same
+  constraint ComfyUI itself has for `models/`, `input/`, and `output/`.
 - **Safe for shared files:** saving checks the file hasn't changed under
   you since you loaded it. If it has (the other machine got there first),
   nothing is written — you get *File changed on disk* with **Reload** /
