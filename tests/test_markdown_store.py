@@ -14,6 +14,7 @@ from pathlib import Path
 import pytest
 
 from lora_library import markdown_store as ms
+from lora_library.context import LibraryContext
 
 # ------------------------------------------------------------------- parsing
 
@@ -1088,3 +1089,56 @@ class TestCheckConflict:
         with pytest.raises(ms.ConflictError) as exc_info:
             ms.check_conflict(100.0, 200.0)
         assert exc_info.value.current_mtime == 200.0
+
+
+class TestResolveNotebookFileRejectsUriValues:
+    """2026-07-26 owner report (Linux): a typed ``smb://`` address used to be
+    silently swallowed. ``Path("smb://host/x")`` collapses the double slash to
+    ``smb:/host/x``, which is NOT absolute on POSIX, so the value was treated
+    as RELATIVE and joined under the library folder -- the node then reported a
+    missing file (reading as an empty notebook) and the first save would have
+    created a bogus ``smb:/host/...`` tree inside the real library folder.
+    """
+
+    @pytest.mark.parametrize(
+        "value",
+        [
+            "smb://dxp4800pro-ring.local/personal_folder/docs/loras.md",
+            "nfs://server/export/loras.md",
+            "http://example.com/loras.md",
+            "  smb://host/share/loras.md  ",
+        ],
+    )
+    def test_uri_style_values_raise_valueerror(
+        self, context: LibraryContext, value: str
+    ) -> None:
+        with pytest.raises(ValueError) as exc_info:
+            context.resolve_notebook_file(value)
+        message = str(exc_info.value)
+        assert "network address, not a file path" in message
+        assert "Mount the share first" in message
+
+    def test_error_names_the_callers_own_scheme(self, context: LibraryContext) -> None:
+        with pytest.raises(ValueError) as exc_info:
+            context.resolve_notebook_file("afp://host/share/loras.md")
+        assert str(exc_info.value).startswith("afp://")
+
+    def test_uri_value_never_lands_inside_the_library_folder(
+        self, context: LibraryContext
+    ) -> None:
+        # The actual damage this prevents: a relative-looking join under the
+        # user's real library dir (and a mkdir of it on the next save).
+        with pytest.raises(ValueError):
+            context.resolve_notebook_file("smb://host/share/loras.md")
+        assert not list(context.library_dir().glob("smb:*"))
+
+    @pytest.mark.parametrize(
+        "value",
+        ["loras.md", "sub/loras.md", "/mnt/nas/loras.md", "//server/share/loras.md"],
+    )
+    def test_ordinary_and_unc_paths_still_resolve(
+        self, context: LibraryContext, value: str
+    ) -> None:
+        # No false positives: relative names, POSIX absolutes, and a UNC-style
+        # double-slash path (no scheme, so no "://") all pass through as before.
+        assert isinstance(context.resolve_notebook_file(value), Path)

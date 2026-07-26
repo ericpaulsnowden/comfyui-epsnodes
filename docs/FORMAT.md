@@ -254,7 +254,7 @@ message>"}` with a 4xx status. `mtime` values are float POSIX seconds.
 |---|---|
 | `GET /lora_library/version` | `{"version": "X.Y.Z"}` |
 | `GET /lora_library/config` | `{"library_dir", "default_library_dir", "configured": bool, "is_local": bool, "library_dir_exists": bool, "library_dir_note": str}` — `is_local` = §2 loopback verdict for THIS request (drives §7.2's remote read-only gating). `library_dir_exists` = whether the SERVER can see the configured folder right now — the owner's 2026-07-19 NAS confusion was a library path the server machine couldn't resolve, invisible until a node errored. `library_dir_note` = "" when fine, else a one-line human diagnosis chosen server-side: unreachable path, or a path whose SHAPE doesn't match the server's OS (e.g. `/Volumes/…` configured while the server is Windows, or `C:\`/UNC while it's POSIX — a strong sign it was set from the wrong machine's perspective) |
-| `GET /lora_library/fs/list?dir=` | **loopback-only** (403 remote): server-filesystem browser for the §7.2 picker. Empty/missing `dir` ⇒ `library_dir`. `dir="ROOTS"` (sentinel) ⇒ the top level: on Windows every existing drive (`C:\`, `D:\`, `U:\`, …) as `dirs` + `parent: null`; on POSIX the filesystem root `/`. → `{"dir": <abs or "ROOTS">, "parent": <abs, "ROOTS", or null>, "dirs": [names], "files": [names]}` — `files` limited to `.md`; entries sorted case-insensitively; a directory at a drive root reports `parent: "ROOTS"` so the picker can climb to the drive list (the 2026-07-19 "stuck at top of C:\, can't reach another drive/NAS" fix); a UNC path (`\\server\share\…`) passed as `dir` lists normally; unreadable/nonexistent dir ⇒ 400 |
+| `GET /lora_library/fs/list?dir=` | **loopback-only** (403 remote): server-filesystem browser for the §7.2 picker. Empty/missing `dir` ⇒ `library_dir`. `dir="ROOTS"` (sentinel) ⇒ the top level: the library folder (labeled) + "Home" always, then a platform tail — every existing drive on Windows (`C:\`, `D:\`, `U:\`, …); every `/Volumes` mount on macOS; or on Linux every conventional mount parent that actually exists on this host (`/`, `/mnt`, `/media`, `/media/<user>`, `/run/media/<user>`, `/srv`, `/run/user/<uid>/gvfs` — the last is where a desktop file manager's mounted network share, e.g. `smb://`, actually lives on disk; **2026-07-26 fix**: the POSIX tail used to read `/Volumes` ONLY, which does not exist on Linux, so a Linux user's ROOTS collapsed to library+Home with no route to any mount). Entries are de-duplicated by path. → `{"dir": <abs or "ROOTS">, "parent": <abs, "ROOTS", or null>, "dirs": [names], "files": [names]}` — `files` limited to `.md`; entries sorted case-insensitively; a directory at a drive root reports `parent: "ROOTS"` so the picker can climb to the drive list (the 2026-07-19 "stuck at top of C:\, can't reach another drive/NAS" fix); a UNC path (`\\server\share\…`) passed as `dir` lists normally; unreadable/nonexistent dir ⇒ 400; a `dir` containing `://` (a typed `smb://`/`nfs://`/… address) ⇒ 400 whose message says in plain language that it is a network address, not a file path, and names a mount point to use instead (2026-07-26) |
 | `POST /lora_library/notebook/open_folder` `{"file"}` | **loopback-only** (403 remote): reveals the resolved notebook file's folder in the OS file manager ON THE SERVER MACHINE (Explorer/Finder). Missing folder ⇒ 404; `{"ok": true}` |
 | `POST /lora_library/config` `{"library_dir"}` | validates (absolute, creatable, writable), persists; `{"ok", "library_dir"}` |
 | `GET /lora_library/loras` | `{"loras": [".."]}` — installed loras for pickers |
@@ -279,6 +279,20 @@ Class ids are FROZEN once shipped. Both nodes re-read their files at every
 execution — **the file is the truth; the UI is a view.**
 
 ### §6.1 `LoraLibraryNotebook` (display: "EPS Prompt Notebook")
+
+- **A `scheme://` `file` value is REJECTED, loudly (2026-07-26 fix).**
+  `Path("smb://host/share/x.md")` collapses the double slash to
+  `smb:/host/share/x.md`, which is NOT absolute on POSIX — so a typed
+  network address used to fall through to the relative branch and get
+  joined UNDER the library folder. It failed in the worst way: the node
+  reported a missing file (indistinguishable from an empty notebook) and
+  the first SAVE would `mkdir -p` a bogus `smb:/host/…` tree inside the
+  user's real library folder (`:` is a legal POSIX filename character).
+  `LibraryContext.resolve_notebook_file` now raises `ValueError` naming
+  the caller's own scheme, which `routes_notebook._resolve_path` turns
+  into a 400 and the node surfaces at queue time. A NAS is reached by its
+  MOUNT POINT (`/mnt/nas/loras.md`, `/Volumes/share/loras.md`,
+  `/run/user/<uid>/gvfs/smb-share:server=…`), never by its URL.
 
 - **List scroll position is preserved across re-renders (2026-07-24 owner
   fix):** `renderList()` rebuilds the left column on every selection,

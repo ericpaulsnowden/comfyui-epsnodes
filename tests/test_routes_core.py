@@ -9,6 +9,17 @@ fs/list reshaped 2026-07-19 to STANDARD-fs-browse.md, the shared cross-plugin
 cap, dotfile-skipping, and a `ROOTS` sentinel that now returns a labeled
 roots list (default dir + Home + platform roots) on every platform, not just
 Windows.
+
+2026-07-26: the POSIX platform tail split in two -- macOS keeps its exact
+pre-existing `/Volumes` behavior, while Linux (a real ComfyUI-on-Linux bug
+report: the picker couldn't reach a NAS mount, `/Volumes` doesn't exist
+there) gets its own conventional-mount-parent tail (`/`, `/mnt`, `/media`,
+the per-user auto-mount dirs, `/srv`, GVFS), exercised here the same way the
+Windows/macOS branches always have been: monkeypatching the `_is_linux`
+seam plus a fake candidate set, from this (macOS) test machine. Also new:
+`fs/list` now 400s a typed `scheme://` value (e.g. `smb://...`) with a
+message explaining it's a network address, not a file path, instead of the
+generic "must be an absolute path" 400.
 """
 
 from __future__ import annotations
@@ -213,6 +224,207 @@ async def test_fs_list_roots_sentinel_lists_macos_volumes_when_monkeypatched(
     assert by_name["Backup"] == "/Volumes/Backup"
 
 
+# --------------------------------------------------- fs/list: Linux ROOTS tail
+#
+# 2026-07-26 fix: on a Linux ComfyUI host, `/Volumes` never exists, so the
+# pre-fix code (which called `_list_macos_volumes` for "any non-Windows
+# host") silently degraded the whole ROOTS tail to `[]` -- the owner could
+# not browse to `/mnt`, a NAS mount, or anything but the library dir/Home.
+# Real Linux mounts aren't available on this (macOS) test machine, so every
+# case below drives it through the `_is_linux` seam plus a fake
+# `_linux_mount_root_candidates` set (routes.py's factored-out-so-tests-can-
+# replace-it-wholesale pattern, same as `_list_macos_volumes`/
+# `_list_windows_drives`) -- exactly parallel to the Windows tests above.
+
+
+async def test_fs_list_roots_sentinel_lists_linux_mount_roots_when_monkeypatched(
+    client, monkeypatch, context: LibraryContext, tmp_path: Path
+) -> None:
+    fake_root = tmp_path / "fakeroot"
+    fake_mnt = tmp_path / "mnt"
+    fake_media = tmp_path / "media"
+    fake_media_user = tmp_path / "media_user"
+    fake_run_media_user = tmp_path / "run_media_user"
+    fake_srv = tmp_path / "srv"
+    fake_gvfs = tmp_path / "gvfs"
+    for directory in (
+        fake_root,
+        fake_mnt,
+        fake_media,
+        fake_media_user,
+        fake_run_media_user,
+        fake_srv,
+        fake_gvfs,
+    ):
+        directory.mkdir()
+
+    monkeypatch.setattr(lora_routes, "_is_linux", lambda: True)
+    monkeypatch.setattr(
+        lora_routes,
+        "_linux_mount_root_candidates",
+        lambda: [
+            ("Filesystem root", str(fake_root)),
+            ("mnt", str(fake_mnt)),
+            ("media", str(fake_media)),
+            ("Removable media", str(fake_media_user)),
+            ("Removable media (run)", str(fake_run_media_user)),
+            ("srv", str(fake_srv)),
+            ("Network shares (GVFS)", str(fake_gvfs)),
+        ],
+    )
+    response = await client.get("/lora_library/fs/list", params={"dir": "ROOTS"})
+    data = await response.json()
+    assert data["dir"] == "ROOTS"
+    assert data["parent"] is None
+    assert data["sep"] == os.sep
+    assert data["files"] == []
+    assert data["truncated"] is False
+
+    by_name = {entry["name"]: entry["path"] for entry in data["dirs"]}
+    assert by_name["Library Folder"] == str(context.library_dir().resolve())
+    assert by_name["Home"] == str(Path.home().resolve())
+    assert by_name["Filesystem root"] == str(fake_root)
+    assert by_name["mnt"] == str(fake_mnt)
+    assert by_name["media"] == str(fake_media)
+    assert by_name["Removable media"] == str(fake_media_user)
+    assert by_name["Removable media (run)"] == str(fake_run_media_user)
+    assert by_name["srv"] == str(fake_srv)
+    assert by_name["Network shares (GVFS)"] == str(fake_gvfs)
+    # Standard's declared ROOTS order: default dir, Home, then platform
+    # roots -- and the platform tail itself keeps the candidates' own order.
+    assert [entry["name"] for entry in data["dirs"]] == [
+        "Library Folder",
+        "Home",
+        "Filesystem root",
+        "mnt",
+        "media",
+        "Removable media",
+        "Removable media (run)",
+        "srv",
+        "Network shares (GVFS)",
+    ]
+
+
+async def test_fs_list_roots_sentinel_skips_nonexistent_linux_candidates(
+    client, monkeypatch, tmp_path: Path
+) -> None:
+    real_dir = tmp_path / "real"
+    real_dir.mkdir()
+    monkeypatch.setattr(lora_routes, "_is_linux", lambda: True)
+    monkeypatch.setattr(
+        lora_routes,
+        "_linux_mount_root_candidates",
+        lambda: [
+            ("Filesystem root", str(real_dir)),
+            ("mnt", str(tmp_path / "does-not-exist")),
+        ],
+    )
+    response = await client.get("/lora_library/fs/list", params={"dir": "ROOTS"})
+    data = await response.json()
+    names = [entry["name"] for entry in data["dirs"]]
+    assert "Filesystem root" in names
+    assert "mnt" not in names
+
+
+async def test_fs_list_roots_sentinel_skips_unreadable_linux_candidate_not_fatal(
+    client, monkeypatch, tmp_path: Path
+) -> None:
+    unreadable = tmp_path / "unreadable"
+    unreadable.mkdir()
+    readable = tmp_path / "readable"
+    readable.mkdir()
+    monkeypatch.setattr(lora_routes, "_is_linux", lambda: True)
+    monkeypatch.setattr(
+        lora_routes,
+        "_linux_mount_root_candidates",
+        lambda: [("bad", str(unreadable)), ("good", str(readable))],
+    )
+
+    real_is_dir = Path.is_dir
+
+    def flaky_is_dir(self):
+        if str(self) == str(unreadable):
+            raise PermissionError("denied")
+        return real_is_dir(self)
+
+    monkeypatch.setattr(Path, "is_dir", flaky_is_dir)
+    response = await client.get("/lora_library/fs/list", params={"dir": "ROOTS"})
+    # A stat failure on one candidate must not take down the whole request.
+    assert response.status == 200
+    data = await response.json()
+    names = [entry["name"] for entry in data["dirs"]]
+    assert "bad" not in names
+    assert "good" in names
+
+
+async def test_fs_list_roots_sentinel_dedupes_duplicate_linux_candidate_paths(
+    client, monkeypatch, tmp_path: Path
+) -> None:
+    shared = tmp_path / "shared"
+    shared.mkdir()
+    monkeypatch.setattr(lora_routes, "_is_linux", lambda: True)
+    monkeypatch.setattr(
+        lora_routes,
+        "_linux_mount_root_candidates",
+        lambda: [("First label", str(shared)), ("Second label", str(shared))],
+    )
+    response = await client.get("/lora_library/fs/list", params={"dir": "ROOTS"})
+    data = await response.json()
+    matches = [entry for entry in data["dirs"] if entry["path"] == str(shared)]
+    assert len(matches) == 1
+    assert matches[0]["name"] == "First label"
+
+
+async def test_fs_list_roots_sentinel_does_not_duplicate_home_when_a_linux_root_coincides(
+    client, monkeypatch
+) -> None:
+    home = str(Path.home().resolve())
+    monkeypatch.setattr(lora_routes, "_is_linux", lambda: True)
+    monkeypatch.setattr(
+        lora_routes, "_linux_mount_root_candidates", lambda: [("Home again", home)]
+    )
+    response = await client.get("/lora_library/fs/list", params={"dir": "ROOTS"})
+    data = await response.json()
+    matches = [entry for entry in data["dirs"] if entry["path"] == home]
+    assert len(matches) == 1
+    # First occurrence (the default "Home" entry) wins over the platform
+    # tail's later duplicate.
+    assert matches[0]["name"] == "Home"
+
+
+# ------------------------------------------------- fs/list: URI-style `dir` 400
+#
+# 2026-07-26 owner report: typing an `smb://...` address into the picker's
+# manual-path field "doesn't work" -- correctly (GIO/GVFS addresses aren't
+# filesystem paths), but the generic "dir must be an absolute path" 400
+# didn't say why. `fs/list` now recognizes ANY `scheme://` value and 400s
+# with a plain-language explanation instead.
+
+
+async def test_fs_list_rejects_a_uri_style_dir_with_a_helpful_message(client) -> None:
+    response = await client.get(
+        "/lora_library/fs/list",
+        params={"dir": "smb://dxp4800pro-ring.local/personal_folder/docs/loras.md"},
+    )
+    assert response.status == 400
+    data = await response.json()
+    assert data["error"].startswith("smb://")
+    assert "network address" in data["error"]
+    assert "not a file path" in data["error"]
+    assert "absolute path" not in data["error"]
+    assert "/mnt" in data["error"]
+    assert "gvfs" in data["error"]
+
+
+async def test_fs_list_uri_style_error_names_the_actual_scheme(client) -> None:
+    # Scheme-agnostic: whatever scheme the caller used gets echoed back, not
+    # a hardcoded "smb".
+    response = await client.get("/lora_library/fs/list", params={"dir": "nfs://nas.local/share"})
+    assert response.status == 400
+    data = await response.json()
+    assert data["error"].startswith("nfs://")
+
+
 async def test_fs_list_drive_root_parent_climbs_to_roots_under_monkeypatched_windows(
     client, monkeypatch
 ) -> None:
@@ -253,6 +465,96 @@ def test_fs_root_parent_is_null_for_a_unc_share_root_even_on_windows() -> None:
 
 def test_fs_root_parent_is_null_on_posix() -> None:
     assert lora_routes._fs_root_parent(Path("/"), windows=False) is None
+
+
+# ------------------------------------------------ fs/list: small pure helpers
+#
+# 2026-07-26 fix: direct unit coverage for the small helpers behind the
+# Linux ROOTS tail and the `://` 400, mirroring how `_is_unc_share_root`/
+# `_fs_root_parent` above get their own direct tests alongside the
+# HTTP-level ones.
+
+
+def test_dedupe_root_entries_keeps_first_occurrence_of_a_repeated_path() -> None:
+    entries = [
+        {"name": "First", "path": "/same"},
+        {"name": "Second", "path": "/same"},
+        {"name": "Third", "path": "/different"},
+    ]
+    assert lora_routes._dedupe_root_entries(entries) == [
+        {"name": "First", "path": "/same"},
+        {"name": "Third", "path": "/different"},
+    ]
+
+
+def test_dedupe_root_entries_is_a_no_op_when_every_path_is_unique() -> None:
+    entries = [{"name": "A", "path": "/a"}, {"name": "B", "path": "/b"}]
+    assert lora_routes._dedupe_root_entries(entries) == entries
+
+
+def test_uri_style_path_error_names_the_scheme_and_explains_the_fix() -> None:
+    message = lora_routes._uri_style_path_error("smb://nas.local/share")
+    assert message.startswith("smb://")
+    assert "network address" in message
+    assert "not a file path" in message
+    assert "/mnt" in message
+    assert "gvfs" in message
+
+
+def test_uri_style_path_error_is_scheme_agnostic() -> None:
+    message = lora_routes._uri_style_path_error("nfs://nas.local/share")
+    assert message.startswith("nfs://")
+
+
+def test_safe_current_username_returns_a_string_or_none_on_this_real_machine() -> None:
+    # Never raises (2026-07-26 contract) -- exercised for real, unmocked,
+    # against whatever this actual machine's home directory is.
+    username = lora_routes._safe_current_username()
+    assert username is None or isinstance(username, str)
+
+
+def test_safe_current_uid_returns_an_int_on_this_real_posix_machine() -> None:
+    uid = lora_routes._safe_current_uid()
+    assert isinstance(uid, int)
+
+
+def test_linux_mount_root_candidates_keeps_the_documented_order() -> None:
+    # Pins the REAL (unmocked) candidate function's own internal order --
+    # the HTTP-level ROOTS tests above replace this function wholesale with
+    # a fake candidate set, so they cannot catch an ordering bug inside its
+    # real implementation (caught once already during review: `/srv` was
+    # briefly assembled BEFORE the per-user media dirs instead of after).
+    # Documented order: `/`, `/mnt`, `/media`, then (when a username is
+    # resolvable) `/media/<user>` and `/run/media/<user>`, then `/srv`, then
+    # (when a uid is resolvable) the GVFS dir.
+    candidates = lora_routes._linux_mount_root_candidates()
+    paths = [path for _label, path in candidates]
+    assert paths[0] == "/"
+    assert paths[1] == "/mnt"
+    assert paths[2] == "/media"
+    assert "/srv" in paths
+    srv_index = paths.index("/srv")
+
+    username = lora_routes._safe_current_username()
+    if username:
+        assert paths[3:srv_index] == [f"/media/{username}", f"/run/media/{username}"]
+
+    uid = lora_routes._safe_current_uid()
+    if uid is not None:
+        assert paths[srv_index + 1] == f"/run/user/{uid}/gvfs"
+        assert srv_index + 1 == len(paths) - 1  # GVFS is the last candidate
+
+
+def test_list_linux_mount_roots_runs_cleanly_on_this_real_machine() -> None:
+    # Never invoked in production on macOS (gated by `_is_linux` in
+    # `_platform_root_entries`), but must still not raise if called
+    # directly -- a real-machine smoke test on top of the monkeypatched-
+    # candidate HTTP-level tests above.
+    roots = lora_routes._list_linux_mount_roots()
+    assert isinstance(roots, list)
+    for label, path in roots:
+        assert isinstance(label, str)
+        assert isinstance(path, str)
 
 
 # ------------------------------------------------- config: library_dir diagnosis

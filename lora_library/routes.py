@@ -15,6 +15,7 @@ import logging
 import os
 import re
 import string
+import sys
 from pathlib import Path, PureWindowsPath
 
 from aiohttp import web
@@ -29,7 +30,11 @@ SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9-_]*$")
 
 #: ../../STANDARD-fs-browse.md's `dir` sentinel meaning "the virtual top
 #: level": this pack's own default library directory (labeled), "Home", and
-#: every drive on Windows / every `/Volumes` mount on macOS.
+#: every drive on Windows / every `/Volumes` mount on macOS / the existing
+#: conventional mount parents on Linux (2026-07-26 fix, see
+#: `_platform_root_entries` -- the standard doc itself only itemizes the
+#: Windows/macOS cases today; this pack's Linux tail is a documented,
+#: additive extension of it, same spirit as `_fs_entry`'s `path` field).
 ROOTS = "ROOTS"
 
 #: STANDARD-fs-browse.md's locality policy for THIS pack, as an explicit,
@@ -133,6 +138,16 @@ def error_response(status: int, message: str) -> web.Response:
 # inlined in the handler) specifically so tests can monkeypatch the
 # Windows-only bits from macOS/Linux CI — real drive enumeration and real
 # `os.name` are both unavailable there.
+#
+# 2026-07-26 fix: on a Linux ComfyUI host, `_platform_root_entries` fell
+# through to `_list_macos_volumes`, which only ever looks at `/Volumes` — a
+# path that doesn't exist on Linux — so the ROOTS listing silently degraded
+# to just the library dir + Home, with no way to browse to `/mnt`, a NAS
+# mount, or anything else outside those two (owner report: "If I try and
+# browse to a drive I can't go deeper than the root ... so I can't connect
+# to the nas"). `_is_linux` is the same kind of seam as `_is_windows` below,
+# for the same reason: real Linux mounts aren't available on this (macOS)
+# dev/CI machine either.
 
 
 def _is_windows() -> bool:
@@ -144,6 +159,18 @@ def _is_windows() -> bool:
     own platform.
     """
     return os.name == "nt"
+
+
+def _is_linux() -> bool:
+    """True on a Linux host (this fix's conventional-mount-parent world).
+
+    A seam like :func:`_is_windows`, so tests can exercise the Linux
+    ROOTS branch (:func:`_list_linux_mount_roots`) from macOS/CI without a
+    real Linux host. Checked via ``sys.platform`` rather than ``os.name`` --
+    ``os.name`` is just ``"posix"`` for both macOS and Linux, so it can't
+    tell them apart; ``sys.platform`` is the one stdlib signal that can.
+    """
+    return sys.platform.startswith("linux")
 
 
 def _list_windows_drives() -> list[str]:
@@ -160,7 +187,10 @@ def _list_windows_drives() -> list[str]:
 
 
 def _list_macos_volumes() -> list[str]:
-    """Every mounted volume under ``/Volumes`` on a macOS (or other POSIX) host.
+    """Every mounted volume under ``/Volumes`` on a macOS host (also the
+    fallback for any other non-Linux POSIX host, e.g. a BSD -- Linux has its
+    own dedicated :func:`_list_linux_mount_roots`, since `/Volumes` never
+    exists there).
 
     Backs the ``dir="ROOTS"`` sentinel's platform tail on POSIX
     (:func:`_platform_root_entries`) -- ``/Volumes`` always contains at least
@@ -192,6 +222,126 @@ def _list_macos_volumes() -> list[str]:
     return volumes
 
 
+#: Static conventional Linux mount parents that come BEFORE the per-user
+#: candidates in this fix's documented order: the filesystem root, the
+#: traditional `/mnt`, and the modern desktop-automount `/media` PARENT dir
+#: itself (distinct from `/media/<user>`, computed below). Labeled per this
+#: fix's spec: "Filesystem root" for `/` (it has no meaningful bare name),
+#: the path's own name otherwise (matches `_list_macos_volumes`'s
+#: bare-volume-name convention).
+_LINUX_MOUNT_PARENTS_BEFORE_USER: tuple[tuple[str, str], ...] = (
+    ("Filesystem root", "/"),
+    ("mnt", "/mnt"),
+    ("media", "/media"),
+)
+
+#: `/srv` (network-share convention) comes AFTER the per-user candidates and
+#: BEFORE GVFS in the documented order -- kept as its own constant (not
+#: folded into :data:`_LINUX_MOUNT_PARENTS_BEFORE_USER`) specifically so
+#: that ordering is structural rather than something a future edit could
+#: silently reshuffle.
+_LINUX_SRV_MOUNT_PARENT: tuple[str, str] = ("srv", "/srv")
+
+
+def _safe_current_username() -> str | None:
+    """Best-effort current username, or None -- never raises.
+
+    Used only to build the per-user Linux mount-parent candidates
+    (``/media/<user>``, ``/run/media/<user>``). Reads the home directory's
+    own leaf name (the same source :data:`_FS_LIST_HOME_LABEL`'s path
+    already relies on) rather than :func:`os.getlogin`/the ``pwd`` module --
+    both can raise in contexts with no controlling terminal or password-db
+    entry (services, containers), exactly the kind of failure this whole
+    fix must degrade gracefully from (skip the candidate, don't 500).
+    """
+    try:
+        name = Path.home().name
+    except RuntimeError:
+        return None
+    return name or None
+
+
+def _safe_current_uid() -> int | None:
+    """Best-effort current numeric uid, or None -- never raises.
+
+    Used only to build the GVFS mount-parent candidate
+    (``/run/user/<uid>/gvfs``). ``os.getuid`` only exists on POSIX, but this
+    is only ever called from the Linux branch (:func:`_is_linux` gates
+    :func:`_list_linux_mount_roots`), which is only ever True on a real
+    POSIX host.
+    """
+    try:
+        return os.getuid()
+    except AttributeError:
+        return None
+
+
+def _linux_mount_root_candidates() -> list[tuple[str, str]]:
+    """Every candidate Linux mount-parent, as ``(label, path)``, UNFILTERED
+    -- existence/readability is checked later, by
+    :func:`_list_linux_mount_roots`.
+
+    Factored out to its own function, like :func:`_list_macos_volumes`/
+    :func:`_list_windows_drives`, so tests replace it WHOLESALE with a fake
+    candidate set instead of depending on the test machine's real mounts --
+    the only POSIX-y filesystem feature every dev/CI box (including macOS)
+    is guaranteed to have is `/` itself; `/mnt`, the per-user media dirs, and
+    GVFS are real only on an actual Linux host.
+
+    Assembled in this fix's documented order: :data:`_LINUX_MOUNT_PARENTS_BEFORE_USER`
+    (``/``, ``/mnt``, ``/media``), then two computed per-user families --
+    the auto-mount dirs both desktop conventions use (``/media/<user>``,
+    the newer ``/run/media/<user>``) -- then :data:`_LINUX_SRV_MOUNT_PARENT`
+    (``/srv``), then the GVFS directory (``/run/user/<uid>/gvfs``) -- where a
+    desktop file manager's mounted network share (``smb://``, ``ftp://``,
+    ...) actually lives on disk once mounted. That last one is almost
+    certainly the owner's actual NAS case (2026-07-26 report): typing the
+    `smb://` address itself (correctly) doesn't work as a filesystem path
+    (:func:`_uri_style_path_error`), but browsing to its GVFS mountpoint
+    after mounting it from a file manager would. The username/uid lookups
+    are best-effort (:func:`_safe_current_username`/:func:`_safe_current_uid`):
+    either being unavailable just drops its candidate(s) WITHOUT disturbing
+    the position of any other candidate, same as any other
+    unreadable/nonexistent candidate below -- never raises.
+    """
+    candidates = list(_LINUX_MOUNT_PARENTS_BEFORE_USER)
+
+    username = _safe_current_username()
+    if username:
+        candidates.append(("Removable media", f"/media/{username}"))
+        candidates.append(("Removable media (run)", f"/run/media/{username}"))
+
+    candidates.append(_LINUX_SRV_MOUNT_PARENT)
+
+    uid = _safe_current_uid()
+    if uid is not None:
+        candidates.append(("Network shares (GVFS)", f"/run/user/{uid}/gvfs"))
+
+    return candidates
+
+
+def _list_linux_mount_roots() -> list[tuple[str, str]]:
+    """Every :func:`_linux_mount_root_candidates` entry that actually exists
+    (and is a readable directory) on this host right now, as ``(label,
+    path)``, in the documented order.
+
+    Backs the ``dir="ROOTS"`` sentinel's platform tail on Linux
+    (:func:`_platform_root_entries`). A stat/permission failure on any one
+    candidate is skipped -- exactly :func:`_list_macos_volumes`'s per-entry
+    ``except OSError`` -- one bad candidate must never abort the whole ROOTS
+    listing.
+    """
+    roots: list[tuple[str, str]] = []
+    for label, raw in _linux_mount_root_candidates():
+        try:
+            is_dir = Path(raw).is_dir()
+        except OSError:
+            continue
+        if is_dir:
+            roots.append((label, raw))
+    return roots
+
+
 def _fs_entry(name: str, path: Path) -> dict[str, str]:
     """A labeled, directly-navigable ROOTS entry: ``{"name", "path"}``.
 
@@ -210,13 +360,45 @@ def _platform_root_entries(windows: bool) -> list[dict[str, str]]:
     """STANDARD-fs-browse.md ROOTS listing's platform-specific tail.
 
     Every existing drive letter on Windows (:func:`_list_windows_drives`,
-    labeled by its short drive-letter form, e.g. ``"C:"``), or every mounted
-    ``/Volumes`` entry on macOS/other POSIX (:func:`_list_macos_volumes`,
-    labeled by its bare volume name, e.g. ``"Macintosh HD"``).
+    labeled by its short drive-letter form, e.g. ``"C:"``); every mounted
+    ``/Volumes`` entry on macOS/other non-Linux POSIX
+    (:func:`_list_macos_volumes`, labeled by its bare volume name, e.g.
+    ``"Macintosh HD"``); or, on Linux (:func:`_is_linux`, 2026-07-26 fix),
+    every conventional mount parent that actually exists on this host
+    (:func:`_list_linux_mount_roots`, labeled per
+    :func:`_linux_mount_root_candidates`) -- `/Volumes` never exists on
+    Linux, so before this fix `_list_macos_volumes` always returned `[]`
+    there and the picker had no way to reach `/mnt`, a NAS mount, or
+    anything outside the library dir/Home (owner report 2026-07-26).
     """
     if windows:
         return [_fs_entry(raw.rstrip("\\"), Path(raw)) for raw in _list_windows_drives()]
+    if _is_linux():
+        return [_fs_entry(label, Path(raw)) for label, raw in _list_linux_mount_roots()]
     return [_fs_entry(Path(raw).name, Path(raw)) for raw in _list_macos_volumes()]
+
+
+def _dedupe_root_entries(entries: list[dict[str, str]]) -> list[dict[str, str]]:
+    """Drop any ROOTS *entries* whose ``path`` repeats an earlier one,
+    keeping the FIRST occurrence -- preserves the documented order (default
+    dir, Home, then platform tail).
+
+    2026-07-26: needed once the platform tail could itself contain more than
+    one path that might coincide with another entry -- e.g. Linux's
+    ``/media/<user>`` and ``/media`` are both real, separate entries (no
+    dedup between those two -- both are legitimately useful), but a
+    library_dir or Home that happens to sit exactly on one of the platform
+    tail's own paths must not be listed twice under two labels.
+    """
+    seen: set[str] = set()
+    deduped: list[dict[str, str]] = []
+    for entry in entries:
+        path = entry["path"]
+        if path in seen:
+            continue
+        seen.add(path)
+        deduped.append(entry)
+    return deduped
 
 
 def _fs_list_roots(context: LibraryContext, *, windows: bool) -> list[dict[str, str]]:
@@ -228,14 +410,17 @@ def _fs_list_roots(context: LibraryContext, *, windows: bool) -> list[dict[str, 
     exact ROOTS ordering ("the pack's default dir first (labeled) ... 'Home',
     then platform roots"). 2026-07-19: previously POSIX's ``ROOTS`` resolved
     straight to a real listing of ``/``; this labeled-roots shape (already
-    used on Windows) now applies uniformly on every platform.
+    used on Windows) now applies uniformly on every platform. The assembled
+    list is de-duplicated by resolved path (:func:`_dedupe_root_entries`,
+    2026-07-26) before it goes out, so an accidental path collision between
+    the default dir/Home and a platform-tail entry never surfaces twice.
     """
     roots = [
         _fs_entry(_FS_LIST_DEFAULT_DIR_LABEL, context.library_dir().resolve()),
         _fs_entry(_FS_LIST_HOME_LABEL, Path.home().resolve()),
     ]
     roots.extend(_platform_root_entries(windows))
-    return roots
+    return _dedupe_root_entries(roots)
 
 
 def _parse_extensions(raw: str) -> tuple[str, ...]:
@@ -279,6 +464,32 @@ def _fs_root_parent(directory: Path, *, windows: bool) -> str | None:
     if windows and not _is_unc_share_root(directory):
         return ROOTS
     return None
+
+
+def _uri_style_path_error(raw: str) -> str:
+    """FORMAT.md §5 400 message for a ``dir`` value that's a URI
+    (``scheme://...``) rather than a filesystem path.
+
+    2026-07-26 owner report: typing an ``smb://`` address (e.g.
+    ``smb://dxp4800pro-ring.local/personal_folder/docs/loras.md``) into the
+    picker's manual-path field "doesn't work" -- correctly, since that's a
+    GIO/GVFS address (the kind a GUI file manager's address bar accepts),
+    not something Python's ``open``/``Path`` can ever resolve -- but the
+    generic "dir must be an absolute path" 400 doesn't explain WHY a value
+    that reads like a location fails for a non-developer. Names the
+    caller's own scheme back at them (so this reads
+    right for ``smb://``, ``nfs://``, ``afp://``, ... -- the check itself is
+    scheme-agnostic, see the caller) while keeping one concrete, illustrative
+    mount point: the GVFS path (:func:`_linux_mount_root_candidates`) is
+    where a desktop file manager's mounted network share actually ends up on
+    disk, and by far the most likely NAS-from-Linux-desktop case.
+    """
+    scheme = raw.split("://", 1)[0] + "://"
+    return (
+        f"{scheme} is a network address, not a file path. Mount the share "
+        "first, then browse to its mount point (commonly /mnt/... , "
+        "/media/<you>/... , or /run/user/<uid>/gvfs/smb-share:server=...)."
+    )
 
 
 # --------------------------------------------------- library_dir diagnosis
@@ -412,7 +623,9 @@ def register_core(context: LibraryContext, routes: web.RouteTableDef) -> None:
         with ``dir``+``sep``); ROOTS entries additionally carry ``path``
         (:func:`_fs_entry`). 403 when :data:`FS_LIST_LOCAL_ONLY` and the
         caller isn't loopback; 400 for a relative/non-existent/non-directory
-        ``dir``.
+        ``dir``, or one that's a URI (``scheme://...``, e.g. a typed
+        ``smb://`` address -- :func:`_uri_style_path_error`, 2026-07-26 fix)
+        rather than an actual filesystem path.
         """
         if FS_LIST_LOCAL_ONLY and not request_is_loopback(request):
             return error_response(403, "file browsing is host-machine-only — FORMAT.md §5")
@@ -429,6 +642,13 @@ def register_core(context: LibraryContext, routes: web.RouteTableDef) -> None:
                     "truncated": False,
                 }
             )
+        # 2026-07-26 fix: a typed `scheme://...` value (owner's actual case:
+        # `smb://dxp4800pro-ring.local/...`) is never a valid absolute path on
+        # ANY OS, but the generic "must be an absolute path" 400 below doesn't
+        # say why -- catch it first with a message that names the mistake in
+        # plain language (:func:`_uri_style_path_error`).
+        if "://" in raw:
+            return error_response(400, _uri_style_path_error(raw))
         directory = Path(raw) if raw else context.library_dir()
         if not directory.is_absolute():
             return error_response(400, f"dir must be an absolute path (got {raw!r})")

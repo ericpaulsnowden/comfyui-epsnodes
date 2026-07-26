@@ -102,8 +102,29 @@ class LibraryContext:
         an edge case (FORMAT.md §1/§2). No existence check here: readers
         surface "missing file" themselves so a brand-new path can be created
         by the first save.
+
+        A ``scheme://…`` value raises :class:`ValueError` (2026-07-26 owner
+        report, found while fixing the Linux picker): ``Path("smb://host/x")``
+        COLLAPSES to ``smb:/host/x`` — a single slash, which is not absolute
+        on POSIX — so a typed network address used to sail past the
+        ``is_absolute()`` branch below and get joined UNDER the library
+        folder. That failed silently in the worst way: the node reported a
+        missing file (looking like an empty notebook), and the first SAVE
+        would ``mkdir -p`` a bogus ``smb:/host/…`` directory tree inside the
+        user's real library folder (``:`` is a legal POSIX filename char).
+        Raising here is caught by ``routes_notebook._resolve_path`` (→ a 400
+        naming the problem) and surfaces loudly at queue time from the node,
+        which is where FORMAT.md §6.1 wants bad ``file`` values to land.
         """
         value = (file_value or "").strip() or DEFAULT_NOTEBOOK_FILENAME
+        if "://" in value:
+            scheme = value.split("://", 1)[0] or "that"
+            raise ValueError(
+                f"{scheme}:// is a network address, not a file path. Mount the "
+                "share first, then point this at its mount point (e.g. "
+                "/mnt/nas/loras.md, or /run/user/1000/gvfs/smb-share:server=… "
+                "for a share mounted from your file manager)."
+            )
         path = Path(value)
         if not path.is_absolute():
             path = self.library_dir() / path
