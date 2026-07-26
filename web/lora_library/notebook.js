@@ -307,6 +307,49 @@ const WIDGET_TYPE = 'lora_library_notebook'
 /** FORMAT.md §7.2: "resizable via getMinHeight (~180)". */
 const MIN_WIDGET_HEIGHT = 180
 
+/**
+ * The narrowest this node may be (2026-07-26, owner report from Linux:
+ * "it is possible for the container to be smaller than the content and for
+ * the text boxes or columns to break out and be wider than the containers
+ * they are in").
+ *
+ * Every DOM widget in this pack clamped HEIGHT (`getMinHeight` above) but
+ * nothing ever clamped WIDTH, so a node could be dragged — or restored from
+ * a saved workflow — narrower than its two-pane layout can physically
+ * render. It looked survivable on macOS/Windows because their default UI
+ * fonts are narrow; Linux ships wider ones, so the same width that used to
+ * just fit now squeezes the list column, the editor, and the file bar past
+ * the point where their contents fit. The root has `overflow: hidden`, so
+ * the result reads as truncation and collision rather than a clean layout.
+ *
+ * 320 = the 40% list column at a readable width plus an editor pane wide
+ * enough for a line of prompt text, with margin for a wider font. Enforced
+ * in `installMinWidth` below, which only ever GROWS a node to the floor.
+ */
+const MIN_WIDGET_WIDTH = 320
+
+/**
+ * Stops *node* from being sized below *minWidth* (see MIN_WIDGET_WIDTH).
+ *
+ * Wraps `onResize` the same way this pack's other per-node installers wrap
+ * their hooks (guard flag + call-through), and also lifts the CURRENT width,
+ * so a saved workflow that was already too narrow opens correctly rather
+ * than waiting for the user to nudge the node. Purely additive: a node at or
+ * above the floor is untouched, and the floor never shrinks anything.
+ */
+function installMinWidth(node, minWidth) {
+  if (!node || node.__epsMinWidthInstalled) return
+  node.__epsMinWidthInstalled = true
+  const originalOnResize = node.onResize
+  node.onResize = function (size) {
+    if (size && size[0] < minWidth) size[0] = minWidth
+    return originalOnResize?.call(this, size)
+  }
+  if (Array.isArray(node.size) && node.size[0] < minWidth) {
+    node.size[0] = minWidth
+  }
+}
+
 /** How long the Delete button stays in "Are you sure?" mode. */
 const DELETE_CONFIRM_MS = 4000
 
@@ -1012,6 +1055,7 @@ function attachDomWidget(node, rootEl) {
   // `options.serialize` above — see file header).
   domWidget.serialize = false
   domWidget.serializeValue = () => undefined
+  installMinWidth(node, MIN_WIDGET_WIDTH) // 2026-07-26 Linux fix — see its docstring
   return domWidget
 }
 

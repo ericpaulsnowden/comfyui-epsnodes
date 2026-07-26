@@ -493,8 +493,13 @@ const CSS_TEXT = `
   overflow: hidden;
 }
 .epsfs-frame-input {
-  flex: 0 0 auto;
-  width: 56px;
+  /* 2026-07-26 (owner, Linux): a fixed 56px width sized against
+     macOS/Windows metrics clipped its own digits under Linux's wider
+     default fonts. Floor + shrink-to-fit instead of a hard width. */
+  flex: 0 1 auto;
+  width: auto;
+  min-width: 56px;
+  max-width: 100%;
   box-sizing: border-box;
   background: var(--comfy-input-bg, #1e1e1e);
   border: 1px solid var(--border-color, #444);
@@ -739,7 +744,32 @@ function createState(node, pathWidget, frameWidget) {
 // which of these two shapes each of the three widgets below uses, and why).
 // ---------------------------------------------------------------------------
 
+/** The narrowest this node may be (2026-07-26, owner report from Linux:
+ * containers smaller than their content). The three bars here clamp HEIGHT
+ * exhaustively (see the header's sizing section) but nothing clamped WIDTH,
+ * so the transport strip -- four buttons plus the frame field and its
+ * "Frame X/N" counter -- could be squeezed past what it can render. Linux's
+ * wider default fonts make that reachable at widths that looked fine on
+ * macOS/Windows. 260 fits the strip with margin; only ever GROWS a node. */
+const MIN_NODE_WIDTH = 260
+
+/** Twin of notebook.js/controller.js's installMinWidth (same rationale and
+ * shape; each web module stays self-contained). */
+function installMinWidth(node, minWidth) {
+  if (!node || node.__epsMinWidthInstalled) return
+  node.__epsMinWidthInstalled = true
+  const originalOnResize = node.onResize
+  node.onResize = function (size) {
+    if (size && size[0] < minWidth) size[0] = minWidth
+    return originalOnResize?.call(this, size)
+  }
+  if (Array.isArray(node.size) && node.size[0] < minWidth) {
+    node.size[0] = minWidth
+  }
+}
+
 function attachFillWidget(node, name, type, element, minHeight) {
+  installMinWidth(node, MIN_NODE_WIDTH) // 2026-07-26 Linux fix
   const domWidget = node.addDOMWidget(name, type, element, {
     hideOnZoom: true,
     serialize: false, // excludes from the API prompt (utils/executionUtil.ts)
@@ -754,6 +784,7 @@ function attachFillWidget(node, name, type, element, minHeight) {
 }
 
 function attachFixedWidget(node, name, type, element, height) {
+  installMinWidth(node, MIN_NODE_WIDTH) // 2026-07-26 Linux fix
   const domWidget = node.addDOMWidget(name, type, element, {
     hideOnZoom: true,
     serialize: false,

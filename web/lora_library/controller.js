@@ -1476,6 +1476,31 @@ const STATE_PANE_WIDGET_TYPE = 'lora_library_state_picker'
 /** FORMAT.md §7.2 "the widget fills available height" — Notebook's `MIN_WIDGET_HEIGHT` twin, sized for 4 stacked buttons plus a couple of visible list rows. */
 const MIN_STATE_PANE_HEIGHT = 140
 
+/** The narrowest this node may be (2026-07-26, owner report from Linux:
+ * containers smaller than their content). Height was clamped
+ * (MIN_STATE_PANE_HEIGHT); width never was, so the node could be dragged —
+ * or restored from a saved workflow — narrower than the state list plus the
+ * button column can render. macOS/Windows fonts hid it; Linux's wider ones
+ * do not. 300 = the >=104px button column (see `.llsc-pane-right`, now
+ * content-sized with that as a floor) plus a state list wide enough to read
+ * a name. `installMinWidth` only ever GROWS a node to this floor. */
+const MIN_STATE_PANE_WIDTH = 300
+
+/** Twin of notebook.js's installMinWidth (same rationale, same additive
+ * wrap-and-call-through shape; each web module stays self-contained). */
+function installMinWidth(node, minWidth) {
+  if (!node || node.__epsMinWidthInstalled) return
+  node.__epsMinWidthInstalled = true
+  const originalOnResize = node.onResize
+  node.onResize = function (size) {
+    if (size && size[0] < minWidth) size[0] = minWidth
+    return originalOnResize?.call(this, size)
+  }
+  if (Array.isArray(node.size) && node.size[0] < minWidth) {
+    node.size[0] = minWidth
+  }
+}
+
 const STATE_PANE_STYLE_TAG_ID = 'lora-library-controller-styles'
 let controllerStylesInjected = false
 
@@ -1518,7 +1543,14 @@ const STATE_PANE_CSS_TEXT = `
   border-right: 1px solid var(--border-color, #444);
 }
 .llsc-pane-right {
-  flex: 0 0 104px;
+  /* 2026-07-26 (owner, Linux): was a HARD-CODED flex basis of 104px, a
+     width measured against macOS/Windows font metrics. Linux ships wider
+     default UI fonts, so "Delete State" no longer fit and the labels
+     ellipsised inside their own column. Sizing to content with 104px as a
+     FLOOR keeps the familiar width everywhere it already fit and lets the
+     column grow instead of truncating wherever the font is wider. */
+  flex: 0 0 auto;
+  min-width: 104px;
   display: flex;
   flex-direction: column;
   gap: 4px;
@@ -1964,6 +1996,7 @@ export function registerControllerNode() {
         })
         domWidget.serialize = false
         domWidget.serializeValue = () => undefined
+        installMinWidth(this, MIN_STATE_PANE_WIDTH) // 2026-07-26 Linux fix
 
         this._renderStateList()
       }

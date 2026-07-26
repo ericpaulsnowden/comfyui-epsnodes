@@ -1217,6 +1217,22 @@ label, so two chained Cross Products cannot express it.
   (conflicts per §3.5 surface here with Reload / Overwrite). The node is
   resizable; the widget fills available height. Selection writes the
   `entry` STRING widget so serialization needs no custom code.
+  - **Every DOM-widget node also has a WIDTH floor** (2026-07-26, owner
+    report from Linux: "the container [can be] smaller than the content …
+    text boxes or columns break out"). Height was always clamped
+    (`getMinHeight`); width never was, so a node could be dragged — or
+    restored from a saved workflow — narrower than its layout can render.
+    macOS/Windows default UI fonts are narrow enough to hide it; Linux's
+    are not. Each module installs an additive `onResize` clamp
+    (`installMinWidth`, guard-flagged, wraps-and-calls-through) that also
+    lifts the CURRENT width so an already-too-narrow saved workflow opens
+    correct: Notebook 320, Lora Loader State Controller 300, Frame Saver
+    260. It only ever GROWS a node to the floor.
+  - **No hard-coded pixel column widths.** Any column whose width was
+    measured against one platform's font (the controller's button column
+    was `flex: 0 0 104px`; Frame Saver's frame field `width: 56px`) is
+    content-sized with that number as a `min-width` FLOOR instead, so a
+    wider font expands the column rather than ellipsising its labels.
   - Multi-select: ctrl/cmd+click toggles an entry in/out of the selection;
     shift+click selects the visible range; plain click collapses to a
     single selection. All selected rows highlight; the EDITOR always shows
