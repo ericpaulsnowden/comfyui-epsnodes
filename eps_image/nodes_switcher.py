@@ -91,6 +91,106 @@ _IMAGE_INPUT_PATTERN = re.compile(r"image_(\d+)")
 #: rationale).
 DEFAULT_TOGGLES = "{}"
 
+#: This node's own class id, as it appears in a prompt's ``class_type`` --
+#: used to spot an UPSTREAM sibling switcher (see
+#: :func:`_slots_fed_by_an_empty_switcher`).
+_CLASS_ID = "EPSSwitcher"
+
+
+def _unwrap_hidden(value: Any) -> Any:
+    """Undo ``INPUT_IS_LIST``'s wrapping of a hidden input.
+
+    Core wraps hidden inputs in a one-element list exactly like widget values
+    (``execution.py`` ``get_input_data``: ``input_data_all[x] =
+    [dynprompt.get_original_prompt()]`` / ``[unique_id]``), and
+    ``INPUT_IS_LIST`` hands them over unsliced -- same shape, same unwrap, as
+    :func:`_unwrap_toggles`. A bare value (a direct caller/test) passes
+    through untouched.
+    """
+    if isinstance(value, (list, tuple)):
+        return value[0] if value else None
+    return value
+
+
+def _switcher_is_statically_all_off(node: dict) -> bool:
+    """True when *node* is a prompt entry for an EPSSwitcher that provably
+    emits nothing: every ``image_N`` it has wired is turned off in its own
+    ``toggles`` (or it has none wired at all).
+
+    "Provably" from the PROMPT ALONE -- ``toggles`` must be a literal string
+    (it is: a hidden widget value). If it arrives as a link, or as anything
+    this can't parse, the answer is False: unknown means "assume it produces
+    something", so the caller behaves exactly as it did before this check
+    existed.
+    """
+    if str(node.get("class_type") or "") != _CLASS_ID:
+        return False
+    inputs = node.get("inputs")
+    if not isinstance(inputs, dict):
+        return False
+    toggles = inputs.get("toggles", DEFAULT_TOGGLES)
+    if not isinstance(toggles, str):
+        return False  # wired from another node -- not statically knowable
+    toggle_map = _parse_toggles(toggles)
+    wired = [
+        key
+        for key, value in inputs.items()
+        if _IMAGE_INPUT_PATTERN.fullmatch(key)
+        and isinstance(value, (list, tuple))
+        and len(value) == 2
+    ]
+    return all(toggle_map.get(key, True) is False for key in wired)
+
+
+def _slots_fed_by_an_empty_switcher(prompt: Any, unique_id: Any) -> set[str]:
+    """The ``image_N`` input names of THIS node whose upstream is an
+    EPSSwitcher that provably emits nothing (:func:`_switcher_is_statically_all_off`).
+
+    Why this exists (owner report 2026-07-26): "if one of them has all of the
+    inputs unchecked the entire workflow won't run. Even if it's earlier in
+    the workflow than the second one." Reproduced exactly. An all-off switcher
+    emits ``[ExecutionBlocker(None)]``, and core's pre-execution scan
+    (``execution.py``'s ``process_inputs``) blocks a node when ANY element of
+    ANY of its inputs is a blocker -- core has no notion of blocking just one
+    input. So an all-off switcher feeding a SECOND switcher killed that
+    second switcher outright, even though it had a perfectly good enabled
+    image of its own. That is wrong: a switcher's job is "pass on the enabled
+    inputs", and an empty upstream should contribute nothing, not veto us.
+
+    The fix has to live HERE, on the consumer, and it has to work through the
+    LAZY mechanism: by not REQUESTING such a slot, the upstream switcher never
+    runs at all, so no blocker is ever created (rather than being created and
+    then swallowed -- core gives us no way to swallow one).
+
+    Rejected alternative, with live proof: having the all-off switcher emit a
+    bare ``[]`` when it can see that all its consumers tolerate one. That is
+    unsound because it makes a node's OUTPUT depend on the GRAPH while
+    ComfyUI's cache key depends only on its INPUTS -- ``IsChangedCache`` even
+    calls ``get_input_data`` with ``dynprompt=None`` ("We only want constants
+    in IS_CHANGED"), so a graph-derived decision can never participate in the
+    cache key. Tried it: the cached ``[]`` from a graph where it WAS safe got
+    replayed into one where it wasn't, and SaveImage died with
+    ``IndexError`` in ``slice_dict``. Never make an output graph-dependent.
+    """
+    if not isinstance(prompt, dict) or unique_id is None:
+        return set()
+    me = prompt.get(str(unique_id))
+    if not isinstance(me, dict):
+        return set()
+    my_inputs = me.get("inputs")
+    if not isinstance(my_inputs, dict):
+        return set()
+    skip: set[str] = set()
+    for name, value in my_inputs.items():
+        if not _IMAGE_INPUT_PATTERN.fullmatch(name):
+            continue
+        if not (isinstance(value, (list, tuple)) and len(value) == 2):
+            continue
+        upstream = prompt.get(str(value[0]))
+        if isinstance(upstream, dict) and _switcher_is_statically_all_off(upstream):
+            skip.add(name)
+    return skip
+
 
 class _FlexibleOptionalImageInputs(dict):
     """The ``optional`` half of INPUT_TYPES: accepts ANY ``image_N`` key.
@@ -307,9 +407,22 @@ class EPSSwitcher:
                     "toggles": ("STRING", {"default": DEFAULT_TOGGLES, "multiline": False}),
                 }
             ),
+            # Server-supplied, never user-facing: lets the all-off branch see
+            # WHO consumes this output before choosing between an empty list
+            # and a blocker (see _EMPTY_TOLERANT_CONSUMERS). Hidden inputs
+            # can't be omitted by an API caller in a way that breaks us --
+            # `execute`'s own defaults cover their absence, and the fallback
+            # is the pre-2026-07-26 behavior.
+            "hidden": {"prompt": "PROMPT", "unique_id": "UNIQUE_ID"},
         }
 
-    def check_lazy_status(self, toggles: Any = DEFAULT_TOGGLES, **kwargs: Any) -> list[str]:
+    def check_lazy_status(
+        self,
+        toggles: Any = DEFAULT_TOGGLES,
+        prompt: Any = None,
+        unique_id: Any = None,
+        **kwargs: Any,
+    ) -> list[str]:
         """Which ``image_N`` inputs ComfyUI should actually resolve.
 
         Called by core through the SAME ``INPUT_IS_LIST``-gated dispatch as
@@ -342,13 +455,35 @@ class EPSSwitcher:
         method returns).
         """
         toggle_map = _parse_toggles(_unwrap_toggles(toggles))
+        # 2026-07-26: never request a slot fed by a provably-empty sibling
+        # switcher -- see _slots_fed_by_an_empty_switcher for the full why.
+        # Not requesting it means that switcher never runs, so its blocker is
+        # never created and it cannot veto this node's OTHER enabled inputs.
+        skip = _slots_fed_by_an_empty_switcher(
+            _unwrap_hidden(prompt), _unwrap_hidden(unique_id)
+        )
+        if skip:
+            logger.info(
+                "EPS Switcher: not requesting %s -- fed by an EPS Switcher "
+                "with everything toggled off, so it would only contribute an "
+                "execution block; this node's other enabled inputs are "
+                "unaffected",
+                ", ".join(sorted(skip)),
+            )
         return [
-            f"image_{index}"
+            name
             for index in _connected_image_indices(kwargs)
-            if toggle_map.get(f"image_{index}", True) is not False
+            if (name := f"image_{index}") not in skip
+            and toggle_map.get(name, True) is not False
         ]
 
-    def execute(self, toggles: Any = DEFAULT_TOGGLES, **kwargs: Any) -> tuple[list[Any]]:
+    def execute(
+        self,
+        toggles: Any = DEFAULT_TOGGLES,
+        prompt: Any = None,
+        unique_id: Any = None,
+        **kwargs: Any,
+    ) -> tuple[list[Any]]:
         toggle_map = _parse_toggles(_unwrap_toggles(toggles))
         connected = _connected_image_indices(kwargs)
 
@@ -403,6 +538,14 @@ class EPSSwitcher:
             # `v[-1]` on an empty list. Verified live with a real /prompt +
             # /history round trip -- see tests/test_switcher.py and the
             # round-10 report.
+            # NOTE (2026-07-26): the blocker below is UNCONDITIONAL on
+            # purpose. Emitting a bare [] for graphs whose consumers tolerate
+            # one was tried and REVERTED -- it makes the output depend on the
+            # graph while the cache key depends only on the inputs, so a
+            # cached [] gets replayed into a graph where it crashes
+            # (`slice_dict` IndexError). The consumer-side lazy skip in
+            # `check_lazy_status` is the sound fix; see
+            # `_slots_fed_by_an_empty_switcher`.
             if not connected:
                 logger.info(
                     "EPS Switcher: no image inputs are connected -- "

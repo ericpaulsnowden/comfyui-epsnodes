@@ -593,6 +593,33 @@ per-input toggle + toggle-all header + N-enabled→N-runs fan-out.
   blocks the ENTIRE switcher before it runs, silently skipping the whole
   branch (queue still succeeds). Toggle an empty grid off (its branch then
   never even executes) or collect into it first.
+- **A slot fed by a provably-empty SIBLING switcher is never requested**
+  (2026-07-26 owner report: "if one of them has all of the inputs unchecked
+  the entire workflow won't run. Even if it's earlier in the workflow than
+  the second one" — reproduced exactly). Because of the core semantic
+  above, an all-off switcher's blocker vetoed a DOWNSTREAM switcher that had
+  its own perfectly good enabled image. The fix lives on the CONSUMER and
+  works through laziness: `check_lazy_status` reads the graph (hidden
+  `PROMPT`/`UNIQUE_ID` inputs) and, for any `image_N` whose upstream is an
+  `EPSSwitcher` that provably emits nothing — every wired `image_N` of it
+  `false` in its own literal `toggles`, or nothing wired at all — does NOT
+  request that slot. The upstream then never runs, so no blocker is ever
+  created and this node's other enabled inputs are untouched. Unknowable
+  cases (a `toggles` arriving as a LINK, a non-switcher upstream, an
+  uninspectable graph) request as before. **Limitation:** only a DIRECT
+  upstream switcher is detected — a blocker arriving through an intermediate
+  node still blocks, as does an ordinary consumer like `ImageBatch` that
+  genuinely needs every input.
+- **NEVER make an output depend on the graph** (learned the hard way,
+  2026-07-26): the first attempt at the above had the all-off switcher emit
+  a bare `[]` when it could see that all its consumers tolerate one.
+  Unsound — a node's cache key is built from its INPUTS only, and
+  `IsChangedCache` even calls `get_input_data` with `dynprompt=None` ("We
+  only want constants in IS_CHANGED"), so a graph-derived decision can never
+  participate in it. Proven live: the cached `[]` from a graph where it was
+  safe got replayed into one where it wasn't, and `SaveImage` died with an
+  `IndexError` in `slice_dict`. Graph inspection may only influence which
+  inputs a node REQUESTS (laziness), never what it RETURNS.
 - **All-off / none-connected is a VALID state** (owner decision 2026-07-20,
   supersedes the v0.14.0 queue-time error — "there will be times when a user
   might want to turn them all off"): queueing with every input toggled off,

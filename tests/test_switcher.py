@@ -561,3 +561,111 @@ def test_module_never_imports_comfy_or_torch() -> None:
     source = inspect.getsource(sys.modules[nodes_switcher.__name__])
     assert "import comfy" not in source
     assert "import torch" not in source
+
+
+class TestUpstreamEmptySwitcherIsNotRequested:
+    """2026-07-26 owner report: "if one of them has all of the inputs
+    unchecked the entire workflow won't run. Even if it's earlier in the
+    workflow than the second one."
+
+    Root cause (reproduced live): core blocks a node when ANY element of ANY
+    of its inputs is an ExecutionBlocker, so an all-off switcher vetoed a
+    DOWNSTREAM switcher that had its own perfectly good enabled image.
+
+    The fix is on the CONSUMER, through the lazy mechanism: never request a
+    slot whose upstream is a provably-empty sibling switcher, so that
+    switcher never runs and no blocker is ever created. (Emitting a bare []
+    from the empty switcher instead was tried and reverted -- it made the
+    output graph-dependent while the cache key is input-only, and a cached []
+    crashed a later graph. See the module's own notes.)
+    """
+
+    @staticmethod
+    def _prompt(upstream_toggles: str, *, upstream_wired: bool = True) -> dict:
+        upstream_inputs: dict = {"toggles": upstream_toggles}
+        if upstream_wired:
+            upstream_inputs["image_1"] = ["1", 0]
+        return {
+            "1": {"class_type": "LoadImage", "inputs": {"image": "a.png"}},
+            "2": {"class_type": "EPSSwitcher", "inputs": upstream_inputs},
+            "3": {"class_type": "LoadImage", "inputs": {"image": "b.png"}},
+            # node 4 = the node under test: slot 1 from the switcher, slot 2 direct
+            "4": {"class_type": "EPSSwitcher",
+                  "inputs": {"image_1": ["2", 0], "image_2": ["3", 0], "toggles": "{}"}},
+        }
+
+    def _request(self, prompt: dict) -> list[str]:
+        return EPSSwitcher().check_lazy_status(
+            toggles=["{}"], prompt=[prompt], unique_id=["4"],
+            image_1=(None,), image_2=(None,),
+        )
+
+    def test_slot_fed_by_an_all_off_switcher_is_not_requested(self) -> None:
+        requested = self._request(self._prompt('{"image_1": false}'))
+        assert requested == ["image_2"]
+
+    def test_slot_fed_by_a_switcher_with_nothing_wired_is_not_requested(self) -> None:
+        requested = self._request(self._prompt("{}", upstream_wired=False))
+        assert requested == ["image_2"]
+
+    def test_slot_fed_by_a_LIVE_switcher_is_still_requested(self) -> None:
+        requested = self._request(self._prompt("{}"))
+        assert requested == ["image_1", "image_2"]
+
+    def test_partially_off_upstream_is_still_requested(self) -> None:
+        prompt = self._prompt('{"image_1": false}')
+        prompt["2"]["inputs"]["image_2"] = ["3", 0]  # a second, ENABLED slot upstream
+        assert self._request(prompt) == ["image_1", "image_2"]
+
+    def test_non_switcher_upstream_is_never_skipped(self) -> None:
+        prompt = self._prompt("{}")
+        prompt["2"] = {"class_type": "EPSImageGrid", "inputs": {"mode": "Emit"}}
+        assert self._request(prompt) == ["image_1", "image_2"]
+
+    def test_wired_toggles_upstream_is_treated_as_unknown(self) -> None:
+        # toggles arriving as a LINK can't be evaluated statically -> assume
+        # the upstream produces something (pre-fix behavior).
+        prompt = self._prompt("{}")
+        prompt["2"]["inputs"]["toggles"] = ["9", 0]
+        assert self._request(prompt) == ["image_1", "image_2"]
+
+    @pytest.mark.parametrize(
+        "kwargs",
+        [
+            {},
+            {"prompt": [None], "unique_id": ["4"]},
+            {"prompt": [{"4": {}}], "unique_id": [None]},
+        ],
+    )
+    def test_uninspectable_graph_requests_everything_enabled(self, kwargs: dict) -> None:
+        requested = EPSSwitcher().check_lazy_status(
+            toggles=["{}"], image_1=(None,), image_2=(None,), **kwargs
+        )
+        assert requested == ["image_1", "image_2"]
+
+    def test_an_unrequested_slot_contributes_nothing_at_execute(self) -> None:
+        # Core hands an unresolved lazy input the (None,) placeholder; it must
+        # neither crash nor contribute, and the other slot must still flow.
+        assert EPSSwitcher().execute(
+            toggles=["{}"], image_1=(None,), image_2=["live"]
+        ) == (["live"],)
+
+    def test_all_off_still_returns_a_blocker_unconditionally(
+        self, fake_execution_blocker: type
+    ) -> None:
+        # The reverted approach would have returned [] here for a tolerant
+        # consumer; it must not, at any graph.
+        prompt = {
+            "4": {"class_type": "EPSSwitcher", "inputs": {"toggles": '{"image_1": false}'}},
+            "5": {"class_type": "EPSSwitcher", "inputs": {"image_1": ["4", 0]}},
+        }
+        (images,) = EPSSwitcher().execute(
+            toggles=['{"image_1": false}'], prompt=[prompt], unique_id=["4"], image_1=["img"]
+        )
+        assert len(images) == 1 and isinstance(images[0], fake_execution_blocker)
+
+
+class TestHiddenInputsDeclared:
+    def test_prompt_and_unique_id_are_declared_hidden(self) -> None:
+        spec = EPSSwitcher.INPUT_TYPES()
+        assert spec["hidden"] == {"prompt": "PROMPT", "unique_id": "UNIQUE_ID"}
