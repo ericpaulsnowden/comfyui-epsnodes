@@ -5,43 +5,25 @@ live in **plain files you own**. Everything appears under **EPSNodes** in
 the node browser and Settings. It started as a LoRA family and has grown
 beyond it — image-flow utilities now live here too.
 
-Current capabilities, no dependencies:
+## The ten nodes
 
-- **EPS Prompt Notebook** — your prompt library as a node: a scrollable list of
-  named prompts with an editor pane beside it. Backed by a plain
-  **Markdown file you can put anywhere** — including a NAS folder shared by
-  several machines. Selected prompts flow out as `STRING`s you can wire
-  into any text input. The file is the truth: edit it in ComfyUI, in
-  VS Code, on the other computer — everything stays in sync.
-- **LoRA states** — save a whole lora configuration (which loras, order,
-  on/off, strengths) as a named state, then switch from a list.
-  `EPS Apply LoRA Set` works standalone (MODEL/CLIP in → out, plus a
-  `LORA_STACK` and trigger words). If you use
-  [rgthree's Power Lora Loader](https://github.com/rgthree/rgthree-comfy),
-  the `EPS Lora Loader State Controller` drives it directly — capture
-  its current rows as a state, apply a state back, reorder included.
-  **EPS LoRA Sweep** takes any `LORA_STACK` and auditions it by strength —
-  set a min/max/increment range and it runs your workflow once per step
-  (per lora, or all together) in a single queue.
-- **Image utilities** — **EPS Switcher** toggles any number of image inputs
-  on/off and fans the enabled ones out (N enabled → the workflow runs N
-  times); **EPS Resolution** is an image-first, all-in-one resize + size
-  node (target size, four resize modes, and the original image + both sizes
-  passed through) so one node replaces a resize + a reroute + a get-size;
-  **EPS Image Grid** collects images across separate Runs into a navigable
-  grid and fans the whole set out (gather 10, then run them through a
-  workflow at once); **EPS Cross Product** pairs every image with every
-  text (2 images × 4 prompts = 8 runs — ComfyUI's own list pairing zips
-  instead); **EPS Cross Sweep** multiplies a whole EPS LoRA Sweep across
-  all of those pairs, strength-grouped, with per-run save paths so big
-  runs land in tidy folders; **EPS Frame Saver** loads a video by path,
-  lets you scrub/play to a frame, and outputs that frame as an image.
+No dependencies — every node below works on its own. Each has its own
+section further down; this is the map.
 
-> **Status: pre-release. Ten capabilities ship today:** the **EPS Prompt
-> Notebook**, **EPS Apply LoRA Set**, the **EPS Lora Loader State Controller**,
-> **EPS LoRA Sweep**, **EPS Switcher**, **EPS Resolution**, **EPS Image
-> Grid**, **EPS Cross Product**, **EPS Cross Sweep**, and **EPS Frame
-> Saver** (each described below). Contracts live in
+| Node | What it does |
+| --- | --- |
+| [**EPS Prompt Notebook**](#eps-prompt-notebook-shipped) | Your prompt library as a node — a scrolling list of named prompts with an editor beside it, backed by a plain Markdown file you own (local or on a NAS). Select several and the workflow runs once per prompt. |
+| [**EPS Apply LoRA Set**](#eps-apply-lora-set-shipped) | Pick a saved lora configuration ("state") from a dropdown and apply it — which loras, order, on/off, strengths. Standalone: MODEL/CLIP in → out, plus a `LORA_STACK` and trigger words. |
+| [**EPS Lora Loader State Controller**](#eps-lora-loader-state-controller-shipped-requires-rgthree-comfy) | Captures and applies those states directly on an [rgthree Power Lora Loader](https://github.com/rgthree/rgthree-comfy) — rgthree stays the loader, this moves whole configurations in and out of it. |
+| [**EPS LoRA Sweep**](#eps-lora-sweep-shipped) | Auditions any `LORA_STACK` by strength: set min/max/increment and one queue runs your workflow once per step (per lora, or all together). |
+| [**EPS Switcher**](#eps-switcher-shipped) | Any number of image inputs, each independently on/off; the enabled ones fan out (N enabled → N runs). Disabled branches never execute. |
+| [**EPS Resolution**](#eps-resolution-shipped) | Image-first resize + size in one node: target size (with a drag pad), four resize modes, and the original image + both sets of dimensions passed through. |
+| [**EPS Image Grid**](#eps-image-grid-shipped) | Collects images across separate Runs into a buffer that survives restarts, shows them as a thumbnail grid, and fans the whole set out on demand. |
+| [**EPS Cross Product**](#eps-cross-product-shipped) | Pairs every image with every text — 2 images × 4 prompts = 8 runs. (ComfyUI's own list pairing zips index-by-index instead.) |
+| [**EPS Cross Sweep**](#eps-cross-sweep-shipped) | Multiplies a whole LoRA Sweep across all of those pairs, grouped by strength, with per-run save paths so big runs land in tidy folders. |
+| [**EPS Frame Saver**](#eps-frame-saver-shipped) | Loads a video by path, lets you scrub or play to a frame, and outputs that frame as an image. |
+
+> **Status: pre-release.** Contracts live in
 > [docs/FORMAT.md](docs/FORMAT.md). Want to see everything working
 > together? Load
 > [examples/eps-full-pipeline.json](examples/eps-full-pipeline.json) —
@@ -76,6 +58,16 @@ captions).
   paths (including NAS shares) work as-is. Edit it in ComfyUI, VS Code, or
   on the other machine; the node re-reads the file every run, so external
   edits are picked up automatically (`IS_CHANGED` hashes the file).
+- **Putting it on a NAS:** point the node at the share's **mount point**,
+  not its network address. A `smb://…` (or `nfs://…`) URL is what a file
+  manager's address bar takes — it isn't a path any program can open, and
+  the node will tell you so. Mount the share first, then use the path it
+  appears at: `/mnt/nas/loras.md` or `/run/user/1000/gvfs/smb-share:server=…`
+  on Linux, `/Volumes/share/loras.md` on macOS, `Z:\loras.md` or
+  `\\server\share\loras.md` on Windows. **Browse…** lists the mount
+  parents for your OS (drives on Windows, `/Volumes` on macOS, `/`, `/mnt`,
+  `/media`, and the GVFS folder on Linux), so a mounted share is reachable
+  by clicking.
 - **Safe for shared files:** saving checks the file hasn't changed under
   you since you loaded it. If it has (the other machine got there first),
   nothing is written — you get *File changed on disk* with **Reload** /
