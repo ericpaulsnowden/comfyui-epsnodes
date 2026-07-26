@@ -320,6 +320,160 @@ def _linux_mount_root_candidates() -> list[tuple[str, str]]:
     return candidates
 
 
+def _is_listable_dir(path: Path) -> bool:
+    """True when THIS SERVER PROCESS can actually list *path*.
+
+    2026-07-26, owner report verbatim: ``could not list /root: [Errno 13]
+    Permission denied: '/root'``. ``Path.is_dir()`` alone is not enough --
+    ``/root`` exists and IS a directory, it just isn't readable by a non-root
+    process, so every root entry built on ``is_dir()`` could still be a
+    guaranteed 400. Read+execute is what listing a directory actually needs.
+
+    Uses :func:`os.access` (a single syscall) rather than probing with
+    ``iterdir()``: a dead or unreachable network mount would make a probe
+    hang, and this runs while assembling the ROOTS listing.
+    """
+    try:
+        return path.is_dir() and os.access(path, os.R_OK | os.X_OK)
+    except OSError:
+        return False
+
+
+#: Pseudo/virtual filesystems that are never a place a user keeps files, so
+#: they are filtered out of the mount listing (:func:`_list_mounted_filesystems`).
+_MOUNT_SKIP_FSTYPES = frozenset(
+    {
+        "autofs", "binfmt_misc", "bpf", "cgroup", "cgroup2", "configfs",
+        "debugfs", "devpts", "devtmpfs", "efivarfs", "fusectl", "hugetlbfs",
+        "mqueue", "nsfs", "overlay", "pstore", "proc", "ramfs", "rpc_pipefs",
+        "securityfs", "selinuxfs", "squashfs", "sysfs", "tmpfs", "tracefs",
+    }
+)
+
+#: Mount points under these are machinery, not user storage (snap packages,
+#: container layers, the EFI partition, runtime dirs) -- filtered out with
+#: their whole subtrees. ``/run`` is deliberately NOT here: GVFS mounts a
+#: user's network shares under ``/run/user/<uid>/gvfs``.
+_MOUNT_SKIP_PREFIXES = (
+    "/proc", "/sys", "/dev", "/boot/efi", "/snap", "/var/snap",
+    "/var/lib/docker", "/var/lib/snapd", "/run/lock", "/run/credentials",
+)
+
+#: Filesystem types that mean "this is a network share" -- surfaced FIRST in
+#: the listing, since a NAS is what a user browsing for one is looking for.
+_MOUNT_NETWORK_FSTYPES = frozenset(
+    {
+        "afpfs", "cifs", "davfs", "davfs2", "fuse.davfs2", "fuse.gvfsd-fuse",
+        "fuse.sshfs", "fuse.smbnetfs", "nfs", "nfs4", "smb3", "smbfs",
+    }
+)
+
+#: A GVFS mount point's basename encodes the share, e.g.
+#: ``smb-share:server=dxp4800pro-ring.local,share=personal_folder``.
+_GVFS_FIELD_RE = re.compile(r"(server|share)=([^,]+)")
+
+#: ``/proc/mounts`` octal escapes (the kernel escapes these in mount paths).
+_MOUNT_ESCAPES = (("\\040", " "), ("\\011", "\t"), ("\\012", "\n"), ("\\134", "\\"))
+
+
+def _unescape_mount_path(raw: str) -> str:
+    """Undo the kernel's octal escaping of a mount path (a share called
+    ``My Files`` appears as ``My\\040Files``)."""
+    for escape, plain in _MOUNT_ESCAPES:
+        raw = raw.replace(escape, plain)
+    return raw
+
+
+def _read_mount_table() -> list[tuple[str, str]]:
+    """``(mountpoint, fstype)`` for every filesystem the OS reports mounted.
+
+    The test seam for :func:`_list_mounted_filesystems` (replaced wholesale,
+    like :func:`_list_windows_drives`) -- a dev/CI box's real mounts are not
+    something tests can depend on.
+
+    Linux exposes this at ``/proc/self/mounts`` (the caller's namespace view,
+    which is the correct one inside a container) with ``/proc/mounts`` and
+    ``/etc/mtab`` as fallbacks. Other platforms have no such file, so this
+    returns ``[]`` there and the mount listing simply contributes nothing --
+    macOS already surfaces its mounts through ``/Volumes``.
+    """
+    for candidate in ("/proc/self/mounts", "/proc/mounts", "/etc/mtab"):
+        try:
+            text = Path(candidate).read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        rows: list[tuple[str, str]] = []
+        for line in text.splitlines():
+            fields = line.split()
+            if len(fields) < 3:
+                continue
+            rows.append((_unescape_mount_path(fields[1]), fields[2]))
+        return rows
+    return []
+
+
+def _mount_label(mountpoint: str, fstype: str) -> str:
+    """A human label for a mounted filesystem.
+
+    A GVFS share's own mount-point name is machine-readable rather than
+    readable (``smb-share:server=HOST,share=NAME``), so it is rewritten as
+    ``NAME on HOST``. Everything else is ``<folder name> (<fstype>)``, with
+    network types collapsed to the word "network" -- ``nas (network)`` says
+    more to a non-developer than ``nas (cifs)``.
+    """
+    name = mountpoint.rstrip("/").rpartition("/")[2] or mountpoint
+    fields = dict(match.groups() for match in _GVFS_FIELD_RE.finditer(name))  # type: ignore[misc]
+    share = fields.get("share")
+    if share:
+        server = fields.get("server")
+        return f"{share} on {server}" if server else share
+    kind = "network" if fstype in _MOUNT_NETWORK_FSTYPES else fstype
+    return f"{name} ({kind})"
+
+
+def _list_mounted_filesystems() -> list[tuple[str, str]]:
+    """``(label, path)`` for every mount worth offering, network shares first.
+
+    **This is the answer to "how do I get to my shared drives?" (owner,
+    2026-07-26).** Guessing at the conventional mount PARENTS (``/mnt``,
+    ``/media``, ...) only helps when a share happens to live in one of them;
+    it does not help a share mounted at ``/srv/photos``, at
+    ``/run/user/1000/gvfs/smb-share:...`` by a file manager, or anywhere else
+    an admin chose. Reading the OS's own mount table means ANY filesystem the
+    machine already has mounted shows up by itself, wherever it is and
+    however it got there -- the user never has to know or type a path.
+
+    Filtered: pseudo filesystems (:data:`_MOUNT_SKIP_FSTYPES`), machinery
+    subtrees (:data:`_MOUNT_SKIP_PREFIXES`), ``/`` itself (already offered as
+    "Filesystem root"), and anything this process cannot actually list
+    (:func:`_is_listable_dir`). Never raises: a table that can't be read
+    contributes nothing.
+    """
+    seen: set[str] = set()
+    network: list[tuple[str, str]] = []
+    local: list[tuple[str, str]] = []
+    for mountpoint, fstype in _read_mount_table():
+        if not mountpoint.startswith("/") or mountpoint == "/":
+            continue
+        if fstype in _MOUNT_SKIP_FSTYPES:
+            continue
+        if any(
+            mountpoint == prefix or mountpoint.startswith(prefix + "/")
+            for prefix in _MOUNT_SKIP_PREFIXES
+        ):
+            continue
+        if mountpoint in seen:
+            continue
+        if not _is_listable_dir(Path(mountpoint)):
+            continue
+        seen.add(mountpoint)
+        entry = (_mount_label(mountpoint, fstype), mountpoint)
+        (network if fstype in _MOUNT_NETWORK_FSTYPES else local).append(entry)
+    network.sort(key=lambda pair: pair[0].casefold())
+    local.sort(key=lambda pair: pair[0].casefold())
+    return network + local
+
+
 def _list_linux_mount_roots() -> list[tuple[str, str]]:
     """Every :func:`_linux_mount_root_candidates` entry that actually exists
     (and is a readable directory) on this host right now, as ``(label,
@@ -330,16 +484,17 @@ def _list_linux_mount_roots() -> list[tuple[str, str]]:
     candidate is skipped -- exactly :func:`_list_macos_volumes`'s per-entry
     ``except OSError`` -- one bad candidate must never abort the whole ROOTS
     listing.
+
+    2026-07-26 (later, same owner round): filters on
+    :func:`_is_listable_dir`, not bare ``is_dir()`` -- an existing but
+    unreadable directory (his ``/root``) is a guaranteed 400, so it must not
+    be offered.
     """
-    roots: list[tuple[str, str]] = []
-    for label, raw in _linux_mount_root_candidates():
-        try:
-            is_dir = Path(raw).is_dir()
-        except OSError:
-            continue
-        if is_dir:
-            roots.append((label, raw))
-    return roots
+    return [
+        (label, raw)
+        for label, raw in _linux_mount_root_candidates()
+        if _is_listable_dir(Path(raw))
+    ]
 
 
 def _fs_entry(name: str, path: Path) -> dict[str, str]:
@@ -374,7 +529,20 @@ def _platform_root_entries(windows: bool) -> list[dict[str, str]]:
     if windows:
         return [_fs_entry(raw.rstrip("\\"), Path(raw)) for raw in _list_windows_drives()]
     if _is_linux():
-        return [_fs_entry(label, Path(raw)) for label, raw in _list_linux_mount_roots()]
+        # 2026-07-26 (owner: "How do I get to my shared drives? Mounting
+        # can't be the answer - that's not something I can ask every user to
+        # do."): the OS's own mount table comes FIRST, so any share the
+        # machine already has mounted -- wherever it lives -- is one click
+        # away without the user knowing a path. The conventional parents
+        # (`/`, /mnt, /media, ...) follow as a fallback for browsing to
+        # somewhere not yet mounted. _dedupe_root_entries drops the overlap.
+        entries = [
+            _fs_entry(label, Path(raw)) for label, raw in _list_mounted_filesystems()
+        ]
+        entries.extend(
+            _fs_entry(label, Path(raw)) for label, raw in _list_linux_mount_roots()
+        )
+        return entries
     return [_fs_entry(Path(raw).name, Path(raw)) for raw in _list_macos_volumes()]
 
 
@@ -414,11 +582,27 @@ def _fs_list_roots(context: LibraryContext, *, windows: bool) -> list[dict[str, 
     list is de-duplicated by resolved path (:func:`_dedupe_root_entries`,
     2026-07-26) before it goes out, so an accidental path collision between
     the default dir/Home and a platform-tail entry never surfaces twice.
+
+    2026-07-26: Home (and every platform-tail entry) is now dropped when the
+    SERVER can't actually list it -- owner report, verbatim: ``could not list
+    /root: [Errno 13] Permission denied: '/root'``. His ComfyUI runs with
+    ``HOME=/root`` while NOT being the root user, so the "Home" entry was a
+    guaranteed dead end: visible, clickable, and a 400 every time. Offering a
+    root we already know will fail is worse than omitting it. The library
+    folder is exempt from that check -- it is this pack's own default, it is
+    created on demand by ``library_dir()``, and Settings has its own separate
+    warning for an unreachable one, so hiding it would only be confusing.
     """
-    roots = [
-        _fs_entry(_FS_LIST_DEFAULT_DIR_LABEL, context.library_dir().resolve()),
-        _fs_entry(_FS_LIST_HOME_LABEL, Path.home().resolve()),
-    ]
+    roots = [_fs_entry(_FS_LIST_DEFAULT_DIR_LABEL, context.library_dir().resolve())]
+    home = Path.home().resolve()
+    if _is_listable_dir(home):
+        roots.append(_fs_entry(_FS_LIST_HOME_LABEL, home))
+    else:
+        logger.info(
+            "lora_library: fs/list ROOTS is omitting Home (%s) -- this server "
+            "process cannot list it, so offering it would only 400",
+            home,
+        )
     roots.extend(_platform_root_entries(windows))
     return _dedupe_root_entries(roots)
 
@@ -459,11 +643,21 @@ def _fs_root_parent(directory: Path, *, windows: bool) -> str | None:
     - UNC share root (``\\\\server\\share``): reports ``null`` even on
       Windows — there is no portable way to enumerate a server's other
       shares, so there is nothing to climb to.
-    - POSIX root (``/``): reports ``null`` — it has no sibling to climb to.
+    - POSIX root (``/``): climbs to ``"ROOTS"`` too (2026-07-26 fix).
+
+    **2026-07-26 (owner: "I can no longer access root on linux when I
+    browse").** POSIX ``/`` used to report ``null`` here, with the reasoning
+    "it has no sibling to climb to". That was true only while ``ROOTS`` on
+    POSIX resolved straight to a listing of ``/``. Since 2026-07-19 ``ROOTS``
+    is a LABELED LIST (library folder, Home, volumes/mounts), so ``/`` very
+    much does have somewhere to climb back to — and reporting ``null`` left
+    the picker with no way out of ``/`` once you entered it: the identical
+    dead end that was fixed for Windows drive roots in the same July round,
+    just never applied to POSIX.
     """
-    if windows and not _is_unc_share_root(directory):
-        return ROOTS
-    return None
+    if windows and _is_unc_share_root(directory):
+        return None
+    return ROOTS
 
 
 def _uri_style_path_error(raw: str) -> str:

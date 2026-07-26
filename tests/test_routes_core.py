@@ -27,6 +27,7 @@ from __future__ import annotations
 import os
 import sys
 from pathlib import Path
+from typing import ClassVar
 
 import pytest
 from aiohttp import web
@@ -161,7 +162,7 @@ async def test_fs_list_unreadable_dir_is_400(client, tmp_path: Path) -> None:
 # 2026-07-19 fix: the §7.2 picker could reach the top of C:\ but no further.
 # Drive enumeration and `os.name` aren't real on this (macOS) test machine,
 # so every Windows-flavored case goes through the `_is_windows` /
-# `_list_windows_drives` monkeypatch seams (routes.py §"fs/list: ROOTS &
+# `_list_windows_drives` monkeypatch seams (lora_routes.py §"fs/list: ROOTS &
 # drives") rather than touching real drives.
 
 
@@ -232,7 +233,7 @@ async def test_fs_list_roots_sentinel_lists_macos_volumes_when_monkeypatched(
 # not browse to `/mnt`, a NAS mount, or anything but the library dir/Home.
 # Real Linux mounts aren't available on this (macOS) test machine, so every
 # case below drives it through the `_is_linux` seam plus a fake
-# `_linux_mount_root_candidates` set (routes.py's factored-out-so-tests-can-
+# `_linux_mount_root_candidates` set (lora_routes.py's factored-out-so-tests-can-
 # replace-it-wholesale pattern, same as `_list_macos_volumes`/
 # `_list_windows_drives`) -- exactly parallel to the Windows tests above.
 
@@ -438,11 +439,16 @@ async def test_fs_list_drive_root_parent_climbs_to_roots_under_monkeypatched_win
     assert data["parent"] == "ROOTS"
 
 
-async def test_fs_list_posix_root_parent_is_null_without_monkeypatching(client) -> None:
+async def test_fs_list_posix_root_climbs_back_to_roots(client) -> None:
+    """2026-07-26: this used to assert ``parent is None`` for ``/`` -- which
+    WAS the bug (owner: "I can no longer access root on linux when I
+    browse"). Entering ``/`` left the picker with no way back out, the exact
+    dead end fixed for Windows drive roots in July. ROOTS is a labeled LIST
+    now, so ``/`` climbs back to it."""
     response = await client.get("/lora_library/fs/list", params={"dir": "/"})
     data = await response.json()
     assert data["dir"] == "/"
-    assert data["parent"] is None
+    assert data["parent"] == "ROOTS"
 
 
 def test_is_unc_share_root_detects_a_share_root() -> None:
@@ -463,8 +469,11 @@ def test_fs_root_parent_is_null_for_a_unc_share_root_even_on_windows() -> None:
     assert lora_routes._fs_root_parent(Path(r"\\server\share"), windows=True) is None
 
 
-def test_fs_root_parent_is_null_on_posix() -> None:
-    assert lora_routes._fs_root_parent(Path("/"), windows=False) is None
+def test_fs_root_parent_climbs_to_roots_on_posix() -> None:
+    """Was ``is None`` until 2026-07-26 -- that null WAS the owner's "I can no
+    longer access root on linux when I browse" dead end. See
+    ``TestPosixRootClimbsBackToRoots`` for the full rationale."""
+    assert lora_routes._fs_root_parent(Path("/"), windows=False) == lora_routes.ROOTS
 
 
 # ------------------------------------------------ fs/list: small pure helpers
@@ -670,3 +679,166 @@ async def test_config_unconfigured_library_dir_reports_exists_true(client) -> No
     assert data["configured"] is False
     assert data["library_dir_exists"] is True
     assert data["library_dir_note"] == ""
+
+
+class TestListableDirGuard:
+    """2026-07-26 owner report, verbatim: ``could not list /root: [Errno 13]
+    Permission denied: '/root'``. His ComfyUI runs with ``HOME=/root`` while
+    not being root, so the ROOTS "Home" entry was visible, clickable and a
+    400 every time. ``is_dir()`` is not enough -- listing needs read+execute.
+    """
+
+    def test_readable_directory_passes(self, tmp_path: Path) -> None:
+        assert lora_routes._is_listable_dir(tmp_path) is True
+
+    def test_missing_path_fails(self, tmp_path: Path) -> None:
+        assert lora_routes._is_listable_dir(tmp_path / "nope") is False
+
+    def test_file_is_not_a_listable_dir(self, tmp_path: Path) -> None:
+        target = tmp_path / "f.md"
+        target.write_text("x", encoding="utf-8")
+        assert lora_routes._is_listable_dir(target) is False
+
+    def test_unreadable_directory_fails(self, tmp_path: Path) -> None:
+        blocked = tmp_path / "rootlike"
+        blocked.mkdir()
+        blocked.chmod(0o000)
+        try:
+            assert lora_routes._is_listable_dir(blocked) is False
+        finally:
+            blocked.chmod(0o755)
+
+
+class TestRootsOmitsUnlistableHome:
+    def test_home_dropped_when_unreadable(
+        self, context: LibraryContext, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        blocked = tmp_path / "root_home"
+        blocked.mkdir()
+        blocked.chmod(0o000)
+        monkeypatch.setattr(lora_routes.Path, "home", classmethod(lambda cls: blocked))
+        monkeypatch.setattr(lora_routes, "_platform_root_entries", lambda windows: [])
+        try:
+            roots = lora_routes._fs_list_roots(context, windows=False)
+        finally:
+            blocked.chmod(0o755)
+        labels = [entry["name"] for entry in roots]
+        assert labels == [lora_routes._FS_LIST_DEFAULT_DIR_LABEL]  # library folder only
+
+    def test_home_kept_when_readable(
+        self, context: LibraryContext, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        home = tmp_path / "ok_home"
+        home.mkdir()
+        monkeypatch.setattr(lora_routes.Path, "home", classmethod(lambda cls: home))
+        monkeypatch.setattr(lora_routes, "_platform_root_entries", lambda windows: [])
+        labels = [e["name"] for e in lora_routes._fs_list_roots(context, windows=False)]
+        assert labels == [lora_routes._FS_LIST_DEFAULT_DIR_LABEL, lora_routes._FS_LIST_HOME_LABEL]
+
+
+class TestPosixRootClimbsBackToRoots:
+    """2026-07-26: ``/`` reported ``parent: null``, so entering it was a dead
+    end -- the same trap fixed for Windows drive roots in July, never applied
+    to POSIX. ROOTS is a labeled LIST now, so ``/`` has somewhere to go."""
+
+    def test_posix_root_parent_is_roots(self) -> None:
+        assert lora_routes._fs_root_parent(Path("/"), windows=False) == lora_routes.ROOTS
+
+    def test_windows_drive_root_still_roots(self) -> None:
+        assert lora_routes._fs_root_parent(Path("C:\\"), windows=True) == lora_routes.ROOTS
+
+    def test_unc_share_root_still_none(self) -> None:
+        assert lora_routes._fs_root_parent(Path(r"\\server\share"), windows=True) is None
+
+
+class TestMountedFilesystemDiscovery:
+    """2026-07-26 owner: "How do I get to my shared drives? Mounting can't be
+    the answer - that's not something I can ask every user to do." Reading the
+    OS mount table means any ALREADY-mounted share is offered by itself,
+    wherever it lives -- no path knowledge, no typing."""
+
+    GVFS_MOUNT = (
+        "/run/user/1000/gvfs/"
+        "smb-share:server=dxp4800pro-ring.local,share=personal_folder"
+    )
+    TABLE: ClassVar[list[tuple[str, str]]] = [
+        ("/", "ext4"),
+        ("/proc", "proc"),
+        ("/sys", "sysfs"),
+        ("/run/lock", "tmpfs"),
+        ("/snap/firefox/1234", "squashfs"),
+        ("/boot/efi", "vfat"),
+        ("/mnt/nas", "cifs"),
+        ("/srv/photos", "nfs4"),
+        ("/media/eric/BACKUP", "exfat"),
+        (GVFS_MOUNT, "fuse.gvfsd-fuse"),
+    ]
+
+    def _entries(self, monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, str]]:
+        monkeypatch.setattr(lora_routes, "_read_mount_table", lambda: self.TABLE)
+        monkeypatch.setattr(lora_routes, "_is_listable_dir", lambda path: True)
+        return lora_routes._list_mounted_filesystems()
+
+    def test_pseudo_and_machinery_mounts_are_filtered_out(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        paths = [path for _label, path in self._entries(monkeypatch)]
+        for unwanted in ("/", "/proc", "/sys", "/run/lock", "/snap/firefox/1234", "/boot/efi"):
+            assert unwanted not in paths
+
+    def test_real_storage_is_offered(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        paths = [path for _label, path in self._entries(monkeypatch)]
+        assert "/mnt/nas" in paths
+        assert "/srv/photos" in paths
+        assert "/media/eric/BACKUP" in paths
+
+    def test_network_shares_come_first(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        entries = self._entries(monkeypatch)
+        network_paths = {"/mnt/nas", "/srv/photos"}
+        gvfs = next(p for _l, p in entries if "gvfs" in p)
+        network_paths.add(gvfs)
+        first_three = {path for _label, path in entries[:3]}
+        assert first_three == network_paths
+        assert entries[-1][1] == "/media/eric/BACKUP"  # local disk last
+
+    def test_gvfs_share_gets_a_human_label(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        labels = dict((path, label) for label, path in self._entries(monkeypatch))
+        gvfs_path = next(p for p in labels if "gvfs" in p)
+        assert labels[gvfs_path] == "personal_folder on dxp4800pro-ring.local"
+
+    def test_ordinary_mount_label_names_the_folder_and_kind(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        labels = dict((path, label) for label, path in self._entries(monkeypatch))
+        assert labels["/mnt/nas"] == "nas (network)"
+        assert labels["/media/eric/BACKUP"] == "BACKUP (exfat)"
+
+    def test_unlistable_mounts_are_skipped(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(lora_routes, "_read_mount_table", lambda: [("/mnt/dead", "cifs")])
+        monkeypatch.setattr(lora_routes, "_is_listable_dir", lambda path: False)
+        assert lora_routes._list_mounted_filesystems() == []
+
+    def test_no_mount_table_contributes_nothing(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(lora_routes, "_read_mount_table", lambda: [])
+        assert lora_routes._list_mounted_filesystems() == []
+
+    def test_kernel_octal_escapes_are_decoded(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(
+            lora_routes, "_read_mount_table", lambda: [("/mnt/My\\040Files", "cifs")]
+        )
+        monkeypatch.setattr(lora_routes, "_is_listable_dir", lambda path: True)
+        # the table reader does the unescaping; assert the helper directly too
+        assert lora_routes._unescape_mount_path("/mnt/My\\040Files") == "/mnt/My Files"
+
+    def test_linux_tail_puts_mounts_before_the_conventional_parents(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(lora_routes, "_is_linux", lambda: True)
+        monkeypatch.setattr(
+            lora_routes, "_list_mounted_filesystems", lambda: [("nas (network)", "/mnt/nas")]
+        )
+        monkeypatch.setattr(
+            lora_routes, "_list_linux_mount_roots", lambda: [("Filesystem root", "/")]
+        )
+        entries = lora_routes._platform_root_entries(False)
+        assert [e["path"] for e in entries] == ["/mnt/nas", "/"]
