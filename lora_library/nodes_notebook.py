@@ -144,14 +144,42 @@ class LoraLibraryNotebook:
     RETURN_TYPES = ("STRING", "STRING")
     RETURN_NAMES = ("text", "name")
     OUTPUT_IS_LIST = (True, True)
+    OUTPUT_TOOLTIPS = (
+        "The selected entry's prompt text. With more than one entry selected, "
+        "this is a list of strings, one per entry, in selection order.",
+        "The selected entry's heading (its name in the list) -- handy as a "
+        "filename prefix or caption. Paired index-for-index with text.",
+    )
     FUNCTION = "read_entry"
+    DESCRIPTION = (
+        "A library of named text prompts, edited right on the node: a "
+        "scrolling list on the left, a text editor on the right, saved to a "
+        "plain Markdown file you control, locally or on a shared drive. "
+        "Select one entry to output its text as a single string, or select "
+        "several with Ctrl/Cmd-click and Shift-click to run the rest of the "
+        "workflow once per prompt, in selection order. Organize entries "
+        "under category headings created from the same list. The file is "
+        "re-read on every run, so edits made outside ComfyUI are picked up "
+        "automatically."
+    )
 
     @classmethod
     def INPUT_TYPES(cls) -> dict[str, Any]:
         return {
             "required": {
                 "file": ("STRING", {"default": "loras.md"}),
-                "entry": ("STRING", {"default": ""}),
+                "entry": (
+                    "STRING",
+                    {
+                        "default": "",
+                        "tooltip": (
+                            "The selected entry name(s), one per line, in "
+                            "selection order. This is normally filled in "
+                            "automatically as you click entries in the list; "
+                            "you don't need to type into it directly."
+                        ),
+                    },
+                ),
             },
         }
 

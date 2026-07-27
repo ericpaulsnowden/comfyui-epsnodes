@@ -122,7 +122,9 @@ class TestInputTypes:
 
     def test_image_is_optional(self) -> None:
         input_types = EPSImageGrid.INPUT_TYPES()
-        assert input_types["optional"]["image"] == ("IMAGE",)
+        # Type-only (not exact-tuple): `image` also carries a UI-facing
+        # `tooltip` string (text pass, 2026-07).
+        assert input_types["optional"]["image"][0] == "IMAGE"
 
     def test_grid_uuid_is_optional_string_defaulting_empty(self) -> None:
         # optional (NOT required): a hand-built /prompt that omits it must

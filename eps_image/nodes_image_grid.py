@@ -159,30 +159,48 @@ class EPSImageGrid:
     RETURN_NAMES = ("image", "width", "height")
     OUTPUT_IS_LIST = (True, True, True)
     OUTPUT_NODE = True
+    OUTPUT_TOOLTIPS = (
+        "In Collect mode, the image(s) just fed in. In Emit mode, the "
+        "whole buffer plus whatever's currently wired, oldest first -- one "
+        "run downstream per image.",
+        "Each output image's width, index-aligned with image.",
+        "Each output image's height, index-aligned with image.",
+    )
     FUNCTION = "run"
     DESCRIPTION = (
-        "EPS Image Grid -- wire a loader in; whatever's wired ALWAYS flows "
-        "straight through to the output. In Collect mode, each Run ALSO "
-        "records that input into a buffer that grows across separate Runs "
-        "and survives a restart (no cap -- you manage disk use, Clear wipes "
-        "it); the buffer shows as a thumbnail grid on the node, but only "
-        "the image(s) you just fed in continue downstream this Run -- "
-        "Collect does not replay everything collected so far. Switch to "
-        "Emit and Run once to fan the WHOLE buffer out downstream, paired "
-        "with its own width/height, with whatever's currently wired "
-        "appended as the final image(s) -- 10 buffered + 1 wired -> the "
-        "rest of the workflow runs 11 times. A scalar value (e.g. a seed) "
-        "wired further downstream repeats identically across all runs."
+        "Wire an image loader in -- it always flows straight through to "
+        "the output. In Collect mode, each run also adds that image to a "
+        "buffer that grows across separate runs and survives a restart, "
+        "shown as a thumbnail grid on the node; only the image you just "
+        "fed in continues downstream this run, not the whole buffer. "
+        "Switch to Emit and run once to send the whole buffer downstream "
+        "instead, in the order it was collected, with whatever's currently "
+        "wired appended at the end. Clear the buffer from the node any "
+        "time; there's no size cap, so keep an eye on disk use."
     )
 
     @classmethod
     def INPUT_TYPES(cls) -> dict[str, Any]:
         return {
             "required": {
-                "mode": (MODES, {"default": MODE_COLLECT}),
+                "mode": (
+                    MODES,
+                    {
+                        "default": MODE_COLLECT,
+                        "tooltip": (
+                            "Collect adds the wired image to the buffer "
+                            "and passes just that image downstream. Emit "
+                            "sends the whole buffer downstream instead, "
+                            "without adding to it."
+                        ),
+                    },
+                ),
             },
             "optional": {
-                "image": ("IMAGE",),
+                "image": (
+                    "IMAGE",
+                    {"tooltip": "The image to pass through; in Collect mode, it's also buffered."},
+                ),
                 # Hidden serialized bridge to this node's per-instance
                 # identity (module docstring; `image_grid.js` generates +
                 # dedups this into BOTH `node.properties.uuid` and this

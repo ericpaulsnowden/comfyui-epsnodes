@@ -95,37 +95,112 @@ class EPSCrossSweep:
     RETURN_NAMES = ("model", "clip", "image", "text", "save_prefix", "label")
     OUTPUT_IS_LIST = (True, True, True, True, True, True)
     INPUT_IS_LIST = True
+    OUTPUT_TOOLTIPS = (
+        "This run's patched model.",
+        "This run's patched CLIP.",
+        "This run's image.",
+        "This run's text.",
+        "A ready-to-wire Save Image filename_prefix for this run: "
+        "base_folder/<sweep label>/<pair name>.",
+        "This run's strength label, unchanged from the sweep.",
+    )
     FUNCTION = "run"
     DESCRIPTION = (
-        "Runs a whole EPS LoRA Sweep across a whole set of image/text pairs: "
-        "wire the sweep's model/clip/label outputs AND EPS Cross Product's "
-        "image/text (and optionally name) outputs in, then use THIS node's "
-        "outputs downstream. Strength-major: all pairs at the first strength, "
-        "then all pairs at the next -- 11 steps x 8 pairs = 88 runs (mind the "
-        "total: steps x pairs x loras-when-swept-independently; a fixed seed "
-        "repeats across all runs, which is what makes it an apples-to-apples "
-        "audition). Wire save_prefix into SaveImage's filename_prefix and "
-        "every strength gets its own folder under the output dir -- "
-        "base_folder/<sweep label>/<pair name> -- so big runs stay organized."
+        "Runs a whole EPS LoRA Sweep across a whole set of EPS Cross "
+        "Product pairs: wire the sweep's model, clip, and label outputs "
+        "together with Cross Product's image and text (and optionally "
+        "name) outputs, then continue the workflow from this node's "
+        "outputs instead -- 11 sweep steps across 8 pairs, for example, "
+        "means 88 runs. Strength-major order: every pair runs at the first "
+        "strength, then every pair at the next, and so on, so results from "
+        "the same strength land together. Wire save_prefix into Save "
+        "Image's filename_prefix and every strength gets its own folder, "
+        "named from the sweep label and the pair name, so a big run stays "
+        "organized on disk."
     )
 
     @classmethod
     def INPUT_TYPES(cls) -> dict[str, Any]:
         return {
             "required": {
-                "model": ("MODEL",),
-                "clip": ("CLIP",),
-                "label": ("STRING", {"forceInput": True}),
-                "image": ("IMAGE",),
-                "text": ("STRING", {"forceInput": True}),
+                "model": (
+                    "MODEL",
+                    {
+                        "tooltip": (
+                            "The swept models, one per strength step -- "
+                            "wire from EPS LoRA Sweep's model output."
+                        ),
+                    },
+                ),
+                "clip": (
+                    "CLIP",
+                    {
+                        "tooltip": (
+                            "The swept CLIPs, one per strength step -- "
+                            "wire from EPS LoRA Sweep's clip output."
+                        ),
+                    },
+                ),
+                "label": (
+                    "STRING",
+                    {
+                        "forceInput": True,
+                        "tooltip": (
+                            "Each step's strength label -- wire from EPS "
+                            "LoRA Sweep's label output. Wire-only."
+                        ),
+                    },
+                ),
+                "image": (
+                    "IMAGE",
+                    {
+                        "tooltip": (
+                            "The images to pair with the sweep -- wire "
+                            "from EPS Cross Product's image output."
+                        ),
+                    },
+                ),
+                "text": (
+                    "STRING",
+                    {
+                        "forceInput": True,
+                        "tooltip": (
+                            "The texts to pair with the sweep -- wire from "
+                            "EPS Cross Product's text output. Wire-only."
+                        ),
+                    },
+                ),
             },
             "optional": {
                 # Cross Product's `name` output (usually the Prompt
                 # Notebook entry heading riding through it) -- the
                 # human-readable half of save_prefix. Optional: unwired
                 # falls back to a stable pair_NN.
-                "name": ("STRING", {"forceInput": True}),
-                "base_folder": ("STRING", {"default": ""}),
+                "name": (
+                    "STRING",
+                    {
+                        "forceInput": True,
+                        "tooltip": (
+                            "Optional short name per pair, wired from EPS "
+                            "Cross Product's name output -- used to name "
+                            "save_prefix's folders. Falls back to "
+                            "pair_01, pair_02, ... when not wired. "
+                            "Wire-only."
+                        ),
+                    },
+                ),
+                "base_folder": (
+                    "STRING",
+                    {
+                        "default": "",
+                        "tooltip": (
+                            "An optional folder prefix for save_prefix, "
+                            "e.g. shoots/today. May contain / to nest "
+                            "folders. Leave empty to start save_prefix at "
+                            "the output directory's root."
+                        ),
+                    },
+                ),
             },
         }
 

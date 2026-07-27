@@ -392,14 +392,18 @@ class TestClassShapeMatchesFormatMdSection6_8:
         # pure-stack-source mode). `clip` is OPTIONAL (owner ask 2026-07-22):
         # many models have no text encoder, and load_lora_for_models patches
         # the model only when clip is None (like core's LoraLoaderModelOnly).
-        assert required["model"] == ("MODEL",)
-        assert required["lora_stack"] == ("LORA_STACK",)
+        # Per-key (not exact-dict) checks on `model`/`lora_stack`: both
+        # carry a UI-facing `tooltip` string alongside the type (text pass,
+        # 2026-07), which a bare `== ("MODEL",)` equality would reject.
+        assert required["model"][0] == "MODEL"
+        assert required["lora_stack"][0] == "LORA_STACK"
         assert "clip" not in required
 
     def test_clip_is_optional_not_required(self) -> None:
         types = LoraLibrarySweep.INPUT_TYPES()
         assert "clip" not in types["required"]
-        assert types.get("optional", {}).get("clip") == ("CLIP",)
+        clip_type, _clip_spec = types.get("optional", {}).get("clip")
+        assert clip_type == "CLIP"
 
     def test_min_max_increment_widget_specs(self) -> None:
         required = LoraLibrarySweep.INPUT_TYPES()["required"]
@@ -407,26 +411,35 @@ class TestClassShapeMatchesFormatMdSection6_8:
         max_type, max_spec = required["max"]
         inc_type, inc_spec = required["increment"]
         assert (min_type, max_type, inc_type) == ("FLOAT", "FLOAT", "FLOAT")
-        assert min_spec == {"default": 0.0, "min": -10.0, "max": 10.0, "step": 0.05}
-        assert max_spec == {"default": 1.0, "min": -10.0, "max": 10.0, "step": 0.05}
-        assert inc_spec == {"default": 0.1, "min": 0.01, "max": 10.0, "step": 0.01}
+        # Per-key (not exact-dict) checks: each spec also carries a
+        # UI-facing `tooltip` string (text pass, 2026-07).
+        assert min_spec["default"] == 0.0 and min_spec["min"] == -10.0
+        assert min_spec["max"] == 10.0 and min_spec["step"] == 0.05
+        assert max_spec["default"] == 1.0 and max_spec["min"] == -10.0
+        assert max_spec["max"] == 10.0 and max_spec["step"] == 0.05
+        assert inc_spec["default"] == 0.1 and inc_spec["min"] == 0.01
+        assert inc_spec["max"] == 10.0 and inc_spec["step"] == 0.01
 
     def test_mode_combo_options_and_default(self) -> None:
         options, spec = LoraLibrarySweep.INPUT_TYPES()["required"]["mode"]
         assert options == [MODE_INDEPENDENT, MODE_ALL_TOGETHER]
-        assert spec == {"default": MODE_INDEPENDENT}
+        # Per-key: `spec` also carries a UI-facing `tooltip` (text pass).
+        assert spec["default"] == MODE_INDEPENDENT
 
-    def test_description_documents_the_locked_caveats(self) -> None:
+    def test_description_documents_the_key_behaviors(self) -> None:
         # FORMAT.md §6.8 / task instruction: the DESCRIPTION must state
-        # inclusive endpoints, the run-count formula, seed-repeat, whole-
-        # sweep recache, and unclamped values -- check each is present
-        # rather than asserting exact wording (wording may evolve).
+        # inclusive endpoints, both sweep modes, the CLIP-optional
+        # behavior, the shared-seed caveat, and the label -> filename tip
+        # -- check each is present rather than asserting exact wording
+        # (wording may evolve; rewritten 2026-07 for a first-time-user
+        # audience, dropping internal n_loras/n_steps notation).
         text = LoraLibrarySweep.DESCRIPTION.lower()
         assert "11 runs" in text  # inclusive-endpoints fencepost callout
-        assert "n_loras" in text and "n_steps" in text  # run-count formula
+        assert MODE_INDEPENDENT.lower() in text
+        assert MODE_ALL_TOGETHER.lower() in text
+        assert "clip is optional" in text
         assert "seed" in text and "repeat" in text  # seed-repeat caveat
-        assert "whole sweep" in text  # all-or-nothing node caching
-        assert "unclamped" in text  # values apply unclamped
+        assert "filename_prefix" in text  # label -> Save Image tip
 
 
 def test_module_never_imports_comfy_or_torch_at_module_scope() -> None:

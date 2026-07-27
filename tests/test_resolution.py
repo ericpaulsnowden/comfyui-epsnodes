@@ -333,7 +333,9 @@ def test_input_types_declares_widgets_and_optional_image() -> None:
     assert required["interpolation"][0] == ["nearest", "bilinear", "bicubic", "area", "lanczos"]
     assert required["multiple_of"][0] == "INT"
     assert required["multiple_of"][1]["default"] == 0
-    assert input_types["optional"]["image"] == ("IMAGE",)
+    # Type-only (not exact-tuple): `image` also carries a UI-facing
+    # `tooltip` string (text pass, 2026-07).
+    assert input_types["optional"]["image"][0] == "IMAGE"
 
 
 def test_no_comfy_or_torch_bound_at_module_scope() -> None:

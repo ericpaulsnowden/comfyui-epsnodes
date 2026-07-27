@@ -573,7 +573,12 @@ def test_input_types_strength_scale_widget_matches_format_md(context: LibraryCon
     assert "strength_scale" not in input_types["required"]
     widget_type, spec = input_types["optional"]["strength_scale"]
     assert widget_type == "FLOAT"
-    assert spec == {"default": 1.0, "min": 0.0, "max": 2.0, "step": 0.05}
+    # Per-key (not exact-dict): `spec` also carries a UI-facing `tooltip`
+    # string (text pass, 2026-07).
+    assert spec["default"] == 1.0
+    assert spec["min"] == 0.0
+    assert spec["max"] == 2.0
+    assert spec["step"] == 0.05
 
 
 def test_input_types_loader_slot_widget_matches_format_md(context: LibraryContext) -> None:
@@ -589,8 +594,10 @@ def test_input_types_loader_slot_widget_matches_format_md(context: LibraryContex
 
 def test_input_types_model_and_clip_are_optional(context: LibraryContext) -> None:
     input_types = nodes_sets.LoraLibraryApplySet.INPUT_TYPES()
-    assert input_types["optional"]["model"] == ("MODEL",)
-    assert input_types["optional"]["clip"] == ("CLIP",)
+    # Type-only (not exact-tuple): both sockets also carry a UI-facing
+    # `tooltip` string (text pass, 2026-07).
+    assert input_types["optional"]["model"][0] == "MODEL"
+    assert input_types["optional"]["clip"][0] == "CLIP"
 
 
 def test_input_types_without_context_falls_back_to_none_only() -> None:

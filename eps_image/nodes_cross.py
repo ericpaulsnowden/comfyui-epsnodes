@@ -67,35 +67,68 @@ class EPSCrossProduct:
     RETURN_NAMES = ("image", "text", "name")
     OUTPUT_IS_LIST = (True, True, True)
     INPUT_IS_LIST = True
+    OUTPUT_TOOLTIPS = (
+        "One image per pair, image-major order (all of image 1's pairs, "
+        "then all of image 2's, and so on).",
+        "One text per pair, index-aligned with image.",
+        "One name per pair, index-aligned with image and text -- empty "
+        "string where names wasn't wired.",
+    )
     FUNCTION = "run"
     DESCRIPTION = (
-        "Pairs EVERY image with EVERY text: 2 images x 4 texts = 8 pairs, so "
-        "the rest of the workflow runs 8 times (image 1 with each text in "
-        "order, then image 2 with each text, ...). Use this when two fanned "
-        "lists (e.g. EPS Image Grid x EPS Prompt Notebook multi-select) "
-        "should MULTIPLY -- ComfyUI's default pairs lists index-by-index and "
-        "repeats the shorter list's last element instead, which is why 2 "
-        "images + 4 prompts otherwise comes out as 4 runs, 3 of them reusing "
-        "the last image. Wire the outputs onward in place of the two "
-        "originals; they stay paired index-for-index."
+        "Pairs every image with every text: 2 images and 4 texts produce 8 "
+        "pairs, so the rest of the workflow runs 8 times -- image 1 with "
+        "each text in order, then image 2 with each text, and so on. Use "
+        "this when two upstream lists (e.g. EPS Image Grid and EPS Prompt "
+        "Notebook's multi-select) should multiply instead of zip: "
+        "ComfyUI's default pairs lists index-by-index and repeats the "
+        "shorter list's last element, which is why 2 images and 4 texts "
+        "otherwise produces only 4 runs, most of them reusing the last "
+        "image. Wire this node's outputs onward in place of the two "
+        "originals -- they stay paired index-for-index."
     )
 
     @classmethod
     def INPUT_TYPES(cls) -> dict[str, Any]:
         return {
             "required": {
-                "images": ("IMAGE",),
+                "images": (
+                    "IMAGE",
+                    {"tooltip": "The images to pair. Every image is paired with every text below."},
+                ),
                 # forceInput: this is a wire-only socket (there is nothing
                 # sensible to type into a widget here -- the whole point is
                 # pairing an upstream LIST, e.g. the Prompt Notebook's
                 # multi-select `text` output).
-                "texts": ("STRING", {"forceInput": True}),
+                "texts": (
+                    "STRING",
+                    {
+                        "forceInput": True,
+                        "tooltip": (
+                            "The texts to pair. Every text is paired with "
+                            "every image above. Wire-only -- usually from a "
+                            "multi-select Prompt Notebook or similar list."
+                        ),
+                    },
+                ),
             },
             "optional": {
                 # The Prompt Notebook's `name` output, index-aligned with
                 # its `text` -- crossed identically so each pair keeps its
                 # short identity (class docstring). Optional + additive.
-                "names": ("STRING", {"forceInput": True}),
+                "names": (
+                    "STRING",
+                    {
+                        "forceInput": True,
+                        "tooltip": (
+                            "Optional short label per text, index-aligned "
+                            "with texts (e.g. the Prompt Notebook's name "
+                            "output) -- carried through the same pairing "
+                            "so each pair keeps an identity. Empty string "
+                            "where not wired."
+                        ),
+                    },
+                ),
             },
         }
 

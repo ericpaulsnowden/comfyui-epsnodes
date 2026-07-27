@@ -59,15 +59,27 @@ class EPSFrameSaver:
     CATEGORY = CATEGORY_NAME
     RETURN_TYPES = ("IMAGE", "INT", "INT")
     RETURN_NAMES = ("image", "width", "height")
+    OUTPUT_TOOLTIPS = (
+        "The decoded frame, as a single image.",
+        "The frame's width in pixels.",
+        "The frame's height in pixels.",
+    )
     FUNCTION = "run"
     DESCRIPTION = (
-        "EPS Frame Saver -- pick a video by path (Browse; the file is never "
-        "copied), scrub to a frame with play/pause/step/type, and Run outputs "
-        "that exact frame as an IMAGE plus its width/height. The in-node "
-        "preview is close-enough for scrubbing; the output frame is always "
-        "decoded exactly from the source file, independent of the preview."
+        "Picks a video file by path and scrubs to a single frame, right on "
+        "the node, using play/pause/step controls or by typing a frame "
+        "number. Running the node outputs that exact frame as an image, "
+        "along with its width and height. The video file itself is never "
+        "copied into ComfyUI's input folder. The in-node preview is an "
+        "approximation for scrubbing; the output frame is always decoded "
+        "fresh from the source file, so what you get matches the file, not "
+        "the preview."
     )
 
+    # `video_path` and `frame` below have no `tooltip`: both widgets are
+    # hidden serialized bridges (`web/eps_image/frame_saver.js`'s "Two
+    # widgets, hidden" -- the on-node scrubber/player is the entire visible
+    # surface for both), so a Python tooltip on either would never be seen.
     @classmethod
     def INPUT_TYPES(cls) -> dict[str, Any]:
         return {

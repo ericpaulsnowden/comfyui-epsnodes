@@ -146,27 +146,117 @@ class EPSResolution:
         "original_width",
         "original_height",
     )
+    OUTPUT_TOOLTIPS = (
+        "The input image, unchanged. None if nothing is wired.",
+        "The resized image. None if nothing is wired, since there's nothing to resize.",
+        "The target width actually used, after deriving from aspect ratio "
+        "(if 0) and rounding to multiple_of.",
+        "The target height actually used, after deriving from aspect ratio "
+        "(if 0) and rounding to multiple_of.",
+        "The input image's width before resizing. 0 if nothing is wired.",
+        "The input image's height before resizing. 0 if nothing is wired.",
+    )
     FUNCTION = "resolve"
     DESCRIPTION = (
-        "EPS Resolution — set a target width/height (0 on an axis derives it "
-        "from the other axis + the input image's aspect), get the resized "
-        "image, the original image untouched, and both images' sizes — one "
-        "node instead of a resize + a reroute + a get-size node. Pipe the "
-        "width/height outputs into KJNodes' resize for anything fancier than "
-        "stretch / keep-aspect-fit / crop-to-fill / pad."
+        "Resizes an image and reports both its original and new size in "
+        "one node, so there's no separate resize, reroute, and get-size "
+        "node to wire up. Set a target width and height; leaving one at 0 "
+        "derives it from the other using the input image's aspect ratio (0 "
+        "and 0 keeps the original size). Choose how the resize happens: "
+        "stretch to fit exactly, keep aspect ratio and fit inside the box, "
+        "crop to fill the box, or pad with black to fill it. With no image "
+        "wired, the node still reports the requested size, so it can drive "
+        "downstream nodes on its own."
     )
 
     @classmethod
     def INPUT_TYPES(cls) -> dict[str, Any]:
         return {
             "required": {
-                "width": ("INT", {"default": 1024, "min": 0, "max": 16384, "step": 1}),
-                "height": ("INT", {"default": 1024, "min": 0, "max": 16384, "step": 1}),
-                "resize_method": (RESIZE_METHODS, {"default": "stretch"}),
-                "interpolation": (INTERPOLATIONS, {"default": "bilinear"}),
-                "multiple_of": ("INT", {"default": 0, "min": 0, "max": 1024, "step": 1}),
+                "width": (
+                    "INT",
+                    {
+                        "default": 1024,
+                        "min": 0,
+                        "max": 16384,
+                        "step": 1,
+                        "tooltip": (
+                            "Target width in pixels. 0 derives it from "
+                            "height and the input image's aspect ratio "
+                            "(needs an image wired); with no image, 0 "
+                            "stays 0."
+                        ),
+                    },
+                ),
+                "height": (
+                    "INT",
+                    {
+                        "default": 1024,
+                        "min": 0,
+                        "max": 16384,
+                        "step": 1,
+                        "tooltip": (
+                            "Target height in pixels. 0 derives it from "
+                            "width and the input image's aspect ratio "
+                            "(needs an image wired); with no image, 0 "
+                            "stays 0."
+                        ),
+                    },
+                ),
+                "resize_method": (
+                    RESIZE_METHODS,
+                    {
+                        "default": "stretch",
+                        "tooltip": (
+                            "How to reach the target size. Stretch fills it "
+                            "exactly without preserving aspect ratio; keep "
+                            "aspect (fit) scales to fit inside it; crop to "
+                            "fill scales to cover it and crops the "
+                            "overflow; pad scales to fit inside it and "
+                            "fills the rest with black."
+                        ),
+                    },
+                ),
+                "interpolation": (
+                    INTERPOLATIONS,
+                    {
+                        "default": "bilinear",
+                        "tooltip": (
+                            "The resampling filter used when scaling. "
+                            "Bilinear is a good default; lanczos and "
+                            "bicubic are sharper for upscaling, area is "
+                            "often better for downscaling, nearest keeps "
+                            "hard pixel edges."
+                        ),
+                    },
+                ),
+                "multiple_of": (
+                    "INT",
+                    {
+                        "default": 0,
+                        "min": 0,
+                        "max": 1024,
+                        "step": 1,
+                        "tooltip": (
+                            "Rounds the final width and height to the "
+                            "nearest multiple of this number -- useful for "
+                            "models that need dimensions divisible by 8, "
+                            "16, or 64. 0 turns rounding off."
+                        ),
+                    },
+                ),
             },
-            "optional": {"image": ("IMAGE",)},
+            "optional": {
+                "image": (
+                    "IMAGE",
+                    {
+                        "tooltip": (
+                            "The image to resize. Leave unwired to use "
+                            "this node purely as a size calculator."
+                        ),
+                    },
+                ),
+            },
         }
 
     def resolve(

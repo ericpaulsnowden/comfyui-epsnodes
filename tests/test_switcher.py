@@ -83,7 +83,11 @@ class TestFlexibleOptionalImageInputs:
         # docstring "Disabled slots are also genuinely lazy now") --
         # independent of whatever the LOCALLY inserted image_1 above
         # carries, since __getitem__'s synthesis path is what's under test.
-        assert optional["image_5"] == ("IMAGE", {"lazy": True})
+        # Per-key (not exact-dict): the synthesized options also carry a
+        # UI-facing `tooltip` string (text pass, 2026-07).
+        image_type, options = optional["image_5"]
+        assert image_type == "IMAGE"
+        assert options["lazy"] is True
 
     def test_contains_rejects_non_matching_keys(self) -> None:
         optional = _FlexibleOptionalImageInputs({"image_1": ("IMAGE",)})
@@ -99,16 +103,23 @@ class TestFlexibleOptionalImageInputs:
     def test_input_types_optional_accepts_image_5(self) -> None:
         input_types = EPSSwitcher.INPUT_TYPES()
         assert "image_5" in input_types["optional"]
-        assert input_types["optional"]["image_5"] == ("IMAGE", {"lazy": True})
+        # Per-key (not exact-dict): the synthesized options also carry a
+        # UI-facing `tooltip` string (text pass, 2026-07).
+        image_type, options = input_types["optional"]["image_5"]
+        assert image_type == "IMAGE"
+        assert options["lazy"] is True
 
     def test_input_types_image_1_is_lazy(self) -> None:
         # The concrete, hardcoded entry -- independent of the synthesized
         # ones above; both must carry `lazy: True` (nodes_switcher.py module
         # docstring "Disabled slots are also genuinely lazy now") or slots
         # would be inconsistently lazy depending on whether switcher.js had
-        # grown them yet.
+        # grown them yet. Per-key (not exact-dict): also carries a
+        # UI-facing `tooltip` string (text pass, 2026-07).
         input_types = EPSSwitcher.INPUT_TYPES()
-        assert input_types["optional"]["image_1"] == ("IMAGE", {"lazy": True})
+        image_type, options = input_types["optional"]["image_1"]
+        assert image_type == "IMAGE"
+        assert options["lazy"] is True
 
     def test_input_types_toggles_is_not_lazy(self) -> None:
         # `toggles` must stay eager -- `check_lazy_status` needs it

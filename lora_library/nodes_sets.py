@@ -112,13 +112,46 @@ class LoraLibraryApplySet:
     CATEGORY = "EPSNodes"
     RETURN_TYPES = ("MODEL", "CLIP", "LORA_STACK", "STRING", "STRING")
     RETURN_NAMES = ("model", "clip", "lora_stack", "trigger_words", "loras_text")
+    OUTPUT_TOOLTIPS = (
+        "The input model, patched with this set's enabled loras -- or "
+        "passed through unchanged if model isn't wired, or the set is "
+        "empty/None.",
+        "The input CLIP, patched with this set's enabled loras -- or passed "
+        "through unchanged under the same conditions as model.",
+        "This set's enabled loras as a LORA_STACK, ready to wire into EPS "
+        "LoRA Sweep or another stack-consuming node.",
+        "The trigger words saved with this set, as one string.",
+        "A compact, filename-safe summary of the applied loras and "
+        "strengths, e.g. 'detailer_0.8 style_1' -- handy for Save Image's "
+        "filename_prefix.",
+    )
     FUNCTION = "apply"
+    DESCRIPTION = (
+        "Applies a saved LoRA configuration -- which loras, in what order, "
+        "on or off, at what strengths -- to a model and CLIP in one step. "
+        "Pick a set from the dropdown; with neither model nor clip wired, "
+        "the node instead acts as a pure LORA_STACK and trigger-word source "
+        "you can feed into other nodes. Re-reads the saved set file on "
+        "every run, so edits made in the set editor apply the next time you "
+        "queue. A missing or empty set passes model/clip through unchanged "
+        "rather than failing the run."
+    )
 
     @classmethod
     def INPUT_TYPES(cls) -> dict[str, Any]:
         return {
             "required": {
-                "set": (_slug_options(), {"default": "None"}),
+                "set": (
+                    _slug_options(),
+                    {
+                        "default": "None",
+                        "tooltip": (
+                            "Which saved LoRA configuration to apply. "
+                            "Choose None to pass model/clip through "
+                            "untouched and output an empty stack."
+                        ),
+                    },
+                ),
             },
             "optional": {
                 # FORMAT.md §6.2 (2026-07-20 amendment): optional, not
@@ -130,7 +163,21 @@ class LoraLibraryApplySet:
                 # missing" rejection.
                 "strength_scale": (
                     "FLOAT",
-                    {"default": 1.0, "min": 0.0, "max": 2.0, "step": 0.05},
+                    {
+                        "default": 1.0,
+                        "min": 0.0,
+                        "max": 2.0,
+                        "step": 0.05,
+                        "tooltip": (
+                            "Multiplies every lora's strength in this set by "
+                            "this factor. 1.0 applies the set's saved "
+                            "strengths unchanged, 0.5 halves them all, 0 "
+                            "disables them without editing the set itself. "
+                            "Hidden by default -- enable it from this "
+                            "node's Properties panel ('Show strength "
+                            "scale')."
+                        ),
+                    },
                 ),
                 # FORMAT.md §6.2/§4.1 (2026-07-20 composite fix): which
                 # loader's slice of a §4.1 COMPOSITE (format-2) state to
@@ -143,10 +190,41 @@ class LoraLibraryApplySet:
                 # queue and get slot 0 rather than a rejection.
                 "loader_slot": (
                     "INT",
-                    {"default": 0, "min": 0, "max": 63, "step": 1},
+                    {
+                        "default": 0,
+                        "min": 0,
+                        "max": 63,
+                        "step": 1,
+                        "tooltip": (
+                            "For a set saved from multiple loaders: which "
+                            "loader's row of loras to apply here (0 = the "
+                            "first). Ignored by a set saved from a single "
+                            "loader. Hidden by default -- enable it from "
+                            "this node's Properties panel ('Show loader "
+                            "slot')."
+                        ),
+                    },
                 ),
-                "model": ("MODEL",),
-                "clip": ("CLIP",),
+                "model": (
+                    "MODEL",
+                    {
+                        "tooltip": (
+                            "The model to patch with this set's loras. "
+                            "Leave unwired to use this node purely as a "
+                            "LORA_STACK / trigger-word source."
+                        ),
+                    },
+                ),
+                "clip": (
+                    "CLIP",
+                    {
+                        "tooltip": (
+                            "The CLIP to patch with this set's loras. Leave "
+                            "unwired along with model to use this node "
+                            "purely as a LORA_STACK / trigger-word source."
+                        ),
+                    },
+                ),
             },
         }
 

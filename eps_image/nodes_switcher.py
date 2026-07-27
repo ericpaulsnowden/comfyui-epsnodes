@@ -86,6 +86,14 @@ logger = logging.getLogger("eps_image")
 #: the sibling pack's ``cprb/nodes_save.py`` ``_VIDEO_INPUT_PATTERN``.
 _IMAGE_INPUT_PATTERN = re.compile(r"image_(\d+)")
 
+#: Shared verbatim between the hardcoded ``image_1`` entry and every
+#: dynamically-grown slot ``_FlexibleOptionalImageInputs.__getitem__``
+#: synthesizes, so image_2 and up read identically to image_1 on hover.
+_IMAGE_INPUT_TOOLTIP = (
+    "An image to include when enabled. Toggle it from the row on the node; "
+    "when off, nothing upstream of this socket runs at all."
+)
+
 #: Default ``toggles`` widget value: no overrides recorded yet, so every
 #: connected slot is enabled (see the module docstring's default-enabled
 #: rationale).
@@ -235,7 +243,7 @@ class _FlexibleOptionalImageInputs(dict):
         if super().__contains__(key):
             return super().__getitem__(key)
         if isinstance(key, str) and _IMAGE_INPUT_PATTERN.fullmatch(key):
-            return ("IMAGE", {"lazy": True})
+            return ("IMAGE", {"lazy": True, "tooltip": _IMAGE_INPUT_TOOLTIP})
         raise KeyError(key)
 
 
@@ -359,18 +367,22 @@ class EPSSwitcher:
     RETURN_NAMES = ("images",)
     INPUT_IS_LIST = True
     OUTPUT_IS_LIST = (True,)
+    OUTPUT_TOOLTIPS = (
+        "Every enabled image, in slot order, as a list -- the rest of the "
+        "workflow runs once per element.",
+    )
     FUNCTION = "execute"
     DESCRIPTION = (
-        "Toggle any number of image inputs on/off; the enabled ones fan out in "
-        "slot order (N enabled -> the rest of the workflow runs N times). A "
-        "list-producing upstream (e.g. EPS Image Grid) merges element-wise into "
-        "that count instead of counting as a single image. Disabled inputs are "
-        "skipped before they ever run -- their upstream branch doesn't execute "
-        "at all. Turning every input off (or wiring none at all) is a valid "
-        "state -- the queue still succeeds, the downstream image branch just "
-        "doesn't run for it. Caveat: a scalar value (e.g. a seed) wired "
-        "downstream repeats identically across all N runs -- use an explicit "
-        "per-image list for per-image variation."
+        "Toggle any number of image inputs on or off; the enabled ones fan "
+        "out in slot order, so N enabled inputs make the rest of the "
+        "workflow run N times (a list-producing input, like EPS Image Grid, "
+        "counts for as many images as it holds). A toggled-off input's "
+        "upstream branch never executes at all -- not just filtered out "
+        "afterward. Turning every input off, or connecting none at all, is "
+        "a valid state: the queue still succeeds and the downstream branch "
+        "simply doesn't run. A value wired further downstream, like a seed, "
+        "repeats identically across every run unless you give it an "
+        "explicit per-image list."
     )
 
     @classmethod
@@ -382,9 +394,11 @@ class EPSSwitcher:
                     # `lazy: True` -- see the module docstring's "Disabled
                     # slots are also genuinely lazy now" and this class's
                     # own docstring; `_FlexibleOptionalImageInputs.__getitem__`
-                    # synthesizes the SAME options dict for every dynamically
-                    # grown slot (image_2 and up) so they're all equally lazy.
-                    "image_1": ("IMAGE", {"lazy": True}),
+                    # synthesizes the SAME options dict (including the same
+                    # tooltip, `_IMAGE_INPUT_TOOLTIP`) for every dynamically
+                    # grown slot (image_2 and up) so they're all equally lazy
+                    # and read identically on hover.
+                    "image_1": ("IMAGE", {"lazy": True, "tooltip": _IMAGE_INPUT_TOOLTIP}),
                     # Serialized bridge to the frontend's per-row/header toggle
                     # UI (module docstring "Enabled-set mechanism"); switcher.js
                     # hides this widget's on-canvas row (`.hidden = true`, same

@@ -88,6 +88,10 @@ export const SETTINGS = [
     id: 'loraLibrary.versions',
     category: [CATEGORY, 'About', 'Versions'],
     name: 'Backend / frontend versions',
+    tooltip:
+      'Confirms the installed backend and frontend are the same version. A ' +
+      "mismatch usually means an update was pulled but the server hasn't " +
+      "been restarted, or the browser hasn't been hard-refreshed.",
     type: () => versionRow(),
     defaultValue: ''
   }

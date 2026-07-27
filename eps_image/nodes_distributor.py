@@ -192,17 +192,20 @@ class EPSDistributor:
     CATEGORY = "EPSNodes"
     RETURN_TYPES = ("IMAGE",) * MAX_OUTPUTS
     RETURN_NAMES = tuple(f"out_{n}" for n in range(1, MAX_OUTPUTS + 1))
+    OUTPUT_TOOLTIPS = (
+        "The input image, or a silent block if this output's toggle is off.",
+    ) * MAX_OUTPUTS
     FUNCTION = "distribute"
     DESCRIPTION = (
-        "One image in, up to 8 independently-toggleable images out: a tee with a "
-        "per-branch gate. Every out_N carries the same image unless its own slot "
-        "is toggled off, in which case that socket silently blocks execution and "
-        "only the branch wired to it is skipped -- the other branches see the "
-        "real image and run normally, all in one pass (this node never re-runs "
-        "the rest of the graph the way EPS Switcher's fan-out does). Turning "
-        "every output off is a valid state: the queue still succeeds, nothing "
-        "downstream of this node's outputs runs. An out_N with nothing wired to "
-        "it is unaffected either way."
+        "One image in, up to 8 independently-toggleable images out -- a tee "
+        "with a per-branch gate. Every out_N carries the same image unless "
+        "its own toggle is off, in which case only the branch wired to "
+        "that socket is skipped; the rest still see the image and run "
+        "normally, all in a single pass. Turning every output off is a "
+        "valid state: the queue still succeeds, and nothing downstream of "
+        "this node runs. Unlike EPS Switcher, this node never re-runs the "
+        "workflow multiple times -- every enabled branch runs once, "
+        "together."
     )
 
     @classmethod
@@ -214,7 +217,17 @@ class EPSDistributor:
                 # off the input's options dict, exactly as it does for
                 # EPSSwitcher's own `image_N` inputs; `lazy` is orthogonal to
                 # required/optional.
-                "image": ("IMAGE", {"lazy": True}),
+                "image": (
+                    "IMAGE",
+                    {
+                        "lazy": True,
+                        "tooltip": (
+                            "The image to distribute to every enabled "
+                            "output. If every output is toggled off, this "
+                            "input is never even requested upstream."
+                        ),
+                    },
+                ),
             },
             "optional": {
                 # In `optional`, NOT `required` (module docstring): a hand-built

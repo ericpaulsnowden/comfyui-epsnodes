@@ -310,45 +310,100 @@ class LoraLibrarySweep:
     RETURN_TYPES = ("MODEL", "CLIP", "STRING")
     RETURN_NAMES = ("model", "clip", "label")
     OUTPUT_IS_LIST = (True, True, True)
+    OUTPUT_TOOLTIPS = (
+        "The patched model for this step -- one per swept value, as a list.",
+        "The patched CLIP for this step, or None where clip was left "
+        "unwired -- one per swept value, as a list.",
+        "This step's lora and strength as a filename-safe string, e.g. "
+        "my_lora_0.5 -- wire it into Save Image's filename_prefix.",
+    )
     FUNCTION = "sweep"
     DESCRIPTION = (
-        "Sweeps a LORA_STACK's strengths from min to max (BOTH ends "
-        "inclusive -- 0.0 to 1.0 at 0.1 is 11 runs, not 10) and applies each "
-        "step to the model (and clip, if wired), fanning out one run per step. "
-        "CLIP is OPTIONAL -- leave it unwired for models with no text encoder "
-        "and each step patches the MODEL only (the lora's clip-side weights, if "
-        "any, are skipped, like core's model-only loader). 'Each lora "
-        "independently' (default) sweeps one lora at a time while every "
-        "other lora holds its own configured strength: n_loras x n_steps "
-        "runs total. 'All together' moves every lora to the same value at "
-        "once: n_steps runs. Every fanned run shares this queue's seed -- a "
-        "fixed seed repeats identically across all of them, which is the "
-        "point (a clean strength A/B, not a bug); wire an explicit "
-        "per-run seed list instead if you want per-run variation too. "
-        "Changing ANY widget here re-renders the WHOLE sweep on the next "
-        "queue (all-or-nothing node caching, not per-step). min/max accept "
-        "-10..10 and are applied UNCLAMPED -- deliberate over/under-"
-        "strength testing is allowed, nothing here clips back to 0..1. The "
-        "'label' output names each run <lora>_<strength> (e.g. "
-        "my_great_lora_0.5) -- wire it into Save Image's filename_prefix so "
-        "every saved file says exactly which lora and strength produced it."
+        "Auditions a LORA_STACK's strengths without manually re-running the "
+        "workflow at every value: set a min, max, and increment, and get "
+        "back one patched model per step. Both ends are included -- 0.0 to "
+        "1.0 at 0.1 is 11 runs, not 10. 'Each lora independently' (default) "
+        "sweeps one lora at a time while the rest hold their own saved "
+        "strengths; 'All together' moves every lora to the same value at "
+        "once, in fewer total runs. CLIP is optional -- leave it unwired to "
+        "patch the model only, for models with no text encoder. Every run "
+        "shares this queue's seed, so a fixed seed repeats identically "
+        "across every strength for a clean comparison; wire the label "
+        "output into Save Image's filename_prefix so each saved file says "
+        "which lora and strength produced it."
     )
 
     @classmethod
     def INPUT_TYPES(cls) -> dict[str, Any]:
         return {
             "required": {
-                "model": ("MODEL",),
-                "lora_stack": ("LORA_STACK",),
-                "min": ("FLOAT", {"default": 0.0, "min": -10.0, "max": 10.0, "step": 0.05}),
-                "max": ("FLOAT", {"default": 1.0, "min": -10.0, "max": 10.0, "step": 0.05}),
+                "model": (
+                    "MODEL",
+                    {"tooltip": "The model to patch at every swept strength."},
+                ),
+                "lora_stack": (
+                    "LORA_STACK",
+                    {
+                        "tooltip": (
+                            "The loras to sweep, in order -- usually wired "
+                            "from EPS Apply LoRA Set's lora_stack output."
+                        ),
+                    },
+                ),
+                "min": (
+                    "FLOAT",
+                    {
+                        "default": 0.0,
+                        "min": -10.0,
+                        "max": 10.0,
+                        "step": 0.05,
+                        "tooltip": (
+                            "Lowest strength to test, inclusive. Not "
+                            "clamped to 0-1, so testing weaker-than-normal "
+                            "or negative strengths is fine."
+                        ),
+                    },
+                ),
+                "max": (
+                    "FLOAT",
+                    {
+                        "default": 1.0,
+                        "min": -10.0,
+                        "max": 10.0,
+                        "step": 0.05,
+                        "tooltip": (
+                            "Highest strength to test, inclusive. Not "
+                            "clamped to 0-1, so testing beyond full "
+                            "strength is fine."
+                        ),
+                    },
+                ),
                 "increment": (
                     "FLOAT",
-                    {"default": 0.1, "min": 0.01, "max": 10.0, "step": 0.01},
+                    {
+                        "default": 0.1,
+                        "min": 0.01,
+                        "max": 10.0,
+                        "step": 0.01,
+                        "tooltip": (
+                            "Step size between strengths. A smaller "
+                            "increment means more runs; if the min-to-max "
+                            "range doesn't divide evenly by it, the step "
+                            "count rounds to the nearest whole step."
+                        ),
+                    },
                 ),
                 "mode": (
                     [MODE_INDEPENDENT, MODE_ALL_TOGETHER],
-                    {"default": MODE_INDEPENDENT},
+                    {
+                        "default": MODE_INDEPENDENT,
+                        "tooltip": (
+                            "Each lora independently sweeps one lora at a "
+                            "time while the others hold their saved "
+                            "strengths. All together moves every lora to "
+                            "the same value at once, in fewer total runs."
+                        ),
+                    },
                 ),
             },
             "optional": {
@@ -360,7 +415,16 @@ class LoraLibrarySweep:
                 # clip-side weights, if any, are simply skipped) and the `clip`
                 # OUTPUT passes through `None`. `model` stays REQUIRED -- a
                 # strength tester with no model to patch has nothing to sweep.
-                "clip": ("CLIP",),
+                "clip": (
+                    "CLIP",
+                    {
+                        "tooltip": (
+                            "The CLIP to patch at every swept strength. "
+                            "Leave unwired to patch the model only -- "
+                            "useful for models with no text encoder."
+                        ),
+                    },
+                ),
             },
         }
 
