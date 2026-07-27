@@ -334,7 +334,10 @@ times to gather images, then send the whole set through a workflow at once.
   image(s) (10 buffered + 1 wired → 11 runs).
 - **Navigable grid:** the collected images show as a clickable thumbnail grid
   right on the node (ComfyUI's own image viewer — click to enlarge, arrow
-  through them).
+  through them). **Adding an image keeps you on the full grid** — a new
+  arrival (a Collect run, a paste, a drop) shows up as one more thumbnail
+  *in* the grid instead of taking over the view, and if you've enlarged one
+  image to inspect it, re-running the queue won't yank you back out.
 - **Fan-out outputs (Emit mode):** `image`, `width`, `height` — wire them
   downstream in **Emit** mode and the workflow runs once per buffered image,
   plus once more for anything currently wired (10 images → 10 runs, e.g. to

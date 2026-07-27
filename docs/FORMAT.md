@@ -869,6 +869,40 @@ add; single batch-aware IMAGE input; disk-backed, survive-restart, NO cap.
   (a `progress_state` "finished" transition, chosen because core sends NO
   `executed` event at all for a run whose result carries no `ui` —
   execution.py gates both the event and the cache on non-empty ui).
+- **The display sync must own BOTH sides of core's identity check
+  (root-caused + fixed 2026-07-27; the owner's longest-lingering report:
+  "a new image becomes the focus and there is no way back to the full
+  grid").** Frontend 1.45.21 wires every node's `onDrawBackground` to
+  `updatePreviews` (litegraphService.ts), which re-renders the node's
+  images FROM `app.nodeOutputs[locator]` whenever `node.images !==
+  store.images` — an ARRAY-IDENTITY comparison — and core's `executed`
+  handler REPLACES that store entry with just the run's reported refs
+  (which, per the 2026-07-22 decision above, is deliberately only the
+  newly-appended ones). So any fix that wrote only `node.imgs`/`node.images`
+  lost by construction: repaired, then re-clobbered on the very next
+  repaint, forever — which is why three earlier rounds of imperative
+  refreshes and a timer "bet" (an 800ms second refresh, now deleted) never
+  stuck. Reproduced live in one call before fixing (one simulated repaint
+  flipped a 3-image grid to the store's single new ref). The fix:
+  `setNodeImagesFromRefs` writes `app.nodeOutputs[String(node.id)] =
+  {images: refs}` with the SAME array instance it puts on `node.images`
+  (`syncCoreOutputStore` — root-graph nodes only; a subgraph locator is
+  `<uuid>:<id>` and guessing it could hit an unrelated root node), and an
+  `onExecuted` wrapper (`installExecutedMerge`) merges the run's refs into
+  the full list SYNCHRONOUSLY in the same tick core clobbers the store
+  (core calls `onExecuted` right AFTER its store write — app.ts order,
+  verified — and no repaint can interleave a synchronous tick). New refs →
+  the whole grid shows with the new image in it (`imageIndex = null`); a
+  cached re-send (same refs) → store healed with the EXISTING array
+  identity, so a user's deliberately focused cell survives batch re-queues.
+  A FORCED `/list` reconcile follows (`scheduleRefresh(node,
+  {force:true})`, which never rides an in-flight pre-event fetch and never
+  settle-skips — both were real stale-view holes); display correctness
+  never depends on it. Pinned headless in `tests/test_image_grid_js.py`
+  (including core's identity check replayed verbatim, and that
+  `node.images = refs` is never a defensive copy — a clone would resurrect
+  the bug with every other test green) and verified live: three real
+  queued Collect runs showed 1 → 2 → 3 images with repaints in between.
 - **Buffer store (disk, survives restart):** under ComfyUI's OUTPUT dir so
   core's `/view` serves the thumbnails AND it survives restart —
   `<comfy output>/eps_image_grid/<grid_uuid>/NNNN.png` + a `manifest.json`

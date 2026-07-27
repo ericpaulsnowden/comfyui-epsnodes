@@ -931,11 +931,95 @@ function imageUrlForRef(ref) {
  * `onerror` only logs -- a broken thumbnail must not repeatedly retrigger
  * anything.
  */
-function setNodeImagesFromRefs(node, refs) {
+/**
+ * Deduplicating merge of buffer refs: *existing* first (buffer order),
+ * then any *incoming* not already present. Key is the full identity core
+ * itself uses to build a /view URL (`type|subfolder|filename`).
+ *
+ * Returns `{refs, added}` -- and, deliberately, `refs` IS `existing` (same
+ * array identity) when nothing was added, so callers can skip pointless
+ * re-renders and, more importantly, keep the `node.images ===
+ * store.images` identity equality intact (see `syncCoreOutputStore`).
+ * Pure; exported for tests/test_image_grid_js.py.
+ */
+export function mergeBufferRefs(existing, incoming) {
+  const base = Array.isArray(existing) ? existing : []
+  const extra = Array.isArray(incoming) ? incoming : []
+  const keyOf = (ref) =>
+    `${ref?.type || 'output'}|${ref?.subfolder || ''}|${ref?.filename || ''}`
+  const seen = new Set(base.map(keyOf))
+  const additions = []
+  for (const ref of extra) {
+    if (!ref || !ref.filename) continue
+    const key = keyOf(ref)
+    if (seen.has(key)) continue
+    seen.add(key)
+    additions.push(ref)
+  }
+  if (!additions.length) return { refs: base, added: 0 }
+  return { refs: base.concat(additions), added: additions.length }
+}
+
+/**
+ * Makes core's own output store agree with the buffer -- THE root fix for
+ * the owner's longest-lingering grid bug ("a new image becomes the focus
+ * and there is no way back to the full grid", reported across several
+ * rounds; root-caused and reproduced live 2026-07-27).
+ *
+ * Mechanism, verified in this rig's frontend 1.45.21 source, then
+ * reproduced live in one call: `litegraphService.ts` wires EVERY node's
+ * `onDrawBackground` to `updatePreviews`, which re-renders whenever
+ * `node.images !== store.images` -- an ARRAY-IDENTITY comparison against
+ * `app.nodeOutputs[locator].images` -- and re-renders FROM THE STORE
+ * (`useNodeImage.ts` `showPreview()`: `node.imageIndex = null; node.imgs =
+ * elements`). Core's `executed` handler REPLACES that store entry with
+ * just the refs a Run reported (`ui.images` = only the newly-appended
+ * ones, by design, for output-panel cleanliness). So after every append,
+ * the store says "this node's images = [the new one]", our refresh says
+ * otherwise on `node` itself -- and the very next repaint takes the
+ * store's side. Every earlier fix here rewrote `node.imgs`/`node.images`
+ * and lost by construction: repair-then-clobber, once per repaint,
+ * forever. (The pane-based checks that "verified" those fixes never ran
+ * real draws -- the browser pane's degenerate viewport -- which is exactly
+ * how it kept shipping.)
+ *
+ * The fix writes the store THROUGH the same assignment shape the store's
+ * own `setOutputsByLocatorId` uses (`app.nodeOutputs[locator] = outputs`),
+ * with the SAME array instance that goes on `node.images` -- after which
+ * `updatePreviews`' identity check is EQUAL, core stops re-rendering, and
+ * any independent `showPreview()` that does run renders the full buffer
+ * anyway. Both sides of the identity comparison are ours now.
+ *
+ * Locator: for a root-graph node core keys the store by `String(node.id)`
+ * (`nodeToNodeLocatorId`); inside a SUBGRAPH the locator is
+ * subgraph-scoped (`<uuid>:<id>`), and writing the plain id would hit some
+ * unrelated root node's entry -- so a non-root grid keeps the old
+ * imgs-only behavior (safe, just un-hardened) rather than guessing keys.
+ * Exported for tests.
+ */
+export function syncCoreOutputStore(node, refs) {
+  try {
+    if (!node || !app?.nodeOutputs) return
+    if (!node.graph || !app.graph || node.graph !== app.graph) return
+    const locator = String(node.id)
+    if (refs && refs.length) {
+      app.nodeOutputs[locator] = { images: refs }
+    } else if (app.nodeOutputs[locator]) {
+      // Empty buffer: remove the entry outright (mirrors the store's own
+      // removal path) so a repaint can't resurrect stale refs.
+      delete app.nodeOutputs[locator]
+    }
+  } catch (error) {
+    console.warn(PREFIX, 'syncCoreOutputStore failed', error)
+  }
+}
+
+export function setNodeImagesFromRefs(node, refs) {
   if (!refs || !refs.length) {
     node.imgs = []
     node.images = undefined
     node.imageIndex = null
+    syncCoreOutputStore(node, [])
     return
   }
   const imgs = refs.map((ref) => {
@@ -949,8 +1033,11 @@ function setNodeImagesFromRefs(node, refs) {
     return img
   })
   node.imgs = imgs
+  // SAME array instance on both sides of updatePreviews' identity check --
+  // load-bearing, see syncCoreOutputStore's docstring. Never clone here.
   node.images = refs
   node.imageIndex = null
+  syncCoreOutputStore(node, refs)
 }
 
 /**
@@ -1651,17 +1738,45 @@ const REFRESH_SETTLE_MS = 250
  * changed in the meantime, so there is nothing new to fetch). Never
  * rejects, same contract as `refreshFromBuffer` itself.
  */
-function scheduleRefresh(node) {
-  const state = refreshState.get(node)
-  if (state) {
-    if (state.promise) return state.promise
-    if (Date.now() - state.settledAt < REFRESH_SETTLE_MS) return Promise.resolve()
+function scheduleRefresh(node, opts) {
+  // `force` (2026-07-27, part of the focus-clobber root fix): a caller that
+  // KNOWS server state just changed (an append landed, a run finished) must
+  // never be satisfied by a fetch that STARTED before its event -- riding an
+  // in-flight promise, or being swallowed by the settle window, both leave
+  // the pre-event buffer on screen with nothing scheduled to correct it.
+  // Two stale-view holes, both hit in practice:
+  //   1. in-flight ride: /list issued at T0, append lands at T1, trigger at
+  //      T2 rides the T0 fetch -> renders the pre-append buffer;
+  //   2. settle skip: append lands < REFRESH_SETTLE_MS after a refresh
+  //      settled -> trigger returns without fetching at all.
+  // Forced calls instead set `pendingForce`, and the run loop below keeps
+  // fetching until no forced trigger arrived during the fetch -- every
+  // forced caller is guaranteed a /list that STARTED after its call.
+  // Passive callers (attach tail, loadedGraphNode, onConfigure) keep the
+  // old coalescing: their state didn't change, dedupe is the whole point.
+  const force = !!(opts && opts.force)
+  let state = refreshState.get(node)
+  if (state && state.promise) {
+    if (force) state.pendingForce = true
+    return state.promise
   }
-  const promise = refreshFromBuffer(node).finally(() => {
-    refreshState.set(node, { promise: null, settledAt: Date.now() })
-  })
-  refreshState.set(node, { promise, settledAt: 0 })
-  return promise
+  if (!force && state && Date.now() - state.settledAt < REFRESH_SETTLE_MS) {
+    return Promise.resolve()
+  }
+  state = { promise: null, pendingForce: false, settledAt: 0 }
+  refreshState.set(node, state)
+  state.promise = (async () => {
+    try {
+      do {
+        state.pendingForce = false
+        await refreshFromBuffer(node)
+      } while (state.pendingForce)
+    } finally {
+      state.promise = null
+      state.settledAt = Date.now()
+    }
+  })()
+  return state.promise
 }
 
 /**
@@ -1891,21 +2006,70 @@ function installExecutionRefreshListener() {
       const previous = lastKnownProgressState.get(node)
       if (state !== undefined) lastKnownProgressState.set(node, state)
       if (state === 'finished' && previous !== 'finished') {
-        void scheduleRefresh(node)
-        // 2026-07-24 (owner: a Collect run sometimes showed ONLY the newest
-        // image until later runs "flashed" the full grid): core's own
-        // 'executed' handler replaces node.imgs with just this run's
-        // reported refs, and it lands ASYNCHRONOUSLY (imgs are assigned
-        // only after the <img> elements finish loading) -- so it can
-        // arrive AFTER the refresh above and win the race. A second,
-        // delayed refresh outlasts it and settles on the full buffer.
-        setTimeout(() => {
-          void scheduleRefresh(node)
-        }, 800)
+        // Forced: this event IS the news that server state changed, so it
+        // must never ride a pre-event fetch or be settle-skipped (see
+        // scheduleRefresh). The 800ms "second, delayed refresh" that used
+        // to sit here -- a timer bet against core's async executed-render
+        // -- is gone: it treated the symptom, could never win (the clobber
+        // re-fired on EVERY repaint via updatePreviews' identity check),
+        // and is superseded by the real fix, `syncCoreOutputStore` +
+        // `installExecutedMerge` (their docstrings have the mechanism).
+        void scheduleRefresh(node, { force: true })
         void warnIfEmptyAfterRun(node) // see its docstring (2026-07-24)
       }
     }
   })
+}
+
+/**
+ * Wraps `node.onExecuted` so a Run's reported refs are folded into the
+ * full-buffer view SYNCHRONOUSLY, in the same tick core clobbers the store
+ * -- the deterministic half of the focus-clobber root fix (the other half
+ * is `syncCoreOutputStore`; its docstring has the whole mechanism).
+ *
+ * Order, confirmed in `app.ts`'s `'executed'` listener: core FIRST replaces
+ * `app.nodeOutputs[locator]` with just this Run's refs, THEN calls
+ * `node.onExecuted(output)` -- same tick, no repaint possible in between
+ * (draws are rAF; JS is single-threaded). So by the time any repaint's
+ * `updatePreviews` looks, the store already holds the merged full list
+ * again, with `node.images`' own identity. No timers, no races, no bets.
+ *
+ * Two cases:
+ *  - genuinely new refs (a Collect appended): show the whole grid with the
+ *    new image IN it (`setNodeImagesFromRefs` -> `imageIndex = null`) --
+ *    the owner-reported behavior ("a new image becomes the focus and there
+ *    is no way back to the full grid") inverted to what he asked for.
+ *  - nothing new (a CACHED node re-sends its old `ui` on every re-queue,
+ *    both `execution.py` success paths do): only heal the store -- the
+ *    user's current view, INCLUDING a deliberately focused cell
+ *    (`imageIndex`), is left alone. A batch of queued runs must not yank
+ *    the user back to the grid once per run while they're inspecting one
+ *    image. `mergeBufferRefs` returning the SAME array identity for this
+ *    case is what makes the heal invisible to `updatePreviews`.
+ *
+ * The forced `/list` afterwards reconciles authoritatively (true buffer
+ * order, appends from another machine, evictions) -- display correctness
+ * never depends on it arriving, or arriving in order.
+ */
+function installExecutedMerge(node) {
+  const originalOnExecuted = node.onExecuted
+  node.onExecuted = function (output) {
+    let result
+    if (typeof originalOnExecuted === 'function') {
+      result = originalOnExecuted.apply(this, arguments)
+    }
+    try {
+      const incoming = output && Array.isArray(output.images) ? output.images : []
+      const existing = Array.isArray(this.images) ? this.images : []
+      const { refs, added } = mergeBufferRefs(existing, incoming)
+      if (added > 0) setNodeImagesFromRefs(this, refs)
+      else syncCoreOutputStore(this, refs)
+      void scheduleRefresh(this, { force: true })
+    } catch (error) {
+      console.warn(PREFIX, 'onExecuted merge failed', error)
+    }
+    return result
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -1954,6 +2118,7 @@ export function attach(node) {
     // section for the exact check this satisfies).
     node.previewMediaType = 'image'
     installUuidSerializeGuard(node) // 2026-07-24 identity hardening -- see its block comment
+    installExecutedMerge(node) // 2026-07-27 focus-clobber root fix -- see its docstring
 
     // Deferred one tick -- the paste-collision path. See file header
     // point 1 for exactly why this can't run synchronously here. Awaiting
