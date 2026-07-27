@@ -236,7 +236,7 @@ function outputIndexByName(node, name) {
  * guard right above `_processNodeClick`'s outputs loop) in this rig's
  * installed comfyui_frontend_package 1.45.21:
  * `[...(output.links ?? []), ...[...(output._floatingLinks ?? new Set())]]`.
- * The `.links`-only version this replaced (v0.34.0) missed the mid-drag case,
+ * The `.links`-only version replaced here in v0.34.0 missed the mid-drag case,
  * which BOTH callers below treat as destructive: `applyOriginalSizeVisibility`
  * would `removeOutput()` a socket that still has a link on it, and
  * `applyPassthroughVisibility` would leave that link drawn to an invisible
