@@ -1,13 +1,15 @@
 # Example workflows
 
 Drag any `.json` here onto the ComfyUI canvas (or File → Open) to load it.
-All three were built and round-trip verified against ComfyUI v0.28 /
-frontend 1.45 and need this pack at v0.30.0+.
+All four were built and round-trip verified against ComfyUI v0.28 /
+frontend 1.45. The cross/pipeline graphs need this pack at v0.30.0+;
+`eps-test-distributor.json` needs v0.34.0+.
 
-**One-time setup for the two test workflows:** copy
+**One-time setup for the two CROSS test workflows:** copy
 [`eps-cross-test-prompts.md`](eps-cross-test-prompts.md) into your EPSNodes
-library folder (the one in Settings → EPSNodes). Both test graphs point
+library folder (the one in Settings → EPSNodes). Both cross graphs point
 their Prompt Notebook at that file with all four prompts pre-selected.
+`eps-test-distributor.json` needs no setup at all.
 
 ---
 
@@ -31,6 +33,29 @@ just moves images around, so it runs anywhere in seconds.
 
 *Verified end to end on the test rig: this exact graph produced exactly
 those 8 files.*
+
+## eps-test-distributor.json — *press Run, no setup, no GPU*
+
+Proves **one image, three branches, one run** — and that a switched-off
+branch skips its whole chain, not just the node it touches. Load Image → EPS
+Distributor → `out_1` saves as-is, `out_2` goes through **Invert Image
+Colors** and then saves, `out_3` previews on canvas.
+
+Three passes, all on the canvas note:
+
+1. **All on** → `branch_A_00001_`, `branch_B_inverted_00001_`, and a preview.
+2. **Click `out_2`'s checkbox off** → branch A still writes a file, **no new
+   `branch_B_inverted_`**, preview still updates. The Invert node in the
+   middle never executes either.
+3. **All off** → the queue still reports success, writes nothing, no error.
+
+Also try right-click → Properties → `Outputs` to show up to 8 sockets, and
+try lowering it while `out_2` is wired — it refuses rather than silently
+dropping your wire.
+
+*Verified end to end on the test rig: every one of those claims was
+confirmed against a real queue, including that Invert itself produced nothing
+when `out_2` was off.*
 
 ## eps-test-cross-sweep.json — *a real 24-image generation run*
 
@@ -89,6 +114,10 @@ The graph, stage by stage (numbered groups + notes on the canvas):
    0.6) saves via `save_prefix` into
    `output/eps_demo/<lora>_<strength>/<PromptName>_*.png` — one folder per
    strength.
+6. **Distributor → branches** — the decoded result fans out through an EPS
+   Distributor: `out_1` to the Save Image (still using Cross Sweep's folder
+   path), `out_2` to a preview, `out_3` spare. Switch a socket off to drop
+   that branch without touching the rest of the run.
 
 Before running: pick a checkpoint, images, and a video path; select 2+
 prompts in the Notebook; pick (or capture) a lora state. Run count =

@@ -229,8 +229,27 @@ function outputIndexByName(node, name) {
   return (node.outputs || []).findIndex((output) => output?.name === name)
 }
 
-function isOutputConnected(output) {
-  return !!(output && Array.isArray(output.links) && output.links.length > 0)
+/**
+ * Whether *output* currently carries a real link — checks BOTH `.links`
+ * (settled connections) and `._floatingLinks` (a link mid-drag, not yet
+ * dropped), mirroring `LGraphCanvas.ts`'s own `hasRelevantOutputLinks` (the
+ * guard right above `_processNodeClick`'s outputs loop) in this rig's
+ * installed comfyui_frontend_package 1.45.21:
+ * `[...(output.links ?? []), ...[...(output._floatingLinks ?? new Set())]]`.
+ * The `.links`-only version this replaced (v0.34.0) missed the mid-drag case,
+ * which BOTH callers below treat as destructive: `applyOriginalSizeVisibility`
+ * would `removeOutput()` a socket that still has a link on it, and
+ * `applyPassthroughVisibility` would leave that link drawn to an invisible
+ * (but still hit-testable) dot. Identical to distributor.js's function of the
+ * same name — the two refusal paths are deliberately kept in lockstep.
+ * Exported so tests/test_resolution_grid_js.py can drive it headlessly.
+ */
+export function isOutputConnected(output) {
+  if (!output) return false
+  if (Array.isArray(output.links) && output.links.length > 0) return true
+  const floating = output._floatingLinks
+  if (floating && typeof floating.size === 'number' && floating.size > 0) return true
+  return false
 }
 
 function toast(node, severity, detail) {

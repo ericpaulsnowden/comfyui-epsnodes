@@ -91,6 +91,7 @@ _NODE_SPECS = [
     ("eps_image.nodes_frame_saver", "EPSFrameSaver", "EPS Frame Saver"),
     ("eps_image.nodes_cross", "EPSCrossProduct", "EPS Cross Product"),
     ("eps_image.nodes_cross_sweep", "EPSCrossSweep", "EPS Cross Sweep"),
+    ("eps_image.nodes_distributor", "EPSDistributor", "EPS Distributor"),
 ]
 
 NODE_CLASS_MAPPINGS = {}

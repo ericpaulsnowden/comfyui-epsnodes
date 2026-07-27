@@ -706,6 +706,13 @@ is the functional core WITHOUT the grid.
   `image` output's dot/label (removing it for real would corrupt the links of
   `resized_image`/`width`/`height` after it). Both refuse to hide an output
   that is currently wired (revert + toast) rather than leave a dangling wire.
+  "Wired" means what the frontend itself means by it — `LGraphCanvas`'s
+  `hasRelevantOutputLinks` unions `output.links` (settled) with
+  `output._floatingLinks` (a link still mid-drag), and the check here does the
+  same (fixed v0.34.0; it was `.links`-only before, which let a mid-drag link
+  read as unconnected — so `Show original size` could `removeOutput` the
+  socket out from under it). §6.11 carries the identical function; the two are
+  kept in lockstep, with one headless case list each.
 - **Resize impl:** mirror core `ImageScale` semantics via
   `comfy.utils.common_upscale` (lazy `import comfy.utils`/`torch` inside the
   function, never at module scope) — thin, common-case; documented "pipe the
@@ -1255,6 +1262,111 @@ label, so two chained Cross Products cannot express it.
 - A fixed seed repeats across all runs (desired: strength and pair are the
   only moving variables). No `IS_CHANGED` (pure function of inputs). No
   torch/ComfyUI import at module scope (elements are opaque).
+
+### §6.11 `EPSDistributor` (display: "EPS Distributor") — one in, N gated out
+
+NON-lora node in `eps_image/`, category "EPSNodes". Class id `EPSDistributor`
+frozen once shipped (§8). **§6.4's Switcher pointed backwards**: Switcher is
+many toggleable INPUTS gathered into one output (N enabled inputs → N
+downstream RUNS); this is ONE input tee'd onto many toggleable OUTPUTS, each
+socket independently carrying either the image or a silent block, all in a
+SINGLE run. Wire one picture to an upscale branch, a restyle branch and a
+save branch, then flip any branch off from this one node — no rewiring, no
+hand-bypassing groups. Roadmap: `research/roadmap-eps-distributor.md`.
+
+- **Input (required):** `image` (IMAGE — IMAGE-only, matching Switcher;
+  any-type is an M2 scope option). **Optional:** a `toggles` STRING widget
+  (JSON `{"out_N": false}`), visually hidden by the frontend. `optional`,
+  NOT `required`, and NOT ComfyUI's `hidden` section (which is reserved for
+  server-supplied `PROMPT`/`UNIQUE_ID`): core's prompt validation rejects a
+  hand-built `/prompt` that omits any REQUIRED input BEFORE the node runs,
+  which would break the no-frontend API path — so `optional` plus
+  `distribute`'s own default is what keeps that path working.
+- **Outputs:** fixed `RETURN_TYPES = ("IMAGE",) * MAX_OUTPUTS` (8),
+  `RETURN_NAMES = out_1 … out_8`, both DERIVED from `MAX_OUTPUTS` so they
+  cannot drift in length. The frontend hides the trailing unused sockets down
+  to the user's chosen count (§6.5 EPS Resolution's `removeOutput`/
+  `addOutputs` tail pattern — **TRAILING only, never a middle socket**, so
+  existing wire indices never shift).
+- **Toggle semantics — identical to §6.4's**, own local
+  `_parse_toggles`/`DEFAULT_TOGGLES` (adapted, deliberately not imported:
+  a malformed value must log as "EPS Distributor", never misattribute to the
+  sibling, and `_unwrap_toggles` has no counterpart here since there is no
+  `INPUT_IS_LIST`; `nodes_cross.py` set the same own-your-helpers precedent).
+  A slot is ENABLED unless its key is present and **explicitly boolean
+  `false`** — absent, `null`, `0`, `""` all mean enabled (the "ComfyUI-only
+  must work" floor: a hand-edited workflow or an API caller that never heard
+  of this widget still gets every output). Keys outside `out_1..out_8` are
+  ignored. Malformed or non-object JSON → every output enabled + a logged
+  warning, never an exception.
+- **`distribute`** returns a fixed-length 8-tuple every time: the SAME image
+  object (no copy) per enabled slot, else a fresh `ExecutionBlocker(None)`.
+  **All-off is VALID** — 8 blockers, no error, queue succeeds — mirroring
+  §6.4's all-off decision, just distributed per-slot. An unwired disabled
+  slot is inspected by nothing, hence harmless.
+- **Why a per-slot blocker is possible at all** (the load-bearing mechanism,
+  verified against the rig's own ComfyUI v0.28.0 before any code was
+  written): `get_output_from_returns` rewrites a return into "every output
+  blocked" ONLY when the WHOLE return value IS an `ExecutionBlocker`
+  (`execution.py:394-395`). Ours is always a tuple, never a bare blocker, so
+  that expansion never fires and the mixed tuple passes through untouched
+  (`:396`). Each blocker then does its job at the CONSUMER: core's
+  `process_inputs` blocks a downstream node the moment ANY resolved input is
+  a blocker. So a disabled `out_N` skips only the branch wired to it, while
+  a sibling branch on an enabled slot sees the real image and runs in the
+  very same pass.
+- **Deliberately NOT declared** (each would be actively wrong here):
+  `OUTPUT_IS_LIST` — the values are one-per-SOCKET for parallel branches, not
+  lists for a further fan-out; `INPUT_IS_LIST` — nothing fans in;
+  `IS_CHANGED` — both inputs are ordinary tracked inputs already covered by
+  default input-hash caching, with no other state to go stale; and no
+  lazy/`check_lazy_status` — the single input is always needed to produce ANY
+  enabled output, so the skip lives entirely on the OUTPUT side. This node
+  also stays inside §6.4's hard rule: it never inspects the graph, so it
+  cannot violate "graph inspection may change what a node REQUESTS, never
+  what it RETURNS."
+- No torch/ComfyUI import at module scope (`ExecutionBlocker` is imported
+  lazily, only on the at-least-one-disabled path).
+- **The toggle geometry, and why it is simpler than §6.4's** (verified against
+  frontend 1.45.21's own extracted TS, not assumed). Clicks on the output side
+  DO reach `node.onMouseDown` — but `_processNodeClick` runs its outputs loop
+  first and `return`s on
+  `isInRectangle(x, y, socketX-15, socketY-10, 30, 20)`, starting a wire drag
+  instead. So the hard rule is: **a toggle box's right edge must be strictly
+  left of `socketX − 15`.** Three consequences:
+  - The output hit box is a FIXED 30×20 regardless of label text, unlike the
+    input side's conditionally label-aware region — so §6.4's
+    `20 + name.length*7` heuristic must NOT be ported here. The box uses a
+    fixed `ROW_GAP` (92, reused from §6.4's validated `ROW_MIN_X`) measured
+    leftward from the socket, which keeps the geometry a PURE function and
+    clears the boundary by ~77px.
+  - The drawn label reaches further left than that hit box: `NodeSlot.draw()`
+    renders an output's name at `pos[0] - 10` with `textAlign = 'right'`, so
+    the text grows leftward from there. `ROW_GAP` clears that too for the
+    fixed 5-character `out_N` names.
+  - **No row-0 collision with the `image` input.** `out_1` shares row 0 with
+    it, but a normal slot's mousedown `boundingRect` is only
+    `NODE_SLOT_HEIGHT` (20px) wide — `LGraphNode._measureSlot` sets
+    `boundingRect[2] = slot.isWidgetInputSlot ? BaseWidget.margin :
+    LiteGraph.NODE_SLOT_HEIGHT` — NOT the wider `20 + name.length*7` that
+    `getNodeInputOnPos` uses for hover/link-drop only. At the 200px width
+    floor the toggle sits at x≈87–99 against an input region of x≈0–20.
+  `tests/test_distributor_js.py` pins the `right edge < socketX − 15`
+  INEQUALITY (not the margin) across probe widths, so `ROW_GAP` can change
+  without the guarantee silently lapsing.
+- **Lowering the visible count never destroys a wire.** §6.5's rule
+  ("never leave a dangling wire") generalized from a boolean to a range: the
+  request is clamped back UP to the highest WIRED slot rather than reverted to
+  its previous value, so everything provably-unwired above it still hides, and
+  the user gets a toast naming the socket. "Wired" checks BOTH `output.links`
+  and `output._floatingLinks`, mirroring `LGraphCanvas`'s
+  `hasRelevantOutputLinks`, because a missed link would be silently REMOVED —
+  the same check (and the same function, verbatim) as §6.5's, which was
+  `.links`-only until v0.34.0; the two are kept in lockstep.
+- **Live-verified on the rig 2026-07-27, 5/5** (LoadImage → Distributor →
+  three SaveImage branches): all-on saves 3; `out_2` off saves exactly the
+  other 2; two off saves exactly 1; ALL off reports `success` with nothing
+  saved; `{"out_2": null}` stays enabled.
 
 ## §7 Frontend surfaces
 

@@ -49,8 +49,8 @@ from eps_image.nodes_frame_saver import EPSFrameSaver
 #: this repo) -- 16 frames @ 24fps, 320x180, solid-color content confirmed by
 #: a live probe: red-dominant / green-dominant / blue-dominant respectively.
 _SEEDED_CLIPS_DIR = Path(
-    "/private/tmp/claude-501/-Users-ericsnowden-Dropbox-Claude-Code-comfy-ps/"
-    "b7779b16-3a2c-4973-9583-a0a7dc96f62a/scratchpad/comfyui-env/ComfyUI/input"
+    "/Users/ericsnowden/Library/Application Support/"
+    "comfy_ps/rig/ComfyUI/input"
 )
 CLIP_RED = _SEEDED_CLIPS_DIR / "clip_red.mp4"
 CLIP_GREEN = _SEEDED_CLIPS_DIR / "clip_green.mp4"

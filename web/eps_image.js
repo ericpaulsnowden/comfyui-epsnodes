@@ -1,6 +1,7 @@
 /**
  * @file Entry point for the EPSNodes image-utility frontend (EPS Switcher §6.4,
- * EPS Resolution §6.5, EPS Image Grid §6.6). ComfyUI auto-imports every
+ * EPS Resolution §6.5, EPS Image Grid §6.6, EPS Frame Saver §6.7, EPS
+ * Distributor §6.11). ComfyUI auto-imports every
  * top-level `.js` under `WEB_DIRECTORY` (`./web`); this is a SECOND
  * extension alongside `lora_library.js`, so the image nodes' frontend is
  * cleanly separated from the lora family. Each sub-feature is wrapped so one
@@ -12,6 +13,7 @@ import * as switcher from './eps_image/switcher.js'
 import * as resolution from './eps_image/resolution.js'
 import * as imageGrid from './eps_image/image_grid.js'
 import * as frameSaver from './eps_image/frame_saver.js'
+import * as distributor from './eps_image/distributor.js'
 
 const PREFIX = '[eps_image]'
 const REPO_URL = 'https://github.com/ericpaulsnowden/comfyui-epsnodes'
@@ -37,6 +39,7 @@ app.registerExtension({
     safely('resolution.init', () => resolution.init?.())
     safely('imageGrid.init', () => imageGrid.init?.())
     safely('frameSaver.init', () => frameSaver.init?.())
+    safely('distributor.init', () => distributor.init?.())
   },
 
   /** Fires once per node instance; each attach is a no-op for other types. */
@@ -45,6 +48,7 @@ app.registerExtension({
     safely('resolution.attach', () => resolution.attach?.(node))
     safely('imageGrid.attach', () => imageGrid.attach?.(node))
     safely('frameSaver.attach', () => frameSaver.attach?.(node))
+    safely('distributor.attach', () => distributor.attach?.(node))
   },
 
   /**

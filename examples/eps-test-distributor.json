@@ -1,0 +1,414 @@
+{
+  "id": "00000000-0000-0000-0000-000000000000",
+  "revision": 0,
+  "last_node_id": 10,
+  "last_link_id": 5,
+  "nodes": [
+    {
+      "id": 1,
+      "type": "LoadImage",
+      "pos": [
+        -1000,
+        240
+      ],
+      "size": [
+        274,
+        314
+      ],
+      "flags": {},
+      "order": 0,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "localized_name": "IMAGE",
+          "name": "IMAGE",
+          "type": "IMAGE",
+          "links": [
+            1
+          ]
+        },
+        {
+          "localized_name": "MASK",
+          "name": "MASK",
+          "type": "MASK",
+          "links": null
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "LoadImage"
+      },
+      "widgets_values": [
+        "example.png",
+        "image"
+      ]
+    },
+    {
+      "id": 2,
+      "type": "EPSDistributor",
+      "pos": [
+        -620,
+        240
+      ],
+      "size": [
+        220,
+        122
+      ],
+      "flags": {},
+      "order": 1,
+      "mode": 0,
+      "inputs": [
+        {
+          "localized_name": "image",
+          "name": "image",
+          "type": "IMAGE",
+          "link": 1
+        },
+        {
+          "localized_name": "toggles",
+          "name": "toggles",
+          "shape": 7,
+          "type": "STRING",
+          "widget": {
+            "name": "toggles"
+          },
+          "link": null
+        }
+      ],
+      "outputs": [
+        {
+          "localized_name": "out_1",
+          "name": "out_1",
+          "type": "IMAGE",
+          "links": [
+            2
+          ]
+        },
+        {
+          "localized_name": "out_2",
+          "name": "out_2",
+          "type": "IMAGE",
+          "links": [
+            3
+          ]
+        },
+        {
+          "localized_name": "out_3",
+          "name": "out_3",
+          "type": "IMAGE",
+          "links": [
+            5
+          ]
+        }
+      ],
+      "properties": {
+        "Outputs": 3,
+        "Node name for S&R": "EPSDistributor"
+      },
+      "widgets_values": [
+        "{}"
+      ]
+    },
+    {
+      "id": 3,
+      "type": "SaveImage",
+      "pos": [
+        -300,
+        130
+      ],
+      "size": [
+        300,
+        60
+      ],
+      "flags": {},
+      "order": 2,
+      "mode": 0,
+      "inputs": [
+        {
+          "localized_name": "images",
+          "name": "images",
+          "type": "IMAGE",
+          "link": 2
+        }
+      ],
+      "outputs": [],
+      "title": "Branch A - save as-is",
+      "properties": {
+        "Node name for S&R": "SaveImage"
+      },
+      "widgets_values": [
+        "eps_disttest/branch_A"
+      ]
+    },
+    {
+      "id": 4,
+      "type": "ImageInvert",
+      "pos": [
+        -300,
+        300
+      ],
+      "size": [
+        220,
+        30
+      ],
+      "flags": {},
+      "order": 3,
+      "mode": 0,
+      "inputs": [
+        {
+          "localized_name": "image",
+          "name": "image",
+          "type": "IMAGE",
+          "link": 3
+        }
+      ],
+      "outputs": [
+        {
+          "localized_name": "IMAGE",
+          "name": "IMAGE",
+          "type": "IMAGE",
+          "links": [
+            4
+          ]
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "ImageInvert"
+      }
+    },
+    {
+      "id": 5,
+      "type": "SaveImage",
+      "pos": [
+        -20,
+        300
+      ],
+      "size": [
+        300,
+        60
+      ],
+      "flags": {},
+      "order": 4,
+      "mode": 0,
+      "inputs": [
+        {
+          "localized_name": "images",
+          "name": "images",
+          "type": "IMAGE",
+          "link": 4
+        }
+      ],
+      "outputs": [],
+      "title": "Branch B - save inverted",
+      "properties": {
+        "Node name for S&R": "SaveImage"
+      },
+      "widgets_values": [
+        "eps_disttest/branch_B_inverted"
+      ]
+    },
+    {
+      "id": 6,
+      "type": "PreviewImage",
+      "pos": [
+        -300,
+        430
+      ],
+      "size": [
+        300,
+        250
+      ],
+      "flags": {},
+      "order": 5,
+      "mode": 0,
+      "inputs": [
+        {
+          "localized_name": "images",
+          "name": "images",
+          "type": "IMAGE",
+          "link": 5
+        }
+      ],
+      "outputs": [],
+      "title": "Branch C - preview only",
+      "properties": {
+        "Node name for S&R": "PreviewImage"
+      }
+    },
+    {
+      "id": 7,
+      "type": "MarkdownNote",
+      "pos": [
+        -1000,
+        -420
+      ],
+      "size": [
+        860,
+        620
+      ],
+      "flags": {},
+      "order": 6,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [],
+      "title": "Note",
+      "properties": {},
+      "widgets_values": [
+        "# TEST: EPS Distributor - one image, three branches, each on/off\n\n**Just press Run.** No checkpoint, no lora, no GPU, no setup - it only moves\none image around. Takes a second.\n\n## Pass 1 - everything on (how it ships)\n\nPress **Run** once with all three toggles ON. You should get:\n\n- `output/eps_disttest/branch_A_00001_.png` - the plain image\n- `output/eps_disttest/branch_B_inverted_00001_.png` - **colour-inverted**\n- a preview of the image on the `PreviewImage` node at the bottom\n\nThat is three branches off ONE image in ONE run. Nothing ran twice.\n\n## Pass 2 - turn a branch off (the actual test)\n\nClick the little **checkbox next to `out_2`** on the EPS Distributor so it\ngoes dark, then press **Run** again. Now:\n\n- `branch_A_00002_.png` appears - branch A still runs\n- **NO new `branch_B_inverted_` file** - branch B was skipped\n- the preview still updates - branch C still runs\n\nThe important part: the **Invert** node in the middle of branch B never\nexecuted either. A disabled output skips the WHOLE chain hanging off it, not\njust the node touching it. Watch the canvas during Run - Invert never\nhighlights.\n\n## Pass 3 - all off is legal\n\nTurn all three off (or use the **Toggle All** box in the node's header) and\npress Run. The queue should finish **successfully** with nothing new written\nand no error. That is intended: an all-off Distributor simply means nothing\ndownstream of it runs this time.\n\n## Also worth a click\n\n- **Right-click the node -> Properties -> `Outputs`** to show more than three\n  (up to 8) or fewer. Only sockets at the BOTTOM are added or removed, so the\n  wires you already have never jump to a different output.\n- Try lowering `Outputs` to **1** while `out_2` is still wired: it should\n  **refuse** to go below 2 and tell you `out_2` is wired. Unwire it first and\n  it will go all the way down.\n"
+      ],
+      "color": "#432",
+      "bgcolor": "#653"
+    },
+    {
+      "id": 8,
+      "type": "MarkdownNote",
+      "pos": [
+        -620,
+        420
+      ],
+      "size": [
+        300,
+        200
+      ],
+      "flags": {},
+      "order": 7,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [],
+      "title": "Note",
+      "properties": {},
+      "widgets_values": [
+        "## Toggle a row\n\nEach `out_N` has its own checkbox to the LEFT of its label. Off = that branch is skipped this Run. The header box toggles all of them at once (it shows a dash when they're mixed)."
+      ],
+      "color": "#432",
+      "bgcolor": "#653"
+    },
+    {
+      "id": 9,
+      "type": "MarkdownNote",
+      "pos": [
+        100,
+        130
+      ],
+      "size": [
+        300,
+        140
+      ],
+      "flags": {},
+      "order": 8,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [],
+      "title": "Note",
+      "properties": {},
+      "widgets_values": [
+        "## Branch A\n\nPlain save. This one is your control - it should keep producing files no matter what you do to the other two."
+      ],
+      "color": "#432",
+      "bgcolor": "#653"
+    },
+    {
+      "id": 10,
+      "type": "MarkdownNote",
+      "pos": [
+        320,
+        300
+      ],
+      "size": [
+        320,
+        160
+      ],
+      "flags": {},
+      "order": 9,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [],
+      "title": "Note",
+      "properties": {},
+      "widgets_values": [
+        "## Branch B is a CHAIN\n\nInvert sits between the Distributor and the save. Turn `out_2` off and BOTH nodes skip - that's the whole point. A skipped branch costs nothing."
+      ],
+      "color": "#432",
+      "bgcolor": "#653"
+    }
+  ],
+  "links": [
+    [
+      1,
+      1,
+      0,
+      2,
+      0,
+      "IMAGE"
+    ],
+    [
+      2,
+      2,
+      0,
+      3,
+      0,
+      "IMAGE"
+    ],
+    [
+      3,
+      2,
+      1,
+      4,
+      0,
+      "IMAGE"
+    ],
+    [
+      4,
+      4,
+      0,
+      5,
+      0,
+      "IMAGE"
+    ],
+    [
+      5,
+      2,
+      2,
+      6,
+      0,
+      "IMAGE"
+    ]
+  ],
+  "groups": [
+    {
+      "id": 1,
+      "title": "One image in",
+      "bounding": [
+        -1020,
+        180,
+        660,
+        400
+      ],
+      "color": "#3f789e",
+      "flags": {}
+    },
+    {
+      "id": 2,
+      "title": "Three branches out",
+      "bounding": [
+        -320,
+        60,
+        700,
+        660
+      ],
+      "color": "#8A8",
+      "flags": {}
+    }
+  ],
+  "config": {},
+  "extra": {
+    "ds": {
+      "scale": 0.65,
+      "offset": [
+        1080,
+        460
+      ]
+    }
+  },
+  "version": 0.4
+}

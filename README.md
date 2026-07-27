@@ -5,7 +5,7 @@ live in **plain files you own**. Everything appears under **EPSNodes** in
 the node browser and Settings. It started as a LoRA family and has grown
 beyond it — image-flow utilities now live here too.
 
-## The ten nodes
+## The eleven nodes
 
 No dependencies — every node below works on its own. Each has its own
 section further down; this is the map.
@@ -17,6 +17,7 @@ section further down; this is the map.
 | [**EPS Lora Loader State Controller**](#eps-lora-loader-state-controller-shipped-requires-rgthree-comfy) | Captures and applies those states directly on an [rgthree Power Lora Loader](https://github.com/rgthree/rgthree-comfy) — rgthree stays the loader, this moves whole configurations in and out of it. |
 | [**EPS LoRA Sweep**](#eps-lora-sweep-shipped) | Auditions any `LORA_STACK` by strength: set min/max/increment and one queue runs your workflow once per step (per lora, or all together). |
 | [**EPS Switcher**](#eps-switcher-shipped) | Any number of image inputs, each independently on/off; the enabled ones fan out (N enabled → N runs). Disabled branches never execute. |
+| [**EPS Distributor**](#eps-distributor-shipped) | The mirror of the Switcher: one image in, up to eight branches out, each independently on/off. Toggle a branch off and only that branch is skipped — everything happens in one run. |
 | [**EPS Resolution**](#eps-resolution-shipped) | Image-first resize + size in one node: target size (with a drag pad), four resize modes, and the original image + both sets of dimensions passed through. |
 | [**EPS Image Grid**](#eps-image-grid-shipped) | Collects images across separate Runs into a buffer that survives restarts, shows them as a thumbnail grid, and fans the whole set out on demand. |
 | [**EPS Cross Product**](#eps-cross-product-shipped) | Pairs every image with every text — 2 images × 4 prompts = 8 runs. (ComfyUI's own list pairing zips index-by-index instead.) |
@@ -27,7 +28,7 @@ section further down; this is the map.
 > [docs/FORMAT.md](docs/FORMAT.md). Want to see everything working
 > together? Load
 > [examples/eps-full-pipeline.json](examples/eps-full-pipeline.json) —
-> all ten nodes stitched into one annotated workflow — or one of the two
+> all eleven nodes stitched into one annotated workflow — or one of the three
 > ready-to-run test graphs beside it ([examples/](examples/)).
 
 ## EPS Prompt Notebook (shipped)
@@ -246,6 +247,36 @@ off means three runs.
   toggles, and the backend still see `image_N`), persists with the
   workflow, and an empty name resets it.
 - Toggle states save with the workflow and survive reload.
+
+## EPS Distributor (shipped)
+
+`EPSNodes → EPS Distributor`: the **mirror of EPS Switcher**. Where the
+Switcher gathers many toggleable inputs into one flow, the Distributor takes
+**one image and fans it out to up to eight outputs, each independently on or
+off**. Wire the same picture into an upscale branch, a restyle branch and a
+straight-to-save branch, then turn any of them off from this one node — no
+rewiring, no dragging bypass boxes around groups.
+
+- **A toggle on every output.** Click it off and the branch wired to that
+  socket is skipped for that queue; the branches on the sockets still turned
+  on see the real image and run normally.
+- **One run, not many.** This is the important difference from the Switcher.
+  The Switcher's fan-out makes the rest of your workflow run *N times*; the
+  Distributor's branches are **parallel paths inside a single run**. Use the
+  Switcher to iterate over images, the Distributor to route one image several
+  ways at once.
+- **Skipped, not "sent an empty image."** A disabled branch doesn't execute
+  at all — the sampler, upscaler, or save node on it never runs, so you don't
+  pay for it and it can't write a file.
+- **All off is allowed:** turn every output off and the queue still
+  succeeds — nothing downstream of this node runs that time. No error.
+- **Show only the outputs you need:** the node starts with three visible and
+  reveals more up to eight. Only *trailing* sockets are added or removed, so
+  the wires you already have never shift to a different output.
+- An output with nothing wired to it doesn't care either way — leave it on
+  or off, it changes nothing.
+- Toggle states and the visible-output count save with the workflow and
+  survive reload.
 
 ## EPS Resolution (shipped)
 

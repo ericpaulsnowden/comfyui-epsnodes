@@ -1,5 +1,6 @@
-"""Frontend geometry tests for the EPS Resolution M2 size grid (FORMAT.md
-§6.5 M2 — the 2026-07-21 full-width-square / height-follows-width fix).
+"""Frontend tests for the EPS Resolution M2 size grid (FORMAT.md §6.5 M2 —
+the 2026-07-21 full-width-square / height-follows-width fix), plus the
+hideable-output wired-refusal guard (§6.5, ``isOutputConnected``).
 
 ``web/eps_image/resolution.js`` deliberately factors the grid's geometry into
 PURE exported functions (``getPlotRect``, ``valueToPlot``/``plotToValue``,
@@ -41,6 +42,27 @@ PROBE_WIDTHS = [190, 210, 300, 512, 1000]
 #: paths, making it the square's side. Mirrored in the probe script.
 DOM_WIDGET_MARGIN = 10
 
+#: (label, JS expression building the `output`, expected isOutputConnected()).
+#: Mirrors `LGraphCanvas.ts`'s `hasRelevantOutputLinks`, which unions BOTH
+#: `output.links` and `output._floatingLinks`. The floating-only rows are the
+#: regression pin: a `.links`-only check (this file's own version until
+#: v0.34.0) reads a link that is still mid-drag as UNCONNECTED, so both
+#: "never leave a dangling wire" refusals would let go — and the original-size
+#: one really `removeOutput()`s the socket under it. Kept identical to
+#: tests/test_distributor_js.py's list for the same function there.
+OUTPUT_LINK_CASES = [
+    ("null output", "null", False),
+    ("undefined output", "undefined", False),
+    ("neither field", "{}", False),
+    ("empty links array", "{ links: [] }", False),
+    ("settled link", "{ links: [7] }", True),
+    ("links not an array", "{ links: 3 }", False),
+    ("empty floating set", "{ links: [], _floatingLinks: new Set() }", False),
+    ("floating link only", "{ links: [], _floatingLinks: new Set([1]) }", True),
+    ("floating with no links field", "{ _floatingLinks: new Set([1, 2]) }", True),
+    ("floating set is not a Set", "{ links: [], _floatingLinks: {} }", False),
+]
+
 PROBE_JS = """
 import * as grid from './extensions/comfyui-epsnodes/eps_image/resolution.js'
 
@@ -60,6 +82,7 @@ const out = {
     readoutFont: grid.READOUT_FONT,
     readoutFontStrong: grid.READOUT_FONT_STRONG
   },
+  linkChecks: [%(link_cases)s].map((output) => grid.isOutputConnected(output)),
   plots: widths.map((w) => ({ w, ...grid.getPlotRect(w) })),
   widgetHeights: widths.map((w) => ({ w, h: grid.computeGridWidgetHeight(w) })),
   widgetHeightRepeat: [grid.computeGridWidgetHeight(300), grid.computeGridWidgetHeight(300)],
@@ -109,7 +132,14 @@ def grid_api(tmp_path_factory: pytest.TempPathFactory) -> dict:
 
     probe = layout / "probe.mjs"
     probe.write_text(
-        PROBE_JS % {"widths": json.dumps(PROBE_WIDTHS), "margin": DOM_WIDGET_MARGIN},
+        PROBE_JS
+        % {
+            "widths": json.dumps(PROBE_WIDTHS),
+            "margin": DOM_WIDGET_MARGIN,
+            # Built as raw JS, not JSON: `_floatingLinks` is a real `Set`, so
+            # the case inputs have to be constructed in the probe itself.
+            "link_cases": ", ".join(js for _, js, _ in OUTPUT_LINK_CASES),
+        },
         encoding="utf-8",
     )
 
@@ -132,6 +162,25 @@ def test_module_still_exports_the_extension_entry_points(grid_api: dict) -> None
     """web/eps_image.js consumes init()/attach(); the test exports must never
     displace them."""
     assert grid_api["exports"] == {"hasInit": True, "hasAttach": True}
+
+
+# ---------------------------------------------- the wired-output refusal
+
+
+def test_is_output_connected_counts_floating_links_too(grid_api: dict) -> None:
+    """Both hideable-output paths (§6.5) refuse to hide a WIRED output rather
+    than leave a dangling wire — `Show original size` because it really
+    `removeOutput()`s the pair, `Show passthrough image` because the cosmetic
+    hide would leave the wire drawn to an invisible dot. "Wired" therefore has
+    to mean what the frontend itself means by it: `LGraphCanvas.ts`'s
+    `hasRelevantOutputLinks` unions `output.links` with `output._floatingLinks`
+    (a link mid-drag), so a `.links`-only check would silently drop a link
+    the user still has hold of. Same case list as distributor.js's copy of
+    this function, which the two are kept in lockstep with."""
+    for (label, _js, expected), got in zip(
+        OUTPUT_LINK_CASES, grid_api["linkChecks"], strict=True
+    ):
+        assert got is expected, f"isOutputConnected({label}) -> {got!r}, wanted {expected!r}"
 
 
 # ------------------------------------------------------- full-width square
