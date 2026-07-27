@@ -268,8 +268,15 @@ rewiring, no dragging bypass boxes around groups.
 - **Skipped, not "sent an empty image."** A disabled branch doesn't execute
   at all — the sampler, upscaler, or save node on it never runs, so you don't
   pay for it and it can't write a file.
-- **All off is allowed:** turn every output off and the queue still
-  succeeds — nothing downstream of this node runs that time. No error.
+- **All off is allowed, and it skips the work too:** turn every output off
+  and the queue still succeeds with no error — and nothing *upstream* of the
+  node runs either. Put a Distributor at the end of a graph, switch
+  everything off, and the sampler feeding it never fires. (With even one
+  output still on, the upstream runs normally.)
+- **Name your outputs:** double-click an output — the socket or anywhere in
+  its row — and give it a real name like `upscale branch`. It's display-only,
+  so wires and toggles are unaffected, and clearing the field resets it to
+  `out_N`.
 - **Show only the outputs you need:** the node starts with three visible and
   reveals more up to eight. Only *trailing* sockets are added or removed, so
   the wires you already have never shift to a different output.

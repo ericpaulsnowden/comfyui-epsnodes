@@ -131,6 +131,11 @@ IS_ENABLED_CASES = [
     ({"out_1": "false"}, "out_1", True),
 ]
 
+#: Custom-label lengths to probe the renamable-output geometry at. 0 and 5
+#: are the un-renamed baseline (`out_N`); the long ones are what a real
+#: rename ("upscale branch", "final save for the client") looks like.
+LABEL_LENGTHS = [0, 5, 11, 12, 20, 40, 120]
+
 PROBE_JS = """
 import * as d from './extensions/comfyui-epsnodes/eps_image/distributor.js'
 
@@ -166,6 +171,15 @@ const out = {
   boxRects: socketXs.map((socketX) => {
     const rect = d.toggleBoxRect(socketX, socketY)
     return { socketX, boxX: rect.x, boxY: rect.y, w: rect.w, h: rect.h }
+  }),
+  // Renamed outputs: the label is drawn LEFTWARD from the dot, so a long
+  // one must push the box further left -- never let it drift right, under
+  // the wire-drag box.
+  labelledRects: %(label_lengths)s.map((len) => {
+    const label = 'x'.repeat(len)
+    const reach = d.outputTextReach(label)
+    const rect = d.toggleBoxRect(600, socketY, reach)
+    return { len, reach, boxX: rect.x, w: rect.w }
   })
 }
 
@@ -205,6 +219,7 @@ def distributor_api(tmp_path_factory: pytest.TempPathFactory) -> dict:
             # Built as raw JS, not JSON: `_floatingLinks` is a real `Set`, so
             # the case inputs have to be constructed in the probe itself.
             "link_cases": ", ".join(js for _, js, _ in OUTPUT_LINK_CASES),
+            "label_lengths": json.dumps(LABEL_LENGTHS),
         },
         encoding="utf-8",
     )
@@ -380,6 +395,43 @@ def test_toggle_box_clears_output_mousedown_boundary(distributor_api: dict) -> N
             f"does not clear the mousedown boundary {boundary} -- a click there "
             "would start a wire-drag instead of toggling"
         )
+
+
+def test_renamed_output_never_pushes_the_toggle_under_the_wire_drag_box(
+    distributor_api: dict,
+) -> None:
+    """Outputs are renamable (owner ask 2026-07-27), and a label is drawn
+    LEFTWARD from the socket dot -- so a long one must move the toggle box
+    further LEFT, never right. The hard boundary still applies at every
+    length: right edge strictly left of `socketX - 15`."""
+    socket_x = 600
+    previous_box_x = None
+    for entry in distributor_api["labelledRects"]:
+        right_edge = entry["boxX"] + entry["w"]
+        assert right_edge < socket_x - 15, (
+            f"label of {entry['len']} chars: box right edge {right_edge} "
+            f"does not clear {socket_x - 15}"
+        )
+        if previous_box_x is not None:
+            assert entry["boxX"] <= previous_box_x, (
+                f"a longer label ({entry['len']} chars) moved the box RIGHT "
+                f"({previous_box_x} -> {entry['boxX']}), toward the label it "
+                "is supposed to be avoiding"
+            )
+        previous_box_x = entry["boxX"]
+
+
+def test_short_labels_keep_the_plain_row_gap(distributor_api: dict) -> None:
+    """Up to the point where a label actually reaches it, the box stays at
+    the plain ROW_GAP -- the fixed margin is the floor, not an addition."""
+    row_gap = distributor_api["constants"]["rowGap"]
+    row_box = distributor_api["constants"]["rowBox"]
+    baseline = 600 - row_gap - row_box
+    for entry in distributor_api["labelledRects"]:
+        if entry["reach"] + 12 <= row_gap:
+            assert entry["boxX"] == baseline, (
+                f"label of {entry['len']} chars should not have moved the box"
+            )
 
 
 def test_toggle_box_geometry_shape(distributor_api: dict) -> None:

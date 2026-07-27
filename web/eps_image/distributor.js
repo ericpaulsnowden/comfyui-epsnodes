@@ -255,6 +255,17 @@ export const ROW_BOX = 12 // same size as switcher.js's toggle box
  * rather than a freshly-tuned number.
  */
 export const ROW_GAP = 92
+/** Where `NodeSlot.draw()` puts an output label's RIGHT edge, relative to the
+ * socket dot: `ctx.fillText(text, pos[0] - 10, ...)` with
+ * `textAlign = 'right'` (module docstring), so the text grows LEFTWARD from
+ * here. Only matters now that outputs are RENAMABLE. */
+const ROW_TEXT_ANCHOR = 10
+/** measureSlots.ts's own ~7px/char stand-in (`20 + nameLength*7`), the
+ * proxy this pack already treats as validated for "how wide does litegraph
+ * render this slot name". */
+const ROW_CHAR_WIDTH = 7
+/** Clearance between a label's left edge and the toggle box's right edge. */
+const ROW_LABEL_PAD = 12
 const HEADER_BOX = 12
 const HEADER_ROW_HEIGHT = 20
 /** See file header's "Width floor" section for why this reuses switcher.js's
@@ -341,20 +352,42 @@ export function isSlotEnabled(map, name) {
 }
 
 /**
+ * How far an output's DRAWN label reaches leftward from its socket dot.
+ * `NodeSlot.draw()` right-aligns the text ending at `socketX - 10`, so the
+ * reach is that anchor plus the rendered width (measureSlots.ts's own
+ * ~7px/char proxy). Pure; exported for tests.
+ * @param {string} text
+ * @returns {number}
+ */
+export function outputTextReach(text) {
+  return ROW_TEXT_ANCHOR + String(text ?? '').length * ROW_CHAR_WIDTH
+}
+
+/**
  * Pure geometry for one output row's toggle box, given the socket's own
  * LOCAL position (graph position minus `node.pos` -- the frame
  * `node.getOutputPos()`/`getConnectionPos()` both return). No node/ctx/DOM
  * involved, so `tests/test_distributor_js.py` drives this directly under
- * Node. See the module docstring's `_processNodeClick` citation for the
- * `< socketLocalX - 15` right-edge requirement this must clear, and the
- * `ROW_GAP` constant above for why the margin is fixed rather than
- * label-length-dependent.
+ * Node.
+ *
+ * Two constraints, and the gap is the larger of them:
+ *  - HARD: the box's right edge must stay strictly left of
+ *    `socketLocalX - 15`, or the click starts a wire drag instead of
+ *    toggling (module docstring's `_processNodeClick` citation).
+ *  - SOFT: it must not sit under the drawn label. Fixed `out_N` names are
+ *    5 characters and `ROW_GAP` covers them, but outputs are RENAMABLE
+ *    (owner ask 2026-07-27) and a long label would otherwise be drawn
+ *    straight over the box -- so *textReach* pushes the box further left
+ *    when needed. Passing 0 (or omitting it) keeps the plain `ROW_GAP`
+ *    behavior.
  * @param {number} socketLocalX
  * @param {number} socketLocalY
+ * @param {number} [textReach] from `outputTextReach(displayed label)`
  * @returns {{x:number, y:number, w:number, h:number}}
  */
-export function toggleBoxRect(socketLocalX, socketLocalY) {
-  const x = socketLocalX - ROW_GAP - ROW_BOX
+export function toggleBoxRect(socketLocalX, socketLocalY, textReach = 0) {
+  const gap = Math.max(ROW_GAP, (Number(textReach) || 0) + ROW_LABEL_PAD)
+  const x = socketLocalX - gap - ROW_BOX
   const y = socketLocalY - ROW_BOX / 2
   return { x, y, w: ROW_BOX, h: ROW_BOX }
 }
@@ -381,6 +414,58 @@ function getTogglesWidget(node) {
 
 function outputIndexByName(node, name) {
   return (node.outputs || []).findIndex((output) => output?.name === name)
+}
+
+/** What litegraph actually DRAWS for this output -- `label` wins over
+ * `name`, matching `NodeSlot.draw()`'s own `label ?? localized_name ?? name`
+ * precedence (switcher.js's identical helper for its input rows). */
+function displayText(output) {
+  return (output && (output.label || output.name)) || ''
+}
+
+/**
+ * Sets or clears *output*'s display label. `output.name` -- the backend's
+ * `RETURN_NAMES` contract AND the key the `toggles` map is written under --
+ * is never touched, so a rename is purely cosmetic and can never repoint a
+ * wire or silently disable a slot (switcher.js's identical rule for its
+ * input rows, FORMAT.md section 6.4). Empty/whitespace DELETES the property
+ * rather than storing `""`, so litegraph's own `label || name` fallback
+ * shows `out_N` again immediately.
+ */
+function setOutputLabel(node, output, label) {
+  const trimmed = (label ?? '').trim()
+  if (trimmed) output.label = trimmed
+  else delete output.label
+  node.graph?.setDirtyCanvas(true, true)
+}
+
+/** Best-effort active LGraphCanvas for callbacks that don't receive one
+ * (switcher.js's identical helper). */
+function activeCanvas() {
+  return app?.canvas ?? null
+}
+
+/**
+ * Opens the rename editor for *output*: `LGraphCanvas.prompt` where the fork
+ * has it (present on 1.45.21), else `window.prompt`. `window.prompt` returns
+ * `null` on Cancel but `""` on an intentional OK-with-empty-field, so only
+ * the `null` case is skipped -- clearing the field resets to `out_N`.
+ */
+function promptForOutputLabel(node, output, canvas, event) {
+  const current = output.label || ''
+  const commit = (value) => {
+    if (value === null || value === undefined) return
+    setOutputLabel(node, output, String(value))
+  }
+  try {
+    if (canvas && typeof canvas.prompt === 'function') {
+      canvas.prompt('Output name', current, commit, event)
+      return
+    }
+  } catch (error) {
+    console.warn(PREFIX, 'canvas.prompt failed; falling back', error)
+  }
+  commit(window.prompt('Output name', current))
 }
 
 /**
@@ -451,15 +536,30 @@ function toggleRowEnabled(node, name) {
 }
 
 /**
- * Drops toggle-map entries for `out_N` slots that are no longer VISIBLE --
- * the output-side analogue of switcher.js's own pruneToggles, which drops
- * entries for `image_N` slots no longer CONNECTED (that file's docstring:
+ * Reconciles the toggle map with which `out_N` slots are currently VISIBLE:
+ * a hidden slot is recorded as `false`, a visible one keeps whatever the
+ * user set, and a slot that has just BECOME visible is cleared back to
+ * enabled.
+ *
+ * The hidden-means-`false` half is load-bearing, not bookkeeping (owner
+ * question 2026-07-27). The backend has a fixed EIGHT slots and treats an
+ * ABSENT key as enabled -- deliberately, so a no-frontend `/prompt` caller
+ * who has never heard of this widget still gets every output. But the node
+ * only shows `Outputs` of them, so with the default 3 visible and all three
+ * switched off, out_4..out_8 were still "enabled" as far as the backend
+ * could tell. `check_lazy_status` then still had to request `image`, and the
+ * whole upstream chain ran to feed five outputs that do not exist on the
+ * node and cannot be wired to anything. Recording hidden slots as `false`
+ * makes the serialized state say what the user can actually see, so
+ * "everything off" on canvas really is all-off to the backend and the
+ * upstream is genuinely skipped. Verified on the rig both ways.
+ *
+ * The just-became-visible half is switcher.js's own anti-stale rationale
+ * (its pruneToggles drops entries for no-longer-CONNECTED `image_N`:
  * "keeping a stale `false` on a disconnected... slot would silently disable
- * a DIFFERENT image later re-wired into that same slot number"). Here a
- * hidden `out_N` is genuinely removed from `node.outputs` (real
- * removeOutput, resolution.js's mechanism), so "visible" and "exists" are
- * the same test, and the same anti-stale-surprise rationale applies:
- * revealing a previously-hidden slot later always starts ENABLED.
+ * a DIFFERENT image later re-wired into that same slot number"). Same
+ * hazard here in reverse: without the clear, raising `Outputs` would reveal
+ * a socket that is already switched off for no reason the user can see.
  */
 function pruneToggles(node) {
   const widget = getTogglesWidget(node)
@@ -467,9 +567,38 @@ function pruneToggles(node) {
   const map = readToggles(node)
   const visibleNames = new Set(outputEntries(node).map((entry) => entry.name))
   let changed = false
+
   for (const key of Object.keys(map)) {
-    if (!visibleNames.has(key)) {
-      delete map[key]
+    // A key for a slot that is visible again: clear it, so a revealed
+    // socket always starts enabled.
+    if (!visibleNames.has(key) && !OUTPUT_NAME_RE.test(key)) {
+      delete map[key] // foreign key (hand-edited workflow) -- drop entirely
+      changed = true
+    }
+  }
+  for (let n = 1; n <= MAX_OUTPUTS; n++) {
+    const name = outputName(n)
+    if (visibleNames.has(name)) continue
+    if (map[name] !== false) {
+      map[name] = false // hidden slot: genuinely off, not merely unmentioned
+      changed = true
+    }
+  }
+  if (changed) writeToggles(node, map)
+}
+
+/** Clears the toggle entries for slots that just BECAME visible, so a
+ * revealed socket starts enabled rather than inheriting the `false`
+ * `pruneToggles` wrote while it was hidden. Called by
+ * `applyVisibleOutputCount` with the names revealed by THIS change only --
+ * a slot the user switched off while it was visible must keep that state. */
+function clearTogglesFor(node, names) {
+  if (!names.length) return
+  const map = readToggles(node)
+  let changed = false
+  for (const name of names) {
+    if (name in map) {
+      delete map[name]
       changed = true
     }
   }
@@ -588,10 +717,12 @@ function applyVisibleOutputCount(node) {
   const entries = outputEntries(node)
   const currentCount = entries.length
 
+  const revealed = []
   if (desired > currentCount) {
     for (let n = currentCount + 1; n <= desired; n++) {
       if (outputIndexByName(node, outputName(n)) === -1) {
         node.addOutput(outputName(n), OUTPUT_TYPE)
+        revealed.push(outputName(n))
       }
     }
   } else if (desired < currentCount) {
@@ -604,7 +735,11 @@ function applyVisibleOutputCount(node) {
     for (const entry of toRemove) node.removeOutput(entry.idx)
   }
 
+  // Order matters: prune first (hidden slots -> `false`), THEN clear the
+  // ones this call just revealed, so a newly-visible socket starts enabled
+  // instead of inheriting the `false` it carried while hidden.
   pruneToggles(node)
+  clearTogglesFor(node, revealed)
   resyncSize(node)
 }
 
@@ -715,11 +850,77 @@ function drawRowToggles(node, ctx) {
   for (const entry of outputEntries(node)) {
     const pos = outputLocalPos(node, entry.idx)
     if (!pos) continue
-    const rect = toggleBoxRect(pos[0], pos[1])
+    // Label-aware: a renamed output's text is drawn leftward from the dot,
+    // so the box moves out of its way (toggleBoxRect's own docstring).
+    const rect = toggleBoxRect(pos[0], pos[1], outputTextReach(displayText(entry.output)))
     drawToggleBox(ctx, rect.x, rect.y, rect.w, isRowEnabled(node, entry.name), false)
     rects.push({ name: entry.name, x: rect.x, y: rect.y, w: rect.w, h: rect.h })
   }
   node.__epsDistributorRowRects = rects
+}
+
+/**
+ * The `out_N` row whose socket sits nearest *localY*, for the
+ * double-click-anywhere-in-the-row path. Mirrors switcher.js's `rowAtLocalY`
+ * but reads the row rects `drawRowToggles` already cached, so it can never
+ * disagree with what was drawn.
+ */
+function rowAtLocalY(node, localY) {
+  for (const entry of outputEntries(node)) {
+    const pos = outputLocalPos(node, entry.idx)
+    if (pos && Math.abs(localY - pos[1]) <= ROW_BOX) return entry
+  }
+  return null
+}
+
+/**
+ * Double-click an output to rename it (owner ask 2026-07-27: "You should be
+ * able to name the outputs").
+ *
+ * Two hooks, because litegraph dispatches the two halves of a row through
+ * different branches of `_processNodeClick` (module docstring):
+ * `onOutputDblClick(i, e)` fires when the double-click lands in the output's
+ * OWN hit region -- the socket dot and the ~30x20 box around it, registered
+ * as `pointer.onDoubleClick` in the outputs loop, which `return`s before
+ * anything else. `onDblClick(e, pos)` covers the rest of the row, including
+ * our toggle box (deliberately drawn outside that hit region). The title bar
+ * is excluded via litegraph's own `pos[1] < 0` signal so double-clicking the
+ * title still renames the NODE, not an output.
+ */
+function wireOutputRename(node) {
+  const originalOnOutputDblClick = node.onOutputDblClick
+  node.onOutputDblClick = function (index, e) {
+    let result
+    if (typeof originalOnOutputDblClick === 'function') {
+      result = originalOnOutputDblClick.apply(this, arguments)
+    }
+    try {
+      const output = this.outputs?.[index]
+      if (output && OUTPUT_NAME_RE.test(output.name || '')) {
+        promptForOutputLabel(this, output, activeCanvas(), e)
+      }
+    } catch (error) {
+      console.warn(PREFIX, 'onOutputDblClick rename failed', error)
+    }
+    return result
+  }
+
+  const originalOnDblClick = node.onDblClick
+  node.onDblClick = function (e, pos, canvas) {
+    let result
+    if (typeof originalOnDblClick === 'function') {
+      result = originalOnDblClick.apply(this, arguments)
+    }
+    try {
+      if (Array.isArray(pos) && pos[1] >= 0) {
+        const entry = rowAtLocalY(this, pos[1])
+        if (entry) promptForOutputLabel(this, entry.output, canvas || activeCanvas(), e)
+      }
+    } catch (error) {
+      console.warn(PREFIX, 'onDblClick rename failed', error)
+    }
+    return result
+  }
 }
 
 function wireRowToggleDrawing(node) {
@@ -899,6 +1100,7 @@ export function attach(node) {
 
     wireRowToggleDrawing(node)
     wireRowToggleClicks(node)
+    wireOutputRename(node)
     addHeaderWidget(node)
 
     // Fresh node: hide down to the just-seeded default immediately (backend

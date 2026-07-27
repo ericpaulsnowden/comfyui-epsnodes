@@ -22,13 +22,30 @@ which is not what a plain per-branch tee means. Likewise no INPUT_IS_LIST
 (nothing fans IN either -- image and toggles are each consumed exactly once,
 never merged with anything upstream), no IS_CHANGED (both inputs are
 ordinary tracked inputs already covered by ComfyUI's default input-hash
-caching -- there is no other state that could go stale), and no
-lazy/check_lazy_status (Switcher's per-input lazy skip exists to stop an
-upstream from running at all when its slot is disabled; here there is only
-ONE input, and it is always needed to produce ANY enabled output, so there
-is nothing to conditionally avoid resolving -- the branch-skip this node
-provides is entirely on the OUTPUT side, via ExecutionBlocker, never on the
-input side).
+caching -- there is no other state that could go stale).
+
+`image` IS lazy, for exactly one case: ALL slots off (owner question,
+2026-07-27 -- "if this is at the end of a workflow, and all of the
+checkboxes are off, should the workflow run up to this point?"). Measured on
+the rig before answering: it DID still run, because a non-lazy input is
+resolved before this node executes, so every upstream node -- a sampler, an
+upscale, a whole chain -- did its work only to have all eight outputs
+blocked. Nothing consumed any of it. `check_lazy_status` below now declines
+`image` in that one case, which is a real branch skip (an upstream that is
+never REQUESTED is never added to the execution graph at all --
+`comfy_execution/graph.py`'s `TopologicalSort.add_node` `is_lazy` branch),
+and makes this node consistent with EPSSwitcher, whose all-off case already
+skipped its upstream. With ANY slot enabled, `image` is requested exactly as
+before.
+
+This stays inside §6.4's hard rule -- "graph inspection may change what a
+node REQUESTS, never what it RETURNS" -- because the decision reads only
+`toggles`, an ordinary tracked input that is part of this node's cache key,
+never the graph. And what `distribute` RETURNS in the all-off case is eight
+blockers whether or not `image` was ever resolved: the value is genuinely
+unused on that path, so declining it cannot change the result, only the
+work done to reach it. Flipping any toggle changes `toggles`, which
+invalidates the cache entry, so the next run re-decides from scratch.
 
 Toggle bridge: semantics identical to Switcher's toggles widget (own local
 _parse_toggles/DEFAULT_TOGGLES below, adapted rather than imported -- see
@@ -192,7 +209,12 @@ class EPSDistributor:
     def INPUT_TYPES(cls) -> dict[str, Any]:
         return {
             "required": {
-                "image": ("IMAGE",),
+                # `lazy` so `check_lazy_status` below can decline it when every
+                # slot is off (module docstring). Core reads this flag straight
+                # off the input's options dict, exactly as it does for
+                # EPSSwitcher's own `image_N` inputs; `lazy` is orthogonal to
+                # required/optional.
+                "image": ("IMAGE", {"lazy": True}),
             },
             "optional": {
                 # In `optional`, NOT `required` (module docstring): a hand-built
@@ -204,6 +226,32 @@ class EPSDistributor:
                 "toggles": ("STRING", {"default": DEFAULT_TOGGLES, "multiline": False}),
             },
         }
+
+    def _enabled_slots(self, toggles: str) -> list[bool]:
+        """Per-slot enabled flags, `out_1`..`out_MAX_OUTPUTS`.
+
+        Shared by `distribute` and `check_lazy_status` so the two can never
+        disagree about which slots are on -- a disagreement would mean
+        declining `image` while some slot still expects to emit it.
+        """
+        toggle_map = _parse_toggles(toggles)
+        return [toggle_map.get(f"out_{n}", True) is not False for n in range(1, MAX_OUTPUTS + 1)]
+
+    def check_lazy_status(self, image: Any = None, toggles: str = DEFAULT_TOGGLES) -> list[str]:
+        """Request `image` unless EVERY slot is off (module docstring).
+
+        Returning `[]` tells core nothing further is needed, so a lazy
+        input's producer is never promoted into the execution graph and the
+        whole upstream chain is skipped -- the same real branch-skip
+        EPSSwitcher gets for its disabled slots. Returning `["image"]` is
+        safe to repeat: core only actually requests a name that is still
+        unresolved and keeps calling until nothing new is needed
+        (`comfy.comfy_types.node_typing.CheckLazyMixin`).
+
+        Reads only `toggles`, never the graph -- see the module docstring on
+        why that keeps this inside FORMAT.md section 6.4's rule.
+        """
+        return ["image"] if any(self._enabled_slots(toggles)) else []
 
     def distribute(self, image: Any, toggles: str = DEFAULT_TOGGLES) -> tuple[Any, ...]:
         """Fan `image` out to MAX_OUTPUTS sockets, gated per-slot by `toggles`.
@@ -222,10 +270,7 @@ class EPSDistributor:
         ONE tuple slot blocks only the branch wired to it instead of this
         node's whole output.
         """
-        toggle_map = _parse_toggles(toggles)
-        enabled = [
-            toggle_map.get(f"out_{n}", True) is not False for n in range(1, MAX_OUTPUTS + 1)
-        ]
+        enabled = self._enabled_slots(toggles)
 
         if all(enabled):
             # Nothing disabled -- skip the import entirely; every slot below

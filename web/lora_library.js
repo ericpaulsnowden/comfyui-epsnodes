@@ -56,6 +56,33 @@ app.registerExtension({
   },
 
   /**
+   * Give the frontend-only controller node its real display name, BEFORE the
+   * defs reach the store (FORMAT.md §6.3).
+   *
+   * `app.ts`'s `registerNodes` synthesizes a def for every
+   * frontend-registered litegraph type with `display_name` HARDCODED to the
+   * registration name — it reads the class's `category` and `description`
+   * statics but never its `title`. So this node announced itself as
+   * "LoraLibrarySetController" and a gallery search for "EPS" missed it
+   * (owner report 2026-07-22, and AGAIN on 2026-07-27 after the first fix).
+   *
+   * The first fix patched `nodeDefsByName` in the Pinia store on a retry
+   * loop AFTER `updateNodeDefs` had already run. That made the SEARCH index
+   * agree (which is what got verified), but anything the store had already
+   * derived from the def kept the old name — which is why it looked
+   * unfixed. This hook is the actual seam: `registerNodes` calls
+   * `invokeExtensions('beforeRegisterVueAppNodeDefs', nodeDefArray)` on the
+   * array and only THEN hands it to `nodeDefStore.updateNodeDefs`, so
+   * editing it here means nothing downstream ever sees the class id.
+   * Verified in `app.ts` from the installed frontend package's own source
+   * map (1.45.21). Older frontends simply never call this — the legacy
+   * store patch in controller.js stays as the fallback for them.
+   */
+  beforeRegisterVueAppNodeDefs(defs) {
+    safely('controller.nameNodeDef', () => controller.nameNodeDef(defs))
+  },
+
+  /**
    * Fires once per node instance. Attaches the notebook's two-pane DOM
    * widget (FORMAT.md §7.2) to LoraLibraryNotebook nodes.
    */

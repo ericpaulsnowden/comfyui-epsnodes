@@ -1682,6 +1682,24 @@ function entryDisplayName(entry) {
  * The def is synthesized in registerNodes AFTER extensions register their
  * node types, so this retries (250ms, up to 10s) instead of assuming order.
  */
+/**
+ * Set this node's `display_name` on the synthesized def BEFORE it reaches
+ * the node-def store — the real fix for the id-as-name problem
+ * `_fixLibraryDisplayName` below only half-solved. Called from
+ * `lora_library.js`'s `beforeRegisterVueAppNodeDefs` hook, which `app.ts`
+ * invokes on the def ARRAY between synthesis and `updateNodeDefs`; see that
+ * hook's comment for the full why. Defensive per §6.3: a shape we don't
+ * recognize is left alone rather than throwing during startup.
+ *
+ * @param {Array<{name?: string, display_name?: string}>} defs
+ */
+export function nameNodeDef(defs) {
+  if (!Array.isArray(defs)) return
+  for (const def of defs) {
+    if (def && def.name === NODE_TYPE) def.display_name = NODE_TITLE
+  }
+}
+
 function _fixLibraryDisplayName() {
   let attempts = 0
   const tryPatch = () => {
@@ -1807,6 +1825,33 @@ export function registerControllerNode() {
       }
 
       // ---------------------------------------------------------- lifecycle
+
+      /**
+       * Repair a title baked into a workflow saved before the rename.
+       *
+       * THE reason the owner kept reporting this node as
+       * "LoraLibrarySetController" (2026-07-22 and again 2026-07-27) even
+       * though every registration-side fix was correct: litegraph's
+       * `configure()` restores `info.title` verbatim, and a workflow saved
+       * back when the title WAS the class id carries
+       * `"title": "LoraLibrarySetController"` forever. Nothing about
+       * registering the type differently can reach an already-saved graph —
+       * fresh nodes were always fine (they serialize no `title` at all,
+       * verified live), which is exactly why this looked fixed from here
+       * and stayed broken on his machine.
+       *
+       * Only the EXACT stale string is rewritten, so a deliberate rename of
+       * this node is never touched. Runs after super so it wins over the
+       * restored value.
+       */
+      configure(info) {
+        super.configure(info)
+        try {
+          if (this.title === NODE_TYPE) this.title = NODE_TITLE
+        } catch (error) {
+          api.warn('title repair failed', error)
+        }
+      }
 
       onAdded() {
         this._guarded('onAdded', () => {

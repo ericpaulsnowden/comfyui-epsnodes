@@ -267,13 +267,17 @@ class TestClassShape:
     def test_no_is_changed_attribute(self) -> None:
         assert not hasattr(EPSDistributor, "IS_CHANGED")
 
-    def test_no_check_lazy_status_method(self) -> None:
-        assert not hasattr(EPSDistributor, "check_lazy_status")
+    def test_image_is_lazy(self) -> None:
+        # The flag `check_lazy_status` below depends on -- without it core
+        # resolves `image` eagerly and the all-off upstream skip silently
+        # stops working (owner question 2026-07-27; measured on the rig).
+        _type, options = EPSDistributor.INPUT_TYPES()["required"]["image"]
+        assert options["lazy"] is True
 
     def test_input_types_shape(self) -> None:
         spec = EPSDistributor.INPUT_TYPES()
         assert set(spec["required"]) == {"image"}
-        assert spec["required"]["image"] == ("IMAGE",)
+        assert spec["required"]["image"][0] == "IMAGE"
         assert set(spec["optional"]) == {"toggles"}
         widget_type, options = spec["optional"]["toggles"]
         assert widget_type == "STRING"
@@ -286,6 +290,66 @@ class TestClassShape:
         # ever runs (module docstring).
         spec = EPSDistributor.INPUT_TYPES()
         assert "toggles" not in spec["required"]
+
+
+# ------------------------------------------------------- lazy upstream skip
+
+
+class TestCheckLazyStatus:
+    """The all-off upstream skip (owner question 2026-07-27).
+
+    Measured on the rig BEFORE this existed: with every output off, the whole
+    upstream chain still executed and its results were thrown away. Declining
+    `image` is what turns that into a real branch skip.
+    """
+
+    def test_requests_image_when_all_slots_enabled(self) -> None:
+        assert EPSDistributor().check_lazy_status(toggles=_toggles()) == ["image"]
+
+    def test_requests_image_when_toggles_omitted(self) -> None:
+        # The no-frontend API path: no toggles at all means every slot is on.
+        assert EPSDistributor().check_lazy_status() == ["image"]
+
+    @pytest.mark.parametrize("still_on", [1, 4, MAX_OUTPUTS])
+    def test_requests_image_when_even_one_slot_is_enabled(self, still_on: int) -> None:
+        # A single enabled slot still needs the real image, so the upstream
+        # must run -- only ALL-off may decline it.
+        off = {f"out_{n}": False for n in range(1, MAX_OUTPUTS + 1) if n != still_on}
+        assert EPSDistributor().check_lazy_status(toggles=json.dumps(off)) == ["image"]
+
+    def test_declines_image_when_every_slot_is_off(self) -> None:
+        toggles = _toggles(**{f"out_{n}": False for n in range(1, MAX_OUTPUTS + 1)})
+        assert EPSDistributor().check_lazy_status(toggles=toggles) == []
+
+    def test_malformed_toggles_still_requests_image(self) -> None:
+        # Degrades to "everything enabled" exactly like `distribute` does --
+        # a garbled widget value must never silently skip the upstream.
+        assert EPSDistributor().check_lazy_status(toggles="not json{{") == ["image"]
+
+    def test_all_off_distribute_never_touches_the_unresolved_image(
+        self, fake_execution_blocker
+    ) -> None:
+        # The safety argument for declining `image` at all: on the all-off
+        # path the value is genuinely unused, so core handing us `None`
+        # instead of a tensor cannot change what we return.
+        toggles = _toggles(**{f"out_{n}": False for n in range(1, MAX_OUTPUTS + 1)})
+        result = EPSDistributor().distribute(image=None, toggles=toggles)
+        assert len(result) == MAX_OUTPUTS
+        assert all(isinstance(value, fake_execution_blocker) for value in result)
+
+    def test_lazy_decision_matches_distribute_exactly(self, fake_execution_blocker) -> None:
+        # check_lazy_status and distribute must never disagree about which
+        # slots are on -- disagreeing would mean declining `image` while some
+        # slot still expects to emit it. Both read `_enabled_slots`.
+        node = EPSDistributor()
+        for off_count in range(MAX_OUTPUTS + 1):
+            toggles = json.dumps({f"out_{n}": False for n in range(1, off_count + 1)})
+            wants_image = node.check_lazy_status(toggles=toggles) == ["image"]
+            emits_image = any(
+                value is not None and not isinstance(value, fake_execution_blocker)
+                for value in node.distribute(image=object(), toggles=toggles)
+            )
+            assert wants_image == emits_image, f"{off_count} slots off"
 
 
 # --------------------------------------------------------- no ComfyUI import

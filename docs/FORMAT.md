@@ -387,6 +387,30 @@ execution — **the file is the truth; the UI is a view.**
 
 ### §6.3 `EPS Lora Loader State Controller` (frontend-only virtual node)
 
+**Three separate things have to say "EPS Lora Loader State Controller", and
+missing any one of them makes the node look unrenamed.** Reported twice
+(2026-07-22, again 2026-07-27) before all three were covered:
+
+1. **The canvas title** — `static title` on the class. Always worked.
+2. **The node library / search entry** — `app.ts`'s `registerNodes`
+   synthesizes a def for every frontend-registered litegraph type with
+   `display_name` HARDCODED to the registration name; it reads the class's
+   `category` and `description` statics but never its `title`. The fix is the
+   `beforeRegisterVueAppNodeDefs` extension hook, which `registerNodes`
+   invokes on the def ARRAY *between* synthesis and
+   `nodeDefStore.updateNodeDefs`. Patching the store afterwards (the first
+   attempt) only reaches what hasn't already been derived from the def —
+   which is why the search index agreed while the visible name did not.
+3. **A title baked into an ALREADY-SAVED workflow** — the one that actually
+   kept the bug alive. `configure()` restores `info.title` verbatim, so a
+   graph saved back when the title *was* the class id carries
+   `"title": "LoraLibrarySetController"` forever, and no amount of fixing the
+   registration can reach it. Fresh nodes were always fine (they serialize no
+   `title` at all), which is exactly why this looked fixed from the dev rig
+   and stayed broken on the owner's machine. The class's `configure()`
+   override rewrites that ONE exact stale string, leaving any deliberate
+   rename alone.
+
 Naming (owner 2026-07-18c, refined 2026-07-19): the node's DISPLAY name is
 **"EPS Lora Loader State Controller"** (was "Power Lora Loader State
 Controller" — "Power" dropped) and every user-facing word in its UI says
@@ -1317,14 +1341,37 @@ hand-bypassing groups. Roadmap: `research/roadmap-eps-distributor.md`.
   very same pass.
 - **Deliberately NOT declared** (each would be actively wrong here):
   `OUTPUT_IS_LIST` — the values are one-per-SOCKET for parallel branches, not
-  lists for a further fan-out; `INPUT_IS_LIST` — nothing fans in;
+  lists for a further fan-out; `INPUT_IS_LIST` — nothing fans in; and
   `IS_CHANGED` — both inputs are ordinary tracked inputs already covered by
-  default input-hash caching, with no other state to go stale; and no
-  lazy/`check_lazy_status` — the single input is always needed to produce ANY
-  enabled output, so the skip lives entirely on the OUTPUT side. This node
+  default input-hash caching, with no other state to go stale. This node
   also stays inside §6.4's hard rule: it never inspects the graph, so it
   cannot violate "graph inspection may change what a node REQUESTS, never
   what it RETURNS."
+- **`image` IS lazy, for the all-off case only** (owner question 2026-07-27:
+  "if this is at the end of a workflow, and all of the checkboxes are off,
+  should the workflow run up to this point?"). Measured on the rig before
+  answering: it DID still run — a non-lazy input is resolved before the node
+  executes, so an entire upstream chain did its work only to have all eight
+  outputs blocked and nothing consume any of it. `check_lazy_status` now
+  returns `[]` when every slot is off and `["image"]` otherwise, which is a
+  real branch skip (an upstream that is never REQUESTED is never added to the
+  execution graph — `comfy_execution/graph.py`'s `TopologicalSort.add_node`
+  `is_lazy` branch), and makes this node consistent with §6.4's Switcher,
+  whose all-off case already skipped its upstream. Still inside the §6.4
+  rule: the decision reads only `toggles`, an ordinary tracked input in the
+  cache key, never the graph — and what the node RETURNS on that path is
+  eight blockers whether or not `image` was resolved, so declining it cannot
+  change the result, only the work done to reach it.
+  - **The frontend has to record hidden slots as `false` for this to fire.**
+    The backend has a fixed EIGHT slots and treats an absent key as enabled
+    (the no-frontend floor), but the node only shows `Outputs` of them — so
+    with the default 3 visible and all three switched off, out_4..out_8 still
+    read as enabled and the upstream still ran. `pruneToggles` therefore
+    writes `false` for every hidden slot (they cannot be wired to anything —
+    they are genuinely removed from `node.outputs`), and clears the entry for
+    any slot a count INCREASE just revealed, so a revealed socket always
+    starts enabled. Verified end to end on the rig with the exact string the
+    UI produces.
 - No torch/ComfyUI import at module scope (`ExecutionBlocker` is imported
   lazily, only on the at-least-one-disabled path).
 - **The toggle geometry, and why it is simpler than §6.4's** (verified against
@@ -1354,6 +1401,16 @@ hand-bypassing groups. Roadmap: `research/roadmap-eps-distributor.md`.
   `tests/test_distributor_js.py` pins the `right edge < socketX − 15`
   INEQUALITY (not the margin) across probe widths, so `ROW_GAP` can change
   without the guarantee silently lapsing.
+- **Outputs are renamable** (owner ask 2026-07-27), the output-side twin of
+  §6.4's row rename: double-click an output — either its socket
+  (`onOutputDblClick`) or anywhere else in the row (`onDblClick`, which is
+  where our toggle box lives, the two being mutually exclusive per click) —
+  and set a display label. `output.name` is never touched, so a rename can
+  never repoint a wire or move a `toggles` key; empty resets to `out_N`.
+  Because a label is drawn LEFTWARD from the socket, `toggleBoxRect` takes
+  the label's reach and pushes the box further left when needed — the fixed
+  `ROW_GAP` is a floor, not an addition, and the hard `socketX − 15`
+  inequality is pinned at label lengths up to 120 characters.
 - **Lowering the visible count never destroys a wire.** §6.5's rule
   ("never leave a dangling wire") generalized from a boolean to a range: the
   request is clamped back UP to the highest WIRED slot rather than reverted to
