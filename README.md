@@ -7,22 +7,26 @@ beyond it — image-flow utilities now live here too.
 
 ## The eleven nodes
 
-No dependencies — every node below works on its own. Each has its own
+No third-party packs required — every node here runs on ComfyUI alone,
+except the Lora Loader State Controller, which is built to extend
+rgthree-comfy and disables itself without it. Some nodes are drag-and-drop
+on their own; others are designed to pair with a saved set or another EPS
+node — the **Works with** column says which. Each node also has its own
 section further down; this is the map.
 
-| Node | What it does |
-| --- | --- |
-| [**EPS Prompt Notebook**](#eps-prompt-notebook-shipped) | Your prompt library as a node — a scrolling list of named prompts with an editor beside it, backed by a plain Markdown file you own (local or on a NAS). Select several and the workflow runs once per prompt. |
-| [**EPS Apply LoRA Set**](#eps-apply-lora-set-shipped) | Pick a saved lora configuration ("state") from a dropdown and apply it — which loras, order, on/off, strengths. Standalone: MODEL/CLIP in → out, plus a `LORA_STACK` and trigger words. |
-| [**EPS Lora Loader State Controller**](#eps-lora-loader-state-controller-shipped-requires-rgthree-comfy) | Captures and applies those states directly on an [rgthree Power Lora Loader](https://github.com/rgthree/rgthree-comfy) — rgthree stays the loader, this moves whole configurations in and out of it. |
-| [**EPS LoRA Sweep**](#eps-lora-sweep-shipped) | Auditions any `LORA_STACK` by strength: set min/max/increment and one queue runs your workflow once per step (per lora, or all together). |
-| [**EPS Switcher**](#eps-switcher-shipped) | Any number of image inputs, each independently on/off; the enabled ones fan out (N enabled → N runs). Disabled branches never execute. |
-| [**EPS Distributor**](#eps-distributor-shipped) | The mirror of the Switcher: one image in, up to eight branches out, each independently on/off. Toggle a branch off and only that branch is skipped — everything happens in one run. |
-| [**EPS Resolution**](#eps-resolution-shipped) | Image-first resize + size in one node: target size (with a drag pad), four resize modes, and the original image + both sets of dimensions passed through. |
-| [**EPS Image Grid**](#eps-image-grid-shipped) | Collects images across separate Runs into a buffer that survives restarts, shows them as a thumbnail grid, and fans the whole set out on demand. |
-| [**EPS Cross Product**](#eps-cross-product-shipped) | Pairs every image with every text — 2 images × 4 prompts = 8 runs. (ComfyUI's own list pairing zips index-by-index instead.) |
-| [**EPS Cross Sweep**](#eps-cross-sweep-shipped) | Multiplies a whole LoRA Sweep across all of those pairs, grouped by strength, with per-run save paths so big runs land in tidy folders. |
-| [**EPS Frame Saver**](#eps-frame-saver-shipped) | Loads a video by path, lets you scrub or play to a frame, and outputs that frame as an image. |
+| Node | What it does | Works with |
+| --- | --- | --- |
+| [**EPS Prompt Notebook**](#eps-prompt-notebook-shipped) | Your prompt library as a node — a scrolling list of named prompts with an editor beside it, backed by a plain Markdown file you own (local or on a NAS). Select several and the workflow runs once per prompt. | Nothing — its own Markdown file (auto-created). |
+| [**EPS Apply LoRA Set**](#eps-apply-lora-set-shipped) | Pick a saved lora configuration ("state") from a dropdown and apply it — which loras, order, on/off, strengths. Standalone: MODEL/CLIP in → out, plus a `LORA_STACK` and trigger words. | Your LoRA files + a saved set (via the Controller, the API, or by hand). |
+| [**EPS Lora Loader State Controller**](#eps-lora-loader-state-controller-shipped-requires-rgthree-comfy) | Captures and applies those states directly on an [rgthree Power Lora Loader](https://github.com/rgthree/rgthree-comfy) — rgthree stays the loader, this moves whole configurations in and out of it. | **rgthree-comfy**'s Power Lora Loader — third-party, self-disables without it. |
+| [**EPS LoRA Sweep**](#eps-lora-sweep-shipped) | Auditions any `LORA_STACK` by strength: set min/max/increment and one queue runs your workflow once per step (per lora, or all together). | A `LORA_STACK` source (usually Apply LoRA Set) + a model. |
+| [**EPS Switcher**](#eps-switcher-shipped) | Any number of image inputs, each independently on/off; the enabled ones fan out (N enabled → N runs). Disabled branches never execute. | Nothing — drag-and-drop with core nodes. |
+| [**EPS Distributor**](#eps-distributor-shipped) | The mirror of the Switcher: one image in, up to eight branches out, each independently on/off. Toggle a branch off and only that branch is skipped — everything happens in one run. | Nothing — drag-and-drop with core nodes. |
+| [**EPS Resolution**](#eps-resolution-shipped) | Image-first resize + size in one node: target size (with a drag pad), four resize modes, and the original image + both sets of dimensions passed through. | Nothing — drag-and-drop with core nodes. |
+| [**EPS Image Grid**](#eps-image-grid-shipped) | Collects images across separate Runs into a buffer that survives restarts, shows them as a thumbnail grid, and fans the whole set out on demand. | Nothing — drag-and-drop with core nodes. |
+| [**EPS Cross Product**](#eps-cross-product-shipped) | Pairs every image with every text — 2 images × 4 prompts = 8 runs. (ComfyUI's own list pairing zips index-by-index instead.) | Two lists to multiply — pairs naturally with Image Grid + Prompt Notebook, but any list sources work. |
+| [**EPS Cross Sweep**](#eps-cross-sweep-shipped) | Multiplies a whole LoRA Sweep across all of those pairs, grouped by strength, with per-run save paths so big runs land in tidy folders. | EPS LoRA Sweep + EPS Cross Product wired in — the pack's most assembly-required node. |
+| [**EPS Frame Saver**](#eps-frame-saver-shipped) | Loads a video by path, lets you scrub or play to a frame, and outputs that frame as an image. | A video file on the ComfyUI machine. |
 
 > **Status: pre-release.** Contracts live in
 > [docs/FORMAT.md](docs/FORMAT.md). Want to see everything working
