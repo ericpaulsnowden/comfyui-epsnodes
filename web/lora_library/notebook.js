@@ -1138,7 +1138,21 @@ function wireFileWidget(state) {
   widget.callback = function (value, ...rest) {
     if (state.isLocal === false && value !== state.lastKnownFileValue) {
       widget.value = state.lastKnownFileValue
+      // 2026-07-27 (owner: "I can browse to the file now but selecting it
+      // does nothing. It continues to show the local .md file no matter what
+      // I do."): this revert is a legitimate rule (FORMAT.md §7.2 -- a remote
+      // browser may not repoint a host-machine file) but it used to announce
+      // itself ONLY in the small status line, which reads exactly like
+      // "nothing happened". A toast makes the refusal, and its reason,
+      // impossible to miss.
       setStatus(state, 'The host machine controls which file this node reads.')
+      toast(
+        'warn',
+        'File not changed',
+        'This browser is not on the machine running ComfyUI, so it cannot ' +
+          'repoint this node at a different file. Open ComfyUI from that ' +
+          'machine to change it.'
+      )
       state.node.graph?.setDirtyCanvas(true, true)
       return undefined
     }
@@ -1543,8 +1557,17 @@ function renderPickerDialog(state, dialog, contentEl, pathErrorEl, data) {
   for (const file of data.files || []) {
     const row = el('div', { className: 'llnb-picker-row', text: `📄 ${file.name}` })
     row.addEventListener('click', () => {
+      const chosen = joinServerPath(data.dir, file.name, data.sep)
       closeBrowsePicker(state)
-      setFileWidgetValue(state, joinServerPath(data.dir, file.name, data.sep))
+      // 2026-07-27 (owner: "I can browse to the file now but selecting it
+      // does nothing"): acknowledge the click IMMEDIATELY, naming the path.
+      // The reload behind it is debounced and async, so without this a
+      // selection that is later refused or fails looks like a dead click --
+      // and, diagnostically, the ABSENCE of this line tells us the click
+      // never reached this handler at all.
+      setStatus(state, `Opening ${chosen}...`)
+      api.log?.(`notebook: picked ${chosen}`)
+      setFileWidgetValue(state, chosen)
     })
     list.append(row)
   }
@@ -1602,6 +1625,17 @@ async function reloadNow(state) {
     if (token !== state.loadToken) return
     api.warn('failed to load notebook list', error)
     setStatus(state, `Could not load notebook: ${error.message}`)
+    // 2026-07-27: also toast, and NAME THE PATH. This is the other way a
+    // file change can look like "nothing happened" -- the widget takes the
+    // new path, the server can't read it (a share the ComfyUI process can't
+    // see, a permission wall), the panel keeps showing the previous file's
+    // entries, and the only clue was a console warning. See toast()'s note.
+    toast(
+      'error',
+      'Could not open that notebook file',
+      `${file} -- ${error.message}. The machine running ComfyUI has to be ` +
+        'able to read this path; the previous file is still loaded.'
+    )
     return
   }
   if (token !== state.loadToken) return
@@ -3306,6 +3340,34 @@ function updateDeleteButtonEnabled(state) {
 function setStatus(state, text) {
   state.statusTextEl.textContent = text || ''
   state.statusActionsEl.replaceChildren()
+}
+
+/**
+ * A ComfyUI toast (same idiom as controller.js's `_toast`).
+ *
+ * 2026-07-27: added because the panel's small status line is too quiet for a
+ * REFUSAL. The owner picked a file in Browse..., the node kept the old one,
+ * and the only trace was a sentence in the status strip -- indistinguishable
+ * from "the click did nothing". Anything that rejects or fails a file change
+ * now also toasts, so the reason is unmissable. Fails soft: an older
+ * frontend without extensionManager.toast simply logs.
+ */
+function toast(severity, summary, detail) {
+  try {
+    const add = app.extensionManager?.toast?.add
+    if (typeof add === 'function') {
+      add.call(app.extensionManager.toast, {
+        severity,
+        summary,
+        detail,
+        life: severity === 'error' ? 8000 : 5000
+      })
+      return
+    }
+  } catch (error) {
+    api.warn('toast failed', error)
+  }
+  api.warn(`${summary}: ${detail}`)
 }
 
 function clearConflict(state) {
