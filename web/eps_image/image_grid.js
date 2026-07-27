@@ -942,11 +942,15 @@ function imageUrlForRef(ref) {
  * store.images` identity equality intact (see `syncCoreOutputStore`).
  * Pure; exported for tests/test_image_grid_js.py.
  */
+/** One ref's identity, the same triple core builds a /view URL from. */
+function refKey(ref) {
+  return `${ref?.type || 'output'}|${ref?.subfolder || ''}|${ref?.filename || ''}`
+}
+
 export function mergeBufferRefs(existing, incoming) {
   const base = Array.isArray(existing) ? existing : []
   const extra = Array.isArray(incoming) ? incoming : []
-  const keyOf = (ref) =>
-    `${ref?.type || 'output'}|${ref?.subfolder || ''}|${ref?.filename || ''}`
+  const keyOf = refKey
   const seen = new Set(base.map(keyOf))
   const additions = []
   for (const ref of extra) {
@@ -1020,6 +1024,28 @@ export function setNodeImagesFromRefs(node, refs) {
     node.images = undefined
     node.imageIndex = null
     syncCoreOutputStore(node, [])
+    return
+  }
+  // Unchanged-content short-circuit (2026-07-27, same round as the
+  // focus-clobber root fix): the forced post-run reconcile calls this on
+  // EVERY finished execution, including runs that appended nothing -- and
+  // unconditionally rebuilding meant resetting `imageIndex` (yanking a
+  // user out of an image they'd enlarged, once per queued run) and
+  // re-creating every <img> for no reason. When the list is
+  // content-identical to what's already shown, only re-assert the store
+  // identity (`node.images`' own array -- NOT the fresh `refs` -- so
+  // `updatePreviews`' identity check stays equal) and leave the view,
+  // enlarged or grid, exactly where the user put it. Only taken when
+  // `node.imgs` is a matching real array -- a fresh/restored node (imgs
+  // not yet built) must still fall through and build them.
+  if (
+    Array.isArray(node.images) &&
+    Array.isArray(node.imgs) &&
+    node.images.length === refs.length &&
+    node.imgs.length === refs.length &&
+    refs.every((ref, i) => refKey(ref) === refKey(node.images[i]))
+  ) {
+    syncCoreOutputStore(node, node.images)
     return
   }
   const imgs = refs.map((ref) => {

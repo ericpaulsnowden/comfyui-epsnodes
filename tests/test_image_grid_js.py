@@ -128,6 +128,30 @@ const out = {}
   }
 }
 
+// ---- unchanged-content refresh preserves the user's view ----
+{
+  const node = makeNode(14, rootGraph)
+  grid.setNodeImagesFromRefs(node, [R('a.png'), R('b.png')])
+  const imgsBefore = node.imgs
+  const imagesBefore = node.images
+  node.imageIndex = 1 // user enlarged the second image
+  // the forced post-run reconcile hands back a FRESH array, same content:
+  grid.setNodeImagesFromRefs(node, [R('a.png'), R('b.png')])
+  out.unchangedRefresh = {
+    focusSurvived: node.imageIndex === 1,
+    imgsUntouched: node.imgs === imgsBefore,
+    imagesIdentityKept: node.images === imagesBefore,
+    storeHealedToNodeArray: app.nodeOutputs['14'].images === imagesBefore,
+    coreWouldRerender: coreWouldRerender(node)
+  }
+  // content actually changed -> full rebuild, back to the grid view:
+  grid.setNodeImagesFromRefs(node, [R('a.png'), R('b.png'), R('c.png')])
+  out.changedRefresh = {
+    rebuilt: node.imgs !== imgsBefore && node.imgs.length === 3,
+    backToGrid: node.imageIndex === null
+  }
+}
+
 // ---- empty buffer clears the store entry ----
 {
   const node = makeNode(12, rootGraph)
@@ -230,6 +254,23 @@ def test_cached_resend_heals_store_without_yanking_focus(grid_api: dict) -> None
     assert grid_api["cachedResend"]["added"] == 0
     assert grid_api["cachedResend"]["focusSurvived"] is True
     assert grid_api["cachedResend"]["coreWouldRerender"] is False
+
+
+def test_unchanged_refresh_preserves_the_users_view(grid_api: dict) -> None:
+    """The post-run reconcile fires on EVERY finished execution, including
+    ones that appended nothing -- it must not reset an enlarged view or
+    rebuild every <img>, and the store heal must reuse `node.images`' OWN
+    identity (not the fresh fetch's array) to keep updatePreviews quiet."""
+    assert grid_api["unchangedRefresh"]["focusSurvived"] is True
+    assert grid_api["unchangedRefresh"]["imgsUntouched"] is True
+    assert grid_api["unchangedRefresh"]["imagesIdentityKept"] is True
+    assert grid_api["unchangedRefresh"]["storeHealedToNodeArray"] is True
+    assert grid_api["unchangedRefresh"]["coreWouldRerender"] is False
+
+
+def test_changed_refresh_rebuilds_and_returns_to_the_grid(grid_api: dict) -> None:
+    assert grid_api["changedRefresh"]["rebuilt"] is True
+    assert grid_api["changedRefresh"]["backToGrid"] is True
 
 
 def test_empty_buffer_deletes_the_store_entry(grid_api: dict) -> None:
