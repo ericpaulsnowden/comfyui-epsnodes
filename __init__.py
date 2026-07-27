@@ -28,15 +28,35 @@ try:
     # pack (FORMAT.md naming note): lora nodes live in lora_library/, non-lora
     # image nodes in eps_image/, future families in their own siblings.
     _TOP_PREFIX = __name__
-except ImportError:
+except ImportError as _relative_import_error:
     # Imported without package context (e.g. pytest rootdir setups, or tooling
     # that loads node-pack entry files flat). ComfyUI itself always loads this
     # file as a package, taking the relative-import branch above.
-    from lora_library import routes as _routes
-    from lora_library.context import LibraryContext
-    from lora_library.version import __version__
+    try:
+        from lora_library import routes as _routes
+        from lora_library.context import LibraryContext
+        from lora_library.version import __version__
 
-    _TOP_PREFIX = ""
+        _TOP_PREFIX = ""
+    except ImportError as _flat_import_error:
+        # BOTH branches failed, so report BOTH reasons. Either one can be the
+        # informative half and the other pure noise, depending on how the file
+        # was loaded, so picking one always risks burying the real cause:
+        #   - loaded as a package (how ComfyUI does it), the relative error is
+        #     real ("No module named 'watchdog'") and the flat one is noise
+        #     ("No module named 'lora_library'");
+        #   - loaded flat by tooling, the relative error is the noise and the
+        #     flat one carries the truth.
+        # A sibling pack cost real debugging time to exactly this masking
+        # (2026-07-26, comfyui-photoshop-bridge: a missing `watchdog` surfaced
+        # as a baffling "No module named 'cpsb'").
+        raise ImportError(
+            "comfyui-epsnodes could not be imported. "
+            f"Package-relative import failed with: {_relative_import_error}. "
+            f"Flat import failed with: {_flat_import_error}. "
+            "If either names a third-party module, install this pack's "
+            "dependencies with the SAME Python that runs ComfyUI."
+        ) from _relative_import_error
 
 # Channel name kept for stability -- five test files pin caplog to
 # "lora_library"/"eps_image" by name, and a channel name is filtering API,
