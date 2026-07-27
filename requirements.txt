@@ -1,2 +1,2 @@
-# Intentionally empty: comfyui-lora-library is stdlib-only.
+# Intentionally empty: comfyui-epsnodes is stdlib-only.
 # (torch / comfy modules are provided by ComfyUI itself.)

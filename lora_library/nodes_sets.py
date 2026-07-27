@@ -45,7 +45,7 @@ def _slug_options() -> list[str]:
     try:
         slugs = sorted(row["slug"] for row in sets_store.list_sets(_context))
     except Exception:  # broad: node registration must not crash on this
-        logger.exception("lora_library: could not list sets for the Apply Set combo")
+        logger.exception("EPSNodes: could not list sets for the Apply Set combo")
         return ["None"]
     return ["None", *slugs]
 
@@ -185,17 +185,17 @@ class LoraLibraryApplySet:
         context = _context
         if context is None:
             logger.warning(
-                "lora_library: EPS Apply LoRA Set has no context configured; passthrough"
+                "EPSNodes: EPS Apply LoRA Set has no context configured; passthrough"
             )
             return model, clip, [], "", ""
 
         try:
             set_data = sets_store.load_set(context, set)
         except sets_store.SetValidationError as exc:
-            logger.warning("lora_library: set %r could not be loaded (%s); passthrough", set, exc)
+            logger.warning("EPSNodes: set %r could not be loaded (%s); passthrough", set, exc)
             return model, clip, [], "", ""
         if set_data is None:
-            logger.warning("lora_library: set %r has no file on disk; passthrough", set)
+            logger.warning("EPSNodes: set %r has no file on disk; passthrough", set)
             return model, clip, [], "", ""
 
         # FORMAT.md §4.1/§6.2: picks the loader_slot-th loader's rows for a
@@ -212,7 +212,7 @@ class LoraLibraryApplySet:
             resolved = sets_store.resolve_lora(context, row["file"])
             if resolved is None:
                 logger.warning(
-                    "lora_library: lora %r in set %r could not be resolved; skipping",
+                    "EPSNodes: lora %r in set %r could not be resolved; skipping",
                     row["file"],
                     set,
                 )
@@ -257,7 +257,7 @@ class LoraLibraryApplySet:
             path = context.resolve_lora_path(file)
             if path is None:
                 logger.warning(
-                    "lora_library: lora %r resolved by name but has no on-disk path; skipping",
+                    "EPSNodes: lora %r resolved by name but has no on-disk path; skipping",
                     file,
                 )
                 continue

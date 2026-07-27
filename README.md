@@ -440,7 +440,12 @@ See [docs/INSTALL.md](docs/INSTALL.md). Short version: clone into
 Everything lives in one folder — `loras.md` plus `sets/*.json` (your prompt notebook + saved lora states) — configured
 in **Settings → EPSNodes → Library folder** (server-side, so every
 browser sees the same value). Point it at a shared/NAS path to use the same
-library from multiple machines. Details: [docs/FORMAT.md §1](docs/FORMAT.md).
+library from multiple machines. This pack's HTTP routes (library browse/
+read/write, plus the image-grid and frame-saver helpers) carry no auth layer
+of their own, so exposing ComfyUI beyond localhost (`--listen`) exposes them
+too — the same trust model as ComfyUI's own routes. Details:
+[docs/FORMAT.md §1](docs/FORMAT.md) (layout) and [§2](docs/FORMAT.md)
+(security posture).
 
 ## Versioning
 

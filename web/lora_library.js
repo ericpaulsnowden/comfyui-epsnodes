@@ -1,5 +1,5 @@
 /**
- * @file Entry point for the comfyui-lora-library frontend extension.
+ * @file Entry point for the comfyui-epsnodes frontend extension.
  * ComfyUI auto-imports every top-level `.js` file under `WEB_DIRECTORY`
  * (`./web`, set by the Python backend) — this is the only such file; every
  * other module lives under `lora_library/` and is wired together here into

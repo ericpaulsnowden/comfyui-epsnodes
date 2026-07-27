@@ -1,4 +1,4 @@
-"""ComfyUI entry point for comfyui-lora-library.
+"""ComfyUI entry point for comfyui-epsnodes.
 
 This is the only file in the pack that touches ComfyUI's own modules
 (``server``, ``folder_paths``). It builds the real
@@ -38,6 +38,10 @@ except ImportError:
 
     _TOP_PREFIX = ""
 
+# Channel name kept for stability -- five test files pin caplog to
+# "lora_library"/"eps_image" by name, and a channel name is filtering API,
+# not display text. The identity shown to users is "EPSNodes" (see the
+# log messages below); only the channel string stays the pre-rename name.
 logger = logging.getLogger("lora_library")
 
 
@@ -54,7 +58,7 @@ def _build_context() -> LibraryContext:
         try:
             return list(folder_paths.get_filename_list("loras"))
         except Exception:  # a broken model dir must not kill the pack
-            logger.exception("lora_library: could not list loras")
+            logger.exception("EPSNodes: could not list loras")
             return []
 
     def _resolve_lora_path(name: str) -> str | None:
@@ -106,7 +110,7 @@ for _module_path, _class_id, _display in _NODE_SPECS:
         NODE_CLASS_MAPPINGS[_class_id] = getattr(_module, _class_id)
         NODE_DISPLAY_NAME_MAPPINGS[_class_id] = _display
     except Exception:  # skip the feature, keep the pack alive
-        logger.exception("lora_library: feature module %s failed to load", _module_path)
+        logger.exception("EPSNodes: feature module %s failed to load", _module_path)
 
 # EPSImageGrid's own tiny route module (FORMAT.md §6.6: just `POST
 # /eps_image_grid/clear`) — needs no LibraryContext (its store resolves
@@ -121,7 +125,7 @@ try:
     _image_grid_routes = importlib.import_module(_image_grid_routes_path)
     _image_grid_routes.register()
 except Exception:
-    logger.exception("lora_library: eps_image.routes_image_grid failed to register")
+    logger.exception("EPSNodes: eps_image.routes_image_grid failed to register")
 
 # EPSFrameSaver's own route module (FORMAT.md §6.7: `GET /eps_frame_saver/
 # probe` + `GET /eps_frame_saver/stream`) — same reasoning as
@@ -135,7 +139,7 @@ try:
     _frame_saver_routes = importlib.import_module(_frame_saver_routes_path)
     _frame_saver_routes.register()
 except Exception:
-    logger.exception("lora_library: eps_image.routes_frame_saver failed to register")
+    logger.exception("EPSNodes: eps_image.routes_frame_saver failed to register")
 
 WEB_DIRECTORY = "./web"
 
@@ -177,7 +181,7 @@ _warn_on_duplicate_installs()
 __all__ = ["NODE_CLASS_MAPPINGS", "NODE_DISPLAY_NAME_MAPPINGS", "WEB_DIRECTORY", "__version__"]
 
 logger.info(
-    "lora_library v%s loaded (%d nodes; library: %s)",
+    "EPSNodes v%s loaded (%d nodes; library: %s)",
     __version__,
     len(NODE_CLASS_MAPPINGS),
     _context.library_dir(),

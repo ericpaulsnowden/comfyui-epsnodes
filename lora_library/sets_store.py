@@ -213,7 +213,7 @@ def normalize_set(raw: object) -> dict:
         # single-loader (format 1) set from the top-level `loras`, rather
         # than rejecting the whole set outright.
         logger.warning(
-            "lora_library: set %r has a malformed/empty 'loaders' (%r); "
+            "EPSNodes: set %r has a malformed/empty 'loaders' (%r); "
             "degrading to a single-loader (format 1) set — FORMAT.md §4.1",
             name,
             loaders_raw,
@@ -329,7 +329,7 @@ def list_sets(context: LibraryContext) -> list[dict]:
         slug = path.stem
         if not _VALID_SLUG_RE.match(slug):
             logger.warning(
-                "lora_library: ignoring %s — %r is not a valid set slug (FORMAT.md §4); "
+                "EPSNodes: ignoring %s — %r is not a valid set slug (FORMAT.md §4); "
                 "rename the file to a valid slug (lowercase letters/digits/-/_, "
                 "starting with a letter or digit) to make it usable",
                 path.name,
@@ -339,7 +339,7 @@ def list_sets(context: LibraryContext) -> list[dict]:
         try:
             data = load_set(context, slug)
         except SetValidationError as exc:
-            logger.warning("lora_library: skipping unreadable set %r: %s", slug, exc)
+            logger.warning("EPSNodes: skipping unreadable set %r: %s", slug, exc)
             continue
         if data is None:  # shouldn't happen (we just globbed the file), but be defensive
             continue
@@ -397,7 +397,7 @@ def resolve_lora(context: LibraryContext, file: str) -> str | None:
         return matches[0]
     if len(matches) > 1:
         logger.warning(
-            "lora_library: %r matches multiple installed loras by basename (%s); "
+            "EPSNodes: %r matches multiple installed loras by basename (%s); "
             "skipping rather than guessing — FORMAT.md §4",
             file,
             ", ".join(matches),

@@ -599,7 +599,7 @@ def _fs_list_roots(context: LibraryContext, *, windows: bool) -> list[dict[str, 
         roots.append(_fs_entry(_FS_LIST_HOME_LABEL, home))
     else:
         logger.info(
-            "lora_library: fs/list ROOTS is omitting Home (%s) -- this server "
+            "EPSNodes: fs/list ROOTS is omitting Home (%s) -- this server "
             "process cannot list it, so offering it would only 400",
             home,
         )
@@ -942,7 +942,7 @@ def _register_all(context: LibraryContext, routes: web.RouteTableDef) -> None:
             module = __import__(f"{__package__}.{module_name}", fromlist=["register"])
             module.register(context, routes)
         except Exception:
-            logger.exception("lora_library: route module %s failed to load", module_name)
+            logger.exception("EPSNodes: route module %s failed to load", module_name)
 
 
 def build_routes(context: LibraryContext) -> web.RouteTableDef:
@@ -966,4 +966,4 @@ def register(context: LibraryContext) -> None:
     from server import PromptServer  # ComfyUI's module; import only inside ComfyUI
 
     _register_all(context, PromptServer.instance.routes)
-    logger.info("lora_library: routes registered")
+    logger.info("EPSNodes: routes registered")

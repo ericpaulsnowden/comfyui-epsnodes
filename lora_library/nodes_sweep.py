@@ -383,7 +383,7 @@ class LoraLibrarySweep:
             # anything. Wrapped in one-element lists -- every output here is
             # OUTPUT_IS_LIST, so a bare (model, clip, label) tuple would
             # break every downstream node expecting a list to fan over.
-            logger.warning("lora_library: EPS LoRA Sweep has no context configured; passthrough")
+            logger.warning("EPSNodes: EPS LoRA Sweep has no context configured; passthrough")
             return [model], [clip], ["(no context configured)"]
 
         plan = build_sweep_plan(lora_stack, min, max, increment, mode)

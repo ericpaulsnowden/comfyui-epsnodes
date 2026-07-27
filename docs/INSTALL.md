@@ -1,4 +1,4 @@
-# Installing comfyui-lora-library
+# Installing comfyui-epsnodes
 
 ## Requirements
 
@@ -15,7 +15,7 @@ cd ComfyUI/custom_nodes
 git clone https://github.com/ericpaulsnowden/comfyui-epsnodes
 ```
 
-Restart ComfyUI. You should see `lora_library vX.Y.Z loaded` in the server
+Restart ComfyUI. You should see `EPSNodes vX.Y.Z loaded` in the server
 log, and an **EPSNodes** section in Settings.
 
 ## Point it at your library folder (optional but recommended)
@@ -33,7 +33,7 @@ database — one editor at a time is the happy path.
 ## Update
 
 ```bash
-cd ComfyUI/custom_nodes/comfyui-lora-library
+cd ComfyUI/custom_nodes/comfyui-epsnodes
 git pull
 ```
 

@@ -173,7 +173,7 @@ class LoraLibraryNotebook:
     def read_entry(self, file: str, entry: str) -> tuple[list[str], list[str]]:
         context = _context
         if context is None:
-            raise RuntimeError("lora_library: EPS Prompt Notebook has no context configured")
+            raise RuntimeError("EPSNodes: EPS Prompt Notebook has no context configured")
 
         try:
             path = context.resolve_notebook_file(file)

@@ -68,7 +68,7 @@ class LibraryContext:
             return {}
         except (OSError, json.JSONDecodeError) as exc:
             logger.warning(
-                "lora_library: unreadable %s (%s); using defaults", self._config_path, exc
+                "EPSNodes: unreadable %s (%s); using defaults", self._config_path, exc
             )
             return {}
         return data if isinstance(data, dict) else {}
