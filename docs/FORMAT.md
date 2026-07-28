@@ -1381,7 +1381,29 @@ hand-bypassing groups. Roadmap: `research/roadmap-eps-distributor.md`.
   also stays inside §6.4's hard rule: it never inspects the graph, so it
   cannot violate "graph inspection may change what a node REQUESTS, never
   what it RETURNS."
-- **`image` IS lazy, for the all-off case only** (owner question 2026-07-27:
+- **`image` IS lazy, and the request decision is WIRING-AWARE (2026-07-27b,
+  after the owner's real workflow caught the toggles-only rule):** the first
+  fix skipped the upstream only when every one of the EIGHT slots read
+  disabled in `toggles` — but a workflow restored from disk replays a saved
+  `toggles` that names only the VISIBLE slots (litegraph's `configure()`
+  restores `widgets_values` last, clobbering any attach-time prune), so
+  out_4..out_8 read enabled and his KSampler still ran, feeding sockets
+  that don't exist on the node. Reproduced on the real restore path.
+  `check_lazy_status` now carries hidden `prompt`/`unique_id` (§6.4's
+  Switcher precedent) and requests `image` only when some ENABLED slot has
+  a CONSUMER (`_wired_slots` scans the prompt for links `[unique_id, n]`);
+  an unreadable graph degrades to the old any-enabled rule, never the
+  reverse. Still §6.4-clean: the graph feeds only the REQUEST;
+  `distribute`'s RETURN stays a pure function of `toggles` + `image`, with
+  one addition — `image is None` (only reachable after a decline) returns
+  blockers for EVERY slot, so a `None` can never ride the tuple, and
+  `prompt` in the input signature means any rewiring re-executes rather
+  than replaying that cached state into a newly-wired consumer. The
+  frontend half (re-prune from `onConfigure`, which fires after
+  `widgets_values` restore for both workflow-load and paste) is now just
+  state hygiene, not correctness.
+- **`image` IS lazy, for the all-off case only** — superseded by the entry
+  above, kept for the original question's record (owner question 2026-07-27:
   "if this is at the end of a workflow, and all of the checkboxes are off,
   should the workflow run up to this point?"). Measured on the rig before
   answering: it DID still run — a non-lazy input is resolved before the node

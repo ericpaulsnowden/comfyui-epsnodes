@@ -326,6 +326,117 @@ class TestCheckLazyStatus:
         # a garbled widget value must never silently skip the upstream.
         assert EPSDistributor().check_lazy_status(toggles="not json{{") == ["image"]
 
+    # ---- wiring-aware decision (owner failure 2026-07-27: a saved workflow
+    # whose toggles only covered the visible three slots still ran the whole
+    # KSampler chain, because out_4..out_8 read as enabled and the old rule
+    # was "any slot enabled -> request image") ----
+
+    @staticmethod
+    def _prompt_with_consumers(*slots: int) -> dict:
+        """A minimal API-format graph: this node is id "1"; one consumer per
+        entry in *slots* (0-based origin slots, like real links)."""
+        graph: dict = {"1": {"class_type": "EPSDistributor", "inputs": {}}}
+        for i, slot in enumerate(slots):
+            graph[str(10 + i)] = {
+                "class_type": "SaveImage",
+                "inputs": {"images": ["1", slot]},
+            }
+        return graph
+
+    def test_regression_stale_toggles_with_only_wired_slots_off_skips(self) -> None:
+        # HIS EXACT CASE: three consumers on out_1..out_3, all three toggled
+        # off, out_4..out_8 absent from toggles (a pre-recording save) -- the
+        # upstream must NOT be requested for five sockets nothing consumes.
+        toggles = json.dumps({"out_1": False, "out_2": False, "out_3": False})
+        prompt = self._prompt_with_consumers(0, 1, 2)
+        assert EPSDistributor().check_lazy_status(
+            toggles=toggles, prompt=prompt, unique_id="1"
+        ) == []
+
+    def test_enabled_wired_slot_still_requests(self) -> None:
+        toggles = json.dumps({"out_1": False, "out_2": False})
+        prompt = self._prompt_with_consumers(0, 1, 2)  # out_3 wired + enabled
+        assert EPSDistributor().check_lazy_status(
+            toggles=toggles, prompt=prompt, unique_id="1"
+        ) == ["image"]
+
+    def test_enabled_but_unwired_slot_alone_never_requests(self) -> None:
+        # Everything wired is off; out_8 is "enabled" purely by absence and
+        # has no consumer.
+        toggles = json.dumps({"out_1": False})
+        prompt = self._prompt_with_consumers(0)
+        assert EPSDistributor().check_lazy_status(
+            toggles=toggles, prompt=prompt, unique_id="1"
+        ) == []
+
+    def test_int_origin_ids_and_multiple_consumers_count(self) -> None:
+        toggles = "{}"
+        prompt = {
+            "1": {"class_type": "EPSDistributor", "inputs": {}},
+            "20": {"class_type": "PreviewImage", "inputs": {"images": [1, 4]}},
+        }
+        assert EPSDistributor().check_lazy_status(
+            toggles=toggles, prompt=prompt, unique_id=1
+        ) == ["image"]
+
+    @pytest.mark.parametrize(
+        ("prompt", "unique_id"),
+        [
+            (None, "1"),
+            ("not a graph", "1"),
+            ({"2": {"inputs": {}}}, "1"),  # our own id absent from the graph
+            ({"1": {"inputs": {}}}, None),
+        ],
+    )
+    def test_unreadable_graph_falls_back_to_any_enabled(
+        self, prompt: object, unique_id: object
+    ) -> None:
+        node = EPSDistributor()
+        assert node.check_lazy_status(toggles="{}", prompt=prompt, unique_id=unique_id) == [
+            "image"
+        ]
+        all_off = json.dumps({f"out_{n}": False for n in range(1, MAX_OUTPUTS + 1)})
+        assert (
+            node.check_lazy_status(toggles=all_off, prompt=prompt, unique_id=unique_id) == []
+        )
+
+    def test_list_wrapped_hidden_values_are_tolerated(self) -> None:
+        toggles = json.dumps({"out_1": False})
+        prompt = self._prompt_with_consumers(0)
+        assert EPSDistributor().check_lazy_status(
+            toggles=toggles, prompt=[prompt], unique_id=["1"]
+        ) == []
+
+    def test_out_of_range_and_non_link_inputs_are_ignored(self) -> None:
+        toggles = json.dumps({"out_1": False})
+        prompt = {
+            "1": {"class_type": "EPSDistributor", "inputs": {}},
+            "30": {
+                "class_type": "Whatever",
+                "inputs": {
+                    "a": ["1", 99],  # out-of-range slot
+                    "b": ["1", -1],
+                    "c": "just a widget string",
+                    "d": ["1", 0, "extra"],  # not a 2-list
+                    "e": 42,
+                },
+            },
+        }
+        assert EPSDistributor().check_lazy_status(
+            toggles=toggles, prompt=prompt, unique_id="1"
+        ) == []
+
+    def test_declined_image_blocks_every_slot_even_enabled_unwired_ones(
+        self, fake_execution_blocker
+    ) -> None:
+        # distribute(image=None) is only reachable after a decline; a `None`
+        # must never ride the tuple into the graph -- every slot blocks,
+        # including "enabled" unwired ones.
+        toggles = json.dumps({"out_1": False})  # out_2..out_8 enabled, unwired
+        result = EPSDistributor().distribute(image=None, toggles=toggles)
+        assert len(result) == MAX_OUTPUTS
+        assert all(isinstance(value, fake_execution_blocker) for value in result)
+
     def test_all_off_distribute_never_touches_the_unresolved_image(
         self, fake_execution_blocker
     ) -> None:

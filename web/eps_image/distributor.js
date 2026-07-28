@@ -1103,6 +1103,30 @@ export function attach(node) {
     wireOutputRename(node)
     addHeaderWidget(node)
 
+    // Re-prune AFTER any restore (owner failure report 2026-07-27, the
+    // all-off-still-ran-the-sampler one, reproduced on the real
+    // litegraph restore path): `configure()` restores widgets_values LAST
+    // -- after properties, after every attach-time prune -- so a workflow
+    // saved before hidden slots were recorded as `false` replays a
+    // `toggles` that covers only the visible sockets, and out_4..out_8
+    // silently read as ENABLED again. `onConfigure` fires at the very end
+    // of `configure()` (both whole-workflow load AND a pasted node), which
+    // makes it the one hook that can re-assert hidden-slots-off over the
+    // restored value. The backend is no longer fooled either way
+    // (`_wired_slots` -- unwired sockets never force the upstream), so
+    // this is state hygiene: what the widget SAYS should match what the
+    // node SHOWS.
+    const originalOnConfigure = node.onConfigure
+    node.onConfigure = function (info) {
+      const result = originalOnConfigure?.apply(this, arguments)
+      try {
+        applyVisibleOutputCount(this)
+      } catch (error) {
+        console.warn(PREFIX, 'post-configure re-prune failed', error)
+      }
+      return result
+    }
+
     // Fresh node: hide down to the just-seeded default immediately (backend
     // declares all MAX_OUTPUTS outputs up front, per resolution.js's
     // identical "addProperty() doesn't fire onPropertyChanged" reasoning).

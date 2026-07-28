@@ -24,19 +24,19 @@ never merged with anything upstream), no IS_CHANGED (both inputs are
 ordinary tracked inputs already covered by ComfyUI's default input-hash
 caching -- there is no other state that could go stale).
 
-`image` IS lazy, for exactly one case: ALL slots off (owner question,
-2026-07-27 -- "if this is at the end of a workflow, and all of the
-checkboxes are off, should the workflow run up to this point?"). Measured on
-the rig before answering: it DID still run, because a non-lazy input is
-resolved before this node executes, so every upstream node -- a sampler, an
-upscale, a whole chain -- did its work only to have all eight outputs
-blocked. Nothing consumed any of it. `check_lazy_status` below now declines
-`image` in that one case, which is a real branch skip (an upstream that is
-never REQUESTED is never added to the execution graph at all --
-`comfy_execution/graph.py`'s `TopologicalSort.add_node` `is_lazy` branch),
-and makes this node consistent with EPSSwitcher, whose all-off case already
-skipped its upstream. With ANY slot enabled, `image` is requested exactly as
-before.
+`image` IS lazy: `check_lazy_status` requests it only when some ENABLED slot
+actually has a CONSUMER wired (owner question 2026-07-27 -- "if this is at
+the end of a workflow, and all of the checkboxes are off, should the
+workflow run up to this point?" -- and, same day, his failure report that
+the first fix missed: a workflow restored from disk replays a `toggles`
+that names only the VISIBLE slots, so out_4..out_8 read as enabled and a
+toggles-only rule ran his whole KSampler chain to feed sockets nothing
+consumes). Declining is a real branch skip: an upstream that is never
+REQUESTED is never added to the execution graph at all
+(`comfy_execution/graph.py`'s `TopologicalSort.add_node` `is_lazy` branch),
+same mechanism as EPSSwitcher's disabled slots. `_wired_slots` has the
+wiring-aware rationale and the fallback contract (unreadable graph -> the
+conservative any-slot-enabled rule).
 
 This stays inside §6.4's hard rule -- "graph inspection may change what a
 node REQUESTS, never what it RETURNS" -- because the decision reads only
@@ -238,6 +238,12 @@ class EPSDistributor:
                 # `toggles=DEFAULT_TOGGLES` default covers the omitted case.
                 "toggles": ("STRING", {"default": DEFAULT_TOGGLES, "multiline": False}),
             },
+            # For `check_lazy_status`'s wiring-aware REQUEST decision only --
+            # never for what `distribute` RETURNS (the section 6.4 rule; see
+            # `_wired_slots`). EPSSwitcher carries the same pair for the same
+            # reason. Unlike Switcher, this node has no INPUT_IS_LIST, so
+            # these arrive as PLAIN values, not one-element lists.
+            "hidden": {"prompt": "PROMPT", "unique_id": "UNIQUE_ID"},
         }
 
     def _enabled_slots(self, toggles: str) -> list[bool]:
@@ -250,8 +256,76 @@ class EPSDistributor:
         toggle_map = _parse_toggles(toggles)
         return [toggle_map.get(f"out_{n}", True) is not False for n in range(1, MAX_OUTPUTS + 1)]
 
-    def check_lazy_status(self, image: Any = None, toggles: str = DEFAULT_TOGGLES) -> list[str]:
-        """Request `image` unless EVERY slot is off (module docstring).
+    @staticmethod
+    def _wired_slots(prompt: Any, unique_id: Any) -> set[int] | None:
+        """1-based `out_N` numbers with at least one consumer wired, read
+        from the hidden `prompt` graph -- or ``None`` when the graph can't
+        be read (missing/malformed prompt, an exotic caller), which every
+        caller must treat as "assume everything is wired" (the conservative
+        fallback: at worst the upstream runs unnecessarily, never the
+        reverse).
+
+        Why this exists (owner failure report 2026-07-27, reproduced): the
+        original all-off skip trusted `toggles` to describe every slot, but
+        the backend has EIGHT slots and an absent key means ENABLED -- so a
+        workflow whose saved `toggles` only covered the visible three (any
+        graph saved before the frontend recorded hidden slots, and any
+        restore path that replays such a value) left out_4..out_8 "enabled",
+        and `check_lazy_status` dutifully ran a whole KSampler chain to feed
+        five sockets that don't exist on the node and can't be wired to
+        anything. The frontend recording hidden slots as off is now only a
+        belt; THIS is the floor: an enabled slot with no consumer never
+        justifies resolving `image`, no matter what `toggles` says or which
+        client wrote it.
+
+        Section 6.4's hard rule holds: graph inspection may change what a
+        node REQUESTS, never what it RETURNS. This feeds only the REQUEST
+        decision in `check_lazy_status`; `distribute`'s return value stays a
+        pure function of `toggles` + `image`. (EPSSwitcher's
+        `_slots_fed_by_an_empty_switcher` is the precedent, docstring and
+        all -- including the live-proven disaster writeup for why the
+        OUTPUT must never learn the graph.)
+
+        Tolerant of one-element list wrapping on either hidden value (core
+        only wraps under INPUT_IS_LIST, which this node doesn't declare --
+        guarded anyway so a core behavior change degrades to the safe
+        fallback rather than a crash).
+        """
+        if isinstance(prompt, list) and len(prompt) == 1:
+            prompt = prompt[0]
+        if isinstance(unique_id, list) and len(unique_id) == 1:
+            unique_id = unique_id[0]
+        if not isinstance(prompt, dict) or unique_id is None:
+            return None
+        me = str(unique_id)
+        if me not in prompt:
+            return None
+        wired: set[int] = set()
+        for node in prompt.values():
+            inputs = node.get("inputs") if isinstance(node, dict) else None
+            if not isinstance(inputs, dict):
+                continue
+            for value in inputs.values():
+                # A link is `[origin_id, origin_slot]`; anything else is a
+                # widget value.
+                if (
+                    isinstance(value, list)
+                    and len(value) == 2
+                    and str(value[0]) == me
+                    and isinstance(value[1], int)
+                    and 0 <= value[1] < MAX_OUTPUTS
+                ):
+                    wired.add(value[1] + 1)
+        return wired
+
+    def check_lazy_status(
+        self,
+        image: Any = None,
+        toggles: str = DEFAULT_TOGGLES,
+        prompt: Any = None,
+        unique_id: Any = None,
+    ) -> list[str]:
+        """Request `image` only if some ENABLED slot is actually WIRED.
 
         Returning `[]` tells core nothing further is needed, so a lazy
         input's producer is never promoted into the execution graph and the
@@ -261,12 +335,23 @@ class EPSDistributor:
         unresolved and keeps calling until nothing new is needed
         (`comfy.comfy_types.node_typing.CheckLazyMixin`).
 
-        Reads only `toggles`, never the graph -- see the module docstring on
-        why that keeps this inside FORMAT.md section 6.4's rule.
+        `_wired_slots` has the wiring-aware rationale (and the owner failure
+        it fixes); an unreadable graph degrades to the old any-slot-enabled
+        rule, never the other way.
         """
-        return ["image"] if any(self._enabled_slots(toggles)) else []
+        enabled = self._enabled_slots(toggles)
+        wired = self._wired_slots(prompt, unique_id)
+        if wired is None:
+            return ["image"] if any(enabled) else []
+        return ["image"] if any(enabled[n - 1] for n in wired) else []
 
-    def distribute(self, image: Any, toggles: str = DEFAULT_TOGGLES) -> tuple[Any, ...]:
+    def distribute(
+        self,
+        image: Any,
+        toggles: str = DEFAULT_TOGGLES,
+        prompt: Any = None,
+        unique_id: Any = None,
+    ) -> tuple[Any, ...]:
         """Fan `image` out to MAX_OUTPUTS sockets, gated per-slot by `toggles`.
 
         A slot is enabled unless `toggles` names it (out_1..out_8) and the
@@ -284,6 +369,20 @@ class EPSDistributor:
         node's whole output.
         """
         enabled = self._enabled_slots(toggles)
+
+        if image is None:
+            # Only reachable when `check_lazy_status` declined `image` --
+            # i.e. no ENABLED slot has a consumer. Block EVERY slot rather
+            # than letting `None` into the tuple: an enabled-but-unwired
+            # slot has nothing reading it today, and `prompt` sits in this
+            # node's input signature, so any rewiring that gives such a slot
+            # a consumer re-executes the node fresh (image then genuinely
+            # requested) instead of replaying a cached `None` into a live
+            # wire. NOTE this branch reads only its INPUT being None -- the
+            # return value never consults the graph (section 6.4).
+            from comfy_execution.graph import ExecutionBlocker
+
+            return tuple(ExecutionBlocker(None) for _ in range(MAX_OUTPUTS))
 
         if all(enabled):
             # Nothing disabled -- skip the import entirely; every slot below
