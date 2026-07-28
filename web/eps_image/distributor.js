@@ -846,13 +846,26 @@ function outputLocalPos(node, idx) {
 function drawRowToggles(node, ctx) {
   if (node.flags?.collapsed) return
 
+  // One ALIGNED column (owner ask 2026-07-27: "Can the checkboxes ... line
+  // up when the text for the outputs are of different lengths"): every row
+  // uses the LONGEST visible label's reach, so mixed-length names give a
+  // straight edge of boxes just left of the longest one, instead of a
+  // ragged per-row stagger. To the RIGHT of the text is not an option --
+  // that region is inside litegraph's own output wire-drag hit box
+  // (`socketX - 15` onward, file header), where a click starts a drag.
+  // All output sockets share one X, so one shared reach = one shared boxX.
+  const entries = outputEntries(node)
+  let maxReach = 0
+  for (const entry of entries) {
+    const reach = outputTextReach(displayText(entry.output))
+    if (reach > maxReach) maxReach = reach
+  }
+
   const rects = []
-  for (const entry of outputEntries(node)) {
+  for (const entry of entries) {
     const pos = outputLocalPos(node, entry.idx)
     if (!pos) continue
-    // Label-aware: a renamed output's text is drawn leftward from the dot,
-    // so the box moves out of its way (toggleBoxRect's own docstring).
-    const rect = toggleBoxRect(pos[0], pos[1], outputTextReach(displayText(entry.output)))
+    const rect = toggleBoxRect(pos[0], pos[1], maxReach)
     drawToggleBox(ctx, rect.x, rect.y, rect.w, isRowEnabled(node, entry.name), false)
     rects.push({ name: entry.name, x: rect.x, y: rect.y, w: rect.w, h: rect.h })
   }

@@ -421,6 +421,19 @@ def test_renamed_output_never_pushes_the_toggle_under_the_wire_drag_box(
         previous_box_x = entry["boxX"]
 
 
+def test_mixed_length_labels_share_one_aligned_column() -> None:
+    """Owner ask 2026-07-27 ("Can the checkboxes ... line up when the text
+    for the outputs are of different lengths"): drawRowToggles now feeds
+    every row the LONGEST visible label's reach — one shared reach into the
+    same-X sockets means one shared boxX, a straight column. Source-text
+    pin, since drawRowToggles itself is canvas-bound; toggleBoxRect's own
+    per-reach behavior (including the wire-drag clearance at any reach) is
+    already covered by the tests above."""
+    source = (REPO_ROOT / "web" / "eps_image" / "distributor.js").read_text(encoding="utf-8")
+    assert "if (reach > maxReach) maxReach = reach" in source
+    assert "toggleBoxRect(pos[0], pos[1], maxReach)" in source
+
+
 def test_short_labels_keep_the_plain_row_gap(distributor_api: dict) -> None:
     """Up to the point where a label actually reaches it, the box stays at
     the plain ROW_GAP -- the fixed margin is the floor, not an addition."""
