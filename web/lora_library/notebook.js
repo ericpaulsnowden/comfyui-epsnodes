@@ -857,6 +857,7 @@ export function attachNotebookWidget(node) {
     buildUi(state)
     hideFileWidget(state)
     wireFileWidget(state)
+    wireConfigureReload(state)
     wireNodeCleanup(state)
 
     // FORMAT.md §7.2 amendment: one `/config` check per attach (cached at
@@ -1170,6 +1171,64 @@ function wireFileWidget(state) {
       onFileWidgetChanged(state)
     } catch (error) {
       api.warn('notebook file-change handler threw', error)
+    }
+    return result
+  }
+}
+
+/**
+ * Reload the panel AFTER `configure()` restores the saved `file` value --
+ * THE fix for the owner's "every time I load a workflow I have to
+ * re-select the location of my Notebook .md file" (2026-07-27, reproduced
+ * on the real `app.loadGraphData` path).
+ *
+ * Sequence, before this existed: `attach()` fires `reloadNow()`
+ * immediately, and at that moment the `file` widget still holds its BACKEND
+ * DEFAULT, because litegraph restores `widgets_values` LAST -- after the
+ * node is constructed and added. So the panel loaded the default file's
+ * entries; then `configure()` put the saved path into the widget WITHOUT
+ * firing its callback (litegraph assigns `widget.value` directly), leaving
+ * `state.file` (what the panel shows) and `fileWidget.value` (what the node
+ * will actually READ on a Run) permanently disagreeing. The node ran the
+ * right file while showing the wrong one -- and every attempt to fix it by
+ * re-picking that same path in Browse... hit `setFileWidgetValue`'s
+ * equal-value early return and did nothing.
+ *
+ * `onConfigure` fires at the END of `configure()` (both whole-workflow load
+ * and a pasted/cloned node), which is the one hook that can see the
+ * restored value. Same lesson, same week, as the EPS Distributor's
+ * restore-path bug (FORMAT.md section 6.11): a fresh in-session node is NOT
+ * the same code path as one restored from disk, and only the latter is what
+ * users actually have.
+ *
+ * `lastKnownFileValue` is re-synced here too: `wireFileWidget` captured it
+ * at attach time (the default), and for a REMOTE viewer
+ * (`isLocal === false`) the read-only guard reverts edits back to it -- so
+ * a stale capture would have let a remote browser silently rewrite a
+ * loaded workflow's saved path back to the default.
+ */
+function wireConfigureReload(state) {
+  const node = state.node
+  const originalOnConfigure = node.onConfigure
+  node.onConfigure = function (info) {
+    let result
+    if (typeof originalOnConfigure === 'function') {
+      try {
+        result = originalOnConfigure.apply(this, arguments)
+      } catch (error) {
+        api.warn('original onConfigure threw', error)
+      }
+    }
+    try {
+      const restored = state.fileWidget.value ?? ''
+      state.lastKnownFileValue = restored
+      if (restored !== state.file) {
+        reloadNow(state).catch((error) =>
+          api.warn('notebook reload after configure failed', error)
+        )
+      }
+    } catch (error) {
+      api.warn('post-configure notebook reload failed', error)
     }
     return result
   }
@@ -1592,7 +1651,24 @@ function buildPickerFooter(state) {
  * remote caller — belt-and-suspenders all the same). */
 function setFileWidgetValue(state, value) {
   const widget = state.fileWidget
-  if (widget.value === value) return
+  if (widget.value === value) {
+    // Same value already in the widget -- but that does NOT mean the panel
+    // is showing it (owner report 2026-07-27: "I have to re-select the
+    // location of my Notebook .md file... and it doesn't take"). After a
+    // workflow load the widget holds the SAVED path while the panel is
+    // still showing whatever `attach()` loaded before `configure()` ran, so
+    // picking that same path in Browse... used to early-return here and do
+    // literally nothing -- the exact dead-end he was stuck in, escapable
+    // only by recreating the node so the values differed again.
+    // `state.file` is the file the panel is actually displaying, so a
+    // mismatch means "reload", not "no-op".
+    if (state.file !== value) {
+      reloadNow(state).catch((error) =>
+        api.warn('notebook reload after same-value reselect failed', error)
+      )
+    }
+    return
+  }
   widget.value = value
   try {
     widget.callback?.(value)

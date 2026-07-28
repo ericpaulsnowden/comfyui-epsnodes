@@ -1495,6 +1495,32 @@ hand-bypassing groups. Roadmap: `research/roadmap-eps-distributor.md`.
   (conflicts per §3.5 surface here with Reload / Overwrite). The node is
   resizable; the widget fills available height. Selection writes the
   `entry` STRING widget so serialization needs no custom code.
+  - **The panel MUST re-read the file after `configure()`** (2026-07-27,
+    owner: "Every time I load a workflow on my Linux machine I have to
+    re-select the location of my Notebook .md file… and it doesn't take
+    until after recreate node > reset widget values"). Reproduced on the
+    real `app.loadGraphData` path. `attach()` fires `reloadNow()` at once,
+    but litegraph restores `widgets_values` LAST — after construction and
+    `add` — so the panel loaded the BACKEND DEFAULT file's entries, and
+    `configure()` then wrote the saved path into the widget *without*
+    firing its callback (it assigns `widget.value` directly). `state.file`
+    (displayed) and `fileWidget.value` (what a Run reads) then disagreed
+    permanently: the node ran the right file while showing the wrong one.
+    `wireConfigureReload` wraps `onConfigure` — the one hook that fires
+    after the restore, for whole-workflow load AND paste — and reloads when
+    they differ. It also re-syncs `lastKnownFileValue`, the baseline the
+    remote read-only guard reverts to, which was captured at attach time
+    and would otherwise let a remote browser rewrite a loaded workflow's
+    saved path back to the default.
+  - **An equal-value re-pick must still reload.** `setFileWidgetValue`
+    early-returned whenever the chosen path equalled the widget's current
+    value — and after a load it always did, so re-picking the same file in
+    Browse… was a dead click and the only escape was recreating the node.
+    The early return now fires only when the panel is ALSO showing that
+    file (`state.file === value`); otherwise it reloads. This is the same
+    restore-path lesson as §6.11's Distributor bug, one week apart: **a
+    fresh in-session node is not the same code path as one restored from
+    disk, and only the latter is what users actually have.**
   - **Every DOM-widget node also has a WIDTH floor** (2026-07-26, owner
     report from Linux: "the container [can be] smaller than the content …
     text boxes or columns break out"). Height was always clamped
