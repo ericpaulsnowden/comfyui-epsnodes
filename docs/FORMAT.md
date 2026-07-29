@@ -1001,6 +1001,58 @@ add; single batch-aware IMAGE input; disk-backed, survive-restart, NO cap.
   ComfyUI `/view?...` URL is appended by `{filename,subfolder,type}` ref
   with NO re-upload; anything else falls back to fetch + `/upload/image`.
   Fails soft if a future frontend renames the menu label.
+- **Bulk add (2026-07-29, owner ask — `docs/ROADMAP-image-grid-bulk-add.md`;
+  "it's really hard to add many images to comfy," typical batch 20–100,
+  ordering filename-numeric-aware):**
+  - **"Add images…" button** (after Clear): a detached
+    `<input type="file" multiple accept="image/png,image/jpeg,image/webp">`;
+    `widget.serialize = false` on the INSTANCE (§6.3's flag nuance); no
+    `canvasOnly`, and the callback uses only closure state (Nodes 2.0 strips
+    `pos`/`event`/`value`). `input.value` resets in `onchange` so re-picking
+    the same files fires again.
+  - **Numeric-aware sort before ingest** (`sortFilesForIngest`, pure,
+    exported): `Intl.Collator(undefined, {numeric: true, sensitivity:
+    'base'})` on `file.name` — `img2` before `img10` — applied by BOTH the
+    picker and the Finder-files drop branch (FileList order is
+    spec-unspecified; Windows hoists the last-clicked file first). Ctrl+V
+    paste batches are not sorted (typically 1–2 files, clipboard order is
+    meaningful).
+  - **One shared batch runner** (`runAddBatch`) behind the picker, the drop
+    path, and clipspace-'all': display refresh HOISTED out of the per-file
+    loop (every `BATCH_REFRESH_INTERVAL`=10 files + once at the end — the
+    old per-file refresh rebuilt an `Image()` per ref in the whole buffer
+    per file, ≈5,050 full-res fetches for 100 files); progress + cancel on
+    the button itself (`label` mutated to `Cancel (n/total)` — paint-only,
+    `name` stays the lookup key — restored in a `finally`); a real
+    `AbortController` (verified: `api.fetchApi` spreads its options bag
+    into `fetch`, so `signal` passes through) plus a cooperative flag; ONE
+    aggregate toast (added/skipped/failed); a busy-guard refusing a second
+    concurrent batch per node (manifest read-modify-write is unlocked —
+    §6.6's own atomicity note); and the batch's `grid_uuid` captured ONCE
+    up front (the uuid-remint race, roadmap risk #1).
+  - **Silent-skip detection:** `/add` fails SOFT (HTTP 200, buffer
+    unchanged) on an unreadable source — pinned in
+    `tests/test_routes_image_grid.py` — so the runner counts a response
+    whose `images.length` didn't grow as `skipped`, seeding the baseline
+    from the displayed buffer length (0 for a fresh/empty display).
+  - **The `v=<generation>` cache token, replacing `rand=`:** buffer frames
+    are append-only while a buffer lives, BUT `clear()` is an `rmtree` and
+    `_next_frame_filename` restarts from the highest EXISTING frame — so
+    after Clear, `0001.png` is REUSED with different pixels (pinned in
+    `tests/test_image_grid_store.py`). Fully-stable URLs would show stale
+    cached frames after Clear; per-render `rand=` defeated the cache on
+    every repaint. `store.buffer_generation(uuid)` (manifest mtime, ms) now
+    rides every `/add` and `/list` response as `generation`; the frontend
+    threads the last-seen value per node into every URL as `v=` — stable
+    within a generation, fresh across anything that can reuse a name.
+  - **Compressed thumbnails without degrading Copy:**
+    `imageUrlForRef(ref, {preview, epoch})` appends `preview=webp;80`
+    (server-side resize, `server.py`'s `/view` handler) for DISPLAY only.
+    Pixel-consuming paths (Copy image, clipspace) derive a FULL-RES URL
+    from the REF (`node.images[index]`, index-aligned with `imgs`), never
+    from an on-screen `.src` — a preview `.src` would otherwise silently
+    put degraded webp pixels on the clipboard. Param order is fixed
+    (identity → preview → v) so `refFromImageSrc` parses either shape.
 - **Drop-to-add (2026-07-22, owner ask):** dropping onto the node adds to
   the buffer and pre-empts core's "load workflow from dropped image"
   (core's own drop handler early-returns when a node's `onDragDrop`

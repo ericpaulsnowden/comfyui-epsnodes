@@ -577,6 +577,63 @@
  * `widgets_values`) — NOT `options.serialize` — is what actually keeps a
  * button out of a saved workflow's widget-value array; leaving it default
  * would insert an extra slot and risk desyncing that positional restore.
+ *
+ * ---- M1/M2 bulk add (docs/ROADMAP-image-grid-bulk-add.md, owner ask:
+ * "give the image grid an upload button ... multiselect") ----
+ *
+ * M1 adds "Add images…" right after Clear — a detached, lazily-created
+ * `<input type="file" multiple>` (`ensureFileInput`), sorted before ingest
+ * with a numeric-aware `Intl.Collator` (`sortFilesForIngest`, exported and
+ * pure) so `img2` lands before `img10` regardless of the unspecified
+ * `FileList`/OS-dialog order — applied at BOTH this picker and
+ * `installDragAndDrop`'s Finder-files branch, which was unsorted before
+ * this. No `canvasOnly` (renders nowhere under Nodes 2.0/Vue); the button
+ * callback captures `node` in its closure rather than trusting its own
+ * `(value, options, node, pos, event)` arguments, which are absent/
+ * clobbered there too.
+ *
+ * M2 rewrites `addFilesToBuffer`'s loop (shared, via `runAddBatch`, with
+ * `addClipspaceToBuffer`'s 'all' mode) to make a 20–100-image batch
+ * pleasant instead of ~5,050 full-resolution image loads:
+ *  - the display refresh moves OUT of the per-item loop to every 10th item
+ *    and once at the end, reusing the last `/add` response's whole-buffer
+ *    `images` rather than a fresh `/list` round trip;
+ *  - `imageUrlForRef` drops the old per-render `rand=Math.random()`
+ *    cache-buster (defeated the browser cache on every repaint) and gains
+ *    `preview`/`epoch` options instead. `preview: true` requests a
+ *    compressed `webp;80` thumbnail (core's own `/view?preview=` resize
+ *    hint) for DISPLAY only; every pixel-consuming path (Copy image,
+ *    clipspace add) derives a full-resolution url from a buffer REF
+ *    directly rather than trusting a possibly-compressed `<img>.src` (see
+ *    `fullResImageUrl`/`currentMenuSelection` — `addClipspaceImageToBuffer`
+ *    was audited too and found already safe: its ref-reuse fast path never
+ *    touches pixels at all). `epoch` replaces `rand=` as the cache key —
+ *    checked against `image_grid_store.py` before removing `rand=`
+ *    outright: `clear()` is a plain `rmtree` and the next append restarts
+ *    numbering from `0001.png`, so a FULLY stable url would show a stale
+ *    cached frame after Clear → re-add reuses a name. `epoch` is the
+ *    server's own `generation` (manifest mtime, `buffer_generation`),
+ *    threaded through `noteBufferGeneration`/`getBufferGeneration`
+ *    (a per-node `WeakMap`) from every response that carries one
+ *    (`/list`, `/add` today) and reset on Clear — stable across calls
+ *    describing the same buffer contents, fresh the moment a Clear could
+ *    have replaced what a filename points to;
+ *  - the "Add images…" button doubles as the progress/Cancel control while
+ *    a batch runs (`.label` mutated to `Cancel (n/total)`, restored in a
+ *    `finally`) — cooperative cancel is a `state.cancelled` flag checked
+ *    every iteration PLUS a real `AbortController` (confirmed against the
+ *    installed frontend's `ComfyApi.prototype.fetchApi` source that it
+ *    spreads its whole options bag straight into `fetch()`, so a `signal`
+ *    passed through `api.fetchApi` reaches the browser unmodified);
+ *  - one aggregate added/skipped/failed toast per batch
+ *    (`notifyBatchResult`) instead of a `console.warn` per file; a
+ *    same-response-length compared against the previous one is how a
+ *    silent HTTP-200 soft-skip (an unreadable file, `append_uploaded_image`)
+ *    gets counted instead of silently miscounted as "added";
+ *  - `grid_uuid` is captured ONCE per batch (`currentUuid(node)`, before
+ *    the loop) and threaded through every item, so a debounced collision
+ *    remint mid-batch (the roadmap's risk #1) can't send the tail of a
+ *    long batch into a different buffer than the head.
  */
 
 import { api } from '../../../scripts/api.js'
@@ -838,6 +895,11 @@ function clearNodePreview(node) {
   node.imgs = []
   node.images = undefined
   node.imageIndex = null
+  // M2 cache-token reset (see `imageUrlForRef`'s docstring): Clear can
+  // reuse `NNNN.png` names on the next append, so a stale cached epoch
+  // must not survive it -- back to the "unknown" default (`0`) until the
+  // next response that carries a real `generation`.
+  bufferGenerationByNode.delete(node)
   try {
     node.setSizeForImage?.()
   } catch {
@@ -869,6 +931,176 @@ function addClearButton(node) {
 }
 
 // ---------------------------------------------------------------------------
+// M1: "Add images..." button (roadmap-eps-image-grid.md M1) -- a detached,
+// lazily-created multiselect file picker. The heavy lifting (upload+add,
+// batching, progress/cancel) lives in the M2 section below
+// (`addFilesToBuffer`/`runAddBatch`); this section only owns the button and
+// the picker `<input>` that feeds it.
+// ---------------------------------------------------------------------------
+
+const ADD_IMAGES_BUTTON_LABEL = 'Add images…'
+const ACCEPTED_IMAGE_TYPES = 'image/png,image/jpeg,image/webp'
+
+//: node -> { input: HTMLInputElement|null, batch: object|null } -- the
+//: lazily-created file-picker `<input>` (M1) and the in-flight batch's
+//: cancel/progress bookkeeping (M2, `runAddBatch`), keyed by node so
+//: `onRemoved` can tear both down in one place without hunting the widget
+//: list.
+const nodeFileState = new WeakMap()
+
+function getNodeFileState(node) {
+  let state = nodeFileState.get(node)
+  if (!state) {
+    state = { input: null, batch: null }
+    nodeFileState.set(node, state)
+  }
+  return state
+}
+
+/** Same image-shaped test `addFilesToBuffer` has always filtered with,
+ * factored out so `sortFilesForIngest` below filters identically. */
+function isImageFile(file) {
+  return Boolean(file) && typeof file.type === 'string' && file.type.startsWith('image/')
+}
+
+/**
+ * Numeric-aware, case-insensitive filename order for a bulk ingest --
+ * roadmap-eps-image-grid.md M1 owner decision ("Ordering: Filename,
+ * numeric-aware, img2 before img10"). `FileList` order is NOT the order
+ * files appear in the OS picker/Finder -- unspecified by spec, and on
+ * Windows the last-CLICKED file (not the first) can land first in the
+ * list -- so both bulk-ingest entry points (the picker below, and
+ * `installDragAndDrop`'s Finder-files branch) sort through this before
+ * handing files to `addFilesToBuffer`, which itself preserves whatever
+ * order it's given.
+ *
+ * Pure: *files* (an `Array`, or anything `Array.from`-able like a real
+ * `FileList`) in, a NEW array out, never mutated. Filters to image-shaped
+ * entries the SAME way `addFilesToBuffer` does (`isImageFile` above) --
+ * non-images are dropped here rather than merely sorted-then-re-filtered
+ * downstream, so `addFilesToBuffer`'s own defensive filter is always a
+ * no-op for a caller that already sorted. Missing `.name`/`.type` are
+ * tolerated, never thrown: a nameless file sorts as if its key were `''`
+ * (first); a typeless one is simply filtered out by `isImageFile`.
+ * `Intl.Collator`'s `numeric: true` makes "img10" sort after "img2" (not
+ * lexicographically, where "10" < "2"); `sensitivity: 'base'` makes the
+ * order case-insensitive. `Array.prototype.sort` is spec-stable (ES2019+,
+ * and this pack only ever runs on modern Chromium/Node), so two files
+ * whose collated keys tie keep their original relative order.
+ */
+export function sortFilesForIngest(files) {
+  const collator = new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' })
+  return Array.from(files || [])
+    .filter(isImageFile)
+    .sort((a, b) => collator.compare(a?.name || '', b?.name || ''))
+}
+
+/**
+ * Lazily creates *node*'s detached file-picker `<input>` (M1). Deliberately
+ * never appended to the DOM -- a detached `<input type="file">`'s
+ * `.click()` still opens the native OS picker in every evergreen browser,
+ * so there is no layout to manage and nothing to `.remove()` on cleanup
+ * beyond dropping the reference (`installFileInputCleanup` below).
+ * `multiple` + an image-only `accept` narrows the OS dialog (still just a
+ * hint -- the real gate is `isImageFile`, applied by `sortFilesForIngest`
+ * and, defensively, by `addFilesToBuffer` itself). `value = ''` in
+ * `onchange` is what lets picking the EXACT SAME file(s) again re-fire
+ * `change` -- a browser only fires it when the input's value actually
+ * differs from its last-committed one otherwise (roadmap M1).
+ */
+function ensureFileInput(node, state) {
+  if (state.input) return state.input
+  const input = document.createElement('input')
+  input.type = 'file'
+  input.multiple = true
+  input.accept = ACCEPTED_IMAGE_TYPES
+  input.style.display = 'none'
+  input.onchange = () => {
+    const files = Array.from(input.files || [])
+    input.value = ''
+    if (files.length) void addFilesToBuffer(node, sortFilesForIngest(files))
+  }
+  state.input = input
+  return input
+}
+
+/**
+ * "Add images..." button callback. Nodes 2.0 (verified in the roadmap's own
+ * research): NO `canvasOnly` on this widget (a `canvasOnly` widget renders
+ * NOWHERE under Vue nodes), and the callback's own `(value, options, node,
+ * pos, event)` arguments are absent/clobbered there too -- *node* is
+ * captured in `addAddImagesButton`'s closure below instead of read from an
+ * argument, and nothing here reads any of them either.
+ *
+ * A click WHILE a batch is already running for this node CANCELS it
+ * instead of opening the picker again -- the same button IS the Cancel
+ * control while its label reads `Cancel (n/total)` (M2, see
+ * `runAddBatch`'s docstring for the full progress/cancel design).
+ */
+function onAddImagesClicked(node) {
+  const state = getNodeFileState(node)
+  if (state.batch && !state.batch.done) {
+    state.batch.cancelled = true
+    try {
+      state.batch.controller?.abort()
+    } catch {
+      // Best-effort -- the cooperative `cancelled` flag alone still stops
+      // the loop at its next iteration even if abort() itself throws.
+    }
+    return
+  }
+  ensureFileInput(node, state).click()
+}
+
+function addAddImagesButton(node) {
+  if (findWidget(node, ADD_IMAGES_BUTTON_LABEL)) return
+  // Copies `addClearButton` above exactly, including `widget.serialize`
+  // set on the INSTANCE (see its own citation just above -- the options-bag
+  // form sets a different flag on this fork).
+  const widget = node.addWidget(
+    'button',
+    ADD_IMAGES_BUTTON_LABEL,
+    null,
+    () => onAddImagesClicked(node),
+    {}
+  )
+  widget.serialize = false
+}
+
+/**
+ * Tears down this node's lazily-created file `<input>` (drops the
+ * reference AND its `onchange` closure over *node*, so nothing keeps the
+ * node reachable after removal) and cancels any in-flight batch. Installed
+ * once per node instance (`__epsGridFileCleanupInstalled`), mirroring
+ * `installConfigureRefresh`'s guard idiom; wraps (never replaces)
+ * `onRemoved`, calling the original first.
+ */
+function installFileInputCleanup(node) {
+  if (node.__epsGridFileCleanupInstalled) return
+  node.__epsGridFileCleanupInstalled = true
+
+  const originalOnRemoved = node.onRemoved
+  node.onRemoved = function (...args) {
+    try {
+      const state = nodeFileState.get(node)
+      if (state) {
+        if (state.input) {
+          state.input.onchange = null
+          state.input = null
+        }
+        if (state.batch) {
+          state.batch.cancelled = true
+          state.batch.controller?.abort()
+        }
+      }
+    } catch (error) {
+      console.warn(PREFIX, 'file-input cleanup failed', error)
+    }
+    return originalOnRemoved?.apply(this, args)
+  }
+}
+
+// ---------------------------------------------------------------------------
 // M2: paste-to-add (Ctrl+V and the free "Paste Image" menu item both land
 // on `node.pasteFiles`, installed below -- see file header for the hook
 // citations).
@@ -878,19 +1110,78 @@ const UPLOAD_ROUTE = '/upload/image'
 const ADD_ROUTE = '/eps_image_grid/add'
 
 /**
- * A core-style `/view` URL for one buffer ref (`{filename, subfolder,
- * type}`) -- same query-param shape already observed for every OTHER
- * thumbnail this node shows (core's own `ui.images` handling), so a
- * just-added image renders identically to one that arrived via a normal
- * Run. `rand=` matches core's own cache-busting convention.
+ * node -> the last server-reported `generation` (a cache token for the
+ * buffer's CONTENTS -- `image_grid_store.py`'s `buffer_generation`,
+ * manifest mtime in ms) seen for that node. M2 (roadmap "100 files ~=
+ * 5,050 loads"): defaults to `0` (unknown yet, e.g. before the first
+ * `/list`/`/add` response) via `getBufferGeneration` below rather than
+ * `undefined`, so `imageUrlForRef`'s `v=` param is always present and the
+ * URL shape never depends on whether a generation has been observed.
  */
-function imageUrlForRef(ref) {
+const bufferGenerationByNode = new WeakMap()
+
+function getBufferGeneration(node) {
+  return bufferGenerationByNode.get(node) || 0
+}
+
+/**
+ * Records *data*'s `generation` field for *node*, if present and numeric.
+ * Called after every response that carries one (`/list`, `/add` today --
+ * `/clear`/`/clone` may gain it later; this tolerates either). Absent/
+ * non-numeric `generation` (an older backend, or a response shape that
+ * never carries one) leaves the LAST-KNOWN value untouched -- never resets
+ * to `0` -- so display URLs stay keyed off the most recent truth this node
+ * has actually seen, not a fresh guess on every call.
+ */
+function noteBufferGeneration(node, data) {
+  if (data && typeof data.generation === 'number') {
+    bufferGenerationByNode.set(node, data.generation)
+  }
+}
+
+/**
+ * A core-style `/view` URL for one buffer ref (`{filename, subfolder,
+ * type}`) -- same identity query-param shape already observed for every
+ * OTHER thumbnail this node shows (core's own `ui.images` handling), plus
+ * two independent, both-optional decorations appended AFTER those identity
+ * params (in this fixed order) so `refFromImageSrc` can keep parsing just
+ * `filename`/`subfolder`/`type` back out of either a plain or a decorated
+ * URL:
+ *
+ *  - `preview: true` appends core's own `Comfy.PreviewFormat` resize hint
+ *    (`preview=webp;80`, confirmed against this rig's `server.py` `/view`
+ *    handler: `preview_info = query['preview'].split(';')` ->
+ *    format/quality, format constrained to webp/jpeg) -- a COMPRESSED
+ *    thumbnail, DISPLAY-only (`setNodeImagesFromRefs`). Never used for a
+ *    pixel-consuming path (Copy image, clipspace add) -- those derive a
+ *    full-res URL from a REF directly (`preview` omitted) instead of
+ *    trusting an on-screen `<img>`'s `.src` -- see `fullResImageUrl`.
+ *  - `epoch` becomes a `v=<epoch>` cache-token param, REPLACING the old
+ *    per-render `rand=Math.random()` (M2, roadmap "100 files ~= 5,050
+ *    full-resolution loads" -- `rand=` defeated the browser cache on
+ *    EVERY repaint, not just every append). Buffer frames are append-only
+ *    while a buffer lives (`image_grid_store.py`'s `_next_frame_filename`:
+ *    "never reuses a name" -- true only WITHIN one generation), but
+ *    `clear()` is a plain `rmtree` and the next append restarts numbering
+ *    from `0001.png` -- verified in `image_grid_store.py` before removing
+ *    `rand=` outright, since a fully stable URL would then show a STALE
+ *    cached frame after Clear -> re-add reuses a name. `epoch` is the
+ *    server's own `generation` (`image_grid_store.py`'s
+ *    `buffer_generation`, manifest mtime): identical -- therefore
+ *    cacheable -- for any two calls describing the SAME buffer contents;
+ *    different the moment a Clear could have replaced what a given
+ *    filename points to. Defaults to `0`; see `getBufferGeneration`.
+ *
+ * Exported for tests.
+ */
+export function imageUrlForRef(ref, { preview = false, epoch = 0 } = {}) {
   const params = new URLSearchParams({
     filename: ref.filename,
     subfolder: ref.subfolder || '',
-    type: ref.type || 'output',
-    rand: String(Math.random())
+    type: ref.type || 'output'
   })
+  if (preview) params.set('preview', 'webp;80')
+  params.set('v', String(epoch))
   return api.apiURL(`/view?${params.toString()}`)
 }
 
@@ -1048,6 +1339,11 @@ export function setNodeImagesFromRefs(node, refs) {
     syncCoreOutputStore(node, node.images)
     return
   }
+  // M2: a compressed thumbnail (`preview=webp;80`), never the full-res
+  // fetch `imageUrlForRef`'s default gives -- pixel-consuming paths (Copy
+  // image, clipspace add) derive their own full-res URL from a REF
+  // instead of trusting this `.src` (see `fullResImageUrl`).
+  const epoch = getBufferGeneration(node)
   const imgs = refs.map((ref) => {
     const img = new Image()
     // Listeners attached BEFORE `.src` (belt-and-suspenders -- image loads
@@ -1055,7 +1351,7 @@ export function setNodeImagesFromRefs(node, refs) {
     // matter, but this matches the safer convention).
     img.onload = () => node.setDirtyCanvas(true, true)
     img.onerror = () => console.warn(PREFIX, `image failed to load: ${ref.filename}`)
-    img.src = imageUrlForRef(ref)
+    img.src = imageUrlForRef(ref, { preview: true, epoch })
     return img
   })
   node.imgs = imgs
@@ -1070,11 +1366,21 @@ export function setNodeImagesFromRefs(node, refs) {
  * `POST /upload/image` (core's own route) -- returns `{name, subfolder,
  * type}` on success, throws otherwise. Reimplemented directly (see file
  * header) rather than importing `useNodeImageUpload`'s `uploadFile`.
+ *
+ * *signal* (M2, optional): an `AbortController.signal` a batch (
+ * `runAddBatch`) passes through so a Cancel click aborts an in-flight
+ * upload rather than waiting for it to finish first. Confirmed against the
+ * installed frontend's `ComfyApi.prototype.fetchApi` source that it spreads
+ * its whole options bag straight into the real `fetch()` call (`fetch(this
+ * .apiURL(route), {cache: 'no-cache', ...options, headers})`), so a
+ * `{signal}` here reaches the browser unmodified -- not a guess.
+ * `undefined` (every non-batch caller) is simply "no signal", identical to
+ * omitting the option entirely.
  */
-async function uploadImageFile(file) {
+async function uploadImageFile(file, signal) {
   const formData = new FormData()
   formData.append('image', file)
-  const response = await api.fetchApi(UPLOAD_ROUTE, { method: 'POST', body: formData })
+  const response = await api.fetchApi(UPLOAD_ROUTE, { method: 'POST', body: formData, signal })
   if (!response.ok) {
     throw new Error(`upload failed (HTTP ${response.status})`)
   }
@@ -1084,10 +1390,19 @@ async function uploadImageFile(file) {
 /**
  * `POST /eps_image_grid/add` -- appends the just-uploaded file (its
  * `{name,subfolder,type}` from `uploadImageFile`) to *node*'s buffer.
- * Returns `{ok, uuid, images}` on success, throws otherwise.
+ * Returns `{ok, uuid, images, generation}` on success, throws otherwise.
+ *
+ * *uuidOverride* (M2, optional -- roadmap risk #1 "uuid remint race"): a
+ * batch (`runAddBatch` via `addFilesToBuffer`/`addClipspaceToBuffer`)
+ * captures `currentUuid(node)` ONCE, before its loop starts, and passes it
+ * here for every item so a debounced collision-sweep remint mid-batch
+ * can't send the tail of a long batch into a DIFFERENT buffer than the
+ * head. Falsy (every non-batch caller, e.g. a single Ctrl+V or asset-drop
+ * add) falls back to reading `currentUuid(node)` fresh, exactly the old
+ * behavior. *signal*: see `uploadImageFile`'s docstring.
  */
-async function addUploadToBuffer(node, uploaded) {
-  const uuid = currentUuid(node)
+async function addUploadToBuffer(node, uploaded, uuidOverride, signal) {
+  const uuid = uuidOverride || currentUuid(node)
   if (!GRID_UUID_RE.test(uuid)) {
     throw new Error('node has no valid grid_uuid yet')
   }
@@ -1099,7 +1414,8 @@ async function addUploadToBuffer(node, uploaded) {
       filename: uploaded.name,
       subfolder: uploaded.subfolder || '',
       type: uploaded.type || 'input'
-    })
+    }),
+    signal
   })
   let data = null
   try {
@@ -1114,33 +1430,209 @@ async function addUploadToBuffer(node, uploaded) {
   return data
 }
 
+//: M2 (roadmap "make 20-100 images pleasant"): how often a batch refreshes
+//: the displayed grid mid-flight -- every Kth item, plus always once at the
+//: end. K=10 per the brief; tune here if 20-100-image batches ever want a
+//: different cadence.
+const BATCH_REFRESH_INTERVAL = 10
+
 /**
- * Uploads and appends every image `File` in *files* to *node*'s buffer,
- * one at a time (so a batch paste/drop with several images adds all of
- * them, in order -- sequential on purpose: our own atomic manifest writes
- * are not safe against truly concurrent appends from the same process).
- * Refreshes the displayed grid after each successful add. Fails soft per
- * file -- one bad file logs a warning and does not stop the rest; a
- * *files* list with nothing image-shaped is a silent no-op (`false`).
+ * Best-effort aggregate toast for ONE finished batch -- replaces the old
+ * per-file `console.warn` (still there, but no longer the only signal) with
+ * a single added/skipped/failed summary. Reuses `notifyClipboard`'s toast
+ * idiom (same `app.extensionManager?.toast?.add?.()` call, same shape) but
+ * NOT its per-node cooldown -- a batch summary is inherently one
+ * deliberate event per batch, never spam.
  */
-async function addFilesToBuffer(node, files) {
-  const imageFiles = Array.from(files || []).filter(
-    (file) => file && typeof file.type === 'string' && file.type.startsWith('image/')
-  )
+function notifyBatchResult(node, { noun, added, skipped, failed, cancelled }) {
+  const total = added + skipped + failed
+  if (!total) return
+  const parts = [`added ${added}`]
+  if (skipped) parts.push(`skipped ${skipped}`)
+  if (failed) parts.push(`failed ${failed}`)
+  const detail = `${cancelled ? 'Cancelled -- ' : ''}${parts.join(', ')} of ${total} ${noun}.`
+  try {
+    if (app.extensionManager?.toast?.add) {
+      app.extensionManager.toast.add({
+        severity: failed ? 'warn' : 'info',
+        summary: node.title || NODE_TITLE,
+        detail,
+        life: 6000
+      })
+      return
+    }
+  } catch (error) {
+    console.warn(PREFIX, 'batch toast failed', error)
+  }
+  console.info(PREFIX, detail)
+}
+
+/**
+ * Runs *addOne(item, signal)* sequentially over *items* (never concurrent
+ * -- our own atomic manifest writes are not safe against truly concurrent
+ * appends from the same process, the same reasoning this file has always
+ * used for a single-file batch). Shared by `addFilesToBuffer`'s file loop
+ * AND `addClipspaceToBuffer`'s 'all' mode (M2 #8, "apply the same
+ * batching/refresh discipline to both") so both get the identical M2
+ * package instead of two drifting copies:
+ *
+ *  - the display refresh is HOISTED out of the per-item loop -- every
+ *    `BATCH_REFRESH_INTERVAL`th item and unconditionally once more at the
+ *    end, reusing the LAST successful response's whole-buffer `images`
+ *    (never a fresh `/list` round trip mid-batch: the bug this whole
+ *    rewrite exists for -- 100 files used to mean ~5,050 image loads,
+ *    roadmap M2). A redundant final call when the loop already refreshed
+ *    on the exact last item is cheap on purpose: `setNodeImagesFromRefs`'s
+ *    own unchanged-content short-circuit makes a repeat of identical refs
+ *    a no-op rebuild.
+ *  - the node's "Add images..." button (if this node has one -- found by
+ *    NAME, `ADD_IMAGES_BUTTON_LABEL`, which never changes even while
+ *    `.label` -- the PAINTED text -- does) mutates `.label` to
+ *    `Cancel (n/total)` for the duration, restored to whatever it showed
+ *    before in a `finally` regardless of how the batch ends. This
+ *    reconciles the brief's two framings of the same mechanism -- "show
+ *    progress" and "the button becomes Cancel" -- as ONE label that does
+ *    both: it names the count AND is the click target that aborts.
+ *  - cooperative cancel: *batchState.cancelled* is checked every
+ *    iteration, AND an `AbortController` (its `.signal` handed to
+ *    *addOne*) aborts whatever request is actually in flight -- so a
+ *    cancel during a slow upload doesn't have to wait for that upload to
+ *    finish first. An aborted request's rejection is NOT counted as a
+ *    failure.
+ *  - ONE aggregate toast at the end (`notifyBatchResult`), never one per
+ *    item.
+ *  - silent-skip detection: the backend fails SOFT (HTTP 200, buffer
+ *    unchanged) on an unreadable file (`append_uploaded_image`'s
+ *    docstring) -- *previousLength* starts from *node*'s OWN currently-
+ *    displayed buffer length (cheap, synchronous, no extra round trip
+ *    needed just to seed a baseline) and is compared against each
+ *    response's `images.length`: unchanged == skipped, grew == added.
+ *
+ * Refuses to start a SECOND concurrent batch for the same node (returns
+ * immediately, logging a warning) -- the button-click cancel path only
+ * guards the button's own second click; a drop or paste arriving while a
+ * picker-driven batch is still running must not run two loops appending to
+ * the same manifest at once.
+ *
+ * *addOne* must resolve to `{images, generation?}` (the `/eps_image_grid/
+ * add` response shape `addUploadToBuffer` already returns) or throw/reject
+ * -- a per-item failure is caught here, counted, and does not stop the
+ * rest of the batch (the long-standing "fails soft per item" contract).
+ *
+ * Returns `{added, skipped, failed, cancelled}`. Never throws.
+ */
+async function runAddBatch(node, items, addOne, { noun = 'images' } = {}) {
+  const total = items.length
+  if (!total) return { added: 0, skipped: 0, failed: 0, cancelled: false }
+
+  const state = getNodeFileState(node)
+  if (state.batch && !state.batch.done) {
+    console.warn(
+      PREFIX,
+      'a batch is already in progress for this node; ignoring the new add request until it finishes'
+    )
+    return { added: 0, skipped: 0, failed: 0, cancelled: false }
+  }
+
+  const controller = typeof AbortController === 'function' ? new AbortController() : null
+  const batchState = { cancelled: false, controller, done: false }
+  state.batch = batchState
+
+  const buttonWidget = findWidget(node, ADD_IMAGES_BUTTON_LABEL)
+  const idleLabel = (buttonWidget && buttonWidget.label) || ADD_IMAGES_BUTTON_LABEL
+
+  let added = 0
+  let skipped = 0
+  let failed = 0
+  let lastImages = null
+  // Seed 0 when nothing is displayed yet: an EMPTY buffer displays
+  // `images: undefined` (setNodeImagesFromRefs' empty branch), and 0 is its
+  // true length -- so a silent skip on the very FIRST file of a fresh
+  // buffer still counts as skipped, not added. (A restored-but-unfetched
+  // non-empty buffer also lands here; its first add then can't be
+  // distinguished from a skip either way, and counting it as added is the
+  // better default -- identical behavior to the null-seed this replaces.)
+  let previousLength = Array.isArray(node.images) ? node.images.length : 0
+
+  try {
+    for (let i = 0; i < total; i++) {
+      if (batchState.cancelled) break
+
+      if (buttonWidget) {
+        buttonWidget.label = `Cancel (${i + 1}/${total})`
+        node.setDirtyCanvas(true, true)
+      }
+
+      try {
+        const result = await addOne(items[i], controller?.signal)
+        noteBufferGeneration(node, result)
+        const images = Array.isArray(result?.images) ? result.images : null
+        if (images) {
+          lastImages = images
+          if (previousLength !== null && images.length === previousLength) {
+            skipped++
+          } else {
+            added++
+          }
+          previousLength = images.length
+        }
+      } catch (error) {
+        if (batchState.cancelled) break // an abort() surfaces as a rejection here -- not a real failure.
+        failed++
+        console.warn(PREFIX, 'batch add failed for one item', error)
+      }
+
+      if (lastImages && (i + 1) % BATCH_REFRESH_INTERVAL === 0) {
+        setNodeImagesFromRefs(node, lastImages)
+        node.setDirtyCanvas(true, true)
+      }
+    }
+  } finally {
+    if (lastImages) {
+      setNodeImagesFromRefs(node, lastImages)
+      node.setDirtyCanvas(true, true)
+    }
+    if (buttonWidget) {
+      buttonWidget.label = idleLabel
+      node.setDirtyCanvas(true, true)
+    }
+    batchState.done = true
+    if (state.batch === batchState) state.batch = null
+    notifyBatchResult(node, { noun, added, skipped, failed, cancelled: batchState.cancelled })
+  }
+
+  return { added, skipped, failed, cancelled: batchState.cancelled }
+}
+
+/**
+ * Uploads and appends every image `File` in *files* to *node*'s buffer, in
+ * the given order (sort happens at the CALL SITES that need it --
+ * `ensureFileInput`'s picker and `installDragAndDrop`'s Finder-files
+ * branch, via `sortFilesForIngest` -- not here, so a Ctrl+V/paste-file
+ * batch, which is usually one or two images anyway, is unaffected). M2
+ * rewrite (roadmap-eps-image-grid.md M2): the display refresh used to run
+ * INSIDE this loop, once per file, rebuilding an `Image()` for every ref in
+ * the WHOLE buffer on every single iteration (100 files ~= 5,050 loads) --
+ * now hoisted into `runAddBatch`'s shared K-and-final cadence, which also
+ * gives this path progress/cancel/aggregate-toast for free.
+ *
+ * The batch's `grid_uuid` is captured ONCE, before the loop starts
+ * (roadmap risk #1, "uuid remint race") -- see `addUploadToBuffer`'s
+ * docstring for why.
+ *
+ * A *files* list with nothing image-shaped is a silent no-op (`false`,
+ * unchanged contract). Never throws -- per-file failures are caught and
+ * counted by `runAddBatch`.
+ */
+export async function addFilesToBuffer(node, files) {
+  const imageFiles = Array.from(files || []).filter(isImageFile)
   if (!imageFiles.length) return false
 
-  for (const file of imageFiles) {
-    try {
-      const uploaded = await uploadImageFile(file)
-      const result = await addUploadToBuffer(node, uploaded)
-      if (result && Array.isArray(result.images)) {
-        setNodeImagesFromRefs(node, result.images)
-      }
-    } catch (error) {
-      console.warn(PREFIX, 'paste-to-add failed for one file', error)
-    }
-  }
-  app.graph?.setDirtyCanvas(true, true)
+  const uuid = currentUuid(node) // captured ONCE for the whole batch -- see docstring above.
+  await runAddBatch(node, imageFiles, async (file, signal) => {
+    const uploaded = await uploadImageFile(file, signal)
+    return addUploadToBuffer(node, uploaded, uuid, signal)
+  })
   return true
 }
 
@@ -1223,6 +1715,7 @@ async function addResultItemToBuffer(node, item) {
     subfolder: item.subfolder || '',
     type: item.type || 'input'
   })
+  noteBufferGeneration(node, result)
   if (result && Array.isArray(result.images)) {
     setNodeImagesFromRefs(node, result.images)
   }
@@ -1289,7 +1782,11 @@ function installDragAndDrop(node) {
   node.onDragDrop = async (e) => {
     const files = Array.from(e?.dataTransfer?.files || [])
     if (files.length) {
-      return addFilesToBuffer(node, files)
+      // M1: numeric-aware order before ingest -- FileList order is
+      // unspecified by spec, and Windows Explorer can hoist the
+      // last-clicked file first; matches the "Add images..." picker path
+      // (`ensureFileInput`), which sorts the same way.
+      return addFilesToBuffer(node, sortFilesForIngest(files))
     }
     const asset = parseAssetInfo(e?.dataTransfer?.getData(MIME_ASSET_INFO))
     if (asset) {
@@ -1352,38 +1849,67 @@ function canUseOsClipboardImage() {
 }
 
 /**
- * The exact image core's OWN "Open/Copy/Save Image" items would target --
- * mirrors `litegraphService.ts`'s `getExtraMenuOptions` resolution order
- * precisely (a focused single image via `imageIndex`, else a merely-
- * hovered one via `overIndex` while the grid view is showing) so this
- * node's OWN "Copy image" item appears/targets in exactly the same
- * circumstances core's would, never a surprise to someone used to core's
- * behavior on other image nodes. Returns `null` when nothing resolves
+ * The exact image (and its buffer ref, if one lines up) core's OWN
+ * "Open/Copy/Save Image" items would target -- mirrors
+ * `litegraphService.ts`'s `getExtraMenuOptions` resolution order precisely
+ * (a focused single image via `imageIndex`, else a merely-hovered one via
+ * `overIndex` while the grid view is showing) so this node's OWN "Copy
+ * image" item appears/targets in exactly the same circumstances core's
+ * would. `ref` is `node.images[index]` -- the SAME index into the ref
+ * array `setNodeImagesFromRefs` builds `node.imgs` from (both are
+ * `refs.map(...)`-built together, same length, same order by
+ * construction), so it always names the identical buffered frame `img`
+ * shows, full quality regardless of what `img.src` itself happens to be
+ * decorated with (M2, "compressed thumbnails without degrading Copy" --
+ * see `fullResImageUrl`). `{img: null, ref: null}` when nothing resolves
  * (e.g. the grid view with nothing hovered) -- callers must not offer a
  * copy action with nothing to act on.
  */
-function currentMenuImage(node) {
-  if (!node.imgs || !node.imgs.length) return null
-  let img = null
-  if (node.imageIndex != null) {
-    img = node.imgs[node.imageIndex]
-  } else if (node.overIndex != null) {
-    img = node.imgs[node.overIndex]
-  }
-  return img || null
+function currentMenuSelection(node) {
+  if (!node.imgs || !node.imgs.length) return { img: null, ref: null }
+  let index = null
+  if (node.imageIndex != null) index = node.imageIndex
+  else if (node.overIndex != null) index = node.overIndex
+  if (index == null) return { img: null, ref: null }
+  const img = node.imgs[index] || null
+  const ref = Array.isArray(node.images) ? node.images[index] || null : null
+  return { img, ref }
 }
 
-/** *img*'s real `/view` URL with the `preview` resize hint stripped --
- * matches core's own Open/Copy/Save Image handling (`litegraphService.ts`)
- * so this targets the actual full asset, not a thumbnail-sized render.
- * Works whether *img* came from this file's own `imageUrlForRef` (never
- * has a `preview` param to begin with) or from a normal Run's `ui.images`
- * (core's own thumbnail loading, which sometimes does) -- `URLSearchParams
- * .delete` on an absent key is simply a no-op either way. */
-function fullImageUrl(img) {
-  const url = new URL(img.src)
-  url.searchParams.delete('preview')
-  return url
+/**
+ * The full-RESOLUTION `/view` url for the (*img*, *ref*) pair
+ * `currentMenuSelection` resolves -- what core's own Open/Copy/Save Image
+ * items would target. M2 ("compressed thumbnails without degrading Copy"):
+ * `node.imgs[i].src` may now be a COMPRESSED preview url
+ * (`imageUrlForRef(ref, {preview: true, ...})`, the display path) --
+ * reading pixels from it directly would silently degrade Copy image and
+ * clipspace paste. Resolution order:
+ *  1. *ref* (`node.images[index]`, index-aligned with `node.imgs` by
+ *     construction) -- always full-res, since `preview` is omitted here.
+ *  2. `refFromImageSrc(img.src)` -- a fallback for the (shouldn't-happen-
+ *     by-the-invariant-above, but cheap to guard) case where `node.images`
+ *     doesn't line up; re-derives a REF from *img*'s own url's identity
+ *     params rather than trusting whatever decoration is on it.
+ *  3. *img*'s own `.src`, verbatim -- absolute last resort, for a
+ *     non-ComfyUI-native image (e.g. a stray `data:`/`blob:` url) that
+ *     carries no `filename` param at all; degraded only in the sense that
+ *     there is nothing else this function could possibly return.
+ * Always includes the current buffer generation (`getBufferGeneration`) as
+ * `v=` -- correctness matters even more here than for the display path,
+ * and the epoch gives both (see `imageUrlForRef`'s docstring).
+ */
+function fullResImageUrl(node, img, ref) {
+  if (ref && ref.filename) {
+    return imageUrlForRef(ref, { epoch: getBufferGeneration(node) })
+  }
+  const parsed = refFromImageSrc(img.src)
+  if (parsed) {
+    return imageUrlForRef(
+      { filename: parsed.name, subfolder: parsed.subfolder, type: parsed.type },
+      { epoch: getBufferGeneration(node) }
+    )
+  }
+  return img.src
 }
 
 //: Per-node cooldown so a burst of clicks on the degraded path doesn't
@@ -1454,17 +1980,17 @@ function copyTextViaExecCommand(text) {
 
 /**
  * OS-clipboard image copy -- the "normal path", only ever called after
- * `canUseOsClipboardImage()` has confirmed the APIs exist. Fetches the
- * image's own bytes (plain `fetch`, matching core's OWN
- * `getCopyImageOption` exactly -- `/view` is a CORE route, not one of this
- * pack's own, so there's no reason to route it through `api.fetchApi`) and
- * hands them to `navigator.clipboard.write` as a `ClipboardItem`. Still
- * wrapped in try/catch by the caller -- a secure context guarantees the
- * API's PRESENCE, not that the write will succeed (the user can deny a
- * clipboard permission prompt, etc).
+ * `canUseOsClipboardImage()` has confirmed the APIs exist. Fetches *url*'s
+ * own bytes (plain `fetch`, matching core's OWN `getCopyImageOption`
+ * exactly -- `/view` is a CORE route, not one of this pack's own, so
+ * there's no reason to route it through `api.fetchApi`) and hands them to
+ * `navigator.clipboard.write` as a `ClipboardItem`. *url* is always the
+ * FULL-RESOLUTION url (`fullResImageUrl`, M2) -- never a thumbnail's own
+ * possibly-compressed `.src`. Still wrapped in try/catch by the caller --
+ * a secure context guarantees the API's PRESENCE, not that the write will
+ * succeed (the user can deny a clipboard permission prompt, etc).
  */
-async function copyImageToOsClipboard(img) {
-  const url = fullImageUrl(img)
+async function copyImageToOsClipboard(url) {
   const response = await fetch(url)
   if (!response.ok) throw new Error(`fetch failed (HTTP ${response.status})`)
   const blob = await response.blob()
@@ -1479,23 +2005,24 @@ async function copyImageToOsClipboard(img) {
  * fixable from here (see `canUseOsClipboardImage`'s docstring) -- so
  * instead this does the best available TWO things, independently,
  * best-effort:
- *   1. Copies the image's `/view` URL as TEXT (`copyTextViaExecCommand`
- *      above) -- at least something lands on the OS clipboard.
- *   2. Opens the image in a new browser tab, where the BROWSER's OWN
- *      native "Copy Image" (no ComfyUI/secure-context dependency at all)
- *      is available on the image itself.
- * Deliberately fully SYNCHRONOUS (no `await` before `window.open`) so the
- * call stays inside the same user-gesture the menu click provides --
- * anything async first risks the browser treating the tab-open as an
- * unrequested popup and blocking it. A toast always explains why this
- * isn't a real OS image-copy -- never pretend to fix what the browser
- * forbids; "Copy (Clipspace)" remains the one path that works identically
- * in every context, because it never touches the OS clipboard at all.
+ *   1. Copies *url* as TEXT (`copyTextViaExecCommand` above) -- at least
+ *      something lands on the OS clipboard.
+ *   2. Opens *url* in a new browser tab, where the BROWSER's OWN native
+ *      "Copy Image" (no ComfyUI/secure-context dependency at all) is
+ *      available on the image itself.
+ * *url* is always the FULL-RESOLUTION url (`fullResImageUrl`, M2), same as
+ * `copyImageToOsClipboard` above. Deliberately fully SYNCHRONOUS (no
+ * `await` before `window.open`) so the call stays inside the same
+ * user-gesture the menu click provides -- anything async first risks the
+ * browser treating the tab-open as an unrequested popup and blocking it. A
+ * toast always explains why this isn't a real OS image-copy -- never
+ * pretend to fix what the browser forbids; "Copy (Clipspace)" remains the
+ * one path that works identically in every context, because it never
+ * touches the OS clipboard at all.
  */
-function degradedCopyImage(node, img) {
-  const url = fullImageUrl(img)
-  const textCopied = copyTextViaExecCommand(url.toString())
-  window.open(url.toString(), '_blank', 'noopener')
+function degradedCopyImage(node, url) {
+  const textCopied = copyTextViaExecCommand(url)
+  window.open(url, '_blank', 'noopener')
   notifyClipboard(
     node,
     (textCopied
@@ -1523,7 +2050,7 @@ function degradedCopyImage(node, img) {
  * `installPasteFiles`/`installConfigureRefresh` already use elsewhere in
  * this file, so no other node type or instance is ever affected.
  *
- * Always adds the item when there's an image to target (`currentMenuImage`
+ * Always adds the item when there's an image to target (`currentMenuSelection`
  * above); the callback branches on `canUseOsClipboardImage()` at CLICK
  * time (not once at menu-build time) since a browser's secure-context
  * status cannot change between one right-click and the next, but checking
@@ -1545,18 +2072,19 @@ function installCopyImageMenuItem(node) {
   const original = node.getExtraMenuOptions
   node.getExtraMenuOptions = function (canvas, options) {
     const result = original ? original.call(this, canvas, options) : undefined
-    const img = currentMenuImage(node)
+    const { img, ref } = currentMenuSelection(node)
     if (img) {
       options.push({
         content: 'Copy image',
         callback: () => {
+          const url = fullResImageUrl(node, img, ref)
           if (canUseOsClipboardImage()) {
-            copyImageToOsClipboard(img).catch((error) => {
+            copyImageToOsClipboard(url).catch((error) => {
               console.warn(PREFIX, 'OS clipboard image copy failed', error)
               notifyClipboard(node, `Copy image failed: ${error?.message || error}`)
             })
           } else {
-            degradedCopyImage(node, img)
+            degradedCopyImage(node, url)
           }
         }
       })
@@ -1586,9 +2114,11 @@ const CLIPSPACE_PASTE_MENU_LABEL = 'Paste (Clipspace)'
  * thumbnail/preview URLs already carry. `null` when *src* carries no
  * `filename` param (e.g. a `data:`/`blob:` URL) -- not a ComfyUI-native
  * file reference, so the caller must fall back to re-uploading the actual
- * pixels instead.
+ * pixels instead. Exported for tests, and reused by `fullResImageUrl` (M2)
+ * as the fallback for deriving a full-res Copy-image url when no `ref`
+ * lines up.
  */
-function refFromImageSrc(src) {
+export function refFromImageSrc(src) {
   try {
     const url = new URL(src)
     const filename = url.searchParams.get('filename')
@@ -1610,29 +2140,50 @@ function refFromImageSrc(src) {
  * URL already names a file the server has), and only re-uploads actual
  * pixels (fetch -> Blob -> File -> `uploadImageFile`, mirroring the Ctrl+V
  * path) when *img*'s `.src` carries no `filename` param.
+ *
+ * M2 audit ("compressed thumbnails without degrading Copy"): this function
+ * was flagged alongside the Copy-image path as a pixel-consuming reader of
+ * `.src` -- audited, and it's safe as designed, not changed. The ref-reuse
+ * branch never touches pixels at all (it appends a REFERENCE to a file the
+ * server already has); the fetch-fallback branch only runs when *img.src*
+ * carries no `filename` param at all, which never happens for one of this
+ * node's OWN preview urls (`imageUrlForRef` always keeps `filename` -- the
+ * `preview`/`v` decorations are strictly ADDITIONAL params). That fallback
+ * exists for genuinely foreign clipspace content (e.g. `data:`/`blob:`
+ * pixels from outside ComfyUI's own `/view`), which was never degraded by
+ * this node's preview mechanism in the first place.
+ *
+ * *uuidOverride* and *signal*: threaded through from `runAddBatch` when
+ * this runs as part of a batch (`addClipspaceToBuffer` below) -- see
+ * `addUploadToBuffer`'s docstring.
  */
-async function addClipspaceImageToBuffer(node, img) {
+async function addClipspaceImageToBuffer(node, img, uuidOverride, signal) {
   const ref = refFromImageSrc(img.src)
-  if (ref) return addUploadToBuffer(node, ref)
+  if (ref) return addUploadToBuffer(node, ref, uuidOverride, signal)
 
-  const response = await fetch(img.src)
+  const response = await fetch(img.src, { signal })
   if (!response.ok) throw new Error(`fetch failed (HTTP ${response.status})`)
   const blob = await response.blob()
   const ext = (blob.type.split('/')[1] || 'png').split('+')[0]
   const file = new File([blob], `clipspace-paste.${ext}`, { type: blob.type || 'image/png' })
-  const uploaded = await uploadImageFile(file)
-  return addUploadToBuffer(node, uploaded)
+  const uploaded = await uploadImageFile(file, signal)
+  return addUploadToBuffer(node, uploaded, uuidOverride, signal)
 }
 
 /**
  * Appends whatever `ComfyApp.clipspace` currently holds to *node*'s buffer
  * -- respecting `img_paste_mode` (`'selected'`, the default: just the
- * currently-selected clipspace image; `'all'`: every image in it) --
- * refreshing the displayed grid after each successful add so the FULL
- * buffer (every already-buffered image plus the new one(s)) stays visible.
- * Never throws -- fails soft per image, the same convention
- * `addFilesToBuffer` already uses; a missing/empty clipspace is a silent
- * no-op.
+ * currently-selected clipspace image; `'all'`: every image in it). M2 #8
+ * ("apply the same batching/refresh discipline to addClipspaceToBuffer's
+ * 'all' mode, it refreshes per item today"): now runs through the SAME
+ * `runAddBatch` `addFilesToBuffer` uses, rather than a second, drifting
+ * copy of the hoisted-refresh/progress/cancel/toast logic -- a
+ * `'selected'`-mode single image is just a batch of one (refreshes once,
+ * identical to the old per-item behavior for that case). uuid captured
+ * ONCE for the same "remint race" reason `addFilesToBuffer` captures it.
+ * Never throws -- fails soft per image via `runAddBatch`; a missing/empty
+ * clipspace, or nothing left after filtering out src-less images, is a
+ * silent no-op.
  */
 async function addClipspaceToBuffer(node) {
   const clipspace = ComfyApp.clipspace
@@ -1640,23 +2191,18 @@ async function addClipspaceToBuffer(node) {
   if (!imgs || !imgs.length) return
 
   const selected = imgs[clipspace.selectedIndex] ? [imgs[clipspace.selectedIndex]] : []
-  const targets = clipspace.img_paste_mode === 'all' ? imgs : selected
+  const targets = (clipspace.img_paste_mode === 'all' ? imgs : selected).filter(
+    (img) => img && img.src
+  )
   if (!targets.length) return
 
-  let addedAny = false
-  for (const img of targets) {
-    if (!img || !img.src) continue
-    try {
-      const result = await addClipspaceImageToBuffer(node, img)
-      if (result && Array.isArray(result.images)) {
-        setNodeImagesFromRefs(node, result.images)
-        addedAny = true
-      }
-    } catch (error) {
-      console.warn(PREFIX, 'clipspace-paste-to-add failed for one image', error)
-    }
-  }
-  if (addedAny) app.graph?.setDirtyCanvas(true, true)
+  const uuid = currentUuid(node) // captured ONCE -- see addUploadToBuffer's docstring.
+  await runAddBatch(
+    node,
+    targets,
+    (img, signal) => addClipspaceImageToBuffer(node, img, uuid, signal),
+    { noun: 'clipspace images' }
+  )
 }
 
 /**
@@ -1735,6 +2281,7 @@ async function refreshFromBuffer(node) {
     }
     const data = await response.json()
     if (!data || data.ok !== true || !Array.isArray(data.refs)) return
+    noteBufferGeneration(node, data) // M2 cache-token -- see imageUrlForRef's docstring.
     setNodeImagesFromRefs(node, data.refs)
     node.setDirtyCanvas(true, true)
   } catch (error) {
@@ -2132,6 +2679,8 @@ export function attach(node) {
 
     hideGridUuidWidget(node)
     addClearButton(node)
+    addAddImagesButton(node) // M1 -- right after Clear.
+    installFileInputCleanup(node) // tears down the picker <input> + any in-flight batch on removal
     installPasteFiles(node)
     installDragAndDrop(node) // assets-panel/Finder drop-to-add -- see its own docstring
     installCopyImageMenuItem(node) // Mac-over-LAN-http Copy Image fix -- see its own docstring

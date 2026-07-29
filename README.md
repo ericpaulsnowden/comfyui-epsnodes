@@ -355,10 +355,19 @@ times to gather images, then send the whole set through a workflow at once.
 - Each node keeps its own independent buffer, even after copy/paste.
 - **Copy/paste:** right-click a collected image → Copy image (to the OS
   clipboard, for Photoshop/etc.) or Copy (Clipspace) (into the mask editor or
-  another node). Three ways to ADD an image: with the node selected,
-  **Ctrl+V**; **right-click → Paste (Clipspace)**; or **drag a file (or an
-  assets-panel image) straight onto the node** — all three append to the
-  buffer without losing what's already there.
+  another node). Four ways to ADD images: the **Add images… button** (a
+  real file picker — select as many as you want at once); with the node
+  selected, **Ctrl+V**; **right-click → Paste (Clipspace)**; or **drag
+  files (or an assets-panel image) straight onto the node** — and yes,
+  dragging thirty files as one drop adds all thirty. Every path appends to
+  the buffer without losing what's already there.
+- **Built for real batches (20–100 images):** files ingest in
+  filename-numeric order (`img2` before `img10`, whatever order your OS
+  hands them over); the button shows progress and becomes **Cancel** while
+  a batch runs; and when it finishes you get one summary (added / skipped /
+  failed) instead of silence. Thumbnails load as compressed previews so a
+  big grid stays snappy — Copy image still copies the full-resolution
+  original.
   - *Viewing ComfyUI on another machine over plain `http://` (e.g. a Mac
     pointed at a PC's LAN address)?* Browsers block writing an image to the OS
     clipboard outside a "secure context", so **Copy image** can't reach the OS

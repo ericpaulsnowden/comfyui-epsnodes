@@ -47,12 +47,17 @@ globalThis.Image = class {
 }
 
 import { app } from './scripts/app.js'
+import { api } from './scripts/api.js'
 import * as grid from './extensions/comfyui-epsnodes/eps_image/image_grid.js'
 
 const R = (name) => ({ filename: name, subfolder: '', type: 'output' })
 const rootGraph = {}
 app.graph = rootGraph
 app.nodeOutputs = {}
+// The M2 batch test below exercises `notifyBatchResult`'s toast path -- a
+// no-op `add` keeps it off stdout (its `console.info` fallback would
+// otherwise interleave with the JSON this script writes at the very end).
+app.extensionManager = { toast: { add: () => {} } }
 
 const makeNode = (id, graph) => ({
   id, graph, imgs: null, images: undefined, imageIndex: 7,
@@ -174,6 +179,130 @@ const out = {}
   }
 }
 
+// ---- sortFilesForIngest (M1: numeric-aware ingest order) ----
+{
+  const files = [
+    { name: 'img10.png', type: 'image/png' },
+    { name: 'IMG2.png', type: 'image/png' },
+    { name: 'img1.PNG', type: 'image/png' },
+    { name: 'not-an-image.txt', type: 'text/plain' }, // filtered: wrong type
+    { name: 'no-type.png' }, // filtered: missing type entirely
+    { type: 'image/png' } // tolerated: missing name, sorts as ''
+  ]
+  const namesBefore = files.map((f) => f.name ?? null)
+  const sorted = grid.sortFilesForIngest(files)
+  out.sort = {
+    names: sorted.map((f) => f.name ?? null),
+    length: sorted.length,
+    isNewArray: sorted !== files,
+    inputUnmutated: files.map((f) => f.name ?? null).every((n, i) => n === namesBefore[i])
+  }
+
+  // Stability: two entries whose collated keys tie keep their input order.
+  const tie = [
+    { name: 'a.png', type: 'image/png', tag: 'first' },
+    { name: 'a.png', type: 'image/png', tag: 'second' }
+  ]
+  out.sortStable = grid.sortFilesForIngest(tie).map((f) => f.tag)
+}
+
+// ---- imageUrlForRef / refFromImageSrc (M2: preview + epoch, rand= gone) ----
+{
+  const ref = { filename: 'a.png', subfolder: 'eps_image_grid/uuid1', type: 'output' }
+  const plain = grid.imageUrlForRef(ref)
+  const withEpoch = grid.imageUrlForRef(ref, { epoch: 7 })
+  const withEpochAgain = grid.imageUrlForRef(ref, { epoch: 7 })
+  const withDifferentEpoch = grid.imageUrlForRef(ref, { epoch: 8 })
+  const preview = grid.imageUrlForRef(ref, { preview: true, epoch: 7 })
+  // The test stub's `api.apiURL` is the identity function, so these come
+  // back relative (`/view?...`) -- a real browser only ever assigns an
+  // already-absolute `.src`, so this prepends a fake origin to simulate
+  // that before round-tripping through `refFromImageSrc` (which does
+  // `new URL(src)` with no base).
+  const paramOrder = Array.from(new URL('http://x' + preview).searchParams.keys())
+  const roundTrip = grid.refFromImageSrc('http://x' + preview)
+  out.imageUrl = {
+    noRandAnywhere: ![plain, withEpoch, preview].some((u) => u.includes('rand=')),
+    stableForEqualInputs: withEpoch === withEpochAgain,
+    differsByEpoch: withEpoch !== withDifferentEpoch,
+    defaultEpochIsZero: plain.includes('v=0'),
+    paramOrder,
+    roundTrip
+  }
+}
+
+// ---- addFilesToBuffer: batch order, hoisted refresh, epoch threading ----
+// (the roadmap's M0 probe, extended for M2's rewrite of the same loop)
+{
+  const node = makeNode(21, rootGraph)
+  node.properties = { uuid: '11111111-1111-1111-1111-111111111111' }
+
+  const calls = []
+  let addCallCount = 0
+  let refreshCount = 0
+  // Counts store WRITES for this node's own locator -- the store write
+  // happens once per `setNodeImagesFromRefs` refresh (`syncCoreOutputStore`
+  // -- see the identity tests above), so this is a direct spy on "how many
+  // times did the display actually refresh".
+  app.nodeOutputs = new Proxy(app.nodeOutputs, {
+    set(target, prop, value) {
+      if (prop === String(node.id)) refreshCount++
+      target[prop] = value
+      return true
+    }
+  })
+
+  // A recording `api.fetchApi` stub -- reassigning the shared stub module's
+  // export is deliberate (its docstring at the top of this file notes it's
+  // a mutable object for exactly this). Real `File` instances (not plain
+  // `{name, type}` objects) so `FormData.get('image')` hands the upload
+  // route its name back, letting the stub prove upload/add ORDER without
+  // needing to actually parse multipart bytes.
+  api.fetchApi = async (route, options) => {
+    const record = { route, method: options?.method }
+    calls.push(record)
+    if (route === '/upload/image') {
+      const uploaded = options.body.get('image')
+      record.uploadedName = uploaded?.name
+      return {
+        ok: true,
+        json: async () => ({ name: uploaded?.name, subfolder: '', type: 'input' })
+      }
+    }
+    if (route === '/eps_image_grid/add') {
+      const body = JSON.parse(options.body)
+      record.addFilename = body.filename
+      addCallCount++
+      // A growing buffer -- images.length increases by exactly one per
+      // add, so the skip-detection heuristic sees "added", never "skipped".
+      const images = Array.from({ length: addCallCount }, (_, i) => R(`buffered-${i}.png`))
+      return {
+        ok: true,
+        json: async () => ({ ok: true, uuid: body.uuid, images, generation: 42 })
+      }
+    }
+    return { ok: true, json: async () => ({}) }
+  }
+
+  const files = [
+    new File(['x'], 'img10.png', { type: 'image/png' }),
+    new File(['x'], 'img2.png', { type: 'image/png' }),
+    new File(['x'], 'img1.png', { type: 'image/png' })
+  ]
+  const sorted = grid.sortFilesForIngest(files)
+  const returned = await grid.addFilesToBuffer(node, sorted)
+
+  out.batch = {
+    sortedNames: sorted.map((f) => f.name),
+    uploadOrder: calls.filter((c) => c.route === '/upload/image').map((c) => c.uploadedName),
+    addOrder: calls.filter((c) => c.route === '/eps_image_grid/add').map((c) => c.addFilename),
+    uploadCount: calls.filter((c) => c.route === '/upload/image').length,
+    addCount: calls.filter((c) => c.route === '/eps_image_grid/add').length,
+    refreshCount,
+    returnedTrue: returned === true
+  }
+}
+
 process.stdout.write(JSON.stringify(out))
 """
 
@@ -286,6 +415,94 @@ def test_subgraph_node_never_touches_the_store(grid_api: dict) -> None:
     assert grid_api["subgraph"]["imgsStillSet"] is True
 
 
+# ---- M1: sortFilesForIngest (roadmap owner decision: numeric-aware order) ----
+
+
+def test_sort_files_for_ingest_is_numeric_aware_and_case_insensitive(grid_api: dict) -> None:
+    names = grid_api["sort"]["names"]
+    # A missing `.name` is tolerated (never thrown) and sorts as if its key
+    # were '' -- first, ahead of every named file.
+    assert names[0] is None
+    # img1 < img2 < img10 numerically (not "1" < "10" < "2" lexically), and
+    # case doesn't affect the order ("IMG2.png" sorts with "img2.png").
+    assert names[1:] == ["img1.PNG", "IMG2.png", "img10.png"]
+
+
+def test_sort_files_for_ingest_filters_non_images(grid_api: dict) -> None:
+    # 6 inputs in: a .txt file and a file with no `type` at all are dropped;
+    # a file with no `.name` is kept (tolerated, not a filter reason).
+    assert grid_api["sort"]["length"] == 4
+
+
+def test_sort_files_for_ingest_is_pure(grid_api: dict) -> None:
+    assert grid_api["sort"]["isNewArray"] is True
+    assert grid_api["sort"]["inputUnmutated"] is True
+
+
+def test_sort_files_for_ingest_is_stable_for_equal_keys(grid_api: dict) -> None:
+    assert grid_api["sortStable"] == ["first", "second"]
+
+
+# ---- M2: imageUrlForRef / refFromImageSrc (preview + epoch, rand= gone) ----
+
+
+def test_image_url_for_ref_never_carries_rand(grid_api: dict) -> None:
+    """Buffer frames are append-only PNGs while a buffer lives
+    (`image_grid_store.py`'s `_next_frame_filename`: "never reuses a name"),
+    so a per-render `rand=Math.random()` cache-buster was pure waste -- the
+    single cause of "100 files ~= 5,050 full-resolution loads" (roadmap
+    M2). It's gone outright, replaced by the server-derived `generation`
+    epoch (`v=`), which is stable across calls describing the same buffer
+    contents and only changes when a Clear could have reused a filename."""
+    assert grid_api["imageUrl"]["noRandAnywhere"] is True
+
+
+def test_image_url_for_ref_epoch_is_a_stable_cache_token(grid_api: dict) -> None:
+    assert grid_api["imageUrl"]["stableForEqualInputs"] is True
+    assert grid_api["imageUrl"]["differsByEpoch"] is True
+    assert grid_api["imageUrl"]["defaultEpochIsZero"] is True
+
+
+def test_image_url_for_ref_preview_after_identity_params(grid_api: dict) -> None:
+    assert grid_api["imageUrl"]["paramOrder"] == [
+        "filename",
+        "subfolder",
+        "type",
+        "preview",
+        "v",
+    ]
+
+
+def test_ref_from_image_src_round_trips_a_preview_url(grid_api: dict) -> None:
+    assert grid_api["imageUrl"]["roundTrip"] == {
+        "name": "a.png",
+        "subfolder": "eps_image_grid/uuid1",
+        "type": "output",
+    }
+
+
+# ---- M0/M2: addFilesToBuffer -- batch order + hoisted refresh ----
+
+
+def test_add_files_to_buffer_uploads_and_adds_in_sorted_order(grid_api: dict) -> None:
+    batch = grid_api["batch"]
+    assert batch["sortedNames"] == ["img1.png", "img2.png", "img10.png"]
+    assert batch["uploadOrder"] == ["img1.png", "img2.png", "img10.png"]
+    assert batch["addOrder"] == ["img1.png", "img2.png", "img10.png"]
+    assert batch["uploadCount"] == 3
+    assert batch["addCount"] == 3
+    assert batch["returnedTrue"] is True
+
+
+def test_add_files_to_buffer_refreshes_the_display_exactly_once(grid_api: dict) -> None:
+    """THE M2 regression pin: before the rewrite, `addFilesToBuffer` called
+    `setNodeImagesFromRefs` INSIDE the per-file loop, so 3 files meant 3
+    full-buffer rebuilds (and 100 files meant ~5,050 image loads). The
+    refresh is now hoisted to `runAddBatch`'s K=10-and-final cadence -- for
+    a 3-file batch (under K), that means exactly ONE store write."""
+    assert grid_api["batch"]["refreshCount"] == 1
+
+
 # ---- closure-bound wiring, pinned by source text ----
 
 _SOURCE = IMAGE_GRID_JS.read_text(encoding="utf-8")
@@ -307,3 +524,111 @@ def test_set_never_clones_the_refs_array() -> None:
     assert "node.images = refs" in _SOURCE
     assert "node.images = [...refs]" not in _SOURCE
     assert "node.images = refs.slice()" not in _SOURCE
+
+
+# ---- M1/M2 bulk-add: more closure-bound wiring, pinned by source text ----
+
+
+def _function_body(marker: str) -> str:
+    """The full brace-matched `{...}` body of the function whose
+    declaration contains *marker* (e.g. ``"export async function
+    addFilesToBuffer"``). Brace-matching (rather than e.g. "up to the next
+    blank line" or "up to the next `export`") keeps the boundary exact
+    regardless of what surrounds the function, including nested arrow
+    functions and object/template-literal braces inside it (both are
+    inherently balanced, so a naive counter still lands correctly).
+
+    Skips past the PARAMETER LIST first (paren-matched) before looking for
+    the body's opening brace -- `runAddBatch`'s own signature has a
+    destructuring default (`{ noun = 'images' } = {}`), whose braces would
+    otherwise be mistaken for the body itself.
+    """
+    start = _SOURCE.index(marker)
+    paren_start = _SOURCE.index("(", start)
+    depth = 0
+    paren_end = None
+    for i in range(paren_start, len(_SOURCE)):
+        ch = _SOURCE[i]
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+            if depth == 0:
+                paren_end = i
+                break
+    if paren_end is None:
+        raise AssertionError(f"unbalanced parens scanning from {marker!r}")
+
+    brace_start = _SOURCE.index("{", paren_end)
+    depth = 0
+    for i in range(brace_start, len(_SOURCE)):
+        ch = _SOURCE[i]
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return _SOURCE[brace_start : i + 1]
+    raise AssertionError(f"unbalanced braces scanning from {marker!r}")
+
+
+def test_hoisted_refresh_not_inside_the_per_file_loop() -> None:
+    """M2's whole reason for existing: `addFilesToBuffer` used to call
+    `setNodeImagesFromRefs` once per file (100 files ~= 5,050 image loads).
+    The refresh now lives entirely inside the shared `runAddBatch` --
+    `addFilesToBuffer`'s OWN body must not call it directly."""
+    body = _function_body("export async function addFilesToBuffer")
+    assert "setNodeImagesFromRefs(" not in body
+    assert "runAddBatch(" in body
+
+
+def test_batch_runner_hoists_refresh_to_k_interval_and_final() -> None:
+    body = _function_body("async function runAddBatch")
+    assert "BATCH_REFRESH_INTERVAL" in body
+    assert body.count("setNodeImagesFromRefs(") == 2  # the K-interval call + the final call
+
+
+def test_uuid_captured_once_per_batch() -> None:
+    """Roadmap risk #1, "uuid remint race": a debounced collision sweep can
+    remint a node's uuid mid-batch; both bulk-ingest loops must capture
+    `currentUuid(node)` ONCE, before their loop starts, and thread that same
+    value through every item -- never re-read it per item."""
+    files_body = _function_body("export async function addFilesToBuffer")
+    assert files_body.count("currentUuid(node)") == 1
+    assert "addUploadToBuffer(node, uploaded, uuid, signal)" in files_body
+
+    clipspace_body = _function_body("async function addClipspaceToBuffer")
+    assert clipspace_body.count("currentUuid(node)") == 1
+
+
+def test_batch_runner_restores_the_label_in_finally() -> None:
+    body = _function_body("async function runAddBatch")
+    finally_index = body.index("finally")
+    assert finally_index != -1
+    assert "buttonWidget.label = idleLabel" in body[finally_index:]
+
+
+def test_batch_runner_sends_one_aggregate_toast() -> None:
+    body = _function_body("async function runAddBatch")
+    assert body.count("notifyBatchResult(") == 1
+
+
+def test_sort_applied_in_both_the_picker_and_drop_paths() -> None:
+    picker_body = _function_body("function ensureFileInput")
+    assert "sortFilesForIngest(" in picker_body
+
+    drop_body = _function_body("function installDragAndDrop")
+    assert "sortFilesForIngest(" in drop_body
+
+
+def test_add_images_button_copies_clear_button_exactly() -> None:
+    body = _function_body("function addAddImagesButton")
+    assert "node.addWidget(" in body
+    assert "widget.serialize = false" in body
+
+
+def test_batch_runner_wires_an_abort_controller_for_cancel() -> None:
+    body = _function_body("async function runAddBatch")
+    assert "new AbortController()" in body
+    assert "batchState.cancelled" in body
+    assert "controller?.signal" in body
