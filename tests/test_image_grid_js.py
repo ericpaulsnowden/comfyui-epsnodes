@@ -360,6 +360,17 @@ out.folderThreshold = {
   }
 }
 
+// ---- basenameForUpload (2026-07-29 folder-upload fix) ----
+out.basenames = [
+  { name: 'Eric/IMG_1865.PNG' },
+  { name: 'Eric' + String.fromCharCode(92) + 'IMG_1865.PNG' }, // backslash, escaping-proof
+  { name: 'shots/2/IMG_1865.PNG' },
+  { name: 'plain.png' },
+  { name: '' },
+  { name: '   ' },
+  null
+].map((f) => grid.basenameForUpload(f))
+
 process.stdout.write(JSON.stringify(out))
 """
 
@@ -832,3 +843,43 @@ def test_delete_refresh_reuses_the_generation_and_display_pipeline() -> None:
     body = _function_body("async function deleteBufferFrame")
     assert "noteBufferGeneration(node, result)" in body
     assert "setNodeImagesFromRefs(node, result.images)" in body
+
+
+# ---- folder-upload filename + button order (2026-07-29 owner reports) ------
+
+
+def test_upload_sends_a_bare_basename_never_a_path(grid_api: dict) -> None:
+    """Owner bug: "Adding a folder fails" with
+    `FileNotFoundError: ...\\Input\\Eric\\IMG_1865.PNG` from core's own
+    /upload/image. A webkitdirectory pick names each File after its place in
+    the tree, `FormData.append(name, file)` transmits that whole string as
+    the filename, and core joins it into the path while only creating the
+    directory implied by the SUBFOLDER param -- so the write target's parent
+    never exists. Reproduced live (500 with a path-y name, 200 with a
+    basename) before fixing."""
+    assert grid_api["basenames"] == [
+        "IMG_1865.PNG",  # posix folder pick
+        "IMG_1865.PNG",  # windows separator
+        "IMG_1865.PNG",  # nested
+        "plain.png",  # already bare -- unchanged
+        "image.png",  # empty name -> generic (core 400s a blank filename)
+        "image.png",  # whitespace-only
+        "image.png",  # missing/!File
+    ]
+
+
+def test_upload_call_passes_the_explicit_filename(grid_api: dict) -> None:
+    # The third FormData argument IS the fix; without it the browser falls
+    # back to file.name and the bug returns silently.
+    source = (REPO_ROOT / "web" / "eps_image" / "image_grid.js").read_text(encoding="utf-8")
+    assert "formData.append('image', file, basenameForUpload(file))" in source
+
+
+def test_clear_button_is_installed_after_both_add_buttons() -> None:
+    """Owner ask: "the clear button should be below the two add buttons" --
+    destructive action last. Widget paint order is install order."""
+    source = (REPO_ROOT / "web" / "eps_image" / "image_grid.js").read_text(encoding="utf-8")
+    images_at = source.index("addAddImagesButton(node) // M1")
+    folder_at = source.index("addAddFolderButton(node) // M3")
+    clear_at = source.rindex("addClearButton(node)")
+    assert images_at < folder_at < clear_at

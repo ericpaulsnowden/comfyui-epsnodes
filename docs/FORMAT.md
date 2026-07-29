@@ -1064,6 +1064,25 @@ add; single batch-aware IMAGE input; disk-backed, survive-restart, NO cap.
     concurrent batch per node (manifest read-modify-write is unlocked —
     §6.6's own atomicity note); and the batch's `grid_uuid` captured ONCE
     up front (the uuid-remint race, roadmap risk #1).
+  - **Uploads always send a BARE BASENAME** (owner bug 2026-07-29, "Adding
+    a folder fails", reproduced live): a `webkitdirectory` pick names every
+    File after its place in the tree, and `FormData.append(name, file)`
+    transmits that whole string as the multipart filename. Core's
+    `/upload/image` then builds `filepath = join(upload_dir,
+    normpath(subfolder), filename)` while only ever `makedirs`-ing the
+    SUBFOLDER part (`server.py` ~400-420) — so the directory implied by the
+    FILENAME never exists and the write dies with `FileNotFoundError:
+    ...\Input\Eric\IMG_1865.PNG`, a 500. `basenameForUpload` strips BOTH
+    separators (a Windows client against a POSIX server, and the reverse,
+    are both normal here) and `append`'s third argument overrides the
+    transmitted name. Same-basename collisions across different subfolders
+    are fine — core auto-suffixes `name (1).ext`. Verified on the rig: a
+    path-carrying name 500s without the override and 200s with it.
+  - **Button order: the two ADD buttons, then Clear** (owner ask
+    2026-07-29). Destructive action last, the same reasoning §6.3's
+    controller stack already follows. Paint order only — all three carry
+    `serialize = false`, so `widgets_values` and every saved workflow are
+    untouched by the move.
   - **Silent-skip detection:** `/add` fails SOFT (HTTP 200, buffer
     unchanged) on an unreadable source — pinned in
     `tests/test_routes_image_grid.py` — so the runner counts a response

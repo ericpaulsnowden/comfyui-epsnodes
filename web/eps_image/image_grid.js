@@ -1410,6 +1410,27 @@ export function imageUrlForRef(ref, { preview = false, epoch = 0 } = {}) {
  * store.images` identity equality intact (see `syncCoreOutputStore`).
  * Pure; exported for tests/test_image_grid_js.py.
  */
+/**
+ * The bare filename to transmit for *file* — never a path.
+ *
+ * A `webkitdirectory` pick names every File after its position in the tree
+ * (`shots/2/IMG_1865.PNG` via `webkitRelativePath`, and `file.name` itself
+ * carries the folder on the browsers Eric hit), which core's upload route
+ * cannot write (see `uploadImageFile`). Strips BOTH separators — a Windows
+ * client talking to a POSIX server (and the reverse) is this pack's normal
+ * case, so trusting one separator would fix only half the users. Falls back
+ * to a generic name rather than an empty one, since core 400s a blank
+ * filename outright.
+ *
+ * Pure; exported for tests.
+ */
+export function basenameForUpload(file) {
+  const raw = String(file?.name ?? '')
+  const cut = Math.max(raw.lastIndexOf('/'), raw.lastIndexOf('\\'))
+  const base = (cut >= 0 ? raw.slice(cut + 1) : raw).trim()
+  return base || 'image.png'
+}
+
 /** One ref's identity, the same triple core builds a /view URL from. */
 function refKey(ref) {
   return `${ref?.type || 'output'}|${ref?.subfolder || ''}|${ref?.filename || ''}`
@@ -1556,7 +1577,20 @@ export function setNodeImagesFromRefs(node, refs) {
  */
 async function uploadImageFile(file, signal) {
   const formData = new FormData()
-  formData.append('image', file)
+  // ALWAYS send an explicit BASENAME, never `file.name` implicitly (owner
+  // bug 2026-07-29, "Adding a folder fails", reproduced on the rig): a
+  // `webkitdirectory` pick gives every File a name carrying its folder
+  // (`Eric/IMG_1865.PNG`), and `FormData.append(name, file)` sends that
+  // whole string as the multipart filename. Core's `/upload/image` then
+  // does `filepath = join(upload_dir, normpath(subfolder), filename)` while
+  // only ever `makedirs`-ing the SUBFOLDER part (`server.py` ~400-420), so
+  // the directory implied by the FILENAME never exists and the write dies
+  // with `FileNotFoundError: ...\Input\Eric\IMG_1865.PNG` -- a 500, his
+  // exact traceback. `append`'s third argument overrides the transmitted
+  // filename, so one basename fixes every folder pick. Same-basename
+  // collisions across different subfolders are fine: core auto-suffixes
+  // `name (1).ext` (and short-circuits byte-identical re-uploads).
+  formData.append('image', file, basenameForUpload(file))
   const response = await api.fetchApi(UPLOAD_ROUTE, { method: 'POST', body: formData, signal })
   if (!response.ok) {
     throw new Error(`upload failed (HTTP ${response.status})`)
@@ -3036,9 +3070,15 @@ export function attach(node) {
     const allowCollisionMint = !isGraphConfiguring()
 
     hideGridUuidWidget(node)
+    // Order is deliberate (owner ask 2026-07-29: "the clear button should be
+    // below the two add buttons"): the two ADD actions first, then the
+    // destructive one last -- the same put-Delete-last reasoning §6.3's
+    // controller button stack already follows. Only affects paint order;
+    // all three carry `serialize = false`, so `widgets_values` (and every
+    // saved workflow) is untouched by the move.
+    addAddImagesButton(node) // M1
+    addAddFolderButton(node) // M3
     addClearButton(node)
-    addAddImagesButton(node) // M1 -- right after Clear.
-    addAddFolderButton(node) // M3 -- right after Add images...
     installFileInputCleanup(node) // tears down both pickers' <input>s + any in-flight batch on removal
     installPasteFiles(node)
     installDragAndDrop(node) // assets-panel/Finder drop-to-add -- see its own docstring
