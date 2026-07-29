@@ -375,6 +375,40 @@ def list_refs(grid_uuid: str) -> list[dict]:
     return _refs_for(grid_uuid, manifest["frames"])
 
 
+def buffer_generation(grid_uuid: str) -> int:
+    """A monotonic-enough cache token for the buffer's CONTENTS: the
+    manifest's mtime in integer milliseconds, ``0`` for an invalid uuid or
+    a buffer with no manifest yet. Never raises.
+
+    Why this exists (2026-07-29, the bulk-add work): frame files are
+    append-only while a buffer lives, but :func:`clear` is an ``rmtree``
+    and :func:`_next_frame_filename` restarts from the highest EXISTING
+    frame — so after Clear, ``0001.png`` is reused with different pixels at
+    the same path. Frontend thumbnails therefore can't use fully stable
+    URLs (a cached stale frame would show) nor per-render ``rand=``
+    cache-busting (100 buffered images become 100 uncached full fetches per
+    refresh). This value changes exactly when the buffer's contents change
+    — every append and every clone rewrite the manifest, and after a Clear
+    the next append creates a fresh one — so the frontend appends it as a
+    ``v=`` param: stable within a generation (cacheable), new after
+    anything that could have reused a name.
+
+    mtime, not a stored counter, deliberately: it needs no manifest schema
+    change, and a Clear (which deletes the counter's would-be home) can't
+    reset it backwards in any way that matters — the next manifest's mtime
+    is later than the old one's by wall clock. (A clock jumping backwards
+    across a Clear+re-add could in principle repeat a value; accepting that
+    beats a schema migration for what is only a cache token.)
+    """
+    directory = buffer_dir(grid_uuid)
+    if directory is None:
+        return 0
+    try:
+        return int(_manifest_path(directory).stat().st_mtime * 1000)
+    except OSError:
+        return 0
+
+
 def read_all_as_tensors(grid_uuid: str) -> list:
     """Every buffered frame, decoded fresh from disk, as its own
     ``[1,H,W,C]`` float tensor (FORMAT.md §6.6: "NEVER stacked — buffered

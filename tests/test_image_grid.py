@@ -516,7 +516,14 @@ class TestListRoute:
     async def test_unknown_but_valid_uuid_returns_an_empty_list(self, client) -> None:
         response = await client.get("/eps_image_grid/list", params={"uuid": VALID_UUID})
         assert response.status == 200
-        assert await response.json() == {"ok": True, "uuid": VALID_UUID, "refs": []}
+        # `generation` added 2026-07-29 (bulk-add cache token -- see
+        # store.buffer_generation): 0 when no manifest exists yet.
+        assert await response.json() == {
+            "ok": True,
+            "uuid": VALID_UUID,
+            "refs": [],
+            "generation": 0,
+        }
 
     async def test_returns_the_whole_buffer_in_append_order(self, client) -> None:
         store.append_batch(VALID_UUID, _make_batch(3))

@@ -585,3 +585,38 @@ class TestCloneBuffer:
         before = store.list_refs(VALID_UUID)
         store.clone_buffer(VALID_UUID, OTHER_VALID_UUID)
         assert store.list_refs(VALID_UUID) == before
+
+
+class TestBufferGeneration:
+    """The bulk-add cache token (2026-07-29) -- see buffer_generation's
+    docstring for why it exists: Clear is an rmtree and frame numbering
+    restarts, so ``0001.png`` is REUSED with different pixels after a
+    Clear + re-add. Display URLs carry this value as ``v=`` so they're
+    stable (cacheable) within a generation and fresh across one."""
+
+    def test_zero_for_invalid_uuid(self, fake_folder_paths: Path) -> None:
+        assert store.buffer_generation("not-a-uuid") == 0
+
+    def test_zero_before_any_append(self, fake_folder_paths: Path) -> None:
+        assert store.buffer_generation(VALID_UUID) == 0
+
+    def test_nonzero_after_append_and_stable_across_reads(self, fake_folder_paths: Path) -> None:
+        store.append_batch(VALID_UUID, _make_batch(1))
+        first = store.buffer_generation(VALID_UUID)
+        assert first > 0
+        assert store.buffer_generation(VALID_UUID) == first  # pure read: stable
+
+    def test_changes_when_a_cleared_frame_name_is_reused(self, fake_folder_paths: Path) -> None:
+        # THE scenario the token exists for: 0001.png reused with new pixels.
+        store.append_batch(VALID_UUID, _make_batch(1))
+        gen_before = store.buffer_generation(VALID_UUID)
+        first_name = store.list_refs(VALID_UUID)[0]["filename"]
+
+        import time
+
+        time.sleep(0.002)  # mtime resolution guard (ms-precision token)
+        store.clear(VALID_UUID)
+        store.append_batch(VALID_UUID, _make_batch(1))
+
+        assert store.list_refs(VALID_UUID)[0]["filename"] == first_name  # name reuse is REAL
+        assert store.buffer_generation(VALID_UUID) != gen_before  # token catches it

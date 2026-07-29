@@ -87,7 +87,16 @@ def register_routes(routes: web.RouteTableDef) -> None:
             return error_response(400, "'type' must be a non-empty string")
 
         images = store.append_uploaded_image(grid_uuid, filename, subfolder, source_type)
-        return web.json_response({"ok": True, "uuid": grid_uuid, "images": images})
+        return web.json_response(
+            {
+                "ok": True,
+                "uuid": grid_uuid,
+                "images": images,
+                # Cache token for the buffer's contents -- see
+                # store.buffer_generation's docstring (2026-07-29 bulk-add).
+                "generation": store.buffer_generation(grid_uuid),
+            }
+        )
 
     @routes.get("/eps_image_grid/list")
     async def get_list(request: web.Request) -> web.Response:
@@ -96,7 +105,14 @@ def register_routes(routes: web.RouteTableDef) -> None:
             return error_response(400, f"invalid grid uuid {grid_uuid!r} -- FORMAT.md §6.6")
 
         refs = store.list_refs(grid_uuid)
-        return web.json_response({"ok": True, "uuid": grid_uuid, "refs": refs})
+        return web.json_response(
+            {
+                "ok": True,
+                "uuid": grid_uuid,
+                "refs": refs,
+                "generation": store.buffer_generation(grid_uuid),
+            }
+        )
 
     @routes.post("/eps_image_grid/clone")
     async def post_clone(request: web.Request) -> web.Response:
