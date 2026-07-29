@@ -56,16 +56,16 @@ PROBE_SOCKET_X = [30, 60, 92, 107, 140, 191, 300, 512, 1000]
 PROBE_SOCKET_Y = 48
 
 #: (raw property value, expected clampOutputsCount() result). Mirrors the
-#: backend contract: round to nearest int, clamp 1..8, non-finite -> the
+#: backend contract: round to nearest int, clamp 1..16, non-finite -> the
 #: default (3).
 CLAMP_OUTPUTS_CASES = [
     (3, 3),
     (1, 1),
-    (8, 8),
+    (16, 16),
     (0, 1),
     (-5, 1),
-    (15, 8),
-    (8.6, 8),
+    (99, 16),
+    (16.4, 16),
     (1.4, 1),
     # `Number(None)` coerces to `0` (finite), so this hits the ordinary
     # clamp path -- not the non-finite/NaN fallback -- and clamps up to
@@ -81,12 +81,44 @@ CLAMP_OUTPUTS_CASES = [
 #: forced UP when the request is already at or above it.
 CLAMP_VISIBLE_CASES = [
     (2, 5, 5),
-    (8, 0, 8),
-    (10, 0, 8),
-    (10, 12, 8),
+    (16, 0, 16),
+    (20, 0, 16),
+    (20, 24, 16),
     (1, None, 1),
     (6, 3, 6),
-    (1, 8, 8),
+    (1, 16, 16),
+]
+
+#: (current visible count, highestWiredIndex, expected growVisibleCount()).
+#: The growing-outputs rule (v0.40.0, owner ask): keep exactly one spare
+#: socket below the highest wired one, grow only, cap at MAX_OUTPUTS. Wiring
+#: the LAST visible output is the case that has to reveal a new one -- that
+#: is the whole feature -- and wiring a middle one must reveal nothing.
+GROW_VISIBLE_CASES = [
+    # nothing wired -> untouched (a fresh node keeps its default 3)
+    (3, 0, 3),
+    (1, 0, 1),
+    (3, None, 3),
+    # the feature: last visible slot just got wired -> one more appears
+    (3, 3, 4),
+    (1, 1, 2),
+    (4, 4, 5),
+    # a MIDDLE slot wired -> the spare already exists, nothing to do
+    (3, 1, 3),
+    (3, 2, 3),
+    (8, 5, 8),
+    # grows only, never shrinks: unwiring everything leaves the count alone
+    (12, 1, 12),
+    # a jump (paste of a workflow wired straight to a high slot) catches up
+    # in one step rather than one socket at a time
+    (3, 9, 10),
+    # the ceiling: at MAX_OUTPUTS there is no spare left to reserve, so the
+    # last socket is itself wirable rather than permanently empty
+    (16, 16, 16),
+    (16, 15, 16),
+    (15, 15, 16),
+    # a hand-edited/garbage property value can't grow past the ceiling
+    (99, 16, 16),
 ]
 
 #: (rawValue, expected parsed map). parseToggles must never throw.
@@ -131,6 +163,11 @@ IS_ENABLED_CASES = [
     ({"out_1": "false"}, "out_1", True),
 ]
 
+#: `applyVisibleOutputCount`'s declaration, as the source-structure tests
+#: below have to match it verbatim. `grow` is opt-in per call path (see
+#: test_growth_is_opt_in_per_call_path).
+APPLY_SIGNATURE = "applyVisibleOutputCount(node, { grow = false } = {})"
+
 #: Custom-label lengths to probe the renamable-output geometry at. 0 and 5
 #: are the un-renamed baseline (`out_N`); the long ones are what a real
 #: rename ("upscale branch", "final save for the client") looks like.
@@ -160,11 +197,12 @@ const out = {
     rowGap: d.ROW_GAP,
     minNodeWidth: d.MIN_NODE_WIDTH
   },
-  outputNames: [1, 2, 3, 4, 5, 6, 7, 8].map((n) => d.outputName(n)),
-  parseRoundTrip: [1, 2, 8].map((n) => d.parseOutputSlot(d.outputName(n))),
+  outputNames: Array.from({ length: d.MAX_OUTPUTS }, (_, i) => d.outputName(i + 1)),
+  parseRoundTrip: [1, 2, 16].map((n) => d.parseOutputSlot(d.outputName(n))),
   parseInvalid: invalidNames.map((v) => d.parseOutputSlot(v)),
   clampOutputs: %(clamp_outputs_inputs)s.map((v) => d.clampOutputsCount(v)),
   clampVisible: %(clamp_visible_inputs)s.map(([req, wired]) => d.clampVisibleCount(req, wired)),
+  growVisible: %(grow_visible_inputs)s.map(([now, wired]) => d.growVisibleCount(now, wired)),
   parseToggles: %(parse_toggles_inputs)s.map((v) => d.parseToggles(v)),
   isEnabled: %(is_enabled_inputs)s.map(([map, name]) => d.isSlotEnabled(map, name)),
   linkChecks: [%(link_cases)s].map((output) => d.isOutputConnected(output)),
@@ -206,6 +244,7 @@ def distributor_api(tmp_path_factory: pytest.TempPathFactory) -> dict:
     (scripts / "app.js").write_text("export const app = {}\n", encoding="utf-8")
 
     clamp_visible_inputs = [[req, wired] for req, wired, _ in CLAMP_VISIBLE_CASES]
+    grow_visible_inputs = [[now, wired] for now, wired, _ in GROW_VISIBLE_CASES]
     probe = layout / "probe.mjs"
     probe.write_text(
         PROBE_JS
@@ -214,6 +253,7 @@ def distributor_api(tmp_path_factory: pytest.TempPathFactory) -> dict:
             "socket_y": PROBE_SOCKET_Y,
             "clamp_outputs_inputs": json.dumps([v for v, _ in CLAMP_OUTPUTS_CASES]),
             "clamp_visible_inputs": json.dumps(clamp_visible_inputs),
+            "grow_visible_inputs": json.dumps(grow_visible_inputs),
             "parse_toggles_inputs": json.dumps([v for v, _ in PARSE_TOGGLES_CASES]),
             "is_enabled_inputs": json.dumps([[m, n] for m, n, _ in IS_ENABLED_CASES]),
             # Built as raw JS, not JSON: `_floatingLinks` is a real `Set`, so
@@ -284,13 +324,28 @@ def test_class_id_and_widget_names(distributor_api: dict) -> None:
 
 
 def test_output_count_property_name_default_and_bounds(distributor_api: dict) -> None:
-    """The `Outputs` right-click Property: default 3, clamped 1..8 (FORMAT.md
-    section 6.11 / the roadmap's decision)."""
+    """The `Outputs` right-click Property: default 3, clamped 1..16 (FORMAT.md
+    section 6.11 / the roadmap's decision). The ceiling went 8 -> 16 in
+    v0.40.0 alongside auto-growth; see `test_frontend_ceiling_matches_backend`
+    for the constraint that actually pins the number."""
     constants = distributor_api["constants"]
     assert constants["propOutputs"] == "Outputs"
     assert constants["defaultVisible"] == 3
     assert constants["minOutputs"] == 1
-    assert constants["maxOutputs"] == 8
+    assert constants["maxOutputs"] == 16
+
+
+def test_frontend_ceiling_matches_backend(distributor_api: dict) -> None:
+    """`MAX_OUTPUTS` is declared in TWO places -- nodes_distributor.py (which
+    builds the real RETURN_TYPES tuple) and distributor.js (which decides how
+    far auto-growth may reveal). They MUST agree: too low in the frontend caps
+    growth below sockets that exist, too high reveals sockets the backend never
+    declared, and a link into one of those serializes an `origin_slot` core
+    cannot resolve. Imported here rather than re-parsed so this fails the
+    moment either side moves alone."""
+    from eps_image.nodes_distributor import MAX_OUTPUTS as BACKEND_MAX
+
+    assert distributor_api["constants"]["maxOutputs"] == BACKEND_MAX
 
 
 def test_min_node_width_floor_is_present(distributor_api: dict) -> None:
@@ -306,11 +361,13 @@ def test_min_node_width_floor_is_present(distributor_api: dict) -> None:
 
 
 def test_output_name_matches_backend_return_names(distributor_api: dict) -> None:
-    assert distributor_api["outputNames"] == [f"out_{n}" for n in range(1, 9)]
+    from eps_image.nodes_distributor import EPSDistributor
+
+    assert distributor_api["outputNames"] == list(EPSDistributor.RETURN_NAMES)
 
 
 def test_parse_output_slot_round_trips(distributor_api: dict) -> None:
-    assert distributor_api["parseRoundTrip"] == [1, 2, 8]
+    assert distributor_api["parseRoundTrip"] == [1, 2, 16]
 
 
 def test_parse_output_slot_rejects_non_matching_names(distributor_api: dict) -> None:
@@ -335,6 +392,138 @@ def test_clamp_visible_count_never_hides_a_wired_slot(distributor_api: dict) -> 
     for (req, wired, expected), got in pairs:
         msg = f"clampVisibleCount({req!r}, {wired!r}) -> {got!r}, wanted {expected!r}"
         assert got == expected, msg
+
+
+def test_grow_visible_count_keeps_one_spare_socket(distributor_api: dict) -> None:
+    """The growing-outputs rule (v0.40.0): wiring the last visible output
+    reveals the next, so there is always one spare socket below the highest
+    wired one -- EPS Switcher's feel, applied to outputs. Grow-only (never
+    shrinks a socket the user has already seen) and capped at MAX_OUTPUTS,
+    where the last socket is itself wirable rather than a permanent spare."""
+    pairs = zip(GROW_VISIBLE_CASES, distributor_api["growVisible"], strict=True)
+    for (now, wired, expected), got in pairs:
+        msg = f"growVisibleCount({now!r}, {wired!r}) -> {got!r}, wanted {expected!r}"
+        assert got == expected, msg
+
+
+def test_grow_visible_count_never_shrinks(distributor_api: dict) -> None:
+    """Stated as an invariant over the whole case list, independent of the
+    hand-written expectations above: the result is never below the (range-
+    clamped) current count. This is what protects a user-typed output rename
+    -- shrinking would `removeOutput()` the socket carrying it."""
+    for (now, wired, _expected), got in zip(
+        GROW_VISIBLE_CASES, distributor_api["growVisible"], strict=True
+    ):
+        floor = min(16, max(1, round(now))) if isinstance(now, int | float) else 3
+        assert got >= floor, f"growVisibleCount({now!r}, {wired!r}) shrank to {got!r}"
+
+
+def test_grow_visible_count_stays_within_bounds(distributor_api: dict) -> None:
+    """Growth can never step outside the property's own declared range."""
+    for got in distributor_api["growVisible"]:
+        assert 1 <= got <= 16
+
+
+def test_growth_is_wired_through_both_hooks(distributor_source: str) -> None:
+    """`wireOutputGrowth` must be installed from attach() and must chain BOTH
+    litegraph hooks the mechanism needs: `configure` (for the `restoring`
+    guard -- litegraph's own restore loop dispatches onConnectionsChange from
+    inside its `this.outputs.entries()` iteration, so growing there would
+    splice under a live iterator) and `onConnectionsChange` (the live path).
+    Structural because it only runs against a real litegraph node."""
+    assert "wireOutputGrowth(node)" in distributor_source, "not installed from attach()"
+    body = _function_body(distributor_source, "wireOutputGrowth(node)")
+    assert "node.configure = function" in body
+    assert "node.onConnectionsChange = function" in body
+    assert "state.restoring = true" in body
+    assert "state.restoring = false" in body
+
+
+def test_growth_defers_past_the_litegraph_call_frame(distributor_source: str) -> None:
+    """The live path must SCHEDULE the pass, not run it synchronously:
+    `disconnectOutput` dispatches `onConnectionsChange` before it returns, so
+    a synchronous `node.outputs` mutation would splice the array while
+    litegraph still holds a slot index into it (switcher.js's round-10
+    dead-rewire finding, ported). The scheduling flag is what coalesces a
+    drag's event burst into one pass."""
+    body = _function_body(distributor_source, "wireOutputGrowth(node)")
+    assert "setTimeout(" in body, "the live path must defer to the next macrotask"
+    assert "state.growScheduled" in body, "burst coalescing flag missing"
+    # ...and the deferred run must bail if the node left the graph meanwhile.
+    assert "!target.graph" in body
+
+
+def test_growth_ignores_the_isconnected_argument(distributor_source: str) -> None:
+    """litegraph's restore loop passes `isConnected` HARDCODED true, even for
+    a slot with no link. This file must therefore never branch on that
+    argument -- it recomputes wiring from the slots themselves via
+    `highestWiredSlot`, which is why a restore could not misgrow even if one
+    got past the `restoring` guard."""
+    body = _function_body(distributor_source, "wireOutputGrowth(node)")
+    signature_line = next(line for line in body.split("\n") if "onConnectionsChange = " in line)
+    assert "isConnected" in signature_line, "argument should still be named for clarity"
+    used = [
+        line
+        for line in body.split("\n")
+        if "isConnected" in line and "onConnectionsChange = " not in line
+    ]
+    assert not used, f"growth must not branch on isConnected: {used}"
+
+
+def test_growth_never_masks_the_wired_refusal(distributor_source: str) -> None:
+    """Order matters inside `applyVisibleOutputCount`, and this exact ordering
+    is a REGRESSION PIN -- caught on the rig, not in review.
+
+    Growing BEFORE the clamps looks natural and is wrong: lowering `Outputs`
+    to 1 while `out_3` is wired then produced a grown value (4) that already
+    covered the wired floor, so the `refused > rangeClamped` comparison came
+    out false and the refusal went SILENT -- which is the original
+    owner-reported bug. The refusal must therefore be derived from the STORED
+    request, with growth applied after it."""
+    body = _function_body(distributor_source, APPLY_SIGNATURE)
+    assert "clampVisibleCount(stored, wiredMax)" in body, "refusal must read the stored request"
+    refuse_at = body.index("clampVisibleCount(")
+    grow_at = body.index("growVisibleCount(")
+    assert refuse_at < grow_at, "the refusal must be computed before growth can mask it"
+    assert "if (refused > rangeClamped)" in body
+    assert "clampOutputsCount(stored)" in body, "the range clamp must also read the request"
+
+
+def test_growth_is_opt_in_per_call_path(distributor_source: str) -> None:
+    """Auto-growth applies ONLY to the live connection path. A number typed
+    into the `Outputs` panel is an explicit instruction (and growing past it is
+    what masked the refusal above), and a loaded workflow's saved output set is
+    authoritative -- growing it on load would mutate a graph the user only
+    opened. So the parameter defaults to off and exactly one caller sets it."""
+    body = _function_body(distributor_source, APPLY_SIGNATURE)
+    assert "grow ? growVisibleCount(" in body, "growth must be gated on the flag"
+    opted_in = re.findall(r"applyVisibleOutputCount\([^)]*\{\s*grow:\s*true", distributor_source)
+    assert len(opted_in) == 1, f"exactly one caller may opt in, found {len(opted_in)}"
+    growth_body = _function_body(distributor_source, "wireOutputGrowth(node)")
+    assert "applyVisibleOutputCount(target, { grow: true })" in growth_body
+
+
+def test_apply_visible_output_count_persists_the_result(distributor_source: str) -> None:
+    """The write-back must be gated on the STORED property value. Comparing the
+    derived numbers to each other instead silently no-ops in the ordinary
+    growth case -- they are equal whenever the clamps don't bite -- leaving the
+    right-click panel showing a count one short of the sockets on screen."""
+    body = _function_body(distributor_source, APPLY_SIGNATURE)
+    assert "if (stored !== desired) node.properties[PROP_OUTPUTS] = desired" in body
+
+
+def test_deferred_growth_skips_no_op_passes(distributor_source: str) -> None:
+    """The live hook fires on every connect AND disconnect, but
+    `applyVisibleOutputCount` re-derives the node height (`resyncSize`), so an
+    unconditional pass would snap back a manual resize each time the user
+    wires anything. The deferred run must therefore bail unless growth
+    genuinely changes the count."""
+    body = _function_body(distributor_source, "wireOutputGrowth(node)")
+    guard = next(
+        (line for line in body.split("\n") if "growVisibleCount(" in line and "return" in line),
+        None,
+    )
+    assert guard, "deferred run must short-circuit when growth is a no-op"
 
 
 def test_is_output_connected_counts_floating_links_too(distributor_api: dict) -> None:
@@ -478,12 +667,14 @@ def test_wired_refusal_path_uses_clamp_visible_count(distributor_source: str) ->
     numerically-tested function above), not a separate ad-hoc comparison --
     so the rule pinned by test_clamp_visible_count_never_hides_a_wired_slot
     is what actually governs the real add/remove path, and a refusal is
-    surfaced (console.warn -- no toast in this file, per the round's
-    direction)."""
-    body = _function_body(distributor_source, "applyVisibleOutputCount(node)")
-    assert "clampVisibleCount(rawValue, wiredMax)" in body
-    assert "desired > rangeClamped" in body
+    surfaced both ways (console.warn AND an on-node toast: the property number
+    visibly snaps back, and a log-only message reads exactly like the silent
+    refusal the owner originally reported as a bug)."""
+    body = _function_body(distributor_source, APPLY_SIGNATURE)
+    assert "clampVisibleCount(stored, wiredMax)" in body
+    assert "refused > rangeClamped" in body
     assert "console.warn(" in body
+    assert "toast(node, 'warn'" in body
 
 
 def test_is_output_connected_checks_floating_links(distributor_source: str) -> None:

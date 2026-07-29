@@ -1,5 +1,5 @@
 """EPSDistributor (FORMAT.md section 6.11, display: "EPS Distributor") -- one
-image in, MAX_OUTPUTS (currently 8) independently-gated images out.
+image in, MAX_OUTPUTS (currently 16) independently-gated images out.
 
 The mirror of EPSSwitcher (nodes_switcher.py), pointed backwards. Switcher is
 many toggleable INPUTS fanned into one gathered output (N enabled inputs ->
@@ -29,7 +29,7 @@ actually has a CONSUMER wired (owner question 2026-07-27 -- "if this is at
 the end of a workflow, and all of the checkboxes are off, should the
 workflow run up to this point?" -- and, same day, his failure report that
 the first fix missed: a workflow restored from disk replays a `toggles`
-that names only the VISIBLE slots, so out_4..out_8 read as enabled and a
+that names only the VISIBLE slots, so the hidden ones read as enabled and a
 toggles-only rule ran his whole KSampler chain to feed sockets nothing
 consumes). Declining is a real branch skip: an upstream that is never
 REQUESTED is never added to the execution graph at all
@@ -41,8 +41,8 @@ conservative any-slot-enabled rule).
 This stays inside §6.4's hard rule -- "graph inspection may change what a
 node REQUESTS, never what it RETURNS" -- because the decision reads only
 `toggles`, an ordinary tracked input that is part of this node's cache key,
-never the graph. And what `distribute` RETURNS in the all-off case is eight
-blockers whether or not `image` was ever resolved: the value is genuinely
+never the graph. And what `distribute` RETURNS in the all-off case is a full
+tuple of blockers whether or not `image` was ever resolved: the value is genuinely
 unused on that path, so declining it cannot change the result, only the
 work done to reach it. Flipping any toggle changes `toggles`, which
 invalidates the cache entry, so the next run re-decides from scratch.
@@ -53,7 +53,7 @@ their docstrings for why: a malformed value logs as "EPS Distributor" here,
 never misattributed to the sibling node; this also keeps the two node
 modules independent of each other, the same way nodes_cross.py owns its own
 small helpers instead of reaching into nodes_switcher.py for conceptually
-similar ones). A JSON object {"out_N": false, ...}, keyed out_1..out_8. A
+similar ones). A JSON object {"out_N": false, ...}, keyed out_1..out_MAX. A
 slot is ENABLED unless its key is present and EXPLICITLY the boolean false
 -- a non-bool falsy value (null/0/"") or an absent key both mean enabled,
 matching Switcher's "is not False" rule exactly (same rationale: the
@@ -122,13 +122,33 @@ from typing import Any
 
 logger = logging.getLogger("eps_image")
 
-#: Fixed output count for this M1 design (roadmap "Decisions to confirm" #1:
-#: fixed MAX=8 with trailing reveal, chosen over a true-growable output list
-#: so this node reuses the toggle-bridge machinery outright; a growable
-#: version is M2-only, if 8 ever chafes). RETURN_TYPES/RETURN_NAMES below are
-#: both DERIVED from this constant, never hand-typed, so they can never
-#: drift out of sync in length.
-MAX_OUTPUTS = 8
+#: How many out_N sockets this node declares. RETURN_TYPES/RETURN_NAMES are
+#: both DERIVED from it, never hand-typed, so they can never drift in length.
+#:
+#: Raised 8 -> 16 on 2026-07-29 (owner: "EPS Distributor should have more
+#: than three outputs. Just like EPS Switcher the number of nodes needs to be
+#: able to grow"). Growth is now automatic in the frontend -- wiring the last
+#: visible socket reveals the next one, the same feel as EPSSwitcher's
+#: growing inputs -- but the CEILING is real and lives here, for a reason
+#: that is a ComfyUI constraint rather than a choice:
+#:
+#: EPSSwitcher's inputs can be genuinely unbounded because inputs are
+#: resolved BY NAME -- `_FlexibleOptionalImageInputs.__getitem__` synthesizes
+#: `image_N` for any N on demand. OUTPUTS are resolved POSITIONALLY: a link
+#: records `[origin_id, origin_slot]` and core indexes that straight into
+#: this class's RETURN_TYPES tuple, which is read once at registration. There
+#: is no per-instance output count in the node API, so "declare as many as
+#: anyone will plausibly wire" is the only shape available. 16 is that
+#: number; raising it later is safe (see below) if it ever chafes.
+#:
+#: Raising this is APPEND-ONLY and therefore safe for saved workflows: new
+#: sockets land after the existing ones, so no already-recorded origin_slot
+#: shifts (the same trailing-only rule section 6.11's hide/reveal follows).
+#: Old saves whose `toggles` only mention the first eight leave the new ones
+#: reading "enabled" by absence -- harmless, because `check_lazy_status` is
+#: wiring-aware (an enabled socket with no consumer never forces the
+#: upstream) and the frontend re-records hidden slots as off on load.
+MAX_OUTPUTS = 16
 
 #: Default `toggles` widget value: no overrides recorded yet, so every
 #: output slot is enabled (module docstring's toggle-bridge section).
@@ -169,8 +189,8 @@ def _parse_toggles(toggles: str) -> dict[str, Any]:
 
 
 class EPSDistributor:
-    """One image in, MAX_OUTPUTS (currently 8) independently-gated IMAGE
-    outputs out, keyed out_1..out_8 (FORMAT.md section 6.11).
+    """One image in, MAX_OUTPUTS (currently 16) independently-gated IMAGE
+    outputs out, keyed out_1..out_MAX_OUTPUTS (FORMAT.md section 6.11).
 
     RETURN_TYPES/RETURN_NAMES are both built from MAX_OUTPUTS -- never
     hand-typed -- so the two can never drift apart in length. distribute
@@ -267,13 +287,13 @@ class EPSDistributor:
 
         Why this exists (owner failure report 2026-07-27, reproduced): the
         original all-off skip trusted `toggles` to describe every slot, but
-        the backend has EIGHT slots and an absent key means ENABLED -- so a
-        workflow whose saved `toggles` only covered the visible three (any
-        graph saved before the frontend recorded hidden slots, and any
-        restore path that replays such a value) left out_4..out_8 "enabled",
-        and `check_lazy_status` dutifully ran a whole KSampler chain to feed
-        five sockets that don't exist on the node and can't be wired to
-        anything. The frontend recording hidden slots as off is now only a
+        the backend declares MAX_OUTPUTS slots and an absent key means
+        ENABLED -- so a workflow whose saved `toggles` only covered the
+        visible three (any graph saved before the frontend recorded hidden
+        slots, and any restore path that replays such a value) left every
+        hidden socket "enabled", and `check_lazy_status` dutifully ran a
+        whole KSampler chain to feed sockets that don't exist on the node
+        and can't be wired to anything. The frontend recording hidden slots as off is now only a
         belt; THIS is the floor: an enabled slot with no consumer never
         justifies resolving `image`, no matter what `toggles` says or which
         client wrote it.
@@ -354,7 +374,7 @@ class EPSDistributor:
     ) -> tuple[Any, ...]:
         """Fan `image` out to MAX_OUTPUTS sockets, gated per-slot by `toggles`.
 
-        A slot is enabled unless `toggles` names it (out_1..out_8) and the
+        A slot is enabled unless `toggles` names it (out_1..out_MAX) and the
         value is EXPLICITLY the boolean `false` -- an absent key, or a
         present-but-non-bool-falsy value (null/0/""), both mean enabled
         (matches EPSSwitcher's own `is not False` rule; see the module

@@ -87,7 +87,7 @@ class TestToggleSemantics:
     def test_absent_key_is_enabled(self, fake_execution_blocker) -> None:
         # Only out_1 is mentioned (and disabled, hence the fixture -- the
         # implementation still needs a real/fake ExecutionBlocker for that
-        # one slot); out_2..out_8 are never named and must still be enabled.
+        # one slot); out_2..out_16 are never named and must still be enabled.
         node = EPSDistributor()
         image = object()
         result = node.distribute(image=image, toggles=_toggles(out_1=False))
@@ -99,8 +99,8 @@ class TestToggleSemantics:
         result = node.distribute(image=image, toggles=json.dumps({"out_4": True}))
         assert all(slot is image for slot in result)
 
-    @pytest.mark.parametrize("stray_key", ["out_0", "out_9", "out_99", "nonsense", "1", ""])
-    def test_keys_outside_out_1_to_out_8_are_ignored(self, stray_key: str) -> None:
+    @pytest.mark.parametrize("stray_key", ["out_0", "out_17", "out_99", "nonsense", "1", ""])
+    def test_keys_outside_the_real_slot_range_are_ignored(self, stray_key: str) -> None:
         # A stale save from a future MAX, a hand-edited workflow, or an
         # unrelated key sharing the widget must never disable a real slot --
         # `distribute` only ever LOOKS UP out_1..out_MAX_OUTPUTS, so an
@@ -175,7 +175,7 @@ class TestSlotsDisabled:
             else:
                 assert value is image
 
-    def test_all_off_returns_8_blockers_and_does_not_raise(self, fake_execution_blocker) -> None:
+    def test_all_off_returns_all_blockers_and_does_not_raise(self, fake_execution_blocker) -> None:
         # All-off is a VALID state (mirrors EPSSwitcher's own all-off
         # decision) -- must not raise anything.
         node = EPSDistributor()
@@ -231,7 +231,7 @@ class TestReturnedTupleIsAlwaysMaxOutputsLong:
     )
     def test_length_is_always_max_outputs(self, toggles: str, fake_execution_blocker) -> None:
         result = EPSDistributor().distribute(image=object(), toggles=toggles)
-        assert len(result) == MAX_OUTPUTS == 8
+        assert len(result) == MAX_OUTPUTS == 16
 
 
 # ------------------------------------------------------------- class shape
@@ -242,14 +242,14 @@ class TestClassShape:
         assert EPSDistributor.CATEGORY == "EPSNodes"
 
     def test_return_types_length_and_values(self) -> None:
-        assert len(EPSDistributor.RETURN_TYPES) == MAX_OUTPUTS == 8
+        assert len(EPSDistributor.RETURN_TYPES) == MAX_OUTPUTS == 16
         assert EPSDistributor.RETURN_TYPES == ("IMAGE",) * MAX_OUTPUTS
 
     def test_return_names_length_and_values(self) -> None:
-        assert len(EPSDistributor.RETURN_NAMES) == MAX_OUTPUTS == 8
+        assert len(EPSDistributor.RETURN_NAMES) == MAX_OUTPUTS == 16
         assert tuple(f"out_{n}" for n in range(1, MAX_OUTPUTS + 1)) == EPSDistributor.RETURN_NAMES
         assert EPSDistributor.RETURN_NAMES[0] == "out_1"
-        assert EPSDistributor.RETURN_NAMES[-1] == "out_8"
+        assert EPSDistributor.RETURN_NAMES[-1] == "out_16"
 
     def test_function_name_matches_the_declared_entry_point(self) -> None:
         assert EPSDistributor.FUNCTION == "distribute"
@@ -328,7 +328,7 @@ class TestCheckLazyStatus:
 
     # ---- wiring-aware decision (owner failure 2026-07-27: a saved workflow
     # whose toggles only covered the visible three slots still ran the whole
-    # KSampler chain, because out_4..out_8 read as enabled and the old rule
+    # KSampler chain, because out_4..out_16 read as enabled and the old rule
     # was "any slot enabled -> request image") ----
 
     @staticmethod
@@ -345,8 +345,8 @@ class TestCheckLazyStatus:
 
     def test_regression_stale_toggles_with_only_wired_slots_off_skips(self) -> None:
         # HIS EXACT CASE: three consumers on out_1..out_3, all three toggled
-        # off, out_4..out_8 absent from toggles (a pre-recording save) -- the
-        # upstream must NOT be requested for five sockets nothing consumes.
+        # off, out_4..out_16 absent from toggles (a pre-recording save) -- the
+        # upstream must NOT be requested for sockets nothing consumes.
         toggles = json.dumps({"out_1": False, "out_2": False, "out_3": False})
         prompt = self._prompt_with_consumers(0, 1, 2)
         assert EPSDistributor().check_lazy_status(
@@ -361,7 +361,7 @@ class TestCheckLazyStatus:
         ) == ["image"]
 
     def test_enabled_but_unwired_slot_alone_never_requests(self) -> None:
-        # Everything wired is off; out_8 is "enabled" purely by absence and
+        # Everything wired is off; out_2..out_16 are "enabled" purely by absence and
         # has no consumer.
         toggles = json.dumps({"out_1": False})
         prompt = self._prompt_with_consumers(0)
@@ -432,7 +432,7 @@ class TestCheckLazyStatus:
         # distribute(image=None) is only reachable after a decline; a `None`
         # must never ride the tuple into the graph -- every slot blocks,
         # including "enabled" unwired ones.
-        toggles = json.dumps({"out_1": False})  # out_2..out_8 enabled, unwired
+        toggles = json.dumps({"out_1": False})  # out_2..out_16 enabled, unwired
         result = EPSDistributor().distribute(image=None, toggles=toggles)
         assert len(result) == MAX_OUTPUTS
         assert all(isinstance(value, fake_execution_blocker) for value in result)

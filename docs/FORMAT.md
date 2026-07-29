@@ -1470,12 +1470,52 @@ hand-bypassing groups. Roadmap: `research/roadmap-eps-distributor.md`.
   hand-built `/prompt` that omits any REQUIRED input BEFORE the node runs,
   which would break the no-frontend API path — so `optional` plus
   `distribute`'s own default is what keeps that path working.
-- **Outputs:** fixed `RETURN_TYPES = ("IMAGE",) * MAX_OUTPUTS` (8),
-  `RETURN_NAMES = out_1 … out_8`, both DERIVED from `MAX_OUTPUTS` so they
+- **Outputs:** fixed `RETURN_TYPES = ("IMAGE",) * MAX_OUTPUTS` (16),
+  `RETURN_NAMES = out_1 … out_16`, both DERIVED from `MAX_OUTPUTS` so they
   cannot drift in length. The frontend hides the trailing unused sockets down
   to the user's chosen count (§6.5 EPS Resolution's `removeOutput`/
   `addOutputs` tail pattern — **TRAILING only, never a middle socket**, so
   existing wire indices never shift).
+- **The outputs GROW as you wire, and the ceiling is real** (owner ask
+  2026-07-29: "EPS Distributor should have more than three outputs. Just like
+  EPS Switcher the number of nodes needs to be able to grow"). Wiring the last
+  visible output reveals the next one, so there is always exactly one spare
+  socket below the highest wired one — §6.4's `convergeImageInputs` feel, and a
+  structural port of its `wireImageInputGrowth` hook pair. Two differences,
+  both forced by outputs not being the mirror image of inputs:
+  - **Bounded, not unbounded.** §6.4's `image_N` inputs can grow forever
+    because ComfyUI resolves inputs **BY NAME** through `INPUT_TYPES`' dict-like
+    proxy, so a socket the class never declared still binds. Outputs resolve
+    **POSITIONALLY**: a link serializes as `[origin_id, origin_slot]` and core
+    indexes that straight into `RETURN_TYPES`, read ONCE at registration. So
+    every socket must be declared up front and `MAX_OUTPUTS` is a hard ceiling,
+    raised 8 → 16 with this feature. Raising it is **append-only and therefore
+    safe for saved workflows** (every existing `origin_slot` still points at
+    the same output); **LOWERING it would silently repoint live links, so it
+    must never happen** — the same freeze §8 applies to class ids.
+  - **Grows only, never shrinks.** §6.4 CONVERGES (it also removes surplus
+    trailing empties); here a socket the user has already seen stays put,
+    because unlike an input an output can carry a user-typed rename that
+    removal would discard, and because `Outputs` is a hand-editable property
+    whose value would otherwise be fought over. Shrinking stays available, just
+    explicitly: lower `Outputs` by hand, subject to the refuse-if-wired rule
+    below. `MAX_OUTPUTS` is declared in BOTH `nodes_distributor.py` (the real
+    sockets) and `distributor.js` (how far growth may reveal); a test imports
+    the backend constant and asserts the frontend matches, because too low caps
+    growth below sockets that exist and too high serializes an `origin_slot`
+    core cannot resolve.
+  - **Two hooks, for the two litegraph facts §6.4's header already documents.**
+    `configure()`'s restore loop dispatches `onConnectionsChange(OUTPUT, …,
+    true, …)` once per restored link from INSIDE its own
+    `this.outputs.entries()` iteration, so growing there would splice under a
+    live iterator — a `restoring` flag blanks the hook for exactly that call,
+    and the existing `onConfigure` wrap re-applies the count once
+    `node.outputs` is stable. And the LIVE path defers to the next macrotask
+    (`disconnectOutput` dispatches the callback BEFORE returning, so a
+    synchronous mutation would splice the array while litegraph still holds a
+    slot index into it), coalescing a drag's event burst into one pass. That
+    pass also short-circuits when growth changes nothing, since it would
+    otherwise re-derive the node height on every single wire.
 - **Toggle semantics — identical to §6.4's**, own local
   `_parse_toggles`/`DEFAULT_TOGGLES` (adapted, deliberately not imported:
   a malformed value must log as "EPS Distributor", never misattribute to the
@@ -1484,12 +1524,13 @@ hand-bypassing groups. Roadmap: `research/roadmap-eps-distributor.md`.
   A slot is ENABLED unless its key is present and **explicitly boolean
   `false`** — absent, `null`, `0`, `""` all mean enabled (the "ComfyUI-only
   must work" floor: a hand-edited workflow or an API caller that never heard
-  of this widget still gets every output). Keys outside `out_1..out_8` are
+  of this widget still gets every output). Keys outside `out_1..out_16` are
   ignored. Malformed or non-object JSON → every output enabled + a logged
   warning, never an exception.
-- **`distribute`** returns a fixed-length 8-tuple every time: the SAME image
-  object (no copy) per enabled slot, else a fresh `ExecutionBlocker(None)`.
-  **All-off is VALID** — 8 blockers, no error, queue succeeds — mirroring
+- **`distribute`** returns a fixed-length `MAX_OUTPUTS`-tuple every time: the
+  SAME image object (no copy) per enabled slot, else a fresh
+  `ExecutionBlocker(None)`. **All-off is VALID** — all blockers, no error,
+  queue succeeds — mirroring
   §6.4's all-off decision, just distributed per-slot. An unwired disabled
   slot is inspected by nothing, hence harmless.
 - **Why a per-slot blocker is possible at all** (the load-bearing mechanism,
@@ -1513,11 +1554,11 @@ hand-bypassing groups. Roadmap: `research/roadmap-eps-distributor.md`.
   what it RETURNS."
 - **`image` IS lazy, and the request decision is WIRING-AWARE (2026-07-27b,
   after the owner's real workflow caught the toggles-only rule):** the first
-  fix skipped the upstream only when every one of the EIGHT slots read
+  fix skipped the upstream only when every one of the fixed slots read
   disabled in `toggles` — but a workflow restored from disk replays a saved
   `toggles` that names only the VISIBLE slots (litegraph's `configure()`
   restores `widgets_values` last, clobbering any attach-time prune), so
-  out_4..out_8 read enabled and his KSampler still ran, feeding sockets
+  out_4..out_16 read enabled and his KSampler still ran, feeding sockets
   that don't exist on the node. Reproduced on the real restore path.
   `check_lazy_status` now carries hidden `prompt`/`unique_id` (§6.4's
   Switcher precedent) and requests `image` only when some ENABLED slot has
@@ -1537,8 +1578,8 @@ hand-bypassing groups. Roadmap: `research/roadmap-eps-distributor.md`.
   "if this is at the end of a workflow, and all of the checkboxes are off,
   should the workflow run up to this point?"). Measured on the rig before
   answering: it DID still run — a non-lazy input is resolved before the node
-  executes, so an entire upstream chain did its work only to have all eight
-  outputs blocked and nothing consume any of it. `check_lazy_status` now
+  executes, so an entire upstream chain did its work only to have every
+  output blocked and nothing consume any of it. `check_lazy_status` now
   returns `[]` when every slot is off and `["image"]` otherwise, which is a
   real branch skip (an upstream that is never REQUESTED is never added to the
   execution graph — `comfy_execution/graph.py`'s `TopologicalSort.add_node`
@@ -1546,13 +1587,13 @@ hand-bypassing groups. Roadmap: `research/roadmap-eps-distributor.md`.
   whose all-off case already skipped its upstream. Still inside the §6.4
   rule: the decision reads only `toggles`, an ordinary tracked input in the
   cache key, never the graph — and what the node RETURNS on that path is
-  eight blockers whether or not `image` was resolved, so declining it cannot
+  all blockers whether or not `image` was resolved, so declining it cannot
   change the result, only the work done to reach it.
   - **The frontend has to record hidden slots as `false` for this to fire.**
-    The backend has a fixed EIGHT slots and treats an absent key as enabled
-    (the no-frontend floor), but the node only shows `Outputs` of them — so
-    with the default 3 visible and all three switched off, out_4..out_8 still
-    read as enabled and the upstream still ran. `pruneToggles` therefore
+    The backend has a fixed `MAX_OUTPUTS` slots and treats an absent key as
+    enabled (the no-frontend floor), but the node only shows `Outputs` of them
+    — so with the default 3 visible and all three switched off, out_4 upward
+    still read as enabled and the upstream still ran. `pruneToggles` therefore
     writes `false` for every hidden slot (they cannot be wired to anything —
     they are genuinely removed from `node.outputs`), and clears the entry for
     any slot a count INCREASE just revealed, so a revealed socket always
@@ -1576,7 +1617,8 @@ hand-bypassing groups. Roadmap: `research/roadmap-eps-distributor.md`.
   - The drawn label reaches further left than that hit box: `NodeSlot.draw()`
     renders an output's name at `pos[0] - 10` with `textAlign = 'right'`, so
     the text grows leftward from there. `ROW_GAP` clears that too for the
-    fixed 5-character `out_N` names.
+    default 5-6 character `out_N` names (a RENAME makes them unbounded, which
+    the next entry covers).
   - **No row-0 collision with the `image` input.** `out_1` shares row 0 with
     it, but a normal slot's mousedown `boundingRect` is only
     `NODE_SLOT_HEIGHT` (20px) wide — `LGraphNode._measureSlot` sets

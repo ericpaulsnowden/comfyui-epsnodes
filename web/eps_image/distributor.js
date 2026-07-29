@@ -5,10 +5,13 @@
  * than `EPSDistributor`.
  *
  * The roadmap frames this node as "EPS Switcher pointed backwards": one
- * `image` input fans out to fixed `out_1`..`out_8` (MAX_OUTPUTS) IMAGE
+ * `image` input fans out to fixed `out_1`..`out_16` (MAX_OUTPUTS) IMAGE
  * outputs, each independently gated by a hidden `toggles` JSON widget the
- * backend reads (`{"out_3": false}` = off; absent key = on). Two pieces of
- * this file are direct ports, one is genuinely new:
+ * backend reads (`{"out_3": false}` = off; absent key = on). All three
+ * mechanisms below are structural ports of an existing eps_image file's
+ * INPUT-side machinery, pointed at outputs instead -- which is where every
+ * genuinely new bit lives, since litegraph and ComfyUI both treat the two
+ * sides less symmetrically than they look:
  *
  * 1. **Per-slot toggle draw + hit-test** -- a structural port of
  *    `eps_image/switcher.js`'s `onDrawForeground`/`onMouseDown` hand-drawn
@@ -64,12 +67,15 @@
  *        `NodeInputSlot`/`NodeOutputSlot` -- right-aligns an output's name
  *        ending at `pos[0] - 10`, growing LEFTWARD (`NodeOutputSlot.draw()`
  *        sets `ctx.textAlign = 'right'`, `labelPosition: Left`, then
- *        `ctx.fillText(text, pos[0] - 10, pos[1] + 5)`). `out_1`..`out_8`
- *        are all 5 characters, so `ROW_GAP`'s fixed margin clears this too
- *        without needing to measure text at all; a future per-output rename
- *        feature (this node does not have one) would need to revisit this
- *        the way switcher.js's `drawRowToggles` measures `label || name`
- *        dynamically for its own (unbounded-length) `image_N` rows.
+ *        `ctx.fillText(text, pos[0] - 10, pos[1] + 5)`). The default
+ *        `out_1`..`out_16` names are 5-6 characters, which `ROW_GAP`'s fixed
+ *        margin clears on its own -- but the per-output RENAME feature
+ *        (`wireOutputRename` below, v0.35.0) makes labels unbounded, so
+ *        `drawRowToggles` DOES measure `label || name` dynamically, exactly
+ *        the way switcher.js does for its own `image_N` rows. It computes ONE
+ *        shared reach across every visible row rather than per-row, so a node
+ *        with mixed-length labels still draws a single aligned toggle column
+ *        (owner report 2026-07-27).
  *      - `getWidgetOnPos` runs BEFORE `node.onMouseDown` in the same
  *        function, and is mutually exclusive with it (a widget hit calls
  *        `processWidgetClick` and never falls through) -- verified this
@@ -101,8 +107,9 @@
  *    fixed PAIR (`original_width`/`original_height`, an on/off boolean) to a
  *    single right-click Property, `Outputs` (a number, default
  *    `DEFAULT_VISIBLE_OUTPUTS = 3`, clamped `MIN_OUTPUTS..MAX_OUTPUTS` =
- *    `1..8`), that drives how many of the fixed `out_1`..`out_8` backend
- *    outputs stay visible. Same hard rule resolution.js's file header
+ *    `1..16`), that drives how many of the fixed `out_1`..`out_16` backend
+ *    outputs stay visible -- and which `wireOutputGrowth` (item 3) raises on
+ *    its own as the user wires up. Same hard rule resolution.js's file header
  *    derives from ComfyUI's own link-serialization contract (a link's source
  *    is resolved by bare positional index against the backend's FIXED
  *    `RETURN_TYPES` tuple, so only genuine TAIL removal is safe, and it must
@@ -116,9 +123,9 @@
  *    to the highest wired slot -- not all the way back to whatever the
  *    count was before the edit -- and everything strictly above that (which
  *    is provably unwired, or the request would have clamped higher still)
- *    is still hidden. E.g. dropping from 8 to 2 while `out_5` is wired hides
- *    `out_6`..`out_8` (safe, unwired) and clamps the property back to `5`
- *    (not `8`), pure-factored as `clampVisibleCount(requested,
+ *    is still hidden. E.g. dropping from 16 to 2 while `out_5` is wired hides
+ *    `out_6`..`out_16` (safe, unwired) and clamps the property back to `5`
+ *    (not `16`), pure-factored as `clampVisibleCount(requested,
  *    highestWiredIndex)` below so the rule is testable headlessly. "Wired"
  *    checks BOTH `output.links` (settled) and `output._floatingLinks` (a
  *    link mid-drag, not yet dropped) -- `isOutputConnected` below mirrors
@@ -128,8 +135,42 @@
  *    user still has a link on). resolution.js's `isOutputConnected` was
  *    `.links`-only until v0.34.0 and is now this same function -- the two
  *    refusal paths are kept in lockstep, one headless case list each.
- *    Surfaced with `console.warn` only (no toast in this file) when the
- *    refusal actually changes the outcome versus a plain range clamp.
+ *    Surfaced with BOTH `console.warn` and an on-node toast when the refusal
+ *    actually changes the outcome versus a plain range clamp -- deliberately
+ *    louder than resolution.js: the property number visibly snaps back, and a
+ *    log-only message reads exactly like the silent refusal the owner
+ *    originally reported as a bug.
+ * 3. **Growing outputs** -- `wireOutputGrowth`/`growVisibleCount` below
+ *    (owner ask 2026-07-29: "EPS Distributor should have more than three
+ *    outputs. Just like EPS Switcher the number of nodes needs to be able to
+ *    grow"). Wiring the last visible output reveals the next one, so there is
+ *    always exactly one spare socket below the highest wired one -- the same
+ *    feel as switcher.js's `convergeImageInputs`, and a structural port of its
+ *    `wireImageInputGrowth` hook pair (`configure` guard + deferred
+ *    `onConnectionsChange`; see that function's docstring for the two
+ *    litegraph findings both files depend on).
+ *
+ *    Two deliberate differences from the switcher, both forced by outputs
+ *    being a fundamentally different resource than inputs:
+ *      - **Bounded, not unbounded.** The switcher's `image_N` inputs can grow
+ *        forever because ComfyUI resolves inputs BY NAME through
+ *        `INPUT_TYPES`' dict-like proxy, so a socket the class never declared
+ *        still binds. Outputs resolve POSITIONALLY: a link serializes as
+ *        `[origin_id, origin_slot]` and core indexes that straight into the
+ *        class's `RETURN_TYPES` tuple, read ONCE at registration. So the
+ *        backend must declare every socket up front and `MAX_OUTPUTS` is a
+ *        real ceiling, raised 8 -> 16 alongside this feature. Raising it is
+ *        append-only and therefore safe for saved workflows (every existing
+ *        `origin_slot` still points at the same output); LOWERING it would
+ *        silently repoint live links, so it must never happen.
+ *      - **Grows only, never shrinks.** The switcher CONVERGES: it also
+ *        removes surplus trailing empties. Here a socket the user has already
+ *        seen stays put, because unlike an input an output can carry a
+ *        user-typed rename (`wireOutputRename`) that removal would discard,
+ *        and because `Outputs` is a hand-editable property whose value would
+ *        otherwise be fought over. Shrinking stays fully available, just
+ *        explicitly: set `Outputs` down by hand, subject to item 2's
+ *        refuse-if-wired rule.
  *
  * **`toggles` lockstep + pruning**: this file's `pruneToggles` mirrors
  * switcher.js's own pruning, but the criterion that keeps a key is VISIBILITY
@@ -223,8 +264,18 @@ const PREFIX = '[eps_image:distributor]'
 const NODE_TITLE = 'EPS Distributor'
 
 const OUTPUT_TYPE = 'IMAGE'
-/** Backend's fixed `RETURN_NAMES` shape (`out_1`..`out_MAX_OUTPUTS`). */
-export const MAX_OUTPUTS = 8
+/**
+ * Backend's fixed `RETURN_NAMES` shape (`out_1`..`out_MAX_OUTPUTS`). MUST
+ * equal `nodes_distributor.py`'s `MAX_OUTPUTS` -- that module is the source
+ * of truth (it declares the actual sockets) and this is the frontend's
+ * mirror; a smaller number here would cap auto-growth below sockets the
+ * backend really has, a larger one would reveal sockets that don't exist.
+ * Raising it is append-only, so saved workflows are unaffected: see that
+ * module's own `MAX_OUTPUTS` comment for why the ceiling exists at all
+ * (outputs resolve POSITIONALLY, so unlike the Switcher's name-resolved
+ * inputs they cannot be unbounded).
+ */
+export const MAX_OUTPUTS = 16
 export const MIN_OUTPUTS = 1
 const OUTPUT_NAME_RE = /^out_(\d+)$/
 
@@ -317,6 +368,31 @@ export function clampOutputsCount(value) {
  * the one function that would need to change if the clamp-up rule ever
  * changed, and the one this file's `applyVisibleOutputCount` actually calls.
  */
+/**
+ * The visible-output count after AUTO-GROWTH: one spare socket always sits
+ * below the highest wired one, so wiring the last visible output reveals
+ * the next — EPSSwitcher's growing-inputs feel, applied to outputs (owner
+ * ask 2026-07-29: "EPS Distributor should have more than three outputs.
+ * Just like EPS Switcher the number of nodes needs to be able to grow").
+ *
+ * Grows only, never shrinks: a socket the user has already seen (or set via
+ * the `Outputs` property) stays put, exactly as Switcher never renumbers a
+ * connected row. `MAX_OUTPUTS` is the hard ceiling — outputs are resolved
+ * POSITIONALLY against the backend's `RETURN_TYPES`, so unlike Switcher's
+ * name-resolved inputs they cannot be unbounded (see the backend module's
+ * `MAX_OUTPUTS` note). At the ceiling this returns the ceiling, so the last
+ * socket is wirable rather than reserved as a permanent spare.
+ *
+ * Pure; exported for tests.
+ */
+export function growVisibleCount(current, highestWiredIndex) {
+  const now = clampOutputsCount(current)
+  const wired = Math.round(Number(highestWiredIndex))
+  if (!Number.isFinite(wired) || wired <= 0) return now
+  const wantSpare = Math.min(MAX_OUTPUTS, wired + 1)
+  return Math.max(now, wantSpare)
+}
+
 export function clampVisibleCount(requested, highestWiredIndex) {
   const rangeClamped = clampOutputsCount(requested)
   const wired = Math.round(Number(highestWiredIndex))
@@ -690,17 +766,41 @@ function resyncSize(node) {
  * name lookup, and `configure()`'s own wholesale `node.outputs` clone is
  * authoritative for link data no synthetic addOutput() call could
  * reconstruct).
+ *
+ * `grow` (v0.40.0) opts in to the auto-grow spare socket and is passed ONLY
+ * by the live connection path (`wireOutputGrowth`). Deliberately NOT set on
+ * the property or restore paths:
+ *   - A number the user typed into the `Outputs` panel is an explicit
+ *     instruction; growing past it would fight the edit. Lowering it while the
+ *     last socket is wired must clamp back to exactly the wired floor and say
+ *     so -- with growth in that path the clamped-up value already covered the
+ *     floor, which made the refusal SILENT again (caught on the rig, and the
+ *     silent refusal is the original owner-reported bug).
+ *   - A loaded workflow's saved output set is authoritative; growing it on
+ *     load would mutate (and dirty) a graph the user only opened. A spare that
+ *     was there when they saved is still there; one that wasn't appears the
+ *     next time they wire the last socket.
  */
-function applyVisibleOutputCount(node) {
+function applyVisibleOutputCount(node, { grow = false } = {}) {
   if (!node.properties) node.properties = {}
 
-  const rawValue = node.properties[PROP_OUTPUTS]
   const wiredMax = highestWiredSlot(node)
-  const rangeClamped = clampOutputsCount(rawValue)
-  const desired = clampVisibleCount(rawValue, wiredMax)
+  const stored = node.properties[PROP_OUTPUTS]
+  const rangeClamped = clampOutputsCount(stored)
+  // The refusal is computed from what was REQUESTED, before any growth, so
+  // that growth can never mask it (see the `grow` note above).
+  const refused = clampVisibleCount(stored, wiredMax)
+  // AUTO-GROW (2026-07-29 owner ask): keep one spare socket below the highest
+  // wired one, so wiring the last visible output reveals the next -- the
+  // Switcher's growing feel.
+  const desired = grow ? growVisibleCount(refused, wiredMax) : refused
 
-  if (rawValue !== desired) node.properties[PROP_OUTPUTS] = desired
-  if (desired > rangeClamped) {
+  // Compared against the STORED value, not against the other derived numbers:
+  // growth moves the target without touching the property, and `grown ===
+  // desired` holds in the ordinary growth case, so comparing those two would
+  // silently no-op and leave the panel one short of the sockets on screen.
+  if (stored !== desired) node.properties[PROP_OUTPUTS] = desired
+  if (refused > rangeClamped) {
     // The plain range clamp alone would have hidden a wired output --
     // refused, clamped back up to the highest wired slot instead
     // (resolution.js's "never leave a dangling wire" precedent, generalized
@@ -741,6 +841,86 @@ function applyVisibleOutputCount(node) {
   pruneToggles(node)
   clearTogglesFor(node, revealed)
   resyncSize(node)
+}
+
+/**
+ * Chains *node*'s `configure` and `onConnectionsChange` so wiring the last
+ * visible output reveals the next one -- switcher.js's `wireImageInputGrowth`,
+ * applied to outputs. See that function (and switcher.js's file header) for
+ * the two findings this inherits verbatim from litegraph's `LGraphNode.ts`,
+ * both re-verified against this rig's frontend before writing this:
+ *
+ * 1. `configure()`'s restore loop dispatches `onConnectionsChange(OUTPUT, i,
+ *    true, ...)` once per restored link, from INSIDE its own
+ *    `this.outputs.entries()` iteration. Growing the array from there would
+ *    splice under litegraph's live iterator, so a `restoring` flag blanks the
+ *    hook for exactly the duration of THIS node's `configure()` call. Nothing
+ *    is lost: attach()'s `onConfigure` wrap already re-applies the count at
+ *    the very end of `configure()`, once `this.outputs` is stable.
+ * 2. The LIVE path defers to the next macrotask rather than growing
+ *    synchronously: `disconnectOutput` dispatches `onConnectionsChange`
+ *    BEFORE it returns, so a synchronous `node.outputs` mutation would run
+ *    while litegraph (and the mouse-gesture code that called it) still holds
+ *    a slot index into that array. `growScheduled` coalesces an event burst
+ *    -- a single drag fires several -- into one pass.
+ *
+ * Unlike the switcher this recomputes wiring from the slots themselves
+ * (`highestWiredSlot`) and ignores the `isConnected` argument entirely, so
+ * the restore loop's hardcoded `true` could not misgrow even if it did get
+ * through.
+ */
+function wireOutputGrowth(node) {
+  const state = { restoring: false, growScheduled: false }
+
+  function runDeferredGrow(target) {
+    state.growScheduled = false
+    // A configure() that started while this was pending runs its own pass in
+    // onConfigure; a node removed from the graph meanwhile needs no pass.
+    if (state.restoring || !target.graph) return
+    try {
+      // Bail unless the pass would land somewhere other than the stored
+      // value. This hook fires on EVERY connect and disconnect, and
+      // `applyVisibleOutputCount` also re-derives the node's height
+      // (`resyncSize`), which would otherwise snap back a manual resize each
+      // time the user wires anything.
+      const stored = target.properties?.[PROP_OUTPUTS]
+      const wiredMax = highestWiredSlot(target)
+      if (growVisibleCount(clampVisibleCount(stored, wiredMax), wiredMax) === stored) return
+      applyVisibleOutputCount(target, { grow: true })
+    } catch (error) {
+      console.warn(PREFIX, 'applyVisibleOutputCount (deferred) failed', error)
+    }
+  }
+
+  function scheduleGrow(target) {
+    if (state.growScheduled) return
+    state.growScheduled = true
+    setTimeout(() => runDeferredGrow(target), 0)
+  }
+
+  const originalConfigure = node.configure
+  node.configure = function (...args) {
+    state.restoring = true
+    try {
+      return originalConfigure?.apply(this, args)
+    } finally {
+      state.restoring = false
+    }
+  }
+
+  const originalOnConnectionsChange = node.onConnectionsChange
+  node.onConnectionsChange = function (type, index, isConnected, linkInfo, slot) {
+    let result
+    if (typeof originalOnConnectionsChange === 'function') {
+      result = originalOnConnectionsChange.apply(this, arguments)
+    }
+    // Name-matched rather than type-matched: `out_N` is only ever an output,
+    // and this stays correct if litegraph's slot-type enum values ever move.
+    if (!state.restoring && OUTPUT_NAME_RE.test(slot?.name || '')) {
+      scheduleGrow(this)
+    }
+    return result
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -1114,6 +1294,7 @@ export function attach(node) {
     wireRowToggleDrawing(node)
     wireRowToggleClicks(node)
     wireOutputRename(node)
+    wireOutputGrowth(node)
     addHeaderWidget(node)
 
     // Re-prune AFTER any restore (owner failure report 2026-07-27, the

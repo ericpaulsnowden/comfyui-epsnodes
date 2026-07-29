@@ -52,7 +52,7 @@
       ],
       "size": [
         220,
-        122
+        118
       ],
       "flags": {},
       "order": 1,
@@ -99,10 +99,16 @@
           "links": [
             5
           ]
+        },
+        {
+          "localized_name": "out_4",
+          "name": "out_4",
+          "type": "IMAGE",
+          "links": []
         }
       ],
       "properties": {
-        "Outputs": 3,
+        "Outputs": 4,
         "Node name for S&R": "EPSDistributor"
       },
       "widgets_values": [
@@ -254,7 +260,7 @@
       "title": "Note",
       "properties": {},
       "widgets_values": [
-        "# TEST: EPS Distributor - one image, three branches, each on/off\n\n**Just press Run.** No checkpoint, no lora, no GPU, no setup - it only moves\none image around. Takes a second.\n\n## Pass 1 - everything on (how it ships)\n\nPress **Run** once with all three toggles ON. You should get:\n\n- `output/eps_disttest/branch_A_00001_.png` - the plain image\n- `output/eps_disttest/branch_B_inverted_00001_.png` - **colour-inverted**\n- a preview of the image on the `PreviewImage` node at the bottom\n\nThat is three branches off ONE image in ONE run. Nothing ran twice.\n\n## Pass 2 - turn a branch off (the actual test)\n\nClick the little **checkbox next to `out_2`** on the EPS Distributor so it\ngoes dark, then press **Run** again. Now:\n\n- `branch_A_00002_.png` appears - branch A still runs\n- **NO new `branch_B_inverted_` file** - branch B was skipped\n- the preview still updates - branch C still runs\n\nThe important part: the **Invert** node in the middle of branch B never\nexecuted either. A disabled output skips the WHOLE chain hanging off it, not\njust the node touching it. Watch the canvas during Run - Invert never\nhighlights.\n\n## Pass 3 - all off is legal\n\nTurn all three off (or use the **Toggle All** box in the node's header) and\npress Run. The queue should finish **successfully** with nothing new written\nand no error. That is intended: an all-off Distributor simply means nothing\ndownstream of it runs this time.\n\n## Also worth a click\n\n- **Right-click the node -> Properties -> `Outputs`** to show more than three\n  (up to 8) or fewer. Only sockets at the BOTTOM are added or removed, so the\n  wires you already have never jump to a different output.\n- Try lowering `Outputs` to **1** while `out_2` is still wired: it should\n  **refuse** to go below 2 and tell you `out_2` is wired. Unwire it first and\n  it will go all the way down.\n"
+        "# TEST: EPS Distributor - one image, three branches, each on/off\n\n**Just press Run.** No checkpoint, no lora, no GPU, no setup - it only moves\none image around. Takes a second.\n\n## Pass 1 - everything on (how it ships)\n\nPress **Run** once with all three toggles ON. You should get:\n\n- `output/eps_disttest/branch_A_00001_.png` - the plain image\n- `output/eps_disttest/branch_B_inverted_00001_.png` - **colour-inverted**\n- a preview of the image on the `PreviewImage` node at the bottom\n\nThat is three branches off ONE image in ONE run. Nothing ran twice.\n\n## Pass 2 - turn a branch off (the actual test)\n\nClick the little **checkbox next to `out_2`** on the EPS Distributor so it\ngoes dark, then press **Run** again. Now:\n\n- `branch_A_00002_.png` appears - branch A still runs\n- **NO new `branch_B_inverted_` file** - branch B was skipped\n- the preview still updates - branch C still runs\n\nThe important part: the **Invert** node in the middle of branch B never\nexecuted either. A disabled output skips the WHOLE chain hanging off it, not\njust the node touching it. Watch the canvas during Run - Invert never\nhighlights.\n\n## Pass 3 - all off is legal\n\nTurn all three off (or use the **Toggle All** box in the node's header) and\npress Run. The queue should finish **successfully** with nothing new written\nand no error. That is intended: an all-off Distributor simply means nothing\ndownstream of it runs this time.\n\n## Pass 4 - the outputs grow as you wire them\n\nNotice the node has FOUR sockets but only three branches: `out_4` at the\nbottom is empty and waiting. That's the rule - there is always one spare\nsocket below the last one you wired.\n\nWire `out_4` to anything (add a Preview Image) and watch `out_5` appear on\nits own. Wire that and you get `out_6`. You never have to go hunting in a\nmenu to add a branch. Sixteen is the ceiling.\n\nUnwiring does NOT take a socket away again: a socket you have already seen\nstays, so a name you typed on it can't vanish underneath you.\n\n## Also worth a click\n\n- **Right-click the node -> Properties -> `Outputs`** to set the number by\n  hand - handy for tidying up after you've grown past what you need. Only\n  sockets at the BOTTOM are added or removed, so the wires you already have\n  never jump to a different output.\n- Try lowering `Outputs` to **1** while `out_2` is still wired: it should\n  **refuse** to go below 2 and tell you `out_2` is wired. Unwire it first and\n  it will go all the way down.\n- **Double-click an output** - the socket or anywhere in its row - to give it\n  a real name like `upscale branch`. It's display-only: wires and toggles\n  don't care.\n"
       ],
       "color": "#432",
       "bgcolor": "#653"
@@ -278,7 +284,7 @@
       "title": "Note",
       "properties": {},
       "widgets_values": [
-        "## Toggle a row\n\nEach `out_N` has its own checkbox to the LEFT of its label. Off = that branch is skipped this Run. The header box toggles all of them at once (it shows a dash when they're mixed)."
+        "## Toggle a row\n\nEach `out_N` has its own checkbox to the LEFT of its label. Off = that branch is skipped this Run. The header box toggles all of them at once (it shows a dash when they're mixed).\n\nWire the bottom socket and a new one appears below it - the outputs grow as you use them, up to sixteen."
       ],
       "color": "#432",
       "bgcolor": "#653"

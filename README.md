@@ -21,7 +21,7 @@ section further down; this is the map.
 | [**EPS Lora Loader State Controller**](#eps-lora-loader-state-controller-shipped-requires-rgthree-comfy) | Captures and applies those states directly on an [rgthree Power Lora Loader](https://github.com/rgthree/rgthree-comfy) — rgthree stays the loader, this moves whole configurations in and out of it. | **rgthree-comfy**'s Power Lora Loader — third-party, self-disables without it. |
 | [**EPS LoRA Sweep**](#eps-lora-sweep-shipped) | Auditions any `LORA_STACK` by strength: set min/max/increment and one queue runs your workflow once per step (per lora, or all together). | A `LORA_STACK` source (usually Apply LoRA Set) + a model. |
 | [**EPS Switcher**](#eps-switcher-shipped) | Any number of image inputs, each independently on/off; the enabled ones fan out (N enabled → N runs). Disabled branches never execute. | Nothing — drag-and-drop with core nodes. |
-| [**EPS Distributor**](#eps-distributor-shipped) | The mirror of the Switcher: one image in, up to eight branches out, each independently on/off. Toggle a branch off and only that branch is skipped — everything happens in one run. | Nothing — drag-and-drop with core nodes. |
+| [**EPS Distributor**](#eps-distributor-shipped) | The mirror of the Switcher: one image in, up to sixteen branches out, each independently on/off. New outputs appear as you wire them up. Toggle a branch off and only that branch is skipped — everything happens in one run. | Nothing — drag-and-drop with core nodes. |
 | [**EPS Resolution**](#eps-resolution-shipped) | Image-first resize + size in one node: target size (with a drag pad), four resize modes, and the original image + both sets of dimensions passed through. | Nothing — drag-and-drop with core nodes. |
 | [**EPS Image Grid**](#eps-image-grid-shipped) | Collects images across separate Runs into a buffer that survives restarts, shows them as a thumbnail grid, and fans the whole set out on demand. Add whole batches at once — a multiselect picker, a folder importer, or one big drag. | Nothing — drag-and-drop with core nodes. |
 | [**EPS Cross Product**](#eps-cross-product-shipped) | Pairs every image with every text — 2 images × 4 prompts = 8 runs. (ComfyUI's own list pairing zips index-by-index instead.) | Two lists to multiply — pairs naturally with Image Grid + Prompt Notebook, but any list sources work. |
@@ -256,7 +256,7 @@ off means three runs.
 
 `EPSNodes → EPS Distributor`: the **mirror of EPS Switcher**. Where the
 Switcher gathers many toggleable inputs into one flow, the Distributor takes
-**one image and fans it out to up to eight outputs, each independently on or
+**one image and fans it out to up to sixteen outputs, each independently on or
 off**. Wire the same picture into an upscale branch, a restyle branch and a
 straight-to-save branch, then turn any of them off from this one node — no
 rewiring, no dragging bypass boxes around groups.
@@ -281,9 +281,23 @@ rewiring, no dragging bypass boxes around groups.
   its row — and give it a real name like `upscale branch`. It's display-only,
   so wires and toggles are unaffected, and clearing the field resets it to
   `out_N`.
-- **Show only the outputs you need:** the node starts with three visible and
-  reveals more up to eight. Only *trailing* sockets are added or removed, so
-  the wires you already have never shift to a different output.
+- **The outputs grow as you use them,** the same way EPS Switcher's inputs do:
+  the node starts with three, and wiring the last one reveals another, so
+  there is always one spare socket waiting. Sixteen is the ceiling (a
+  ComfyUI limit, not a preference — see below).
+- **Want fewer?** Right-click the node → Properties → `Outputs` and set the
+  number by hand. Growth never takes a socket away on its own, so a name you
+  typed or a wire you ran is never removed behind your back; and a socket
+  that still has a wire on it refuses to hide, with the number snapping back
+  and a message telling you which one. Only *trailing* sockets are ever added
+  or removed, so the wires you already have never shift to a different
+  output.
+- **Why sixteen and not unlimited?** The Switcher's inputs can grow forever
+  because ComfyUI matches inputs by *name*. Outputs are matched by *position*
+  in a list the node declares once when ComfyUI starts, so they have to exist
+  up front. Sixteen is simply where that list is set; if you need more, say
+  so and the number can be raised safely — raising it never disturbs a saved
+  workflow.
 - An output with nothing wired to it doesn't care either way — leave it on
   or off, it changes nothing.
 - Toggle states and the visible-output count save with the workflow and
