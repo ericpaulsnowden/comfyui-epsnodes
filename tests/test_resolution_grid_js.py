@@ -77,6 +77,7 @@ const out = {
   },
   constants: {
     textStripH: grid.TEXT_STRIP_H,
+    sourceLineH: grid.SOURCE_LINE_H,
     gridMinSize: grid.GRID_MIN_SIZE,
     readoutFontSize: grid.READOUT_FONT_SIZE,
     readoutFont: grid.READOUT_FONT,
@@ -87,6 +88,30 @@ const out = {
   widgetHeights: widths.map((w) => ({ w, h: grid.computeGridWidgetHeight(w) })),
   widgetHeightRepeat: [grid.computeGridWidgetHeight(300), grid.computeGridWidgetHeight(300)],
   elementHeights: widths.map((w) => ({ w, h: grid.computeGridElementHeight(w, margin) })),
+  // --- incoming-image ("in") readout line, 2026-07-29 owner ask ---
+  sourceHeights: widths.map((w) => ({
+    w,
+    widgetOneLine: grid.computeGridWidgetHeight(w),
+    widgetTwoLine: grid.computeGridWidgetHeight(w, true),
+    elementOneLine: grid.computeGridElementHeight(w, margin),
+    elementTwoLine: grid.computeGridElementHeight(w, margin, true)
+  })),
+  sourceLines: [
+    [1920, 1080], [512, 512], [1000, 1], [0, 100], [100, 0], [-5, 5], [null, null]
+  ].map(([w, h]) => grid.getSourceReadoutLine(w, h)),
+  sourceMatchesTargetFormat: (() => {
+    // "Display in a similar format" -- the source line must produce the
+    // SAME field shape/formatting the target readout does for equal dims.
+    const target = grid.getReadoutLines({
+      rawW: 1920, rawH: 1080, dispW: 1920, dispH: 1080, wAuto: false, hAuto: false
+    })
+    const source = grid.getSourceReadoutLine(1920, 1080)
+    return {
+      dims: target.dims === source.dims,
+      aspect: target.aspect === source.aspect,
+      mp: target.mp === source.mp
+    }
+  })(),
   square1000: (() => {
     const { plotX, plotY, side } = grid.getPlotRect(400)
     const px = plotX + grid.valueToPlot(1000, side, gridMax)
@@ -295,3 +320,62 @@ def test_both_readout_lines_share_one_small_font_size(grid_api: dict) -> None:
     assert size <= 12  # "small"
     assert f"{size}px" in constants["readoutFont"]
     assert constants["readoutFontStrong"] == f"600 {constants['readoutFont']}"
+
+
+# ---- incoming-image readout line (2026-07-29 owner ask) --------------------
+
+
+def test_source_line_only_adds_height_when_present(grid_api: dict) -> None:
+    """The strip is ONE line until there's a real incoming size to show, so
+    an unconnected node keeps exactly the geometry every earlier fix
+    settled. `withSourceLine` defaults false -- that default is what let 13
+    pre-existing geometry tests keep passing untouched."""
+    extra = grid_api["constants"]["sourceLineH"]
+    assert isinstance(extra, int) and extra > 0
+    for entry in grid_api["sourceHeights"]:
+        assert entry["widgetTwoLine"] - entry["widgetOneLine"] == extra
+        assert entry["elementTwoLine"] - entry["elementOneLine"] == extra
+
+
+def test_source_line_formats_like_the_target_line(grid_api: dict) -> None:
+    """Eric asked for "a similar format" -- pin that it's the SAME
+    formatting, not a lookalike that could drift apart later."""
+    assert grid_api["sourceMatchesTargetFormat"] == {"dims": True, "aspect": True, "mp": True}
+
+
+def test_source_line_content(grid_api: dict) -> None:
+    lines = grid_api["sourceLines"]
+    assert lines[0] == {"dims": "1920 x 1080", "mp": "2.1 MP", "aspect": "16:9"}
+    assert lines[1] == {"dims": "512 x 512", "mp": "0.26 MP", "aspect": "1:1"}
+    assert lines[2]["aspect"] == "1000:1"  # degenerate but real
+
+
+def test_source_line_is_null_when_there_is_nothing_trustworthy(grid_api: dict) -> None:
+    """A zero/negative/missing dimension means the upstream image hasn't
+    decoded yet (or there is none) -- draw nothing rather than "0 x 0", and
+    keep the strip one line tall so text can't land outside the element."""
+    for entry in grid_api["sourceLines"][3:]:
+        assert entry is None
+
+
+_SOURCE = (REPO_ROOT / "web" / "eps_image" / "resolution.js").read_text(encoding="utf-8")
+
+
+def test_height_and_draw_agree_on_one_gate() -> None:
+    # Both the height math and the draw must ask the same question, or the
+    # second line can render outside the element box.
+    assert "hasSourceLine(node)" in _SOURCE
+    assert "readIncomingImageSize(node) !== null" in _SOURCE
+
+
+def test_size_is_read_from_the_upstream_nodes_own_image() -> None:
+    assert "getInputNode" in _SOURCE
+    assert "naturalWidth" in _SOURCE and "naturalHeight" in _SOURCE
+
+
+def test_connection_changes_and_slow_decodes_both_repaint() -> None:
+    # Wiring/unwiring flips the line; a just-wired image is usually still
+    # decoding when that fires, hence the self-cancelling probe.
+    assert "onConnectionsChange" in _SOURCE
+    assert "scheduleSourceProbe" in _SOURCE
+    assert "clearTimeout(node._epsGrid.sourceProbe)" in _SOURCE

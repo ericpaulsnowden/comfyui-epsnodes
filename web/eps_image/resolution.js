@@ -409,6 +409,16 @@ const ACCENT_COLOR = 'rgb(66, 133, 244)' // house accent, lora_library/notebook.
 // line 2 = reduced aspect, muted. Exported constants are consumed by
 // tests/test_resolution_grid_js.py; the app entry uses only init()/attach().
 export const TEXT_STRIP_H = 22 // total strip height, CSS px — ONE readout line
+/** Extra strip height when the incoming-image line is also drawn (2026-07-29).
+ * Added to TEXT_STRIP_H — never a second magic total — so the one-line
+ * geometry every earlier fix settled stays exactly as it was. */
+export const SOURCE_LINE_H = 15
+/** The source line's baseline, below line 1's. */
+const READOUT_LINE2_BASELINE = 15 + SOURCE_LINE_H
+/** Muted prefix marking the second line as the INPUT, so the two lines can
+ * never be confused for each other at a glance. */
+const SOURCE_PREFIX = 'in'
+const SOURCE_PREFIX_GAP = 6
 export const READOUT_FONT_SIZE = 11 // px — the ONE size the whole readout shares
 export const READOUT_FONT = `${READOUT_FONT_SIZE}px ui-monospace, "SF Mono", Menlo, Consolas, monospace`
 export const READOUT_FONT_STRONG = `600 ${READOUT_FONT}`
@@ -495,6 +505,133 @@ export function getReadoutLines(disp) {
     mp: formatMegapixels(disp.dispW, disp.dispH),
     aspect: formatAspect(disp.dispW, disp.dispH)
   }
+}
+
+/**
+ * The SOURCE line's text — the incoming image's own size, in the same
+ * shape `getReadoutLines` produces for the target (owner ask 2026-07-29:
+ * "show the width/height/ratio of the incoming image (if the input is
+ * hooked up) at the bottom of the panel in addition to the info for the
+ * grid. Display in a similar format").
+ *
+ * `null` when there is nothing trustworthy to show (no link, an upstream
+ * that displays no image, an image element that hasn't finished decoding
+ * yet so its natural size still reads 0) — the caller then draws no second
+ * line and the strip stays one line tall, so an unconnected node looks
+ * exactly as it did before this feature.
+ *
+ * Pure over plain numbers; exported for tests.
+ */
+export function getSourceReadoutLine(width, height) {
+  const w = Math.round(Number(width) || 0)
+  const h = Math.round(Number(height) || 0)
+  if (!(w > 0 && h > 0)) return null
+  return {
+    dims: `${w} x ${h}`,
+    mp: formatMegapixels(w, h),
+    aspect: formatAspect(w, h)
+  }
+}
+
+/**
+ * The incoming image's natural pixel size, read LIVE off whatever the
+ * upstream node is already displaying — `{width, height}` or `null`.
+ *
+ * Why the upstream's rendered `<img>` and not a backend value: this has to
+ * be useful BEFORE a Run (choosing a target size is the thing you do
+ * first), and core already loads the real file for any node that shows a
+ * preview — `LoadImage` from the moment a file is picked, a decode/grid
+ * node after its own run. `naturalWidth/Height` on those elements is the
+ * true source resolution, not the on-canvas thumbnail size.
+ *
+ * Deliberately shallow (no walking further up a chain of pass-through
+ * nodes): one hop is what the owner's wiring is, and a wrong number here
+ * would be worse than no number. Everything is optional-chained — a
+ * missing graph, an unlinked slot, a `getInputNode` that a fork renamed,
+ * or an upstream mid-load all degrade to `null`.
+ */
+function readIncomingImageSize(node) {
+  try {
+    const slot = imageInputSlot(node)
+    if (slot < 0) return null
+    const upstream =
+      typeof node.getInputNode === 'function' ? node.getInputNode(slot) : null
+    const imgs = upstream?.imgs
+    if (!Array.isArray(imgs) || !imgs.length) return null
+    // The focused cell when the upstream is showing one (a grid pager), else
+    // its first image -- the same "which image is this node about" rule the
+    // rest of the pack uses for `imgs`/`imageIndex`.
+    const index =
+      typeof upstream.imageIndex === 'number' && upstream.imageIndex >= 0
+        ? upstream.imageIndex
+        : 0
+    const img = imgs[index] || imgs[0]
+    const w = Number(img?.naturalWidth) || 0
+    const h = Number(img?.naturalHeight) || 0
+    if (!(w > 0 && h > 0)) return null
+    return { width: w, height: h }
+  } catch (error) {
+    console.warn(PREFIX, 'could not read the incoming image size', error)
+    return null
+  }
+}
+
+/** Index of this node's `image` input, or -1. Name-based, never positional:
+ * §6.5's input ORDER is not frozen the way its output order is. */
+function imageInputSlot(node) {
+  const inputs = node?.inputs
+  if (!Array.isArray(inputs)) return -1
+  return inputs.findIndex((input) => input && input.name === 'image')
+}
+
+/** Whether the source line should be drawn right now (and therefore
+ * whether the readout strip is two lines tall). One place, so the draw
+ * code and every height calculation can never disagree. */
+function hasSourceLine(node) {
+  return readIncomingImageSize(node) !== null
+}
+
+//: How long to keep watching for a just-wired upstream image to finish
+//: decoding, and how often. 250ms x 12 = 3s, which covers a NAS/LAN load
+//: without leaving a timer running behind a node nobody is looking at.
+const SOURCE_PROBE_INTERVAL_MS = 250
+const SOURCE_PROBE_MAX_TRIES = 12
+
+/**
+ * Re-checks for an incoming image size shortly after a repaint that found
+ * none, and repaints once it appears.
+ *
+ * The race this closes: setting an `<img>`'s `src` starts an async
+ * fetch+decode, so a node wired to a fresh LoadImage reports
+ * `naturalWidth === 0` for the first frames. Without this the source line
+ * would stay hidden until some UNRELATED repaint happened to land after
+ * the decode — the same slow-load shape as EPS Image Grid's own 2026-07-21
+ * bug, and worse over a LAN.
+ *
+ * Self-cancelling: stops the moment a size resolves (the repaint it
+ * triggers is the last one), after SOURCE_PROBE_MAX_TRIES, or if the node
+ * is torn down. At most one probe per node — a repeat call while one is
+ * already pending is a no-op, so the per-frame draw path can call this
+ * unconditionally.
+ */
+function scheduleSourceProbe(node) {
+  const state = node._epsGrid
+  if (!state || state.sourceProbe) return
+  let tries = 0
+  const tick = () => {
+    if (!node._epsGrid || node._epsGrid !== state) return // node gone/replaced
+    state.sourceProbe = null
+    if (!state.canvas?.isConnected) return
+    if (readIncomingImageSize(node)) {
+      applyGridHeight(node)
+      applyWidthDrivenNodeSize(node)
+      renderGrid(node)
+      return
+    }
+    if (++tries >= SOURCE_PROBE_MAX_TRIES) return
+    state.sourceProbe = setTimeout(tick, SOURCE_PROBE_INTERVAL_MS)
+  }
+  state.sourceProbe = setTimeout(tick, SOURCE_PROBE_INTERVAL_MS)
 }
 
 function getGridMax(node) {
@@ -605,23 +742,25 @@ function applyGridShowHide(node) {
  * reporting nodeWidth + TEXT_STRIP_H is exactly what makes the element box
  * come out square-plus-strip. Pure; exported for tests.
  */
-export function computeGridWidgetHeight(nodeWidth) {
-  return Math.max(1, Number(nodeWidth) || 0) + TEXT_STRIP_H
+export function computeGridWidgetHeight(nodeWidth, withSourceLine = false) {
+  return (
+    Math.max(1, Number(nodeWidth) || 0) + TEXT_STRIP_H + (withSourceLine ? SOURCE_LINE_H : 0)
+  )
 }
 
 /** The element's own inline CSS height for a node *nodeWidth* wide: the
  * square's side (the content width) plus the readout strip. Pure; exported
  * for tests. */
-export function computeGridElementHeight(nodeWidth, margin) {
+export function computeGridElementHeight(nodeWidth, margin, withSourceLine = false) {
   const m = Number.isFinite(margin) ? margin : DOM_WIDGET_MARGIN_FALLBACK
   const side = Math.max(1, (Number(nodeWidth) || 0) - 2 * m)
-  return side + TEXT_STRIP_H
+  return side + TEXT_STRIP_H + (withSourceLine ? SOURCE_LINE_H : 0)
 }
 
 /** computeGridWidgetHeight() gated on `Show grid` — the live number every
  * litegraph-facing sizing knob reports (hidden collapses to a hard 0). */
 function gridWidgetHeightFor(node) {
-  return isGridVisible(node) ? computeGridWidgetHeight(node.size[0]) : 0
+  return isGridVisible(node) ? computeGridWidgetHeight(node.size[0], hasSourceLine(node)) : 0
 }
 
 /**
@@ -640,7 +779,13 @@ function applyGridHeight(node) {
   const state = node._epsGrid
   if (!state) return
   const px = isGridVisible(node)
-    ? `${Math.round(computeGridElementHeight(node.size[0], Number(state.domWidget?.margin)))}px`
+    ? `${Math.round(
+        computeGridElementHeight(
+          node.size[0],
+          Number(state.domWidget?.margin),
+          hasSourceLine(node)
+        )
+      )}px`
     : '0px'
   if (state.canvas.style.height !== px) state.canvas.style.height = px
   if (state.canvas.style.minHeight !== px) state.canvas.style.minHeight = px
@@ -838,6 +983,30 @@ function drawGrid(node, ctx, cssW) {
   ctx.fillText(lines.aspect, READOUT_INSET_X + dimsWidth + READOUT_ASPECT_GAP, baseY)
   ctx.textAlign = 'right'
   ctx.fillText(lines.mp, cssW - READOUT_INSET_X, baseY)
+
+  // Line 2 (2026-07-29 owner ask): the INCOMING image, same shape as line 1
+  // -- dims, then the reduced aspect, with megapixels right-aligned -- but
+  // entirely muted and prefixed "in", so the target size stays the one
+  // thing that reads as the node's own value. Drawn only when there is a
+  // real number to show; `hasSourceLine` gates the strip height off the
+  // exact same check, so the text can never land outside the element.
+  const source = readIncomingImageSize(node)
+  const sourceLine = source && getSourceReadoutLine(source.width, source.height)
+  if (!sourceLine) scheduleSourceProbe(node)
+  if (sourceLine) {
+    const baseY2 = plotY + side + READOUT_LINE2_BASELINE
+    ctx.font = READOUT_FONT
+    ctx.fillStyle = colors.muted
+    ctx.textAlign = 'left'
+    ctx.fillText(SOURCE_PREFIX, READOUT_INSET_X, baseY2)
+    const prefixWidth = ctx.measureText(SOURCE_PREFIX).width
+    const dimsX = READOUT_INSET_X + prefixWidth + SOURCE_PREFIX_GAP
+    ctx.fillText(sourceLine.dims, dimsX, baseY2)
+    const sourceDimsWidth = ctx.measureText(sourceLine.dims).width
+    ctx.fillText(sourceLine.aspect, dimsX + sourceDimsWidth + READOUT_ASPECT_GAP, baseY2)
+    ctx.textAlign = 'right'
+    ctx.fillText(sourceLine.mp, cssW - READOUT_INSET_X, baseY2)
+  }
   ctx.restore()
 }
 
@@ -1060,7 +1229,9 @@ function attachSizeGrid(node) {
       canvas: canvasEl,
       domWidget,
       resizeObserver: null,
-      cancelDrag: null
+      cancelDrag: null,
+      // Pending source-size probe timer (2026-07-29) -- see scheduleSourceProbe.
+      sourceProbe: null
     }
 
     node.addProperty(PROP_SHOW_GRID, true, 'boolean')
@@ -1099,6 +1270,36 @@ function attachSizeGrid(node) {
     // computeSize/computedHeight alone on a render backend that doesn't
     // reflect those into the element's actual CSS box).
 
+    // The incoming-image line has to appear/disappear as the `image` input
+    // is wired and unwired (2026-07-29 owner ask). `onConnectionsChange` is
+    // litegraph's own hook for exactly that, and it also fires on
+    // disconnect — so both directions are covered by one wrap. The height
+    // changes with it (one line becomes two), hence applyGridHeight +
+    // applyWidthDrivenNodeSize before the repaint, in the same order every
+    // other size-affecting path here uses. Wrap-never-replace, per §7.1.
+    const originalOnConnectionsChange = node.onConnectionsChange
+    node.onConnectionsChange = function (...args) {
+      let result
+      try {
+        result = originalOnConnectionsChange?.apply(this, args)
+      } finally {
+        try {
+          applyGridHeight(node)
+          applyWidthDrivenNodeSize(node)
+          renderGrid(node)
+        } catch (error) {
+          console.warn(PREFIX, 'connection-change grid refresh failed', error)
+        }
+      }
+      return result
+    }
+
+    // A freshly-wired upstream image is usually still DECODING when
+    // onConnectionsChange fires, so its naturalWidth reads 0 and the line
+    // would silently stay hidden until something else repainted (the exact
+    // shape of the Image Grid's own 2026-07-21 slow-load bug). One short
+    // poll after any repaint that found no size, cheap and self-cancelling:
+    // it stops as soon as a size appears or the tries run out.
     // "editing the numbers moves the dot" — wrap width/height so any
     // programmatic OR user-typed change repaints. try/finally (not catch):
     // an error in the pre-existing callback should propagate exactly as it
@@ -1170,6 +1371,16 @@ function attachSizeGrid(node) {
         node._epsGrid?.cancelDrag?.()
       } catch (error) {
         console.warn(PREFIX, 'grid drag cleanup failed', error)
+      }
+      try {
+        // The source-size probe (2026-07-29) is the only timer this widget
+        // owns; a deleted node must not leave one ticking.
+        if (node._epsGrid?.sourceProbe) {
+          clearTimeout(node._epsGrid.sourceProbe)
+          node._epsGrid.sourceProbe = null
+        }
+      } catch (error) {
+        console.warn(PREFIX, 'source-probe cleanup failed', error)
       }
       return originalOnRemoved?.apply(this, args)
     }

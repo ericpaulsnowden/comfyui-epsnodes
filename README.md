@@ -296,6 +296,11 @@ rewiring, no dragging bypass boxes around groups.
 mode, and get back the resized image **and** the original, plus both sets of
 dimensions. It replaces a resize node + a reroute + a get-image-size node.
 
+- **See what you're resizing FROM:** wire an image in and a second line
+  appears under the readout — `in 1920 x 1080 16:9 2.07 MP` — the incoming
+  image's own size, ratio and megapixels, in the same format as your target
+  above it. It shows up as soon as the image loads (no Run needed), and the
+  panel returns to one line if you unplug the input.
 - **The size grid:** a full-width square drag pad right on the node — drag
   anywhere and `width`/`height` follow, snapping to `multiple_of` (or 64 when
   it's off). The pad is locked to the node's left and right edges (no wasted

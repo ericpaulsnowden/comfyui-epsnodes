@@ -818,6 +818,40 @@ is the functional core WITHOUT the grid.
     1:1 diagonal. Dark, minimal, readable on both Comfy themes.
   - **`Show grid` node property** (default on) hides it for users who only
     want the typed fields. No backend change in M2.
+  - **Incoming-image line (2026-07-29, owner ask — "show the width/height/
+    ratio of the incoming image (if the input is hooked up) at the bottom of
+    the panel in addition to the info for the grid. Display in a similar
+    format"):** a SECOND readout line under the target one, muted and
+    prefixed `in`, in the identical shape — dims, reduced aspect, megapixels
+    right-aligned. `getSourceReadoutLine` reuses the target line's own
+    `formatAspect`/`formatMegapixels`, so the two can never drift into
+    different formats (pinned by a test comparing both for equal dims).
+    - **Where the number comes from:** the upstream node's already-displayed
+      image element, one hop via `getInputNode` →
+      `imgs[imageIndex ?? 0].naturalWidth/Height`. That is the SOURCE
+      resolution (not the on-canvas thumbnail), and it is live BEFORE any
+      Run — which is the point, since choosing a target size is what you do
+      first. Deliberately shallow: one hop is the real wiring, and a wrong
+      number would be worse than none.
+    - **Nothing to show ⇒ nothing drawn, and the strip stays ONE line.**
+      `hasSourceLine` gates the draw AND both height functions
+      (`computeGridWidgetHeight`/`computeGridElementHeight` gained a
+      defaulted `withSourceLine`, so every pre-existing geometry test still
+      passes untouched and an unconnected node is pixel-identical to before).
+      Height and draw asking the same question is what keeps line 2 from
+      rendering into clipped space — the exact failure mode §6.5's own
+      "second line is cut off" fix already burned once.
+    - **Two timing hazards, both closed:** `onConnectionsChange` (wrapped,
+      never replaced) flips the line as the input is wired/unwired; and
+      because a freshly-wired upstream is usually still DECODING then
+      (`naturalWidth` reads 0), a self-cancelling probe re-checks for up to
+      3s and repaints the moment a size resolves. The probe is the only
+      timer this widget owns and is cleared on node removal.
+      NOTE `node.imgs` is populated by core's `updatePreviews` during a
+      DRAW, so this is invisible to state-only probes in a headless pane —
+      verified live instead: connect grew the node 510 → 525 and painted
+      `in 768 x 768 1:1 0.59 MP` on its own baseline; disconnect returned it
+      to 510.
 - **Deferred (M3–M4):** NAS presets (reuse `lora_library`
   context/sets_store/settings), multi-image list fan-out. Do NOT build them
   yet.
