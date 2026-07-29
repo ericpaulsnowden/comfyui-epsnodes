@@ -303,6 +303,33 @@ const out = {}
   }
 }
 
+// ---- sortFilesForIngest: path-aware order (M3 folder picker) ----
+{
+  const files = [
+    { name: 'img1.png', webkitRelativePath: 'shots/10/img1.png', type: 'image/png' },
+    { name: 'img2.png', webkitRelativePath: 'shots/2/img2.png', type: 'image/png' },
+    { name: 'img10.png', webkitRelativePath: 'shots/2/img10.png', type: 'image/png' },
+    // No `webkitRelativePath` at all -- a plain multi-select mixed into
+    // the same call (mixed presence). Falls back to `.name`; 'root.png'
+    // collates before 'shots/...' ('r' < 's').
+    { name: 'root.png', type: 'image/png' },
+    // Wrong type -- the folder picker's ONLY filter (`accept` does
+    // nothing on a directory input), must still be dropped.
+    { name: 'ignored.txt', webkitRelativePath: 'shots/2/ignored.txt', type: 'text/plain' }
+  ]
+  const sorted = grid.sortFilesForIngest(files)
+  out.folderSort = {
+    order: sorted.map((f) => f.webkitRelativePath || f.name),
+    length: sorted.length
+  }
+}
+
+// ---- FOLDER_WARN_THRESHOLD (M3 foot-gun guard) ----
+out.folderThreshold = {
+  value: grid.FOLDER_WARN_THRESHOLD,
+  isNumber: typeof grid.FOLDER_WARN_THRESHOLD === 'number'
+}
+
 process.stdout.write(JSON.stringify(out))
 """
 
@@ -503,6 +530,32 @@ def test_add_files_to_buffer_refreshes_the_display_exactly_once(grid_api: dict) 
     assert grid_api["batch"]["refreshCount"] == 1
 
 
+# ---- M3: "Add folder..." -- path-aware sort + foot-gun threshold ----
+
+
+def test_sort_files_for_ingest_is_path_aware_for_folder_picks(grid_api: dict) -> None:
+    """`shots/2/...` must sort before `shots/10/...` (numeric across the
+    path SEGMENT, not just within one filename), and files within one
+    folder must still sort numerically among themselves."""
+    assert grid_api["folderSort"]["order"] == [
+        "root.png",  # no webkitRelativePath -- falls back to `.name`
+        "shots/2/img2.png",
+        "shots/2/img10.png",
+        "shots/10/img1.png",
+    ]
+
+
+def test_sort_files_for_ingest_folder_filter_still_applies(grid_api: dict) -> None:
+    # 5 inputs in: one non-image (.txt) dropped, the rest (including one
+    # with no `webkitRelativePath` at all -- mixed presence) kept.
+    assert grid_api["folderSort"]["length"] == 4
+
+
+def test_folder_warn_threshold_is_exported_and_numeric(grid_api: dict) -> None:
+    assert grid_api["folderThreshold"]["value"] == 200
+    assert grid_api["folderThreshold"]["isNumber"] is True
+
+
 # ---- closure-bound wiring, pinned by source text ----
 
 _SOURCE = IMAGE_GRID_JS.read_text(encoding="utf-8")
@@ -632,3 +685,49 @@ def test_batch_runner_wires_an_abort_controller_for_cancel() -> None:
     assert "new AbortController()" in body
     assert "batchState.cancelled" in body
     assert "controller?.signal" in body
+
+
+# ---- M3 "Add folder...": more closure-bound wiring, pinned by source text ----
+
+
+def test_folder_input_uses_webkitdirectory() -> None:
+    body = _function_body("function ensureFolderInput")
+    assert "input.webkitdirectory = true" in body
+    # accept is a no-op on a directory input (per the roadmap) -- must not
+    # be set here the way the plain file picker sets it.
+    assert "input.accept" not in body
+
+
+def test_folder_batch_is_confirm_gated_on_the_warn_threshold() -> None:
+    body = _function_body("async function startFolderBatch")
+    assert "FOLDER_WARN_THRESHOLD" in body
+    assert "window.confirm(" in body
+    # The threshold must actually gate the confirm, not just co-occur.
+    threshold_index = body.index("FOLDER_WARN_THRESHOLD")
+    confirm_index = body.index("window.confirm(")
+    assert threshold_index < confirm_index
+
+
+def test_both_add_buttons_share_the_busy_guard() -> None:
+    """Roadmap M3: 'one batch per node total, not per button' -- both
+    button click handlers must route through the SAME cancel/busy check
+    (`handleAddButtonClicked`), not two independent copies of it."""
+    images_body = _function_body("function onAddImagesClicked")
+    folder_body = _function_body("function onAddFolderClicked")
+    assert "handleAddButtonClicked(" in images_body
+    assert "handleAddButtonClicked(" in folder_body
+
+
+def test_batch_runner_progress_targets_the_invoking_button() -> None:
+    """`runAddBatch` must look up the progress/Cancel widget by a
+    PARAMETER, not the "Add images..." constant hard-coded -- otherwise a
+    folder-picker batch would silently mutate the wrong button."""
+    body = _function_body("async function runAddBatch")
+    assert "findWidget(node, buttonLabel)" in body
+    assert "findWidget(node, ADD_IMAGES_BUTTON_LABEL)" not in body
+
+
+def test_add_files_to_buffer_threads_button_label_through() -> None:
+    body = _function_body("export async function addFilesToBuffer")
+    assert "buttonLabel" in body
+    assert "{ buttonLabel }" in body

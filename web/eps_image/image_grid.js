@@ -634,6 +634,27 @@
  *    the loop) and threaded through every item, so a debounced collision
  *    remint mid-batch (the roadmap's risk #1) can't send the tail of a
  *    long batch into a different buffer than the head.
+ *
+ * M3 ("Add folder…", right after "Add images…") reuses every piece of the
+ * above rather than a parallel implementation: a second detached
+ * `<input webkitdirectory multiple>` (`ensureFolderInput`) yields every
+ * descendant file with a real `webkitRelativePath`, which
+ * `sortFilesForIngest` now sorts on when present (falling back to `.name`
+ * otherwise -- provably a no-op change for M1's own callers, since
+ * `webkitRelativePath` is falsy for anything not picked via
+ * `webkitdirectory`) so `shots/2/img2.png` orders before
+ * `shots/10/img1.png`. A directory input's `accept` is ignored by every
+ * browser in practice, so filtering is `sortFilesForIngest`'s `isImageFile`
+ * gate alone. Over `FOLDER_WARN_THRESHOLD` (200, exported) filtered images,
+ * a synchronous `window.confirm` asks before starting at all (roadmap risk
+ * #7: no buffer cap + Emit fan-out means one downstream run per buffered
+ * image) -- the only dialog primitive available here. The result feeds the
+ * SAME `addFilesToBuffer` → `runAddBatch` path M1/M2 already built;
+ * `runAddBatch` gained a *buttonLabel* option (default "Add images…") so
+ * the invoking button, not always the same one, shows progress/Cancel, and
+ * the busy-guard (`getNodeFileState`'s single `state.batch` slot) already
+ * covers both buttons for free -- a click on EITHER while a batch is
+ * running cancels the one in-flight batch, never starts a second.
  */
 
 import { api } from '../../../scripts/api.js'
@@ -931,27 +952,31 @@ function addClearButton(node) {
 }
 
 // ---------------------------------------------------------------------------
-// M1: "Add images..." button (roadmap-eps-image-grid.md M1) -- a detached,
-// lazily-created multiselect file picker. The heavy lifting (upload+add,
-// batching, progress/cancel) lives in the M2 section below
-// (`addFilesToBuffer`/`runAddBatch`); this section only owns the button and
-// the picker `<input>` that feeds it.
+// M1/M3: "Add images..." + "Add folder..." buttons (roadmap-eps-image-
+// grid.md M1/M3) -- two detached, lazily-created pickers (multiselect and
+// `webkitdirectory`) sharing one busy-guard/cancel handler
+// (`handleAddButtonClicked`). The heavy lifting (upload+add, batching,
+// progress/cancel) lives in the M2 section below (`addFilesToBuffer`/
+// `runAddBatch`); this section only owns the two buttons and the picker
+// `<input>`s that feed them.
 // ---------------------------------------------------------------------------
 
 const ADD_IMAGES_BUTTON_LABEL = 'Add images…'
 const ACCEPTED_IMAGE_TYPES = 'image/png,image/jpeg,image/webp'
 
-//: node -> { input: HTMLInputElement|null, batch: object|null } -- the
-//: lazily-created file-picker `<input>` (M1) and the in-flight batch's
-//: cancel/progress bookkeeping (M2, `runAddBatch`), keyed by node so
-//: `onRemoved` can tear both down in one place without hunting the widget
-//: list.
+//: node -> { input: HTMLInputElement|null, folderInput: HTMLInputElement|
+//: null, batch: object|null } -- the lazily-created file-picker `<input>`
+//: (M1) and its M3 `webkitdirectory` sibling, plus the in-flight batch's
+//: cancel/progress bookkeeping (M2, `runAddBatch`) -- ONE batch slot for
+//: BOTH inputs (roadmap M3: "one batch per node total, not per button"),
+//: keyed by node so `onRemoved` can tear all three down in one place
+//: without hunting the widget list.
 const nodeFileState = new WeakMap()
 
 function getNodeFileState(node) {
   let state = nodeFileState.get(node)
   if (!state) {
-    state = { input: null, batch: null }
+    state = { input: null, folderInput: null, batch: null }
     nodeFileState.set(node, state)
   }
   return state
@@ -964,22 +989,45 @@ function isImageFile(file) {
 }
 
 /**
- * Numeric-aware, case-insensitive filename order for a bulk ingest --
- * roadmap-eps-image-grid.md M1 owner decision ("Ordering: Filename,
- * numeric-aware, img2 before img10"). `FileList` order is NOT the order
- * files appear in the OS picker/Finder -- unspecified by spec, and on
- * Windows the last-CLICKED file (not the first) can land first in the
- * list -- so both bulk-ingest entry points (the picker below, and
- * `installDragAndDrop`'s Finder-files branch) sort through this before
- * handing files to `addFilesToBuffer`, which itself preserves whatever
- * order it's given.
+ * *file*'s sort key for `sortFilesForIngest` below: `webkitRelativePath`
+ * when present -- a directory pick (M3, e.g. `shots/2/img2.png`), so files
+ * sort by their FULL path, folder segments included -- else plain `.name`
+ * (a regular multi-select or a Finder/Explorer drop). Safe to apply
+ * unconditionally: `webkitRelativePath` is the empty string (falsy) on
+ * every File not selected via a `webkitdirectory` input, on every browser
+ * that defines the property at all, and simply `undefined` (also falsy)
+ * on a plain test fixture or a browser that doesn't -- either way this
+ * degrades to exactly `.name`, so M1's existing picker/drop callers are
+ * unaffected in every case, not merely the common one.
+ */
+function ingestSortKey(file) {
+  return file?.webkitRelativePath || file?.name || ''
+}
+
+/**
+ * Numeric-aware, case-insensitive ingest order -- roadmap-eps-image-grid.md
+ * M1 owner decision ("Ordering: Filename, numeric-aware, img2 before
+ * img10"), extended for M3's folder picker to sort by full relative PATH
+ * when one is available (`ingestSortKey` above), so `shots/2/img2.png`
+ * sorts before `shots/10/img1.png` (the path segments themselves compare
+ * numerically, same as a bare filename would) and files within one folder
+ * still sort numerically among themselves. `FileList` order is NOT the
+ * order files appear in the OS picker/Finder/folder dialog -- unspecified
+ * by spec, and on Windows the last-CLICKED file (not the first) can land
+ * first in the list -- so every bulk-ingest entry point (the file picker
+ * below, `installDragAndDrop`'s Finder-files branch, and the M3 folder
+ * picker) sorts through this before handing files to `addFilesToBuffer`,
+ * which itself preserves whatever order it's given.
  *
  * Pure: *files* (an `Array`, or anything `Array.from`-able like a real
  * `FileList`) in, a NEW array out, never mutated. Filters to image-shaped
  * entries the SAME way `addFilesToBuffer` does (`isImageFile` above) --
  * non-images are dropped here rather than merely sorted-then-re-filtered
  * downstream, so `addFilesToBuffer`'s own defensive filter is always a
- * no-op for a caller that already sorted. Missing `.name`/`.type` are
+ * no-op for a caller that already sorted. This is ALSO the folder picker's
+ * only image filter -- a directory input's `accept` attribute is ignored
+ * by every browser in practice, so `ensureFolderInput` sets none and
+ * relies entirely on this. Missing `.name`/`.webkitRelativePath` are
  * tolerated, never thrown: a nameless file sorts as if its key were `''`
  * (first); a typeless one is simply filtered out by `isImageFile`.
  * `Intl.Collator`'s `numeric: true` makes "img10" sort after "img2" (not
@@ -992,7 +1040,7 @@ export function sortFilesForIngest(files) {
   const collator = new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' })
   return Array.from(files || [])
     .filter(isImageFile)
-    .sort((a, b) => collator.compare(a?.name || '', b?.name || ''))
+    .sort((a, b) => collator.compare(ingestSortKey(a), ingestSortKey(b)))
 }
 
 /**
@@ -1025,19 +1073,29 @@ function ensureFileInput(node, state) {
 }
 
 /**
- * "Add images..." button callback. Nodes 2.0 (verified in the roadmap's own
- * research): NO `canvasOnly` on this widget (a `canvasOnly` widget renders
- * NOWHERE under Vue nodes), and the callback's own `(value, options, node,
+ * Shared click handler for BOTH the "Add images..." and "Add folder..."
+ * buttons -- Nodes 2.0 (verified in the roadmap's own research): NO
+ * `canvasOnly` on either widget (a `canvasOnly` widget renders NOWHERE
+ * under Vue nodes), and a button callback's own `(value, options, node,
  * pos, event)` arguments are absent/clobbered there too -- *node* is
- * captured in `addAddImagesButton`'s closure below instead of read from an
- * argument, and nothing here reads any of them either.
+ * captured in `addAddImagesButton`/`addAddFolderButton`'s closures below
+ * instead of read from an argument, and nothing here reads any of them
+ * either.
  *
  * A click WHILE a batch is already running for this node CANCELS it
- * instead of opening the picker again -- the same button IS the Cancel
- * control while its label reads `Cancel (n/total)` (M2, see
- * `runAddBatch`'s docstring for the full progress/cancel design).
+ * instead of starting another -- roadmap M3: "one batch per node total,
+ * not per button", so EITHER button cancels the one in-flight batch
+ * regardless of which button started it (there is exactly one
+ * `state.batch` slot per node, `getNodeFileState`). Otherwise runs
+ * *openPicker* to start this button's own kind of pick. The button IS the
+ * Cancel control while its label reads `Cancel (n/total)` (M2/M3, see
+ * `runAddBatch`'s docstring for the full progress/cancel design) -- only
+ * whichever button actually started the running batch shows that label
+ * (`runAddBatch`'s *buttonLabel* option), but a click on the OTHER button
+ * still cancels it rather than silently queuing or no-op'ing, since there
+ * is only ever one batch to act on.
  */
-function onAddImagesClicked(node) {
+function handleAddButtonClicked(node, openPicker) {
   const state = getNodeFileState(node)
   if (state.batch && !state.batch.done) {
     state.batch.cancelled = true
@@ -1049,7 +1107,15 @@ function onAddImagesClicked(node) {
     }
     return
   }
-  ensureFileInput(node, state).click()
+  openPicker(state)
+}
+
+function onAddImagesClicked(node) {
+  handleAddButtonClicked(node, (state) => ensureFileInput(node, state).click())
+}
+
+function onAddFolderClicked(node) {
+  handleAddButtonClicked(node, (state) => ensureFolderInput(node, state).click())
 }
 
 function addAddImagesButton(node) {
@@ -1067,13 +1133,94 @@ function addAddImagesButton(node) {
   widget.serialize = false
 }
 
+//: M3 ("Add folder..." -- roadmap risk #7, "Emit fan-out means 100
+//: buffered images = 100 downstream runs. M3's folder picker makes
+//: reaching that trivial -- the warn matters"). Exported so a caller
+//: (or a test) can see the exact number this asks about before starting.
+export const FOLDER_WARN_THRESHOLD = 200
+
+const ADD_FOLDER_BUTTON_LABEL = 'Add folder…'
+
 /**
- * Tears down this node's lazily-created file `<input>` (drops the
- * reference AND its `onchange` closure over *node*, so nothing keeps the
- * node reachable after removal) and cancels any in-flight batch. Installed
- * once per node instance (`__epsGridFileCleanupInstalled`), mirroring
- * `installConfigureRefresh`'s guard idiom; wraps (never replaces)
- * `onRemoved`, calling the original first.
+ * Lazily creates *node*'s detached DIRECTORY-picker `<input>` (M3) --
+ * `webkitdirectory` (the same non-standard-but-universally-supported
+ * attribute VHS's own folder loader uses, roadmap market check) makes the
+ * native dialog a folder chooser; picking one yields EVERY descendant file
+ * (subfolders included) with a real `webkitRelativePath` on each
+ * (`shots/2/img2.png`-shaped) -- `sortFilesForIngest` above already knows
+ * to sort on that when present. No `accept` set here -- unlike the plain
+ * file picker (`ensureFileInput`), a directory input's `accept` is IGNORED
+ * by every browser in practice, so filtering is left entirely to
+ * `sortFilesForIngest`'s own `isImageFile` gate rather than a hint that
+ * would do nothing. `value = ''` in `onchange`, same reason as
+ * `ensureFileInput`: lets re-picking the SAME folder re-fire `change`.
+ */
+function ensureFolderInput(node, state) {
+  if (state.folderInput) return state.folderInput
+  const input = document.createElement('input')
+  input.type = 'file'
+  input.webkitdirectory = true
+  input.multiple = true
+  input.style.display = 'none'
+  input.onchange = () => {
+    const files = Array.from(input.files || [])
+    input.value = ''
+    void startFolderBatch(node, files)
+  }
+  state.folderInput = input
+  return input
+}
+
+/**
+ * Filters+sorts *files* (every descendant a directory pick yields --
+ * `sortFilesForIngest`, which is also the only image filter here, see
+ * `ensureFolderInput`'s docstring) then guards the roadmap's documented
+ * foot-gun before actually starting: FORMAT.md §6.6 says the buffer has
+ * NO cap by design, and in Emit mode each buffered image becomes its own
+ * downstream run -- so a folder with hundreds of images can silently
+ * queue hundreds of runs. A filtered count over `FOLDER_WARN_THRESHOLD`
+ * asks first, via a SYNCHRONOUS `window.confirm` -- the only dialog
+ * primitive available here (this file has no dialog helper, and a toast
+ * can't ask a question); confirm is plain DOM API, so it is unaffected by
+ * Nodes 2.0/Vue. Proceeds UNGATED under the threshold, and unconditionally
+ * once confirmed. A folder with nothing image-shaped after filtering is a
+ * silent no-op, matching `addFilesToBuffer`'s own contract.
+ */
+async function startFolderBatch(node, files) {
+  const sorted = sortFilesForIngest(files)
+  if (!sorted.length) return
+  if (sorted.length > FOLDER_WARN_THRESHOLD) {
+    const proceed = window.confirm(
+      `This folder has ${sorted.length} images. EPS Image Grid keeps every buffered ` +
+        `image (no cap), and in Emit mode each one becomes its own downstream run -- ` +
+        `adding all ${sorted.length} now means ${sorted.length} runs later.\n\n` +
+        'Add them all anyway?'
+    )
+    if (!proceed) return
+  }
+  void addFilesToBuffer(node, sorted, { buttonLabel: ADD_FOLDER_BUTTON_LABEL })
+}
+
+function addAddFolderButton(node) {
+  if (findWidget(node, ADD_FOLDER_BUTTON_LABEL)) return
+  // Same widget conventions as `addAddImagesButton`/`addClearButton`.
+  const widget = node.addWidget(
+    'button',
+    ADD_FOLDER_BUTTON_LABEL,
+    null,
+    () => onAddFolderClicked(node),
+    {}
+  )
+  widget.serialize = false
+}
+
+/**
+ * Tears down this node's lazily-created file/folder `<input>`s (drops the
+ * references AND their `onchange` closures over *node*, so nothing keeps
+ * the node reachable after removal) and cancels any in-flight batch.
+ * Installed once per node instance (`__epsGridFileCleanupInstalled`),
+ * mirroring `installConfigureRefresh`'s guard idiom; wraps (never
+ * replaces) `onRemoved`, calling the original first.
  */
 function installFileInputCleanup(node) {
   if (node.__epsGridFileCleanupInstalled) return
@@ -1087,6 +1234,10 @@ function installFileInputCleanup(node) {
         if (state.input) {
           state.input.onchange = null
           state.input = null
+        }
+        if (state.folderInput) {
+          state.folderInput.onchange = null
+          state.folderInput = null
         }
         if (state.batch) {
           state.batch.cancelled = true
@@ -1485,14 +1636,19 @@ function notifyBatchResult(node, { noun, added, skipped, failed, cancelled }) {
  *    on the exact last item is cheap on purpose: `setNodeImagesFromRefs`'s
  *    own unchanged-content short-circuit makes a repeat of identical refs
  *    a no-op rebuild.
- *  - the node's "Add images..." button (if this node has one -- found by
- *    NAME, `ADD_IMAGES_BUTTON_LABEL`, which never changes even while
- *    `.label` -- the PAINTED text -- does) mutates `.label` to
- *    `Cancel (n/total)` for the duration, restored to whatever it showed
- *    before in a `finally` regardless of how the batch ends. This
- *    reconciles the brief's two framings of the same mechanism -- "show
- *    progress" and "the button becomes Cancel" -- as ONE label that does
- *    both: it names the count AND is the click target that aborts.
+ *  - the INVOKING button (M3: *buttonLabel*, which of `ADD_IMAGES_BUTTON_
+ *    LABEL`/`ADD_FOLDER_BUTTON_LABEL` started this particular batch --
+ *    defaults to the "Add images..." button so `addFilesToBuffer`'s other
+ *    callers, paste and drop, are unchanged; found by NAME, which never
+ *    changes even while `.label` -- the PAINTED text -- does) mutates
+ *    `.label` to `Cancel (n/total)` for the duration, restored to whatever
+ *    it showed before in a `finally` regardless of how the batch ends.
+ *    This reconciles the brief's two framings of the same mechanism --
+ *    "show progress" and "the button becomes Cancel" -- as ONE label that
+ *    does both: it names the count AND is the click target that aborts.
+ *    The OTHER button stays at its idle label throughout (only the one
+ *    that actually started the batch shows progress), but a click on
+ *    EITHER still cancels -- see `handleAddButtonClicked`'s docstring.
  *  - cooperative cancel: *batchState.cancelled* is checked every
  *    iteration, AND an `AbortController` (its `.signal` handed to
  *    *addOne*) aborts whatever request is actually in flight -- so a
@@ -1521,7 +1677,12 @@ function notifyBatchResult(node, { noun, added, skipped, failed, cancelled }) {
  *
  * Returns `{added, skipped, failed, cancelled}`. Never throws.
  */
-async function runAddBatch(node, items, addOne, { noun = 'images' } = {}) {
+async function runAddBatch(
+  node,
+  items,
+  addOne,
+  { noun = 'images', buttonLabel = ADD_IMAGES_BUTTON_LABEL } = {}
+) {
   const total = items.length
   if (!total) return { added: 0, skipped: 0, failed: 0, cancelled: false }
 
@@ -1538,8 +1699,12 @@ async function runAddBatch(node, items, addOne, { noun = 'images' } = {}) {
   const batchState = { cancelled: false, controller, done: false }
   state.batch = batchState
 
-  const buttonWidget = findWidget(node, ADD_IMAGES_BUTTON_LABEL)
-  const idleLabel = (buttonWidget && buttonWidget.label) || ADD_IMAGES_BUTTON_LABEL
+  // M3: targets whichever button actually started this batch (defaults to
+  // "Add images..." -- see the docstring above) -- NOT always
+  // ADD_IMAGES_BUTTON_LABEL, so the folder picker's own button shows its
+  // own progress instead of silently updating the other one.
+  const buttonWidget = findWidget(node, buttonLabel)
+  const idleLabel = (buttonWidget && buttonWidget.label) || buttonLabel
 
   let added = 0
   let skipped = 0
@@ -1623,16 +1788,27 @@ async function runAddBatch(node, items, addOne, { noun = 'images' } = {}) {
  * A *files* list with nothing image-shaped is a silent no-op (`false`,
  * unchanged contract). Never throws -- per-file failures are caught and
  * counted by `runAddBatch`.
+ *
+ * *buttonLabel* (M3, optional): which button's `.label` `runAddBatch`
+ * shows progress/Cancel on -- defaults to "Add images..." (unchanged for
+ * this function's other callers, paste/drop/the image picker); the M3
+ * folder picker (`startFolderBatch`) passes `ADD_FOLDER_BUTTON_LABEL` so
+ * ITS OWN button reflects progress instead.
  */
-export async function addFilesToBuffer(node, files) {
+export async function addFilesToBuffer(node, files, { buttonLabel = ADD_IMAGES_BUTTON_LABEL } = {}) {
   const imageFiles = Array.from(files || []).filter(isImageFile)
   if (!imageFiles.length) return false
 
   const uuid = currentUuid(node) // captured ONCE for the whole batch -- see docstring above.
-  await runAddBatch(node, imageFiles, async (file, signal) => {
-    const uploaded = await uploadImageFile(file, signal)
-    return addUploadToBuffer(node, uploaded, uuid, signal)
-  })
+  await runAddBatch(
+    node,
+    imageFiles,
+    async (file, signal) => {
+      const uploaded = await uploadImageFile(file, signal)
+      return addUploadToBuffer(node, uploaded, uuid, signal)
+    },
+    { buttonLabel }
+  )
   return true
 }
 
@@ -2680,7 +2856,8 @@ export function attach(node) {
     hideGridUuidWidget(node)
     addClearButton(node)
     addAddImagesButton(node) // M1 -- right after Clear.
-    installFileInputCleanup(node) // tears down the picker <input> + any in-flight batch on removal
+    addAddFolderButton(node) // M3 -- right after Add images...
+    installFileInputCleanup(node) // tears down both pickers' <input>s + any in-flight batch on removal
     installPasteFiles(node)
     installDragAndDrop(node) // assets-panel/Finder drop-to-add -- see its own docstring
     installCopyImageMenuItem(node) // Mac-over-LAN-http Copy Image fix -- see its own docstring
