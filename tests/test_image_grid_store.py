@@ -620,3 +620,69 @@ class TestBufferGeneration:
 
         assert store.list_refs(VALID_UUID)[0]["filename"] == first_name  # name reuse is REAL
         assert store.buffer_generation(VALID_UUID) != gen_before  # token catches it
+
+
+class TestRemoveFrame:
+    """Per-tile delete (2026-07-29, owner: "you get a duplicate image and
+    then the grid is useless and you have to start fresh")."""
+
+    def test_removes_one_frame_and_keeps_order(self, fake_folder_paths: Path) -> None:
+        store.append_batch(VALID_UUID, _make_batch(3))
+        refs = store.list_refs(VALID_UUID)
+        middle = refs[1]["filename"]
+        remaining = store.remove_frame(VALID_UUID, middle)
+        assert [r["filename"] for r in remaining] == [refs[0]["filename"], refs[2]["filename"]]
+        assert store.list_refs(VALID_UUID) == remaining
+
+    def test_frame_file_is_gone_but_manifest_is_the_truth(self, fake_folder_paths: Path) -> None:
+        store.append_batch(VALID_UUID, _make_batch(1))
+        name = store.list_refs(VALID_UUID)[0]["filename"]
+        directory = store.buffer_dir(VALID_UUID)
+        assert (directory / name).is_file()
+        store.remove_frame(VALID_UUID, name)
+        assert not (directory / name).is_file()
+
+    def test_unknown_filename_is_a_soft_noop(self, fake_folder_paths: Path) -> None:
+        store.append_batch(VALID_UUID, _make_batch(2))
+        before = store.list_refs(VALID_UUID)
+        assert store.remove_frame(VALID_UUID, "9999.png") == before
+
+    def test_invalid_uuid_returns_empty(self, fake_folder_paths: Path) -> None:
+        assert store.remove_frame("nope", "0001.png") == []
+
+    def test_numbering_never_reuses_a_deleted_middle_name(self, fake_folder_paths: Path) -> None:
+        # _next_frame_filename is one-past-the-highest-EXISTING -- deleting
+        # 0002 then appending must yield 0004, never a second 0002.
+        store.append_batch(VALID_UUID, _make_batch(3))
+        store.remove_frame(VALID_UUID, "0002.png")
+        store.append_batch(VALID_UUID, _make_batch(1))
+        names = [r["filename"] for r in store.list_refs(VALID_UUID)]
+        assert names == ["0001.png", "0003.png", "0004.png"]
+
+    def test_generation_advances_on_remove(self, fake_folder_paths: Path) -> None:
+        import time
+
+        store.append_batch(VALID_UUID, _make_batch(2))
+        gen_before = store.buffer_generation(VALID_UUID)
+        time.sleep(0.002)
+        store.remove_frame(VALID_UUID, store.list_refs(VALID_UUID)[0]["filename"])
+        assert store.buffer_generation(VALID_UUID) != gen_before
+
+
+class TestCorruptPngSoftFail:
+    def test_corrupt_png_source_is_a_soft_skip_not_a_crash(
+        self, fake_folder_paths: Path, tmp_path: Path
+    ) -> None:
+        """PIL's PngImagePlugin raises a PLAIN SyntaxError on a truncated
+        PNG -- not OSError/ValueError -- which used to escape the catch and
+        500 the /add route despite the documented "never raises" contract
+        (found live 2026-07-29). Pin the widened catch."""
+        import folder_paths  # the fixture's fake
+
+        input_dir = Path(folder_paths.get_input_directory())
+        bad = input_dir / "corrupt.png"
+        bad.write_bytes(b"\x89PNG\r\n\x1a\n" + b"this is not a real png body")
+        store.append_batch(VALID_UUID, _make_batch(1))
+        before = store.list_refs(VALID_UUID)
+        result = store.append_uploaded_image(VALID_UUID, "corrupt.png", "", "input")
+        assert result == before  # unchanged buffer, no exception

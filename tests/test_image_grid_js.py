@@ -330,6 +330,36 @@ out.folderThreshold = {
   isNumber: typeof grid.FOLDER_WARN_THRESHOLD === 'number'
 }
 
+// ---- delete: a removal always returns to grid view (M5 un-deferred) ----
+// `setNodeImagesFromRefs` is the ONLY place `imageIndex` is ever written
+// after a display refresh (the delete feature itself has no index math of
+// its own -- it just hands `/remove`'s whole-remaining-buffer response to
+// this, same as every other add/refresh path). This replays exactly that:
+// a 3-image grid with the SECOND tile focused, then a refresh reflecting
+// that tile's removal (2 images left, shifted).
+{
+  const node = makeNode(31, rootGraph)
+  grid.setNodeImagesFromRefs(node, [R('a.png'), R('b.png'), R('c.png')])
+  node.imageIndex = 1 // user had "b.png" enlarged -- then deletes it
+  grid.setNodeImagesFromRefs(node, [R('a.png'), R('c.png')]) // /remove's response: b.png gone
+  out.deleteFocus = {
+    backToGrid: node.imageIndex === null,
+    remaining: node.images.map((r) => r.filename)
+  }
+
+  // Deleting a tile that was NOT focused must equally drop back to grid --
+  // content changed either way, so there is no special-cased "keep focus
+  // if the deleted one wasn't focused" branch to verify separately.
+  const node2 = makeNode(32, rootGraph)
+  grid.setNodeImagesFromRefs(node2, [R('a.png'), R('b.png'), R('c.png')])
+  node2.imageIndex = 0 // focused on "a.png", but "c.png" gets deleted instead
+  grid.setNodeImagesFromRefs(node2, [R('a.png'), R('b.png')])
+  out.deleteFocusUnrelatedTile = {
+    backToGrid: node2.imageIndex === null,
+    remaining: node2.images.map((r) => r.filename)
+  }
+}
+
 process.stdout.write(JSON.stringify(out))
 """
 
@@ -556,6 +586,27 @@ def test_folder_warn_threshold_is_exported_and_numeric(grid_api: dict) -> None:
     assert grid_api["folderThreshold"]["isNumber"] is True
 
 
+# ---- M5 un-deferred: delete one image (owner ask 2026-07-29) ----
+
+
+def test_delete_of_the_focused_tile_returns_to_grid_view(grid_api: dict) -> None:
+    """No index math needed for delete -- `setNodeImagesFromRefs` already
+    resets `imageIndex` to `null` on ANY content change (never just the
+    additions this was originally written for), and a successful delete is
+    by definition a content change (the buffer shrinks by one), so this
+    already-proven mechanism covers the delete-focused-tile case for free."""
+    assert grid_api["deleteFocus"]["backToGrid"] is True
+    assert grid_api["deleteFocus"]["remaining"] == ["a.png", "c.png"]
+
+
+def test_delete_of_an_unrelated_tile_also_returns_to_grid_view(grid_api: dict) -> None:
+    # Whether or not the deleted tile was the focused one, `imageIndex`
+    # cannot survive pointing at stale data -- there is no "was it the
+    # focused index" branch in the actual implementation to test separately.
+    assert grid_api["deleteFocusUnrelatedTile"]["backToGrid"] is True
+    assert grid_api["deleteFocusUnrelatedTile"]["remaining"] == ["a.png", "b.png"]
+
+
 # ---- closure-bound wiring, pinned by source text ----
 
 _SOURCE = IMAGE_GRID_JS.read_text(encoding="utf-8")
@@ -731,3 +782,53 @@ def test_add_files_to_buffer_threads_button_label_through() -> None:
     body = _function_body("export async function addFilesToBuffer")
     assert "buttonLabel" in body
     assert "{ buttonLabel }" in body
+
+
+# ---- M5 "delete this image": more closure-bound wiring, pinned by source text ----
+
+
+def test_delete_menu_registered_on_the_same_surface_as_copy() -> None:
+    """Roadmap M5 un-deferred: Delete must reuse the SAME resolution
+    (`currentMenuSelection`) and the SAME wrap-`getExtraMenuOptions`-not-
+    replace idiom `installCopyImageMenuItem` established, not a parallel
+    mechanism for deciding "which tile is this menu about"."""
+    body = _function_body("function installDeleteImageMenuItem")
+    assert "currentMenuSelection(node)" in body
+    assert "node.getExtraMenuOptions" in body
+    assert "DELETE_MENU_LABEL" in body
+
+
+def test_delete_derives_the_ref_from_node_images_never_from_src() -> None:
+    """Roadmap ask, verbatim: derive the ref via `node.images[idx]` --
+    NEVER parse `.src`. Neither the menu installer nor the delete request
+    itself may reference `refFromImageSrc` or `.src` anywhere."""
+    menu_body = _function_body("function installDeleteImageMenuItem")
+    delete_body = _function_body("async function deleteBufferFrame")
+    for body in (menu_body, delete_body):
+        assert "refFromImageSrc" not in body
+        assert ".src" not in body
+
+
+def test_delete_refuses_while_a_batch_is_running() -> None:
+    body = _function_body("function installDeleteImageMenuItem")
+    assert "state.batch && !state.batch.done" in body
+    assert "getNodeFileState(node)" in body
+
+
+def test_delete_path_has_no_confirm_dialog() -> None:
+    """Verified against `image_grid_store.py` before shipping this: every
+    buffer frame is either a fresh tensor-encode or a PIL RE-ENCODED COPY
+    of the uploaded/referenced source (never the source file itself), so
+    deleting one is never destructive to anything the user can't
+    regenerate -- same reasoning Clear already relies on for its own lack
+    of a confirm dialog."""
+    menu_body = _function_body("function installDeleteImageMenuItem")
+    delete_body = _function_body("async function deleteBufferFrame")
+    assert "window.confirm" not in menu_body
+    assert "window.confirm" not in delete_body
+
+
+def test_delete_refresh_reuses_the_generation_and_display_pipeline() -> None:
+    body = _function_body("async function deleteBufferFrame")
+    assert "noteBufferGeneration(node, result)" in body
+    assert "setNodeImagesFromRefs(node, result.images)" in body

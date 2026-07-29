@@ -98,6 +98,33 @@ def register_routes(routes: web.RouteTableDef) -> None:
             }
         )
 
+    @routes.post("/eps_image_grid/remove")
+    async def post_remove(request: web.Request) -> web.Response:
+        try:
+            body = await request.json()
+        except Exception:  # broad: malformed body is a client error
+            return error_response(400, "body must be JSON")
+        if not isinstance(body, dict):
+            return error_response(400, "body must be a JSON object")
+
+        grid_uuid = body.get("uuid")
+        if not store.is_valid_grid_uuid(grid_uuid):
+            return error_response(400, f"invalid grid uuid {grid_uuid!r} -- FORMAT.md §6.6")
+
+        filename = body.get("filename")
+        if not isinstance(filename, str) or not filename:
+            return error_response(400, "missing/invalid 'filename'")
+
+        images = store.remove_frame(grid_uuid, filename)
+        return web.json_response(
+            {
+                "ok": True,
+                "uuid": grid_uuid,
+                "images": images,
+                "generation": store.buffer_generation(grid_uuid),
+            }
+        )
+
     @routes.get("/eps_image_grid/list")
     async def get_list(request: web.Request) -> web.Response:
         grid_uuid = request.query.get("uuid")

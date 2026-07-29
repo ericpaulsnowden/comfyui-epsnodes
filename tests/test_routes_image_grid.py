@@ -384,3 +384,54 @@ class TestAddRouteBasicBodyValidation:
     async def test_non_object_body_is_400(self, client) -> None:
         response = await client.post("/eps_image_grid/add", json=["not", "an", "object"])
         assert response.status == 400
+
+
+class TestRemoveRoute:
+    """POST /eps_image_grid/remove (2026-07-29, per-tile delete)."""
+
+    async def _seed(self, client, fake_input_dir, count: int = 3) -> list[dict]:
+        """Three frames via the real /add path; returns the buffer refs."""
+        refs: list[dict] = []
+        for i in range(count):
+            name = f"seed{i}.png"
+            _write_fake_upload(fake_input_dir, name, color=(50 * i, 90, 130))
+            response = await client.post(
+                "/eps_image_grid/add", json={"uuid": VALID_UUID, "filename": name}
+            )
+            refs = (await response.json())["images"]
+        return refs
+
+    async def test_removes_and_returns_remaining_buffer(
+        self, client, fake_input_dir
+    ) -> None:
+        refs = await self._seed(client, fake_input_dir)
+        target = refs[1]["filename"]
+        response = await client.post(
+            "/eps_image_grid/remove", json={"uuid": VALID_UUID, "filename": target}
+        )
+        assert response.status == 200
+        data = await response.json()
+        assert data["ok"] is True
+        assert [r["filename"] for r in data["images"]] == [
+            refs[0]["filename"],
+            refs[2]["filename"],
+        ]
+        assert isinstance(data["generation"], int) and data["generation"] > 0
+
+    async def test_unknown_filename_soft_noop(self, client, fake_input_dir) -> None:
+        refs = await self._seed(client, fake_input_dir)
+        response = await client.post(
+            "/eps_image_grid/remove", json={"uuid": VALID_UUID, "filename": "9999.png"}
+        )
+        assert response.status == 200
+        assert len((await response.json())["images"]) == len(refs)
+
+    async def test_invalid_uuid_is_400(self, client) -> None:
+        response = await client.post(
+            "/eps_image_grid/remove", json={"uuid": "nope", "filename": "0001.png"}
+        )
+        assert response.status == 400
+
+    async def test_missing_filename_is_400(self, client) -> None:
+        response = await client.post("/eps_image_grid/remove", json={"uuid": VALID_UUID})
+        assert response.status == 400

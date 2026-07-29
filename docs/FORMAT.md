@@ -1053,6 +1053,31 @@ add; single batch-aware IMAGE input; disk-backed, survive-restart, NO cap.
     from an on-screen `.src` — a preview `.src` would otherwise silently
     put degraded webp pixels on the clipboard. Param order is fixed
     (identity → preview → v) so `refFromImageSrc` parses either shape.
+- **Delete one tile (2026-07-29, owner ask — "you get a duplicate image and
+  then the grid is useless and you have to start fresh"; this un-deferred
+  the bulk-add roadmap's M5 on its own stated revisit condition):**
+  right-click a hovered/focused tile → **Delete this image**, on the same
+  `getExtraMenuOptions` surface as Copy image (its own wrap function, the
+  one-wrap-per-feature pattern). The ref is derived from
+  `node.images[idx]` (never `.src`) and captured at menu-BUILD time, so
+  the frame named is provably the one deleted even if the buffer refreshes
+  while the menu is open. Backend: `POST /eps_image_grid/remove`
+  `{uuid, filename}` → the whole remaining buffer + `generation`, same
+  soft-fail conventions as `/add` (`store.remove_frame`: unknown filename
+  = no-op; the frame FILE is deleted best-effort but the MANIFEST is the
+  truth; numbering stays one-past-highest-EXISTING so a deleted middle
+  name is never reused). No confirm dialog, deliberately: frames are this
+  store's OWN re-encoded PNGs — deleting one never touches the user's
+  original upload under `input/` (verified end-to-end in the store before
+  shipping). Refused with a toast while a bulk batch is running (the
+  manifest read-modify-write is unlocked). A focused-tile delete returns
+  to grid view via `setNodeImagesFromRefs`' existing changed-content path.
+- **PIL `SyntaxError` is part of the soft-fail catch (2026-07-29):**
+  `PngImagePlugin` raises a PLAIN `SyntaxError` — not an
+  OSError/ValueError subclass — on a truncated/corrupt PNG, which let a
+  corrupt upload 500 the `/add` route despite `append_uploaded_image`'s
+  "never raises" contract (found live, pinned by a corrupt-PNG test). Both
+  that catch and `read_all_as_tensors`' per-frame skip now include it.
 - **Drop-to-add (2026-07-22, owner ask):** dropping onto the node adds to
   the buffer and pre-empts core's "load workflow from dropped image"
   (core's own drop handler early-returns when a node's `onDragDrop`

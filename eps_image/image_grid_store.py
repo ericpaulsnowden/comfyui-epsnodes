@@ -346,7 +346,12 @@ def append_uploaded_image(
     try:
         with Image.open(source_path) as raw:
             png_bytes = _encode_png_image(raw.convert("RGB"))
-    except (OSError, ValueError) as exc:
+    except (OSError, ValueError, SyntaxError) as exc:
+        # SyntaxError included deliberately (2026-07-29, found live during
+        # the per-tile-delete round): PIL's PngImagePlugin raises a PLAIN
+        # SyntaxError -- not an OSError/ValueError subclass -- on a
+        # truncated/corrupt PNG, which made a corrupt upload 500 instead of
+        # honoring this function's own "never raises" contract.
         logger.warning("eps_image_grid: could not read %s to add (%s)", source_path, exc)
         return list_refs(grid_uuid)
 
@@ -372,6 +377,47 @@ def list_refs(grid_uuid: str) -> list[dict]:
     if directory is None:
         return []
     manifest = _load_manifest(directory)
+    return _refs_for(grid_uuid, manifest["frames"])
+
+
+def remove_frame(grid_uuid: str, filename: str) -> list[dict]:
+    """Remove ONE frame from the buffer by its own frame filename
+    (``NNNN.png``) -- the owner's un-brick-my-grid ask (2026-07-29: "you
+    get a duplicate image and then the grid is useless and you have to
+    start fresh"). Returns the whole remaining buffer's refs, same
+    contract as :func:`append_uploaded_image`.
+
+    Soft-fail like every sibling: invalid uuid -> ``[]``; a filename not in
+    the manifest -> the current buffer unchanged. The frame FILE is deleted
+    best-effort (a locked/vanished file still gets its manifest entry
+    removed -- the manifest is the truth the node reads; an orphaned file
+    on disk is harmless and unreachable). Deleting a frame never touches
+    the user's original upload: frames are this store's OWN re-encoded
+    PNGs under the buffer dir (:func:`_encode_png_image` writes them), not
+    references to ``input/``.
+
+    Frame numbering stays collision-safe afterwards:
+    :func:`_next_frame_filename` is one-past-the-highest-EXISTING frame,
+    written for exactly this future. The manifest rewrite also advances
+    :func:`buffer_generation`, so frontend display URLs refresh on their
+    own.
+    """
+    directory = buffer_dir(grid_uuid)
+    if directory is None:
+        return []
+    manifest = _load_manifest(directory)
+    frames = manifest.get("frames", [])
+    if filename not in frames:
+        return _refs_for(grid_uuid, frames)
+    manifest["frames"] = [name for name in frames if name != filename]
+    _save_manifest(directory, manifest)
+    try:
+        (directory / filename).unlink()
+    except OSError:
+        logger.warning(
+            "eps_image_grid: frame file %s could not be deleted (manifest entry removed)",
+            filename,
+        )
     return _refs_for(grid_uuid, manifest["frames"])
 
 
@@ -440,7 +486,9 @@ def read_all_as_tensors(grid_uuid: str) -> list:
                 pil_image = ImageOps.exif_transpose(raw)
                 pil_image = pil_image.convert("RGB")
                 array = np.array(pil_image).astype(np.float32) / 255.0
-        except (OSError, ValueError) as exc:
+        except (OSError, ValueError, SyntaxError) as exc:
+            # Same PIL SyntaxError gap as append_uploaded_image's catch --
+            # one corrupt frame must skip, not sink the whole Emit.
             logger.warning("eps_image_grid: skipping unreadable frame %s (%s)", path, exc)
             continue
         tensors.append(torch.from_numpy(array)[None, ...])

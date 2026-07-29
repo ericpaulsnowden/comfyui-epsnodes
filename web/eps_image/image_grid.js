@@ -655,6 +655,32 @@
  * the busy-guard (`getNodeFileState`'s single `state.batch` slot) already
  * covers both buttons for free -- a click on EITHER while a batch is
  * running cancels the one in-flight batch, never starts a second.
+ *
+ * M5, un-deferred (owner ask 2026-07-29: "right click and delete individual
+ * images or tiles ... a duplicate image ... makes the grid useless and you
+ * have to start fresh" -- the revisit condition this pack's own roadmap
+ * named, "bulk add lands and the buffer becomes hard to curate", just got
+ * met by the owner's own words). Deliberately narrow: one tile, right-
+ * click, no drag-reorder, no multi-select. `installDeleteImageMenuItem`
+ * chains onto the SAME `getExtraMenuOptions` surface
+ * `installCopyImageMenuItem` established (same `currentMenuSelection`
+ * resolution, so Delete appears exactly where Copy does), pushing right
+ * after it. No confirm dialog -- verified against `image_grid_store.py`
+ * first: every buffer frame is either a fresh tensor-encode or a PIL
+ * RE-ENCODED COPY of the uploaded/referenced source, written to a
+ * DIFFERENT path under the buffer dir; the source itself is never touched.
+ * `POST /eps_image_grid/remove {uuid, filename}` returns the whole
+ * remaining buffer (`{images, generation}`, same shape as `/add`), so
+ * deleting reuses the exact same `noteBufferGeneration` +
+ * `setNodeImagesFromRefs` refresh every other mutation here already goes
+ * through -- including, for free, `setNodeImagesFromRefs`'s existing
+ * "any content change resets `imageIndex` to `null`" behavior, which
+ * already returns the view to the grid if the deleted tile was the
+ * focused one (no new index math needed). Refuses while a bulk batch is
+ * running (the SAME `state.batch` slot `runAddBatch`'s own busy-guard
+ * checks) -- a delete's manifest rewrite racing a batch's own unlocked
+ * read-modify-write is the identical atomicity hazard the busy-guard
+ * already exists to prevent between two adds.
  */
 
 import { api } from '../../../scripts/api.js'
@@ -2270,6 +2296,162 @@ function installCopyImageMenuItem(node) {
 }
 
 // ---------------------------------------------------------------------------
+// Delete image (owner ask, un-defers roadmap M5 -- 2026-07-29: "right click
+// and delete individual images or tiles ... a duplicate image ... makes the
+// grid useless and you have to start fresh"). Scope is deliberately narrow:
+// one tile, right-click, no drag-reorder, no multi-select.
+// ---------------------------------------------------------------------------
+
+const REMOVE_ROUTE = '/eps_image_grid/remove'
+const DELETE_MENU_LABEL = 'Delete this image'
+
+/**
+ * `POST /eps_image_grid/remove {uuid, filename}` -- removes ONE frame from
+ * *node*'s buffer by its own on-disk name (`ref.filename`, an `NNNN.png`,
+ * unambiguous within a buffer). Returns `{ok, uuid, images, generation}` --
+ * the WHOLE remaining buffer, same contract as `/add`/`/list`. Mirrors
+ * `postClear`'s request/response handling exactly. Throws on a non-OK
+ * response -- confirmed against the actual route (`routes_image_grid.py`):
+ * an invalid uuid or a missing/non-string `filename` 400s, matching every
+ * sibling route here. An unknown-but-well-formed `filename` is NOT an
+ * error -- `remove_frame` soft-fails 200 with the buffer unchanged
+ * (`image_grid_store.py`, the same soft-fail convention `append_uploaded_
+ * image` already uses for a bad add).
+ */
+async function postRemove(grid_uuid, filename) {
+  const response = await api.fetchApi(REMOVE_ROUTE, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ uuid: grid_uuid, filename })
+  })
+  let data = null
+  try {
+    data = await response.json()
+  } catch {
+    // Non-JSON body (proxy error page etc.) -- fall through to status check.
+  }
+  if (!response.ok) {
+    const message = data && data.error ? data.error : `HTTP ${response.status}`
+    throw new Error(message)
+  }
+  return data
+}
+
+/**
+ * Deletes ONE buffered frame (*ref*, captured at menu-BUILD time --
+ * `installDeleteImageMenuItem` below explains why) and refreshes the
+ * display from the response's whole remaining buffer.
+ *
+ * **Verified against `image_grid_store.py` before shipping this with NO
+ * confirm dialog**: every frame under `eps_image_grid/<uuid>/NNNN.png` is
+ * either a fresh PNG encoded straight from an in-memory tensor batch
+ * (`append_batch`, Collect mode -- there is no "original file" in that
+ * path at all) or a PIL-RE-ENCODED COPY of whatever was uploaded/
+ * referenced (`append_uploaded_image`: opens the source under `input`/
+ * `output`/`temp`, re-encodes it, and writes the RESULT to a DIFFERENT
+ * path under the buffer dir -- the source is read-only there and never
+ * touched again). `remove_frame`'s own docstring states the same
+ * conclusion independently ("Deleting a frame never touches the user's
+ * original upload"). So `/remove` can only ever delete the buffer's own
+ * disposable copy -- this is why Delete, like Clear, needs no confirm:
+ * nothing irreplaceable is ever at risk.
+ *
+ * No `AbortController`/cancel here -- unlike `runAddBatch`'s multi-item
+ * loops, this is a single, fast, non-batch request with nothing long-
+ * running to cancel.
+ *
+ * A genuine failure (network/HTTP error -- NOT the soft-fail "unknown
+ * filename" case, which resolves normally with an unchanged buffer)
+ * surfaces as ONE toast naming the file; success is silent -- the tile
+ * visibly vanishing from the grid IS the feedback, the same convention
+ * every other add/refresh path in this file already follows.
+ */
+async function deleteBufferFrame(node, ref) {
+  const uuid = currentUuid(node)
+  if (!GRID_UUID_RE.test(uuid)) {
+    console.warn(PREFIX, 'delete clicked with no valid grid_uuid yet; nothing to delete')
+    return
+  }
+  try {
+    const result = await postRemove(uuid, ref.filename)
+    noteBufferGeneration(node, result)
+    if (result && Array.isArray(result.images)) {
+      setNodeImagesFromRefs(node, result.images)
+      node.setDirtyCanvas(true, true)
+    }
+  } catch (error) {
+    console.warn(PREFIX, 'delete failed', error)
+    notifyClipboard(node, `Couldn't delete "${ref.filename}": ${error?.message || error}`)
+  }
+}
+
+/**
+ * Installs a "Delete this image" context-menu item -- WRAPS (never
+ * replaces) `getExtraMenuOptions` AGAIN, the identical "wrap, don't
+ * replace" idiom `installCopyImageMenuItem` just above already uses (and
+ * `installClipspacePasteOverride` below chains onto in the same way),
+ * called from `attach()` right after `installCopyImageMenuItem` so this
+ * item is pushed immediately after "Copy image" -- adjacent, as asked.
+ * Reuses the SAME `currentMenuSelection(node)` resolution (a focused
+ * `imageIndex`, else a merely-hovered `overIndex` while the grid view
+ * shows) that already solves "which tile is this menu about" for Copy, so
+ * Delete appears/targets under the same circumstances Copy does -- gated
+ * on `ref` specifically (not `img`, Copy's own gate) because Delete, per
+ * the owner ask, has NO fallback path the way Copy's `fullResImageUrl`
+ * does: it must have a real buffer ref to send to `/remove`, never a
+ * `.src` parse, so there is nothing useful to offer without one.
+ *
+ * *ref* is captured HERE, at menu-BUILD time (when `getExtraMenuOptions`
+ * runs, i.e. the moment of the right-click) -- not re-derived inside the
+ * click callback -- so the frame the menu item is provably about is the
+ * one actually deleted even in the unlikely case something else refreshes
+ * the buffer while the (synchronous, litegraph-native) menu is briefly
+ * open. Derived via `node.images[index]` -- NEVER by parsing an `<img>`'s
+ * `.src` -- the same index-aligned-with-imgs derivation `fullResImageUrl`
+ * uses for Copy (see `currentMenuSelection`'s own docstring for why that
+ * alignment holds).
+ *
+ * Refuses while a bulk batch is running for this node (`state.batch &&
+ * !state.batch.done` -- the SAME single per-node slot `runAddBatch`'s own
+ * busy-guard already checks, `getNodeFileState`) rather than sending the
+ * request: a delete's manifest read-modify-write racing a batch's own
+ * unlocked read-modify-write (`append_uploaded_image`) is the identical
+ * atomicity hazard `runAddBatch`'s busy-guard already exists to prevent
+ * between two concurrent adds -- a toast explains rather than silently
+ * doing nothing or corrupting the manifest.
+ *
+ * Guarded by `node.__epsGridDeleteMenuInstalled`, mirroring `installCopy
+ * ImageMenuItem`'s own `__epsGridCopyMenuInstalled` guard.
+ */
+function installDeleteImageMenuItem(node) {
+  if (node.__epsGridDeleteMenuInstalled) return
+  node.__epsGridDeleteMenuInstalled = true
+
+  const original = node.getExtraMenuOptions
+  node.getExtraMenuOptions = function (canvas, options) {
+    const result = original ? original.call(this, canvas, options) : undefined
+    const { ref } = currentMenuSelection(node)
+    if (ref && ref.filename) {
+      options.push({
+        content: DELETE_MENU_LABEL,
+        callback: () => {
+          const state = getNodeFileState(node)
+          if (state.batch && !state.batch.done) {
+            notifyClipboard(
+              node,
+              'A batch is already adding images -- finish or cancel it first, then delete.'
+            )
+            return
+          }
+          void deleteBufferFrame(node, ref)
+        }
+      })
+    }
+    return result
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Clipspace paste appends, doesn't replace (2026-07-22 owner fix: a second
 // clipspace paste appeared to overwrite the first) -- see file header for
 // the full writeup + citations.
@@ -2861,6 +3043,7 @@ export function attach(node) {
     installPasteFiles(node)
     installDragAndDrop(node) // assets-panel/Finder drop-to-add -- see its own docstring
     installCopyImageMenuItem(node) // Mac-over-LAN-http Copy Image fix -- see its own docstring
+    installDeleteImageMenuItem(node) // un-brick-my-grid delete -- see its own docstring
     installClipspacePasteOverride(node) // clipspace paste-to-add -- see its own docstring
     installConfigureRefresh(node) // undo/redo display fix -- see its own docstring
     // Makes `isImageNode(node)` (litegraphUtil.ts) true even before

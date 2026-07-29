@@ -361,6 +361,10 @@ times to gather images, then send the whole set through a workflow at once.
   files (or an assets-panel image) straight onto the node** — and yes,
   dragging thirty files as one drop adds all thirty. Every path appends to
   the buffer without losing what's already there.
+- **Delete one image without starting over:** right-click any thumbnail →
+  **Delete this image**. A stray duplicate no longer means wiping the whole
+  buffer — remove just that tile and keep going. (Only the grid's own copy
+  is deleted; your original file is untouched.)
 - **Built for real batches (20–100 images):** files ingest in
   filename-numeric order (`img2` before `img10`, whatever order your OS
   hands them over); the button shows progress and becomes **Cancel** while
