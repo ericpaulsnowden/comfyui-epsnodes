@@ -93,6 +93,41 @@ class LibraryContext:
         directory.mkdir(parents=True, exist_ok=True)
         return directory
 
+    def remote_dirs(self) -> list[Path]:
+        """Folders OUTSIDE ``library_dir`` that non-loopback callers may also
+        touch (FORMAT.md §2), newest last. Empty by default.
+
+        Owner report 2026-07-29: a notebook on a NAS mount
+        (``/run/user/1000/gvfs/smb-share:…/docs/loras.md``) worked from the
+        Linux box running ComfyUI and 403'd from his Mac, because §2 confines
+        remote callers to ``library_dir`` and §1 explicitly blesses absolute
+        NAS paths — two rules that were each right and together made the node
+        unusable remotely. This list is the reconciliation: the HOST names the
+        extra folders it is willing to expose, exactly as it already names
+        ``library_dir``.
+
+        Why an allow-list and not "let remote reads through": the ``file``
+        value arrives in the request, so the server cannot tell a path the
+        host's workflow chose from one a caller invented — the workflow lives
+        in the browser. Without a host-side list, permitting an arbitrary
+        remote ``file`` is an arbitrary-file-read on the host, which is the
+        one thing §2 exists to prevent. Written only through the
+        loopback-only route, same as ``library_dir``.
+
+        Deliberately NOT created (no ``mkdir``, unlike :meth:`library_dir`):
+        an entry for a NAS that happens to be unmounted must stay a dormant
+        allow-list entry, not conjure an empty local directory that then
+        shadows the real mount point.
+        """
+        raw = self.load_config().get("remote_dirs")
+        if not isinstance(raw, list):
+            return []
+        out: list[Path] = []
+        for item in raw:
+            if isinstance(item, str) and item.strip():
+                out.append(Path(item.strip()))
+        return out
+
     def resolve_notebook_file(self, file_value: str) -> Path:
         """Resolve a node/route ``file`` value to an absolute ``.md`` path.
 

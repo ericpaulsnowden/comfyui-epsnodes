@@ -1593,3 +1593,240 @@ async def test_post_open_folder_reveal_failure_is_500(
     )
     assert resp.status == 500
     assert (await resp.json())["error"] == "no file manager found"
+
+
+# ---------------------------------------------------------------------------
+# FORMAT.md §2 remote allow-list (owner report 2026-07-29)
+#
+# A notebook on a NAS mount worked from the Linux box running ComfyUI and 403'd
+# from his Mac: §1 explicitly blesses absolute NAS paths, §2 confines remote
+# callers to `library_dir`, and together those two right rules made the node
+# unusable from a second machine. `remote_dirs` is the host-side allow-list
+# that reconciles them.
+#
+# These are security-boundary tests. The negative cases matter more than the
+# positive one: the whole point is that a remote caller can neither read
+# outside the list NOR extend the list.
+# ---------------------------------------------------------------------------
+
+
+async def test_remote_caller_may_read_inside_a_shared_folder(
+    context: LibraryContext, tmp_path: Path, aiohttp_client
+) -> None:
+    """The owner's case, end to end: the host shares the folder, the remote
+    machine can then open the notebook that lives in it."""
+    shared = tmp_path / "nas" / "docs"
+    shared.mkdir(parents=True)
+    book = shared / "loras.md"
+    book.write_text("## Portrait\nsoft light\n", encoding="utf-8")
+    context.save_config({"remote_dirs": [str(shared)]})
+
+    client = await aiohttp_client(make_app(context))
+    resp = await client.get(
+        "/lora_library/notebook", params={"file": str(book)}, headers=REMOTE
+    )
+    assert resp.status == 200
+    assert (await resp.json())["entries"] == [{"name": "Portrait", "category": ""}]
+
+
+async def test_remote_caller_may_write_inside_a_shared_folder(
+    context: LibraryContext, tmp_path: Path, aiohttp_client
+) -> None:
+    shared = tmp_path / "nas" / "docs"
+    shared.mkdir(parents=True)
+    book = shared / "loras.md"
+    book.write_text("## Portrait\nsoft light\n", encoding="utf-8")
+    context.save_config({"remote_dirs": [str(shared)]})
+
+    client = await aiohttp_client(make_app(context))
+    resp = await client.post(
+        "/lora_library/notebook/entry",
+        json={"file": str(book), "name": "Portrait", "text": "harsh light"},
+        headers=REMOTE,
+    )
+    assert resp.status == 200
+    assert "harsh light" in book.read_text(encoding="utf-8")
+
+
+async def test_sharing_one_folder_does_not_share_its_siblings(
+    context: LibraryContext, tmp_path: Path, aiohttp_client
+) -> None:
+    """The list must grant exactly what it names — not its parent, and not a
+    sibling that merely shares a name PREFIX (the classic `is_relative_to`
+    substring trap: `/nas/docs-private` must not match `/nas/docs`)."""
+    shared = tmp_path / "nas" / "docs"
+    shared.mkdir(parents=True)
+    context.save_config({"remote_dirs": [str(shared)]})
+
+    sibling = tmp_path / "nas" / "docs-private"
+    sibling.mkdir()
+    secret = sibling / "secret.md"
+    secret.write_text("## Secret\nnope\n", encoding="utf-8")
+    parent_secret = tmp_path / "nas" / "parent.md"
+    parent_secret.write_text("## Secret\nnope\n", encoding="utf-8")
+
+    client = await aiohttp_client(make_app(context))
+    for target in (secret, parent_secret):
+        resp = await client.get(
+            "/lora_library/notebook", params={"file": str(target)}, headers=REMOTE
+        )
+        assert resp.status == 403, f"{target} must not be reachable"
+
+
+async def test_shared_folder_does_not_let_traversal_escape_it(
+    context: LibraryContext, tmp_path: Path, aiohttp_client
+) -> None:
+    shared = tmp_path / "nas" / "docs"
+    shared.mkdir(parents=True)
+    context.save_config({"remote_dirs": [str(shared)]})
+    outside = tmp_path / "outside.md"
+    outside.write_text("## Secret\nnope\n", encoding="utf-8")
+
+    client = await aiohttp_client(make_app(context))
+    resp = await client.get(
+        "/lora_library/notebook",
+        params={"file": str(shared / ".." / ".." / "outside.md")},
+        headers=REMOTE,
+    )
+    assert resp.status == 403
+
+
+async def test_a_symlink_out_of_a_shared_folder_is_still_refused(
+    context: LibraryContext, tmp_path: Path, aiohttp_client
+) -> None:
+    """Both sides are fully resolved, so a symlink planted inside a shared
+    folder resolves to its real target and fails the check. This is also why
+    "symlink the NAS file into the library folder" is not a workaround."""
+    shared = tmp_path / "nas" / "docs"
+    shared.mkdir(parents=True)
+    context.save_config({"remote_dirs": [str(shared)]})
+    secret = tmp_path / "secret.md"
+    secret.write_text("## Secret\nnope\n", encoding="utf-8")
+    link = shared / "innocent.md"
+    link.symlink_to(secret)
+
+    client = await aiohttp_client(make_app(context))
+    resp = await client.get(
+        "/lora_library/notebook", params={"file": str(link)}, headers=REMOTE
+    )
+    assert resp.status == 403
+
+
+async def test_remote_refusal_names_the_folder_to_share(
+    context: LibraryContext, tmp_path: Path, aiohttp_client
+) -> None:
+    """The old message stopped at "not allowed", which is a dead end for the
+    one case that legitimately hits it. It must name the folder and say where
+    to go — the owner pasted this exact error with nothing to act on."""
+    outside = tmp_path / "nas" / "docs" / "loras.md"
+    outside.parent.mkdir(parents=True)
+    outside.write_text("## X\ny\n", encoding="utf-8")
+
+    client = await aiohttp_client(make_app(context))
+    resp = await client.get(
+        "/lora_library/notebook", params={"file": str(outside)}, headers=REMOTE
+    )
+    assert resp.status == 403
+    error = (await resp.json())["error"]
+    assert str(outside.parent) in error, "must name the folder to share"
+    assert "Share with remote browsers" in error, "must name the control"
+    assert "machine running it" in error, "must say WHERE to do it"
+
+
+async def test_remote_caller_cannot_extend_the_allow_list(
+    context: LibraryContext, tmp_path: Path, aiohttp_client
+) -> None:
+    """The one that would undo the whole boundary: if a remote caller could
+    add a folder, it could grant itself the arbitrary-file read §2 denies."""
+    client = await aiohttp_client(make_app(context))
+    resp = await client.post(
+        "/lora_library/remote_dirs", json={"dir": str(tmp_path), "allow": True}, headers=REMOTE
+    )
+    assert resp.status == 403
+    assert context.remote_dirs() == []
+
+
+async def test_local_caller_can_add_and_remove_a_shared_folder(
+    context: LibraryContext, tmp_path: Path, aiohttp_client
+) -> None:
+    shared = tmp_path / "nas" / "docs"
+    shared.mkdir(parents=True)
+    client = await aiohttp_client(make_app(context))
+
+    resp = await client.post("/lora_library/remote_dirs", json={"dir": str(shared)})
+    assert resp.status == 200
+    assert (await resp.json())["remote_dirs"] == [str(shared)]
+    assert context.remote_dirs() == [shared]
+
+    # Idempotent: adding the same folder (or one already covered) is a no-op.
+    await client.post("/lora_library/remote_dirs", json={"dir": str(shared)})
+    await client.post("/lora_library/remote_dirs", json={"dir": str(shared / "nested")})
+    assert context.remote_dirs() == [shared]
+
+    resp = await client.post(
+        "/lora_library/remote_dirs", json={"dir": str(shared), "allow": False}
+    )
+    assert resp.status == 200
+    assert (await resp.json())["remote_dirs"] == []
+    assert context.remote_dirs() == []
+
+
+async def test_remote_dirs_route_rejects_junk(
+    context: LibraryContext, tmp_path: Path, aiohttp_client
+) -> None:
+    client = await aiohttp_client(make_app(context))
+    for body, why in [
+        ({}, "missing dir"),
+        ({"dir": "   "}, "blank dir"),
+        ({"dir": "relative/path"}, "not absolute"),
+        ({"dir": "smb://host/share"}, "network address, not a path"),
+        ({"dir": str(tmp_path), "allow": "yes"}, "allow must be a bool"),
+    ]:
+        resp = await client.post("/lora_library/remote_dirs", json=body)
+        assert resp.status == 400, f"{why} should be a 400"
+
+
+async def test_config_reports_the_shared_folders(
+    context: LibraryContext, tmp_path: Path, aiohttp_client
+) -> None:
+    shared = tmp_path / "nas" / "docs"
+    shared.mkdir(parents=True)
+    context.save_config({"remote_dirs": [str(shared)]})
+    client = await aiohttp_client(make_app(context))
+    resp = await client.get("/lora_library/config")
+    assert (await resp.json())["remote_dirs"] == [str(shared)]
+
+
+async def test_unmounted_shared_folder_does_not_break_the_check(
+    context: LibraryContext, tmp_path: Path, aiohttp_client
+) -> None:
+    """A stale entry for a NAS that isn't mounted must not match, and must not
+    take the guard down either — and it must never be CREATED by being listed
+    (a conjured empty dir would shadow the real mount point)."""
+    missing = tmp_path / "not-mounted" / "docs"
+    context.save_config({"remote_dirs": [str(missing)]})
+    assert not missing.exists()
+
+    inside_library = context.library_dir() / "fine.md"
+    inside_library.write_text("## Ok\nyes\n", encoding="utf-8")
+    client = await aiohttp_client(make_app(context))
+    resp = await client.get(
+        "/lora_library/notebook", params={"file": str(inside_library)}, headers=REMOTE
+    )
+    assert resp.status == 200, "a stale entry must not break unrelated requests"
+    assert not missing.exists(), "listing a folder must never create it"
+
+
+async def test_library_dir_remains_allowed_without_any_shared_folders(
+    context: LibraryContext, aiohttp_client
+) -> None:
+    """The pre-existing §2 rule is untouched: library_dir works for a remote
+    caller with an empty allow-list."""
+    assert context.remote_dirs() == []
+    book = context.library_dir() / "loras.md"
+    book.write_text("## Ok\nyes\n", encoding="utf-8")
+    client = await aiohttp_client(make_app(context))
+    resp = await client.get(
+        "/lora_library/notebook", params={"file": str(book)}, headers=REMOTE
+    )
+    assert resp.status == 200

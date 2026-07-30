@@ -593,6 +593,19 @@ const CSS_TEXT = `
   padding: 3px 5px;
   font-size: 11px;
 }
+.llnb-share-toggle {
+  /* FORMAT.md §2 share toggle (owner report 2026-07-29) — its own row under
+     the path bar, same treatment as .llnb-filepanel-note, so it never
+     squeezes the path. Hidden outright unless it applies. */
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 6px 3px;
+  font-size: 10px;
+  color: var(--descrip-text, #999);
+}
+.llnb-share-toggle-box { margin: 0; flex: 0 0 auto; cursor: pointer; }
+.llnb-share-toggle-label { cursor: pointer; min-width: 0; }
 .llnb-inline-rename {
   /* Rename in place (owner ask 2026-07-29, "double click a name to rename in
      place") — replaces a row's text with an input sized to the row, so the
@@ -977,6 +990,15 @@ function createState(node, fileWidget, entryWidget) {
     // THIS browser is local (`GET /config`'s `is_local`; null = not yet
     // known, treated as local — see refreshRemoteGating()).
     resolvedFile: null,
+    // FORMAT.md §2 remote allow-list (owner report 2026-07-29), mirrored from
+    // /config so updateShareToggle() can decide whether a SECOND machine
+    // would be refused this file. Advisory only — the server re-derives and
+    // enforces the real check.
+    remoteDirs: [],
+    libraryDir: null,
+    shareToggleWrapEl: null,
+    shareToggleEl: null,
+    shareToggleLabelEl: null,
     isLocal: null,
     // The file WIDGET's last known-good value — wireFileWidget() reverts to
     // this when a remote viewer edits a read-only `file` widget.
@@ -1382,7 +1404,41 @@ async function refreshRemoteGating(state) {
     return
   }
   state.isLocal = config?.is_local !== false
+  state.remoteDirs = Array.isArray(config?.remote_dirs) ? config.remote_dirs : []
+  state.libraryDir = typeof config?.library_dir === 'string' ? config.library_dir : null
   updateRemoteGatingUi(state)
+}
+
+/** Drops the module-scope /config cache so the next getConfig() re-fetches —
+ * needed after the share toggle writes, since `remote_dirs` is part of that
+ * cached payload and N attached nodes share it. */
+function invalidateConfigCache() {
+  cachedConfig = null
+  cachedConfigAt = 0
+}
+
+/** Rough dirname of a resolved path, for both POSIX and Windows separators.
+ * Only used to name the folder in the share toggle — the SERVER re-derives
+ * and validates the real parent, so this never has to be exact. */
+function parentDirOf(fullPath) {
+  const value = String(fullPath || '')
+  const cut = Math.max(value.lastIndexOf('/'), value.lastIndexOf('\\'))
+  return cut > 0 ? value.slice(0, cut) : ''
+}
+
+/** True when `fullPath` sits inside one of `roots` — a plain path-segment
+ * prefix test, so `/nas/docs` never matches `/nas/docs-private`. Advisory
+ * only: it decides whether to OFFER the toggle. The server's own §2 check is
+ * the authority and re-derives everything (see notebook_path_error). */
+function pathIsInsideAny(fullPath, roots) {
+  const value = String(fullPath || '')
+  if (!value) return false
+  return (roots || []).some((root) => {
+    const r = String(root || '').replace(/[/\\]+$/, '')
+    if (!r) return false
+    if (value === r) return true
+    return value.startsWith(r + '/') || value.startsWith(r + '\\')
+  })
 }
 
 function updateRemoteGatingUi(state) {
@@ -1394,6 +1450,64 @@ function updateRemoteGatingUi(state) {
     state.filePanelNoteEl.title = remote
       ? 'The host machine controls which file this node reads.'
       : ''
+  }
+  updateShareToggle(state)
+}
+
+/**
+ * The FORMAT.md §2 "Share with remote browsers" toggle (owner report
+ * 2026-07-29: a NAS notebook that worked on the Linux box running ComfyUI
+ * 403'd from his Mac).
+ *
+ * Shown ONLY to a local viewer, and only when the current file sits outside
+ * everything remote callers can already reach — i.e. exactly when a second
+ * machine would be refused. Local-only is not cosmetic: `POST
+ * /lora_library/remote_dirs` is loopback-only for the same reason `POST
+ * /config` is, because this list IS the boundary §2 enforces, so a remote
+ * caller able to extend it could grant itself the arbitrary-file read the
+ * boundary denies. Placing the control here means the fix is one click on the
+ * machine where the notebook already works.
+ */
+function updateShareToggle(state) {
+  const wrap = state.shareToggleWrapEl
+  if (!wrap) return
+  const fullPath = state.resolvedFile || ''
+  const roots = [state.libraryDir, ...(state.remoteDirs || [])].filter(Boolean)
+  const reachable = pathIsInsideAny(fullPath, roots)
+  const folder = parentDirOf(fullPath)
+  // A remote viewer gets no control (it could not use it) — just the note
+  // above, plus whatever §2 error the request itself reported.
+  const offer = state.isLocal !== false && fullPath && folder && !reachable
+  wrap.style.display = offer ? '' : 'none'
+  if (!offer) return
+  state.shareToggleEl.checked = false
+  state.shareToggleLabelEl.textContent = 'Share this folder with remote browsers'
+  state.shareToggleLabelEl.title =
+    `Lets a browser on another machine open notebooks in ${folder}. ` +
+    'Without this, opening this workflow from another machine reports a ' +
+    'FORMAT.md §2 error. Only this machine can grant it.'
+}
+
+/** Commits the share toggle. Re-reads /config afterwards so the toggle (and
+ * every other attached node's copy) reflects what the server now allows. */
+async function onShareToggleChange(state) {
+  const folder = parentDirOf(state.resolvedFile || '')
+  if (!folder) return
+  const allow = Boolean(state.shareToggleEl?.checked)
+  try {
+    await api.postJson('/lora_library/remote_dirs', { dir: folder, allow })
+    invalidateConfigCache()
+    await refreshRemoteGating(state)
+    setStatus(
+      state,
+      allow
+        ? `Shared ${folder} — this notebook can now be opened from another machine.`
+        : `Stopped sharing ${folder}.`
+    )
+  } catch (error) {
+    api.warn('could not update the remote allow-list', error)
+    if (state.shareToggleEl) state.shareToggleEl.checked = !allow
+    setStatus(state, `Could not share that folder: ${error.message}`)
   }
 }
 
@@ -1423,13 +1537,37 @@ function buildFilePanel(state) {
     onOpenFolderClick(state).catch((error) => api.warn('open folder failed', error))
   })
 
+  // FORMAT.md §2 share toggle (owner report 2026-07-29) — hidden by default;
+  // updateShareToggle() reveals it only for a LOCAL viewer looking at a file
+  // no remote caller could reach. See that function for why local-only.
+  state.shareToggleEl = el('input', {
+    className: 'llnb-share-toggle-box',
+    attrs: { type: 'checkbox', id: `llnb-share-${state.node?.id ?? 'x'}` }
+  })
+  state.shareToggleLabelEl = el('label', {
+    className: 'llnb-share-toggle-label',
+    attrs: { for: state.shareToggleEl.id }
+  })
+  state.shareToggleWrapEl = el('div', { className: 'llnb-share-toggle' }, [
+    state.shareToggleEl,
+    state.shareToggleLabelEl
+  ])
+  state.shareToggleWrapEl.style.display = 'none'
+  state.shareToggleEl.addEventListener('change', () => {
+    onShareToggleChange(state).catch((error) => api.warn('share toggle failed', error))
+  })
+
   const actions = el('div', { className: 'llnb-filepanel-actions' }, [state.browseBtn, state.openFolderBtn])
   // Reworked 2026-07-19: path + buttons share one row (full-width path
   // control, "what's the point of the file field at top, replace it with
   // this"); the host-machine note (populated only when remote — see
   // updateRemoteGatingUi()) gets its OWN row below, never squeezed inline.
   const row = el('div', { className: 'llnb-filepanel-row' }, [state.filePanelPathEl, actions])
-  const panel = el('div', { className: 'llnb-filepanel' }, [row, state.filePanelNoteEl])
+  const panel = el('div', { className: 'llnb-filepanel' }, [
+    row,
+    state.filePanelNoteEl,
+    state.shareToggleWrapEl
+  ])
 
   // Re-fit the path's front-truncation on a node resize too — "full width"
   // is a live property of the bar's current size, not just its size at
@@ -1773,6 +1911,9 @@ async function reloadNow(state) {
   // the (possibly relative) `file` WIDGET value above.
   state.resolvedFile = typeof data.file === 'string' ? data.file : null
   updateFilePanelPath(state)
+  // The share toggle's whole condition is "is THIS path reachable remotely",
+  // so it has to be re-evaluated whenever the resolved path changes.
+  updateShareToggle(state)
   setStatus(state, baselineStatus(state, data.problems))
 
   // Restore the selection from the entry widget's (possibly multi-line)

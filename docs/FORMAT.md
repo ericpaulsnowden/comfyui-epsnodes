@@ -59,9 +59,46 @@ own bind address:
   read/write any path the process user can touch, per §1.
 - **Non-loopback requests** (the server is `--listen`-ing and the caller is
   another machine): mutating routes (§5 POST) and arbitrary-path reads REFUSE
-  paths outside `library_dir` with `403 {"error": ...}` naming this section.
-  Everything inside `library_dir` still works — a remote browser tab driving
-  a shared library is legitimate.
+  paths outside `library_dir` **and outside the host's `remote_dirs`
+  allow-list** with `403 {"error": ...}` naming this section. Everything
+  inside those still works — a remote browser tab driving a shared library is
+  legitimate.
+- **`remote_dirs` — the allow-list, and why it has to exist** (owner report
+  2026-07-29). A notebook on a NAS mount
+  (`/run/user/1000/gvfs/smb-share:…/docs/loras.md`) worked from the Linux box
+  running ComfyUI and 403'd from his Mac. Two rules that were each correct
+  collided: §1 explicitly blesses absolute NAS paths as "the design center,
+  not an edge case", and the rule above confines remote callers to
+  `library_dir` — so the node was unusable from any second machine.
+  - The reconciliation is a host-owned list of extra folders, in `config.json`
+    alongside `library_dir`, written ONLY through the loopback-only
+    `POST /lora_library/remote_dirs`. §7.2's "Share this folder with remote
+    browsers" toggle is its one UI, and it appears only for a LOCAL viewer.
+  - **Why not simply let remote reads through.** The `file` value arrives in
+    the request, and the workflow that "chose" it lives in the browser — so
+    the server cannot distinguish a path the host's workflow configured from
+    one a caller invented. Permitting an arbitrary remote `file` is therefore
+    an arbitrary-file read on the host, which is the one thing this section
+    exists to prevent. Only a host-side list can tell the two apart.
+  - **Containment rules** (each pinned in `tests/test_routes_notebook.py`):
+    both sides fully resolved, so `..` traversal escapes and — importantly —
+    a **symlink planted inside a shared folder resolves to its real target and
+    is refused**. That is the safe direction, and it is also why "symlink the
+    NAS file into the library folder" is NOT a workaround for this guard.
+    Matching is by path SEGMENT, so `/nas/docs` never grants `/nas/docs-private`,
+    and never grants the parent. A listed folder is never created (`mkdir`
+    would shadow a real mount point while its NAS is offline), and an
+    unresolvable entry simply doesn't match instead of failing the check.
+  - **What changed to surface this**: nothing loosened — this confinement has
+    been in place since the first commit. Before v0.35.8 a remote browser
+    never actually REQUESTED the workflow's saved absolute path (litegraph
+    restores `widgets_values` after attach and nothing re-read the file), so
+    it silently loaded the backend DEFAULT notebook inside `library_dir` and
+    looked like it worked. v0.35.8's `wireConfigureReload` made the node
+    honour its saved path, which exposed a wall that had always been there.
+    General lesson: **fixing "the node ignores its saved state" can surface
+    permission errors that the bug was masking** — when a state-restore fix
+    ships, re-check the remote/gated paths it now genuinely exercises.
 - Notebook writes additionally require the resolved path to end in `.md`
   (any request origin). Set slugs must match `^[a-z0-9][a-z0-9-_]*$` and
   resolve strictly inside `sets/` (no traversal).
@@ -253,7 +290,8 @@ message>"}` with a 4xx status. `mtime` values are float POSIX seconds.
 | Route | → |
 |---|---|
 | `GET /lora_library/version` | `{"version": "X.Y.Z"}` |
-| `GET /lora_library/config` | `{"library_dir", "default_library_dir", "configured": bool, "is_local": bool, "library_dir_exists": bool, "library_dir_note": str}` — `is_local` = §2 loopback verdict for THIS request (drives §7.2's remote read-only gating). `library_dir_exists` = whether the SERVER can see the configured folder right now — the owner's 2026-07-19 NAS confusion was a library path the server machine couldn't resolve, invisible until a node errored. `library_dir_note` = "" when fine, else a one-line human diagnosis chosen server-side: unreachable path, or a path whose SHAPE doesn't match the server's OS (e.g. `/Volumes/…` configured while the server is Windows, or `C:\`/UNC while it's POSIX — a strong sign it was set from the wrong machine's perspective) |
+| `POST /lora_library/remote_dirs` `{"dir","allow"?}` | §2 remote allow-list: add (`allow` omitted/true) or remove (`false`) one absolute folder non-loopback callers may also touch. **LOOPBACK-ONLY** (403 otherwise) — this list IS part of the boundary §2 enforces, so a remote caller able to extend it could grant itself the arbitrary-file read that boundary denies. Non-absolute / `scheme://` / non-bool `allow` ⇒ 400. Adding a folder already covered is a no-op. → `{"ok","remote_dirs"}` |
+| `GET /lora_library/config` | `{"library_dir", "default_library_dir", "configured": bool, "is_local": bool, "library_dir_exists": bool, "library_dir_note": str}` — `is_local` = §2 loopback verdict for THIS request (drives §7.2's remote read-only gating). `library_dir_exists` = whether the SERVER can see the configured folder right now — the owner's 2026-07-19 NAS confusion was a library path the server machine couldn't resolve, invisible until a node errored. `library_dir_note` = "" when fine, else a one-line human diagnosis chosen server-side: unreachable path, or a path whose SHAPE doesn't match the server's OS (e.g. `/Volumes/…` configured while the server is Windows, or `C:\`/UNC while it's POSIX — a strong sign it was set from the wrong machine's perspective). `remote_dirs` = the §2 allow-list, driving §7.2's host-only share toggle |
 | `GET /lora_library/fs/list?dir=` | **loopback-only** (403 remote): server-filesystem browser for the §7.2 picker. Empty/missing `dir` ⇒ `library_dir`. `dir="ROOTS"` (sentinel) ⇒ the top level: the library folder (labeled) + "Home" always, then a platform tail — every existing drive on Windows (`C:\`, `D:\`, `U:\`, …); every `/Volumes` mount on macOS; or on Linux **every filesystem the OS reports mounted** (read from `/proc/self/mounts`, network shares first and labeled — a GVFS share becomes `<share> on <server>`, everything else `<folder> (<fstype>)`), then the conventional mount parents that exist (`/`, `/mnt`, `/media`, `/media/<user>`, `/run/media/<user>`, `/srv`, `/run/user/<uid>/gvfs`) as a fallback for browsing somewhere not yet mounted. Pseudo filesystems, snap/container/EFI subtrees, `/` itself (offered as "Filesystem root") and anything this process cannot list are filtered out. **2026-07-26**: the POSIX tail used to read `/Volumes` ONLY, which does not exist on Linux, so a Linux user's ROOTS collapsed to library+Home; then reading the mount table replaced guessing at parents — owner: "How do I get to my shared drives? Mounting can't be the answer." Reading the table means an already-mounted share is offered **wherever it lives**, with no path knowledge required. Entries are de-duplicated by path, and **every** root entry (including Home) is dropped when the server can't actually list it — his `HOME=/root` on a non-root process made "Home" a guaranteed `could not list /root: Permission denied` 400. → `{"dir": <abs or "ROOTS">, "parent": <abs, "ROOTS", or null>, "dirs": [names], "files": [names]}` — `files` limited to `.md`; entries sorted case-insensitively; a directory at a drive root reports `parent: "ROOTS"` so the picker can climb to the drive list (the 2026-07-19 "stuck at top of C:\, can't reach another drive/NAS" fix); a UNC path (`\\server\share\…`) passed as `dir` lists normally; unreadable/nonexistent dir ⇒ 400; a `dir` containing `://` (a typed `smb://`/`nfs://`/… address) ⇒ 400 whose message says in plain language that it is a network address, not a file path, and names a mount point to use instead (2026-07-26) |
 | `POST /lora_library/notebook/open_folder` `{"file"}` | **loopback-only** (403 remote): reveals the resolved notebook file's folder in the OS file manager ON THE SERVER MACHINE (Explorer/Finder). Missing folder ⇒ 404; `{"ok": true}` |
 | `POST /lora_library/config` `{"library_dir"}` | validates (absolute, creatable, writable), persists; `{"ok", "library_dir"}` |
@@ -1747,6 +1785,18 @@ hand-bypassing groups. Roadmap: `research/roadmap-eps-distributor.md`.
     discarded the typed text. The live text now lives in
     `state.inlineRename.value` and `renderList()` re-establishes the editor
     after every rebuild, so a re-render is invisible to the user.
+  - **Share this folder with remote browsers** (owner report 2026-07-29): a
+    checkbox on its own row under the file-panel path, shown ONLY when (a) the
+    viewer is LOCAL and (b) the current file sits outside everything remote
+    callers can already reach — i.e. exactly when a second machine would get
+    the §2 403. Ticking it POSTs the file's PARENT folder to the loopback-only
+    `POST /lora_library/remote_dirs`; the toggle then self-hides, because the
+    condition that summoned it no longer holds. Local-only is not cosmetic:
+    see §2 for why a remote caller must not be able to extend that list. A
+    remote viewer instead gets the §2 error text, which now NAMES the folder
+    and says to go turn this on from the host machine — the old message
+    stopped at "not allowed", which is a dead end for the one case that
+    legitimately hits it.
   - Delete removes EVERY selected entry (owner amendment 2026-07-18c): the
     confirm label shows the count when >1 ("Are you sure? (3)"); deletion
     is sequential client-side over the §5 delete route, refreshing

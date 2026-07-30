@@ -233,3 +233,71 @@ def test_collapse_toggle_still_runs_before_selection(source: str) -> None:
             assert head.index("selectCategory") >= 0
     # Neither call site may select first.
     assert "selectCategory(state, category)\n      toggleCategoryCollapse" not in source
+
+
+# ---------------------------------------------------------------------------
+# FORMAT.md §2 share toggle (owner report 2026-07-29) — the frontend half.
+# The security decision lives on the server (tests/test_routes_notebook.py);
+# these pin that the UI can't misrepresent it.
+# ---------------------------------------------------------------------------
+
+
+def test_share_toggle_is_offered_only_to_a_local_viewer(source: str) -> None:
+    """A remote viewer must never be shown this control: the route behind it is
+    loopback-only, so for them it could only ever fail — and offering it would
+    imply a remote browser can widen its own access, which is the opposite of
+    what §2 guarantees."""
+    block = source.split("function updateShareToggle(state)", 1)[1]
+    block = block.split("\n/**", 1)[0]
+    assert "state.isLocal !== false" in block
+
+
+def test_share_toggle_is_offered_only_when_the_path_is_actually_unreachable(
+    source: str,
+) -> None:
+    """Otherwise it would sit there on every notebook inside the library
+    folder, inviting a click that grants access nobody needed."""
+    block = source.split("function updateShareToggle(state)", 1)[1]
+    block = block.split("\n/**", 1)[0]
+    assert "state.libraryDir" in block and "state.remoteDirs" in block
+    assert "pathIsInsideAny(" in block
+    assert "!reachable" in block
+
+
+def test_share_toggle_posts_the_parent_folder_not_the_file(source: str) -> None:
+    block = source.split("async function onShareToggleChange(state)", 1)[1]
+    block = block.split("\n// ---", 1)[0]
+    assert "parentDirOf(state.resolvedFile" in block
+    assert "'/lora_library/remote_dirs'" in block
+    # The cached /config payload carries remote_dirs and is shared by every
+    # attached node, so a stale cache would leave the toggle lying.
+    assert "invalidateConfigCache()" in block
+    assert "refreshRemoteGating(state)" in block
+
+
+def test_share_toggle_reverts_its_checkbox_when_the_post_fails(source: str) -> None:
+    """A checkbox that stays ticked after a failed write claims access the
+    server never granted."""
+    block = source.split("async function onShareToggleChange(state)", 1)[1]
+    block = block.split("\n// ---", 1)[0]
+    assert "state.shareToggleEl.checked = !allow" in block
+
+
+def test_path_containment_check_is_segment_wise_not_a_string_prefix(source: str) -> None:
+    """`/nas/docs` must not match `/nas/docs-private`. This one only decides
+    whether to OFFER the toggle — the server re-derives the real check — but a
+    frontend that disagrees with the server misinforms the user about what is
+    already shared."""
+    block = source.split("function pathIsInsideAny(fullPath, roots)", 1)[1]
+    block = block.split("\nfunction ", 1)[0]
+    assert "'/'" in block and "'\\\\'" in block, "must require a separator after the root"
+    assert "value === r" in block, "the root itself counts as inside"
+
+
+def test_share_toggle_is_re_evaluated_when_the_resolved_path_changes(source: str) -> None:
+    """Its entire condition is "is THIS path reachable remotely", so pointing
+    the node at a different file has to re-decide it."""
+    assert source.count("updateShareToggle(state)") >= 3
+    # ...including from the load path that assigns resolvedFile.
+    load = source.split("state.resolvedFile = typeof data.file === 'string'", 1)[1][:400]
+    assert "updateShareToggle(state)" in load

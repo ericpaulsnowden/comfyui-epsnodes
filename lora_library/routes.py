@@ -106,6 +106,25 @@ def request_is_loopback(request: web.Request) -> bool:
         return False
 
 
+def _is_inside(path: Path, root: Path) -> bool:
+    """True when *path* is at or under *root*, both fully resolved.
+
+    Resolving BOTH sides is the load-bearing part: it collapses ``..``
+    traversal and, critically, follows symlinks — so a symlink planted inside
+    an allowed folder that points somewhere else resolves to its real target
+    and fails this check. That is the safe direction, and it is why "just
+    symlink the NAS file into the library folder" is NOT a workaround for the
+    §2 remote guard (see :meth:`LibraryContext.remote_dirs`).
+
+    A root that can't be resolved right now (an unmounted NAS in the
+    allow-list) simply doesn't match, rather than taking the whole check down.
+    """
+    try:
+        return path.resolve().is_relative_to(root.resolve())
+    except OSError:
+        return False
+
+
 def notebook_path_error(
     context: LibraryContext, path: Path, *, loopback: bool, writing: bool
 ) -> str | None:
@@ -113,14 +132,21 @@ def notebook_path_error(
     if writing and path.suffix.lower() != ".md":
         return f"notebook files must end in .md (got {path.name!r}) — FORMAT.md §2"
     if not loopback:
-        try:
-            inside = path.resolve().is_relative_to(context.library_dir().resolve())
-        except OSError:
-            inside = False
-        if not inside:
+        # library_dir is resolved through the real method (it is created on
+        # demand); the host's extra shared folders are checked as-is.
+        roots = [context.library_dir(), *context.remote_dirs()]
+        if not any(_is_inside(path, root) for root in roots):
+            # Names the exact folder to share and where to do it. The old
+            # message stopped at "not allowed", which is a dead end for the
+            # one case that legitimately hits it: a host-configured NAS
+            # notebook being opened from a second machine (owner report
+            # 2026-07-29).
             return (
                 "remote (non-loopback) requests may only touch paths inside the "
-                "library folder — FORMAT.md §2"
+                "library folder, or a folder the host has shared for remote "
+                "access — FORMAT.md §2. To use this notebook from another "
+                "machine, open ComfyUI ON the machine running it and turn on "
+                f'"Share with remote browsers" for {path.parent}.'
             )
     return None
 
@@ -789,6 +815,10 @@ def register_core(context: LibraryContext, routes: web.RouteTableDef) -> None:
                 "is_local": request_is_loopback(request),
                 "library_dir_exists": library_dir_exists,
                 "library_dir_note": library_dir_note,
+                # FORMAT.md §2 remote allow-list — the folders outside
+                # library_dir that non-loopback callers may also touch. Drives
+                # §7.2's host-only "Share with remote browsers" toggle.
+                "remote_dirs": [str(p) for p in context.remote_dirs()],
             }
         )
 
@@ -926,6 +956,62 @@ def register_core(context: LibraryContext, routes: web.RouteTableDef) -> None:
         config["library_dir"] = str(path)
         context.save_config(config)
         return web.json_response({"ok": True, "library_dir": str(path)})
+
+    @routes.post("/lora_library/remote_dirs")
+    async def post_remote_dirs(request: web.Request) -> web.Response:
+        """Add/remove a folder from the FORMAT.md §2 remote allow-list.
+
+        Body: ``{"dir": "<absolute path>", "allow": bool}``.
+
+        LOOPBACK-ONLY, for the same reason ``POST /config`` is: this list IS
+        (part of) the boundary §2 enforces for remote callers, so letting a
+        remote caller extend it would let it grant itself the arbitrary-file
+        read the boundary exists to deny. That is also why the §7.2 toggle
+        this backs only appears for a local viewer.
+        """
+        if not request_is_loopback(request):
+            return error_response(
+                403, "shared folders can only be changed locally — FORMAT.md §2"
+            )
+        try:
+            body = await request.json()
+        except Exception:
+            return error_response(400, "body must be JSON")
+        if not isinstance(body, dict):
+            return error_response(400, "body must be a JSON object")
+        raw = str(body.get("dir") or "").strip()
+        if not raw:
+            return error_response(400, "'dir' is required")
+        if "://" in raw:
+            return error_response(
+                400, f"{raw.split('://', 1)[0]}:// is a network address, not a file path"
+            )
+        path = Path(raw)
+        if not path.is_absolute():
+            return error_response(400, f"shared folder must be an absolute path (got {raw!r})")
+        allow = body.get("allow", True)
+        if not isinstance(allow, bool):
+            return error_response(400, "'allow' must be a boolean")
+
+        config = context.load_config()
+        current = [str(p) for p in context.remote_dirs()]
+        wanted = str(path)
+        if allow:
+            # Compared as resolved paths so the same folder reached two ways
+            # (a trailing slash, a `..`, a symlinked parent) can't be listed
+            # twice — but STORED as given, so an entry stays meaningful while
+            # its NAS is unmounted and unresolvable.
+            already = any(_is_inside(path, Path(entry)) for entry in current)
+            if not already:
+                current.append(wanted)
+        else:
+            current = [entry for entry in current if Path(entry) != path]
+        if current:
+            config["remote_dirs"] = current
+        else:
+            config.pop("remote_dirs", None)
+        context.save_config(config)
+        return web.json_response({"ok": True, "remote_dirs": current})
 
     @routes.get("/lora_library/loras")
     async def get_loras(_request: web.Request) -> web.Response:

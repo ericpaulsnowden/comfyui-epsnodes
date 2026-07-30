@@ -82,6 +82,16 @@ captions).
   by `/etc/fstab`, or by an admin at some path nobody would guess all show
   up on their own — you never have to know or type a path. macOS lists
   `/Volumes`, Windows lists drive letters.
+- **Opening the same workflow from a second machine** (e.g. ComfyUI runs on a
+  Linux box, you drive it from a laptop): a notebook that lives *outside* the
+  library folder — on a NAS, say — is blocked for the second machine until the
+  host allows it. That's deliberate: ComfyUI's custom routes have no login, so
+  a browser on another machine is only trusted with the library folder plus
+  whatever the host explicitly shares. **The fix is one click, on the machine
+  running ComfyUI:** open the notebook there and tick **"Share this folder with
+  remote browsers"** under the file path. The laptop can then read and edit it
+  normally. Only that machine can grant it, and it grants exactly that one
+  folder — not its parent, not a similarly-named neighbour.
 - **What won't work is a `smb://…` URL** typed into the file box. That's a
   file-manager *address*, not a filesystem path — no program (ComfyUI
   included) can open one, and the node says so plainly instead of failing
