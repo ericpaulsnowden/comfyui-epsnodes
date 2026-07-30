@@ -1718,22 +1718,40 @@ hand-bypassing groups. Roadmap: `research/roadmap-eps-distributor.md`.
     directly below the ACTIVE entry (via the §5 entry route's `after`),
     in that entry's category — not at end-of-file. With nothing selected it
     appends as before.
-  - Rename via the editor header (owner ask 2026-07-19): the editor pane
-    has a NAME field at its top showing the active item's name; editing it
-    and Saving renames (entries via the entry route's `rename_to`;
-    categories via a category-rename — see §6.3 note / add a `rename_to`
-    to the category route). This is the PRIMARY rename path because the
-    old double-click-inline rename was reported not working; double-click
-    now simply focuses this field. Duplicate names refused client-side
-    first, server authoritative.
+  - **Renaming — TWO paths, both required** (owner ask 2026-07-29: "my
+    expectation is i can either double click a name to rename in place, or if
+    I change the name at the top of the notebook the item becomes savable and
+    I can save with the new name"). Entries AND category headers support both:
+    - **In place:** double-click the row. An input replaces the row's label,
+      pre-selected; Enter commits, Esc cancels, clicking away commits.
+    - **Editor header:** a NAME field at the top of the right pane always
+      shows the active item's name. Editing it dirties the SAME Save button
+      the body does, and Save sends the new name as `rename_to` in the very
+      same request as the body/description write.
+    Both go through the §5 entry/category routes' `rename_to`, refuse
+    duplicates client-side first (server authoritative), and surface a §3.5
+    conflict through the standard Reload/Overwrite UI.
+    **The in-place path is rename-ONLY:** those routes always rewrite the
+    body, so it re-sends the target's CURRENT ON-DISK text (fetched at commit
+    time), never the textarea's. That matters twice over — the row being
+    renamed need not be the one loaded in the editor, and even when it is,
+    unsaved body edits must not be committed by what the user asked to be a
+    rename.
+    **History (don't repeat it):** v0.10.0 shipped an inline rename, it was
+    reported not working, and v0.12.0 REMOVED it in favour of the name field
+    rather than root-causing it — so the request arrived a second time nine
+    days later, and this doc kept a stale bullet promising the removed
+    feature the whole time. The original's fatal flaw was that its editor
+    lived only in the DOM: any `renderList()` under it (poll refresh, late
+    fetch, collapse toggle, drag) restored the plain label and silently
+    discarded the typed text. The live text now lives in
+    `state.inlineRename.value` and `renderList()` re-establishes the editor
+    after every rebuild, so a re-render is invisible to the user.
   - Delete removes EVERY selected entry (owner amendment 2026-07-18c): the
     confirm label shows the count when >1 ("Are you sure? (3)"); deletion
     is sequential client-side over the §5 delete route, refreshing
     `base_mtime` from each response; a mid-sequence conflict stops the run
     and surfaces the standard §3.5 conflict UI.
-  - Rename: double-click an entry row to edit its name inline (Enter/✓
-    commits via the §5 entry route's `rename_to`, Esc cancels; duplicate
-    names are refused client-side first, server remains the authority).
   - Categories in the UI (owner ask 2026-07-19): `＋ New` with a name
     STARTING WITH `#` creates a category instead of an entry (the `#` and
     surrounding whitespace are stripped from the stored name). Category
@@ -1741,7 +1759,17 @@ hand-bypassing groups. Roadmap: `research/roadmap-eps-distributor.md`.
     collapse/expand of that category's entries in the left list (owner ask
     "single tap category name to collapse category"; collapse state is
     UI-only, per-browser, not written to the file), and (2) make the
-    category active so the editor pane shows its §3.1 description. Save
+    category active so the editor pane shows its §3.1 description.
+    **One exception to (1), added 2026-07-29:** the tap that first SELECTS a
+    header only ever EXPANDS, never collapses. Selecting is the only way to
+    get a category's name into the editor, so folding collapse into that same
+    tap meant "click the category you want to rename" also hid every entry
+    inside it — the rename worked, but it read as the entries having been
+    deleted (found on the rig while chasing the rename report). Taps on an
+    ALREADY-ACTIVE header toggle collapse exactly as before, so the
+    single-tap-collapse ask is intact. The toggle must therefore keep running
+    BEFORE `selectCategory()` at both call sites, since it reads
+    `activeCategory`'s PREVIOUS value. Save
     writes the description (and rename via the header name field) through
     the §5 category route — the editor is contextual (entry active ⇒ body;
     category active ⇒ description; the mode hint says which). Category

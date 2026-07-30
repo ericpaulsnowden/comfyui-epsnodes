@@ -105,10 +105,20 @@
  * failed name with that one request forced (base_mtime omitted), then
  * continues normally. See performDeleteRun() below.
  *
+ * Renaming — TWO paths, both of them the owner's stated expectation
+ * (2026-07-29: "my expectation is i can either double click a name to rename
+ * in place, or if I change the name at the top of the notebook the item
+ * becomes savable and I can save with the new name"). The name field below is
+ * the second; the first is the row-level inline editor (beginInlineRename()/
+ * commitInlineRename(), in the "Rename in place" section further down).
+ * v0.10.0 shipped an inline rename, it was reported not working, and v0.12.0
+ * REMOVED it in favour of the name field alone rather than root-causing it —
+ * which is why the same request arrived a second time. See
+ * onEntryDoubleClick()'s history note for the two structural reasons that
+ * original was fragile and how the new one addresses each.
+ *
  * Rename via the editor's name field (FORMAT.md §7.2 amendment, owner ask
- * 2026-07-19 — supersedes the double-click-inline-input scheme this
- * paragraph used to describe, removed outright, "the old inline rename was
- * reported not working"): a NAME field sits at the top of the right pane,
+ * 2026-07-19): a NAME field sits at the top of the right pane,
  * above the mode hint (buildUi()'s `state.nameFieldEl`). It always shows
  * the currently-active item's name (entry or category — populateEditor()
  * sets it alongside the textarea, so the two never drift apart) and is
@@ -119,14 +129,12 @@
  * the active name — one request does both, atomically, whenever both
  * changed. Duplicate names are refused client-side first (checked against
  * `state.entries`/`state.categories`), server authoritative same as every
- * other write in this file. Double-clicking a row no longer opens an
- * inline editor — it just moves focus (+select()) to this field via
- * focusNameField(), relying on the SAME click-vs-drag-vs-double-click
- * disambiguation already documented for onEntryPointerDown below (both
- * single-clicks that precede a dblclick resolve to a selection change
- * first, which is what makes the name field already show the right item's
- * name by the time focus lands on it — modulo the harmless brief race
- * described at focusNameField()'s own definition).
+ * other write in this file. Double-clicking a row opens the inline editor on
+ * that row (2026-07-29); focusNameField() is the fallback for when there is
+ * no rendered row to edit. Both rely on the SAME click-vs-drag-vs-double-click
+ * disambiguation already documented for onEntryPointerDown below: the two
+ * single-clicks that precede a dblclick resolve to a selection change first,
+ * so the row is already the active item by the time either editor opens.
  *
  * File panel (FORMAT.md §7.2 amendment, reworked 2026-07-19 — "why trim at
  * all, make it full width; what's the point of the file field at top,
@@ -239,16 +247,22 @@
  * "active" one underneath category mode) and clicking a header always
  * enters it, but neither path ever calls setSelection()/syncEntryWidget().
  * Delete is entry-only and disabled outright in category mode
- * (updateDeleteButtonEnabled()); double-clicking a header focuses the name
- * field exactly like double-clicking an entry row does (see "Rename via
- * the editor's name field" above) — it never opens anything header-local.
+ * (updateDeleteButtonEnabled()); double-clicking a header opens the inline
+ * rename editor on the header itself, exactly like double-clicking an entry
+ * row does (see "Renaming — TWO paths" above).
  *
  * Single-tap collapse (owner ask 2026-07-19 "single tap category name to
  * collapse category"): a plain tap on a header now does TWO things at once
  * — toggleCategoryCollapse() flips its membership in
  * `state.collapsedCategories` (a plain `Set<string>`, created once per
  * node in createState() and never read by anything outside this file) and
- * selectCategory() still enters category mode, exactly as before. Collapse
+ * selectCategory() still enters category mode, exactly as before. ONE
+ * exception, added 2026-07-29 after the rename report: the tap that first
+ * SELECTS a header only ever expands, never collapses, because selecting is
+ * the only way to get a category's name into the editor and hiding all of its
+ * entries in the same gesture read as the entries having been deleted. Taps on
+ * an ALREADY-ACTIVE header toggle collapse exactly as before, so the feature
+ * he asked for is intact — see toggleCategoryCollapse()'s own comment. Collapse
  * state is deliberately NOT a node property and never touches
  * `entry`/`file` — it lives only on this in-memory `Set`, so it is pure
  * per-node, per-session UI state: it survives any number of renderList()
@@ -579,6 +593,33 @@ const CSS_TEXT = `
   padding: 3px 5px;
   font-size: 11px;
 }
+.llnb-inline-rename {
+  /* Rename in place (owner ask 2026-07-29, "double click a name to rename in
+     place") — replaces a row's text with an input sized to the row, so the
+     rename happens where the user is looking instead of only in the editor's
+     name field. Deliberately shares .llnb-entry's box metrics (padding/font)
+     so the row neither grows nor shifts when the editor opens. */
+  display: block;
+  width: 100%;
+  box-sizing: border-box;
+  background: var(--comfy-input-bg, #1e1e1e);
+  border: 1px solid rgba(66, 133, 244, 0.9);
+  border-radius: 3px;
+  color: var(--input-text, #ccc);
+  padding: 2px 6px;
+  margin: 0;
+  font: inherit;
+  outline: none;
+}
+.llnb-inline-rename-host {
+  /* The row while it hosts the editor: drop the text-clipping and the
+     drag/select affordances so the input behaves like an input. */
+  padding: 1px 4px;
+  overflow: visible;
+  cursor: auto;
+  user-select: auto;
+  touch-action: auto;
+}
 .llnb-name-field {
   /* Rename via the editor's name field (FORMAT.md §7.2 amendment, owner ask
      2026-07-19) — sits above .llnb-mode-hint as the editor pane's own
@@ -890,6 +931,12 @@ function createState(node, fileWidget, entryWidget) {
     // category mode must never touch either.
     categories: [],
     activeCategory: null,
+    // Rename in place (owner ask 2026-07-29) — the row currently hosting an
+    // inline rename editor, or null. `{kind:'entry'|'category', name, value}`;
+    // `value` is the live typed text, kept here (not only in the DOM) so
+    // renderList() can rebuild the list under an open editor without losing
+    // what the user has typed. See beginInlineRename().
+    inlineRename: null,
     // Single-tap collapse (FORMAT.md §7.2 amendment, owner ask 2026-07-19)
     // — category names currently collapsed in the left list. Pure UI/
     // session state: never read outside this file, never serialized, reset
@@ -2222,6 +2269,13 @@ function renderList(state) {
     appendEntry(entries[entryIndex])
   }
 
+  // Rename in place (owner ask 2026-07-29): an open editor has to survive the
+  // rebuild above. This is what makes a poll refresh / late fetch / collapse
+  // toggle invisible to someone mid-rename, and it is the specific failure
+  // that sank the v0.10.0 inline rename — see onEntryDoubleClick's history
+  // note. Last, so the editor mounts onto the final rows.
+  restoreInlineRename(state)
+
   // See the capture at the top of this function (2026-07-24 owner fix).
   state.listEl.scrollTop = previousScrollTop
 }
@@ -2241,6 +2295,10 @@ function buildEntryRow(state, entry) {
     text: entry.name,
     attrs: { tabindex: '0', title: entry.name }
   })
+  // Rename in place (owner ask 2026-07-29): the name this row stands for, so
+  // inlineRenameRow() can find it again after a rebuild without depending on
+  // the row's text (which is the input's, not the name's, while editing).
+  row.__llnbName = entry.name
   row.addEventListener('pointerdown', (event) => onEntryPointerDown(state, event, entry.name))
   row.addEventListener('dblclick', (event) => onEntryDoubleClick(state, event, entry.name))
   row.addEventListener('keydown', (event) => {
@@ -2271,11 +2329,17 @@ function buildCategoryHeaderRow(state, category) {
     text: `${collapsed ? '▸' : '▾'} ${category}`,
     attrs: { tabindex: '0', title: category }
   })
+  headerEl.__llnbName = category
   headerEl.addEventListener('pointerdown', (event) => onCategoryPointerDown(state, event, category))
   headerEl.addEventListener('dblclick', (event) => {
     event.preventDefault()
     event.stopPropagation()
-    focusNameField(state)
+    state.drag?.cleanup?.()
+    state.drag = null
+    // Rename in place (owner ask 2026-07-29) — same gesture as an entry row.
+    // A header's two preceding taps have each toggled collapse, so the
+    // category is back in whatever state it started in by the time this runs.
+    if (!beginInlineRename(state, 'category', category)) focusNameField(state)
   })
   headerEl.addEventListener('keydown', (event) => {
     if (event.key !== 'Enter' && event.key !== ' ') return
@@ -2292,8 +2356,25 @@ function buildCategoryHeaderRow(state, category) {
  * serialization. Called unconditionally on every tap (see
  * onCategoryPointerDown()/the header's own keydown handler above) — even
  * when the category is already active, since re-selecting it is a no-op
- * for selectCategory() but the collapse toggle must still happen. */
+ * for selectCategory() but the collapse toggle must still happen.
+ *
+ * EXCEPT on the tap that first SELECTS the category (2026-07-29, found on the
+ * rig while chasing the owner's rename report). Selecting a category is the
+ * only way to get its name into the editor, and folding collapse into that
+ * same tap meant "click the category you want to rename" also hid every entry
+ * inside it — the rename worked, but it looked like the entries had been
+ * eaten. So the FIRST tap on a not-yet-active header only selects (leaving it
+ * expanded, or expanding it if it was collapsed); once it IS the active
+ * category, taps toggle collapse exactly as before. Every entry stays reachable
+ * at the moment you go to rename its category. */
 function toggleCategoryCollapse(state, category) {
+  if (state.activeCategory !== category) {
+    // The selecting tap: never hide the contents, but do reveal them if this
+    // header was sitting collapsed.
+    state.collapsedCategories.delete(category)
+    renderList(state)
+    return
+  }
   if (state.collapsedCategories.has(category)) {
     state.collapsedCategories.delete(category)
   } else {
@@ -2876,7 +2957,8 @@ function onCategoryPointerDown(state, event, category) {
 // ---------------------------------------------------------------------------
 
 /** Focuses (+selects) the name field, unless there's nothing loaded into
- * it yet (disabled — see resetEditorDom()/populateEditor()). */
+ * it yet (disabled — see resetEditorDom()/populateEditor()). Still the
+ * fallback when an inline rename can't open (see onEntryDoubleClick). */
 function focusNameField(state) {
   if (!state.nameFieldEl || state.nameFieldEl.disabled) return
   state.nameFieldEl.focus()
@@ -2884,15 +2966,31 @@ function focusNameField(state) {
 }
 
 /**
- * Rename via the editor's name field (FORMAT.md §7.2 amendment): native
- * `dblclick` only ever follows two complete click cycles on the same
- * element — see the file header — so by the time this fires, `name`'s row
- * has already become `state.activeName` via the two preceding single-
- * clicks (selectSingle()/chooseSelection()), which is what makes "focus
- * the name field" land on the right item without this handler needing to
- * touch selection itself.
+ * Rename in place (owner ask 2026-07-29: "my expectation is i can either
+ * double click a name to rename in place, or if I change the name at the top
+ * of the notebook the item becomes savable and I can save with the new
+ * name"). Both paths now exist and share one commit function: this one edits
+ * AT the row, performSave()/performSaveCategory() commit the name field.
+ *
+ * History worth keeping: v0.10.0 shipped a double-click inline rename, it was
+ * reported not working, and v0.12.0 REMOVED it in favour of the name field
+ * rather than root-causing it — so the same request is arriving a second time.
+ * This implementation is deliberately not a revival of that code; the two
+ * things that made the original fragile are addressed head-on:
+ *   - **renderList() destroys rows.** The old editor lived only in the DOM, so
+ *     any re-render under it (a poll refresh, a late `selectCategory` fetch, a
+ *     collapse toggle, a drag) silently threw away what the user had typed and
+ *     put the plain label back — indistinguishable from "renaming doesn't
+ *     work". The editor's live text now lives in `state.inlineRename.value`,
+ *     and renderList() re-establishes the editor after every rebuild
+ *     (restoreInlineRename()), so a rebuild is invisible to the user.
+ *   - **The gesture overlaps selection AND drag.** A dblclick only ever
+ *     follows two complete click cycles, so the row is already selected by the
+ *     time this runs (see the file header) — but a stray in-flight drag object
+ *     from the same pointer sequence must not survive, and the row's own
+ *     pointerdown handler must not re-arm a drag from inside the input.
  */
-function onEntryDoubleClick(state, event, _name) {
+function onEntryDoubleClick(state, event, name) {
   event.preventDefault()
   event.stopPropagation()
   // Belt-and-suspenders: a real drag can't produce a dblclick (a drag
@@ -2901,7 +2999,255 @@ function onEntryDoubleClick(state, event, _name) {
   // survive past this point.
   state.drag?.cleanup?.()
   state.drag = null
-  focusNameField(state)
+  if (!beginInlineRename(state, 'entry', name)) focusNameField(state)
+}
+
+// ---------------------------------------------------------------------------
+// Rename in place (owner ask 2026-07-29) — the row-level editor
+// ---------------------------------------------------------------------------
+
+/** The rendered row for an inline-renameable target, or null. */
+function inlineRenameRow(state, kind, name) {
+  const selector = kind === 'category' ? '.llnb-category' : '.llnb-entry'
+  for (const row of state.listEl.querySelectorAll(selector)) {
+    if (row.__llnbName === name) return row
+  }
+  return null
+}
+
+/**
+ * Opens the inline editor on *name*'s row. Returns false when it can't open
+ * (no such row rendered — e.g. a collapsed category's entry), so the caller
+ * can fall back to the name field rather than leaving the gesture dead.
+ */
+function beginInlineRename(state, kind, name) {
+  if (state.busy) return false
+  const row = inlineRenameRow(state, kind, name)
+  if (!row) return false
+  // Committing the previous editor first (rather than cancelling it) keeps a
+  // rename the user has already typed from being lost by moving on.
+  if (state.inlineRename && state.inlineRename.name !== name) {
+    commitInlineRename(state).catch((error) => api.warn('inline rename failed', error))
+  }
+  state.inlineRename = { kind, name, value: name }
+  mountInlineRename(state, row)
+  return true
+}
+
+/** Builds the input into *row* and focuses it. Split from
+ * beginInlineRename() because renderList() re-mounts onto a FRESH row
+ * without restarting the rename. */
+function mountInlineRename(state, row) {
+  const active = state.inlineRename
+  if (!active) return
+  const input = el('input', {
+    className: 'llnb-inline-rename',
+    attrs: { type: 'text', value: active.value, spellcheck: 'false' }
+  })
+  input.value = active.value
+  row.replaceChildren(input)
+  row.classList.add('llnb-inline-rename-host')
+
+  input.addEventListener('input', () => {
+    if (state.inlineRename) state.inlineRename.value = input.value
+  })
+  // Every key stops here: the canvas has global shortcuts (Delete removes the
+  // selected NODE) and this file's own row handlers listen for Enter/space.
+  input.addEventListener('keydown', (event) => {
+    event.stopPropagation()
+    if (event.key === 'Enter') {
+      event.preventDefault()
+      commitInlineRename(state).catch((error) => api.warn('inline rename failed', error))
+    } else if (event.key === 'Escape') {
+      event.preventDefault()
+      cancelInlineRename(state)
+    }
+  })
+  // A pointerdown inside the input must not reach the row's own handler,
+  // which would start a selection change or arm a drag mid-edit.
+  for (const type of ['pointerdown', 'mousedown', 'dblclick', 'click']) {
+    input.addEventListener(type, (event) => event.stopPropagation())
+  }
+  // Clicking away commits, matching the name field's "Save is the commit"
+  // feel rather than silently discarding. `relatedTarget === null` (the whole
+  // widget losing focus, e.g. the canvas being clicked) counts too.
+  input.addEventListener('blur', () => {
+    if (!state.inlineRename) return
+    commitInlineRename(state).catch((error) => api.warn('inline rename failed', error))
+  })
+
+  input.focus()
+  input.select()
+  state.inlineRename.inputEl = input
+}
+
+/** Re-establishes an open editor after renderList() rebuilt the rows —
+ * without this, any re-render under the editor would discard what the user
+ * had typed (the original v0.10.0 inline rename's core failure). */
+function restoreInlineRename(state) {
+  const active = state.inlineRename
+  if (!active) return
+  const row = inlineRenameRow(state, active.kind, active.name)
+  if (!row) {
+    // The row is gone (collapsed, filtered, or deleted) — nothing to edit.
+    state.inlineRename = null
+    return
+  }
+  mountInlineRename(state, row)
+}
+
+/** Closes the editor and puts the plain row back. */
+function cancelInlineRename(state) {
+  if (!state.inlineRename) return
+  state.inlineRename = null
+  renderList(state)
+}
+
+/**
+ * Commits the open inline editor. Shares every rule the name field's Save
+ * path uses (trim, empty refused, client-side duplicate check, server
+ * authoritative, §3.5 conflict UI) — see performSave().
+ *
+ * Rename-ONLY on purpose: the §5 entry/category routes always rewrite the
+ * body, so this sends the target's CURRENT ON-DISK text straight back
+ * (fetched here, not taken from the textarea). That matters for two reasons:
+ * the row being renamed is not necessarily the one loaded in the editor, so
+ * the textarea's contents may belong to a different entry entirely; and even
+ * when it is the same one, unsaved body edits must not be silently committed
+ * by what the user asked to be a rename.
+ */
+async function commitInlineRename(state) {
+  const active = state.inlineRename
+  if (!active || state.busy) return
+  const { kind, name } = active
+  const requested = (active.value || '').trim()
+  // Captured BEFORE the editor is closed below: `force` is set only by the
+  // 409 Overwrite retry, and reading it back off `state.inlineRename` after
+  // that null-out would always be undefined — the retry would re-send the
+  // stale base_mtime and 409 forever.
+  const force = Boolean(active.force)
+
+  // Close the editor first: every path below either finishes or reports, and
+  // leaving a live input over an in-flight request invites a second commit
+  // from its own blur.
+  state.inlineRename = null
+
+  if (!requested) {
+    setStatus(state, kind === 'category' ? 'Enter a name for this category.' : 'Enter a name for this entry.')
+    renderList(state)
+    return
+  }
+  if (requested === name) {
+    renderList(state)
+    return
+  }
+  const taken =
+    kind === 'category'
+      ? state.categories.includes(requested)
+      : state.entries.some((entry) => entry.name === requested)
+  if (taken) {
+    const what = kind === 'category' ? 'category' : 'entry'
+    setStatus(state, `An ${what} named "${requested}" already exists.`)
+    renderList(state)
+    return
+  }
+
+  state.busy = true
+  updateSaveButtonEnabled(state)
+  setStatus(state, 'Renaming…')
+  renderList(state)
+  try {
+    const data =
+      kind === 'category'
+        ? await renameCategoryRequest(state, name, requested, force)
+        : await renameEntryRequest(state, name, requested, force)
+    state.busy = false
+    applyRenameResult(state, kind, name, requested, data)
+    setStatus(state, `Renamed to "${requested}".`)
+  } catch (error) {
+    state.busy = false
+    updateSaveButtonEnabled(state)
+    if (error?.status === 409) {
+      // Same §3.5 surface Save/Move use. Overwrite re-runs the rename with
+      // the mtime check dropped; the editor is already closed, so the retry
+      // carries the name through explicitly rather than re-reading the DOM.
+      showConflict(state, 'File changed on disk', {
+        onReload: () => reloadNow(state),
+        onOverwrite: () => {
+          state.inlineRename = { kind, name, value: requested, force: true }
+          commitInlineRename(state).catch((err) => api.warn('inline rename failed', err))
+        }
+      })
+    } else {
+      api.warn('failed to rename', error)
+      setStatus(state, `Rename failed: ${error.message}`)
+    }
+  }
+}
+
+/** POSTs an entry rename, writing the entry's own on-disk text back
+ * unchanged — see commitInlineRename()'s "Rename-ONLY on purpose". */
+async function renameEntryRequest(state, name, renameTo, force) {
+  const current = await fetchEntry(state, name)
+  const body = { file: state.file, name, text: current?.text ?? '', rename_to: renameTo }
+  // The mtime comes from the GET we just did, so the §3.5 check covers the
+  // window between reading the text and writing it back.
+  if (!force && typeof current?.mtime === 'number') body.base_mtime = current.mtime
+  return api.postJson('/lora_library/notebook/entry', body)
+}
+
+/** Category sibling of renameEntryRequest(): the §5 category route's field
+ * is `description` rather than `text`. */
+async function renameCategoryRequest(state, name, renameTo, force) {
+  const current = await fetchCategory(state, name)
+  const body = {
+    file: state.file,
+    name,
+    description: current?.description ?? '',
+    rename_to: renameTo
+  }
+  if (!force && typeof current?.mtime === 'number') body.base_mtime = current.mtime
+  return api.postJson('/lora_library/notebook/category', body)
+}
+
+/**
+ * Folds a successful rename back into every place the OLD name was held.
+ * Deliberately exhaustive — a name lives in more places in this file than is
+ * obvious, and a miss leaves the UI pointing at a name the file no longer
+ * has: the entry/category lists, the multi-select, the active entry/category,
+ * the serialized `entry` widget, the collapse Set (keyed by name), the
+ * editor's own name field + its saved baseline, and the mode hint.
+ */
+function applyRenameResult(state, kind, name, renameTo, data) {
+  if (Array.isArray(data?.entries)) state.entries = data.entries
+  if (Array.isArray(data?.categories)) state.categories = data.categories
+  if (typeof data?.mtime === 'number') state.baseMtime = data.mtime
+
+  if (kind === 'category') {
+    // Collapse is tracked by NAME, so the key has to move with the rename or
+    // a collapsed category springs open (and vice versa).
+    if (state.collapsedCategories.delete(name)) state.collapsedCategories.add(renameTo)
+    if (state.activeCategory === name) {
+      state.activeCategory = renameTo
+      state.nameFieldEl.value = renameTo
+      state.lastSavedName = renameTo
+    }
+    renderList(state)
+  } else {
+    const nextSelection = state.selection.map((n) => (n === name ? renameTo : n))
+    const nextActive = state.activeName === name ? renameTo : state.activeName
+    if (state.activeName === name) {
+      state.nameFieldEl.value = renameTo
+      state.lastSavedName = renameTo
+    }
+    // setSelection() re-renders and re-syncs the `entry` widget, so the
+    // serialized value never keeps a name the file no longer has.
+    setSelection(state, nextSelection, nextActive)
+  }
+  refreshDirty(state)
+  updateSaveButtonEnabled(state)
+  updateModeHint(state)
+  clearConflict(state)
 }
 
 // ---------------------------------------------------------------------------

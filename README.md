@@ -51,6 +51,17 @@ captions).
 - **Drag to reorder:** drag entries within the list (an insertion line
   shows the landing spot); drop onto a category header to move an entry
   into that category — the file is rewritten to match, byte-safe.
+- **Renaming, two ways** (whichever you reach for first):
+  - **Double-click the name** — in the list, on a prompt or a category
+    header — and type over it. Enter saves, Esc cancels, clicking away
+    saves. The rename happens right there in the row.
+  - **Or use the name field** at the top of the editor pane. Change it and
+    `Save` lights up; saving commits the new name together with whatever you
+    changed in the text, in one write.
+
+  Either way it renames the `##` heading in the file and nothing else — the
+  prompt text is untouched, and a name that's already taken is refused with a
+  message rather than quietly overwriting the other one.
 - **Categories, made in the UI:** click `＋ New` and type a name starting
   with `#` (e.g. `# Styles`) to create a category instead of a prompt.
   Click any category header and the editor switches to that category's
