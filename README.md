@@ -35,6 +35,22 @@ section further down; this is the map.
 > all eleven nodes stitched into one annotated workflow — or one of the three
 > ready-to-run test graphs beside it ([examples/](examples/)).
 
+## A note on ComfyUI's "New node design (beta)"
+
+ComfyUI is rolling out a new way of drawing nodes (Settings → search "new
+node design", the `Comfy.VueNodes` option — the app may prompt you to try
+it). Several EPS controls are **drawn directly on the node** — the per-row
+toggles on the Switcher and Distributor, the Resolution size readouts, the
+double-click renames — and the new design **does not run that drawing yet**,
+so those controls disappear while it's on. Nothing errors; they're just gone.
+The pack now shows a one-time warning when it notices, and the fix is to turn
+the option off and reload. Full support for the new design is on the roadmap.
+
+Worth knowing: the prompt appears **per browser**, so two machines pointed at
+the same ComfyUI can end up in different modes — if the nodes look right on
+one machine and broken on another, check this setting first on the machine
+that looks broken.
+
 ## EPS Prompt Notebook (shipped)
 
 `EPSNodes → EPS Prompt Notebook`: a two-pane editor inside the node — entry

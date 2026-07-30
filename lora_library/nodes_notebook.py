@@ -167,7 +167,15 @@ class LoraLibraryNotebook:
     def INPUT_TYPES(cls) -> dict[str, Any]:
         return {
             "required": {
-                "file": ("STRING", {"default": "loras.md"}),
+                # "hidden": True is the VUE-nodes ("New node design") hide
+                # flag (2026-07-29): that renderer decides widget visibility
+                # from the input spec's options (`options.hidden`,
+                # useProcessedWidgets.ts) and IGNORES the litegraph
+                # `widget.hidden` the frontend sets -- without this, this
+                # internal widget leaked into Vue nodes as a raw editable
+                # field. The classic canvas renderer ignores this key right
+                # back, so it changes nothing there.
+                "file": ("STRING", {"default": "loras.md", "hidden": True}),
                 "entry": (
                     "STRING",
                     {

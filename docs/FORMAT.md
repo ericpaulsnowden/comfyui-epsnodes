@@ -1882,6 +1882,45 @@ hand-bypassing groups. Roadmap: `research/roadmap-eps-distributor.md`.
   reload). Server-side `VALIDATE_INPUTS` already accepts values the combo
   hasn't seen yet.
 
+- **§7.5 Vue nodes ("New node design") compatibility** (owner report
+  2026-07-29: "in general i feel like there is an uptick in issues using my
+  mac to connect to the linux machine with these nodes" — root-caused on the
+  rig by flipping `Comfy.VueNodes.Enabled` and watching the pack degrade).
+  With that setting on, the frontend renders nodes as Vue DOM instead of
+  running litegraph's canvas pipeline, and THREE things follow:
+  - **Hand-drawn controls disappear.** Everything this pack paints in
+    `onDrawForeground`/`onMouseDown` — Switcher/Distributor per-row toggles,
+    Resolution's readout lines, the Distributor's double-click rename — is
+    simply not drawn and not clickable. No error anywhere; the features are
+    just gone, which reads as "these nodes are broken."
+  - **`widget.hidden` is ignored, so plumbing widgets LEAK.** The Vue
+    renderer decides visibility from the input spec's OPTIONS
+    (`options.hidden` — `useProcessedWidgets.ts`, verified in the rig
+    frontend's source maps) and snapshots widget options at creation, so the
+    attach-time `widget.hidden = true` this pack uses for canvas does
+    nothing there, and a late `options.hidden` mutation does nothing either.
+    `toggles`, `grid_uuid`, `video_path`/`frame`, and the Notebook's `file`
+    all rendered as raw editable text fields. **Fix: the flag ships FROM THE
+    BACKEND** — every internal plumbing input carries `"hidden": True` in
+    its `INPUT_TYPES` options (pinned against the real dicts in
+    `tests/test_vue_nodes_compat.py`); the frontend hide-sites also mirror
+    `options.hidden` for their frontend-created widgets. Canvas ignores the
+    key right back, so it is purely additive.
+  - **Two browsers on ONE server can disagree.** The frontend nags each
+    browser separately to try the new design, and a long-lived tab keeps
+    whatever mode it loaded with — so "works on the Linux machine, broken
+    from the Mac" can be nothing but the two browsers' render modes. This is
+    the first thing to check for any works-here-not-there report.
+  Until the pack ships Vue-native widgets (roadmap), `web/eps_image.js`
+  detects the mode once per session (`warnIfVueNodesMode`) and toasts the
+  honest state of things, naming the setting to turn off. The EPS Image Grid
+  Add buttons additionally probe `navigator.userActivation` at click time
+  and toast when a click arrives outside its user-activation window — the
+  one client-side step of the add pipeline that can refuse in total silence
+  (the rest of that pipeline, and every `/eps_image_grid/*` +
+  `/upload/image` route, verified working for a genuine non-loopback caller
+  on the rig).
+
 ## §8 Versioning & stability
 
 - Backend version: `lora_library/version.py` (source of truth); frontend:

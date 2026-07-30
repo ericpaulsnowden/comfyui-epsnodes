@@ -734,7 +734,16 @@ function hideGridUuidWidget(node) {
     )
     return
   }
+  // BOTH flags, deliberately (2026-07-29, owner's "uptick in issues using my
+  // mac" report): litegraph's canvas renderer hides on `widget.hidden`, but
+  // the Vue-nodes renderer ("New node design") decides visibility from
+  // `widget.options.hidden` (useProcessedWidgets.ts: `options.hidden ?? false`,
+  // verified in this rig's frontend source maps) and IGNORES `widget.hidden`
+  // -- so with only the canvas flag, this internal widget leaked into the Vue
+  // node as a raw editable text field. Canvas mode ignores `options.hidden`
+  // right back, so setting both is safe everywhere.
   widget.hidden = true
+  widget.options = { ...(widget.options || {}), hidden: true }
 }
 
 // ---------------------------------------------------------------------------
@@ -1132,6 +1141,47 @@ function handleAddButtonClicked(node, openPicker) {
       // the loop at its next iteration even if abort() itself throws.
     }
     return
+  }
+  // Diagnosis instrumentation (owner report 2026-07-29: the Add buttons "don't
+  // do anything" from his Mac against the Linux server, while the whole
+  // pipeline -- callback, picker, upload, /eps_image_grid/add -- verified
+  // clean on the rig in BOTH render modes, and the backend verified clean for
+  // a genuine non-loopback caller). The one client step that can silently
+  // no-op is `input.click()`: a browser refuses to open a file picker without
+  // transient USER ACTIVATION, and it refuses in total silence (Chrome logs
+  // one console line; Safari says nothing). If some dispatch path delivers
+  // this callback outside the activation window, that is indistinguishable
+  // from a dead button -- so measure it at the exact moment it matters and
+  // SAY it, instead of leaving the next report as silent as this one.
+  // `navigator.userActivation` is Chrome 105+/Safari 16.4+/Firefox 120+; on
+  // anything older `active` stays null and nothing is claimed either way.
+  let activation = null
+  try {
+    if (navigator.userActivation) activation = navigator.userActivation.isActive === true
+  } catch {
+    // Leave null -- diagnostics must never break the pick itself.
+  }
+  if (activation === false) {
+    const message =
+      'The browser refused the file picker: this click reached EPS Image Grid ' +
+      'outside its "user activation" window, so input.click() is ignored. ' +
+      'Please report this toast -- it pinpoints the bug.'
+    console.warn(PREFIX, message, {
+      isSecureContext: typeof window !== 'undefined' ? window.isSecureContext : null,
+      userAgent: typeof navigator !== 'undefined' ? navigator.userAgent : null
+    })
+    try {
+      app.extensionManager?.toast?.add?.({
+        severity: 'warn',
+        summary: 'Could not open the file picker',
+        detail: message,
+        life: 12000
+      })
+    } catch {
+      // console.warn above already carries the message.
+    }
+    // Still try -- a null/failed probe must never block a working browser,
+    // and even a refused click() costs nothing.
   }
   openPicker(state)
 }

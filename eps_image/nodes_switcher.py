@@ -418,7 +418,18 @@ class EPSSwitcher:
                     # Deliberately NOT lazy (module docstring "Enabled-set
                     # mechanism"): `check_lazy_status` needs it immediately to
                     # decide which `image_N` slots are even worth asking for.
-                    "toggles": ("STRING", {"default": DEFAULT_TOGGLES, "multiline": False}),
+                # "hidden": True is the VUE-nodes ("New node design") hide
+                # flag (2026-07-29): that renderer decides widget visibility
+                # from the input spec's options (`options.hidden`,
+                # useProcessedWidgets.ts) and IGNORES the litegraph
+                # `widget.hidden` the frontend sets -- without this, this
+                # internal widget leaked into Vue nodes as a raw editable
+                # field. The classic canvas renderer ignores this key right
+                # back, so it changes nothing there.
+                    "toggles": (
+                    "STRING",
+                    {"default": DEFAULT_TOGGLES, "multiline": False, "hidden": True},
+                ),
                 }
             ),
             # Server-supplied, never user-facing: lets the all-off branch see

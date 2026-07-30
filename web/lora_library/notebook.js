@@ -1187,7 +1187,16 @@ function wireSplitter(state, splitter) {
  * `drawNode()` already calls `node.arrange()` every frame.
  */
 function hideFileWidget(state) {
+  // BOTH flags, deliberately (2026-07-29, owner's "uptick in issues using my
+  // mac" report): litegraph's canvas renderer hides on `widget.hidden`, but
+  // the Vue-nodes renderer ("New node design") decides visibility from
+  // `widget.options.hidden` (useProcessedWidgets.ts: `options.hidden ?? false`,
+  // verified in this rig's frontend source maps) and IGNORES `widget.hidden`
+  // -- so with only the canvas flag, this internal widget leaked into the Vue
+  // node as a raw editable text field. Canvas mode ignores `options.hidden`
+  // right back, so setting both is safe everywhere.
   state.fileWidget.hidden = true
+  state.fileWidget.options = { ...(state.fileWidget.options || {}), hidden: true }
   state.node.graph?.setDirtyCanvas(true, true)
 }
 

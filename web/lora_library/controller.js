@@ -1819,7 +1819,11 @@ export function registerControllerNode() {
       onPropertyChanged(name, value) {
         if (name !== PROP_SHOW_STATUS) return
         this._guarded('Show status property changed', () => {
-          if (this._w.status) this._w.status.hidden = !value
+          if (this._w.status) {
+            // Track BOTH renderers' flags (see the `set` widget below).
+            this._w.status.hidden = !value
+            this._w.status.options = { ...(this._w.status.options || {}), hidden: !value }
+          }
           this.setDirtyCanvas(true, true)
         })
       }
@@ -1926,7 +1930,10 @@ export function registerControllerNode() {
         // click can ever reach it, and every programmatic write goes through
         // `_setSetValueSilently()`, which sets `.value` directly.
         this._w.set = this.addWidget('text', 'set', '', () => {}, {})
+        // Both flags -- canvas hides on `.hidden`, Vue nodes hide on
+        // `options.hidden` (see distributor.js's hideTogglesWidget note).
         this._w.set.hidden = true
+        this._w.set.options = { ...(this._w.set.options || {}), hidden: true }
 
         this._w.name = this.addWidget('text', 'name', '', () => {}, {})
 
@@ -1949,6 +1956,10 @@ export function registerControllerNode() {
         }, {})
         this._w.status.serialize = false
         this._w.status.hidden = !this.properties[PROP_SHOW_STATUS]
+        this._w.status.options = {
+          ...(this._w.status.options || {}),
+          hidden: !this.properties[PROP_SHOW_STATUS]
+        }
 
         // FORMAT.md §6.3 TWO-PANE layout (2026-07-21): left list + right
         // stacked buttons, replacing the removed `set` combo's dropdown and

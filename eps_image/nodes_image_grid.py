@@ -208,7 +208,18 @@ class EPSImageGrid:
                 # FORMAT.md §7.2 already uses for the Prompt Notebook's
                 # `file`). In `optional`, not `required` — see
                 # DEFAULT_GRID_UUID's docstring.
-                "grid_uuid": ("STRING", {"default": DEFAULT_GRID_UUID, "multiline": False}),
+                # "hidden": True is the VUE-nodes ("New node design") hide
+                # flag (2026-07-29): that renderer decides widget visibility
+                # from the input spec's options (`options.hidden`,
+                # useProcessedWidgets.ts) and IGNORES the litegraph
+                # `widget.hidden` the frontend sets -- without this, this
+                # internal widget leaked into Vue nodes as a raw editable
+                # field. The classic canvas renderer ignores this key right
+                # back, so it changes nothing there.
+                "grid_uuid": (
+                    "STRING",
+                    {"default": DEFAULT_GRID_UUID, "multiline": False, "hidden": True},
+                ),
             },
         }
 

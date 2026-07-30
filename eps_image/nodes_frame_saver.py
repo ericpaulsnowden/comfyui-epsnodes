@@ -84,10 +84,25 @@ class EPSFrameSaver:
     def INPUT_TYPES(cls) -> dict[str, Any]:
         return {
             "required": {
-                "video_path": ("STRING", {"default": "", "multiline": False}),
+                # "hidden": True is the VUE-nodes ("New node design") hide
+                # flag (2026-07-29): that renderer decides widget visibility
+                # from the input spec's options (`options.hidden`,
+                # useProcessedWidgets.ts) and IGNORES the litegraph
+                # `widget.hidden` the frontend sets -- without this, this
+                # internal widget leaked into Vue nodes as a raw editable
+                # field. The classic canvas renderer ignores this key right
+                # back, so it changes nothing there.
+                "video_path": ("STRING", {"default": "", "multiline": False, "hidden": True}),
                 "frame": (
                     "INT",
-                    {"default": 0, "min": 0, "max": MAX_FRAME_WIDGET_VALUE, "step": 1},
+                    # Same Vue-nodes hide flag as `video_path` above.
+                    {
+                        "default": 0,
+                        "min": 0,
+                        "max": MAX_FRAME_WIDGET_VALUE,
+                        "step": 1,
+                        "hidden": True,
+                    },
                 ),
             },
         }
