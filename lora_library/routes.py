@@ -10,10 +10,12 @@ an ``aiohttp.web.Application`` from these registrars directly — no ComfyUI.
 
 from __future__ import annotations
 
+import contextlib
 import ipaddress
 import logging
 import os
 import re
+import socket
 import string
 import sys
 from pathlib import Path, PureWindowsPath
@@ -94,6 +96,21 @@ def request_is_loopback(request: web.Request) -> bool:
     hop hides the real origin, so it gets the restricted tier. ``remote``
     being absent (unix sockets, aiohttp test clients) counts as loopback:
     both mean "not a foreign machine".
+
+    **Same-machine-via-LAN-address counts as local** (2026-07-30, remote
+    audit; ported from cpsb/locality.py, which solved this first): a literal
+    ``is_loopback`` check classifies a browser on the HOST machine that
+    reaches ComfyUI via the machine's own LAN address (``--listen`` +
+    ``http://192.168.x.x:8188``) as REMOTE — which didn't just hide
+    conveniences, it created a catch-22: the §2 share toggle (and
+    ``POST /remote_dirs``, and ``POST /config``) are local-only, so a host
+    whose browser used any non-localhost URL could never grant remote access
+    from ANY browser. A hostname can't answer "is this browser on my
+    machine" (the same URL is used from both machines); the OS can: a
+    process can only ``bind()`` a socket to an address this machine owns, so
+    a throwaway UDP bind to the PEER address is a deterministic ownership
+    test. Loopback stays the fast path; forwarded requests stay remote
+    (the peer is the proxy, not the client).
     """
     if "X-Forwarded-For" in request.headers:
         return False
@@ -101,9 +118,48 @@ def request_is_loopback(request: web.Request) -> bool:
     if remote is None:
         return True
     try:
-        return ipaddress.ip_address(remote).is_loopback
+        if ipaddress.ip_address(remote.partition("%")[0]).is_loopback:
+            return True
     except ValueError:
         return False
+    return _machine_owns_address(remote)
+
+
+def _machine_owns_address(address: str) -> bool:
+    """Throwaway UDP bind test: True only if this machine owns *address*.
+
+    cpsb/locality.py's ``_can_bind``, adapted: binding to any address the
+    machine does not own fails with ``OSError`` on every platform (Windows
+    surfaces ``WSAEADDRNOTAVAIL`` as a plain ``OSError`` too, so no
+    branching). An IPv6 zone id (``fe80::1%en0``) is passed as the scoped
+    4-tuple's ``scope_id`` — folded into the address string it is rejected.
+    IPv4-mapped IPv6 peers (``::ffff:192.0.2.7``, from a dual-stack socket)
+    are reduced to plain IPv4 first so the bind uses the right family.
+    """
+    lowered = address.lower()
+    if lowered.startswith("::ffff:") and "." in address:
+        address = address[7:]
+    bare, _, zone = address.partition("%")
+    family = socket.AF_INET6 if ":" in bare else socket.AF_INET
+    scope_id = 0
+    if zone:
+        try:
+            scope_id = int(zone)
+        except ValueError:
+            try:
+                scope_id = socket.if_nametoindex(zone)
+            except OSError:
+                return False
+    sock_address = (bare, 0, 0, scope_id) if family == socket.AF_INET6 else (bare, 0)
+    sock = socket.socket(family, socket.SOCK_DGRAM)
+    try:
+        sock.bind(sock_address)
+    except OSError:
+        return False
+    else:
+        return True
+    finally:
+        sock.close()
 
 
 def _is_inside(path: Path, root: Path) -> bool:
@@ -133,8 +189,17 @@ def notebook_path_error(
         return f"notebook files must end in .md (got {path.name!r}) — FORMAT.md §2"
     if not loopback:
         # library_dir is resolved through the real method (it is created on
-        # demand); the host's extra shared folders are checked as-is.
-        roots = [context.library_dir(), *context.remote_dirs()]
+        # demand) -- GUARDED (2026-07-30, remote audit, live-verified): its
+        # mkdir throws when the configured library folder is unreachable (an
+        # unmounted NAS library), and v0.42.0's unguarded call turned that
+        # into an HTTP 500 for EVERY non-loopback request -- including files
+        # inside a validly shared remote_dirs folder -- while loopback
+        # callers (who skip this guard) kept working. An unreachable library
+        # simply contributes no root; remote_dirs are still consulted, and a
+        # miss degrades to the clean 403 below, same as v0.41.0.
+        roots = list(context.remote_dirs())
+        with contextlib.suppress(OSError):
+            roots.insert(0, context.library_dir())
         if not any(_is_inside(path, root) for root in roots):
             # Names the exact folder to share and where to do it. The old
             # message stopped at "not allowed", which is a dead end for the

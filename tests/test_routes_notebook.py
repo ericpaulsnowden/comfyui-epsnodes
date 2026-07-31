@@ -1830,3 +1830,57 @@ async def test_library_dir_remains_allowed_without_any_shared_folders(
         "/lora_library/notebook", params={"file": str(book)}, headers=REMOTE
     )
     assert resp.status == 200
+
+
+async def test_unreachable_library_dir_degrades_to_403_not_500(
+    context: LibraryContext, tmp_path: Path, aiohttp_client
+) -> None:
+    """v0.42.0 regression, live-verified before fixing: `notebook_path_error`
+    called `context.library_dir()` unguarded, and its on-demand mkdir THROWS
+    when the configured library folder is unreachable (unmounted NAS) -- so
+    every non-loopback request 500'd, including files inside a validly shared
+    folder, while loopback callers (who skip the guard) kept working. An
+    unreachable library must contribute no root: shared folders still work,
+    and a miss is the clean 403."""
+    blocker = tmp_path / "blocker"
+    blocker.write_text("a FILE where the library's parent should be", encoding="utf-8")
+    shared = tmp_path / "nas" / "docs"
+    shared.mkdir(parents=True)
+    book = shared / "loras.md"
+    book.write_text("## Ok\nyes\n", encoding="utf-8")
+    context.save_config(
+        {"library_dir": str(blocker / "lib"), "remote_dirs": [str(shared)]}
+    )
+
+    client = await aiohttp_client(make_app(context))
+    resp = await client.get(
+        "/lora_library/notebook", params={"file": str(book)}, headers=REMOTE
+    )
+    assert resp.status == 200, await resp.text()
+    outside = tmp_path / "outside.md"
+    outside.write_text("## Secret\nnope\n", encoding="utf-8")
+    resp = await client.get(
+        "/lora_library/notebook", params={"file": str(outside)}, headers=REMOTE
+    )
+    assert resp.status == 403
+
+
+def test_machine_owns_address_bind_test() -> None:
+    """The cpsb-ported locality test (2026-07-30): a browser on the HOST that
+    reaches ComfyUI via the machine's own LAN address must classify as LOCAL
+    (it used to read as remote, which made the loopback-only share toggle
+    unreachable from every browser -- a catch-22), while a genuinely foreign
+    address stays remote."""
+    import socket as socket_mod
+
+    from lora_library.routes import _machine_owns_address
+
+    probe = socket_mod.socket(socket_mod.AF_INET, socket_mod.SOCK_DGRAM)
+    try:
+        probe.connect(("192.0.2.1", 9))  # UDP connect sends nothing
+        own_ip = probe.getsockname()[0]
+    finally:
+        probe.close()
+    assert _machine_owns_address(own_ip) is True
+    assert _machine_owns_address("::ffff:127.0.0.1") is True
+    assert _machine_owns_address("192.0.2.1") is False  # TEST-NET-1: never ours
