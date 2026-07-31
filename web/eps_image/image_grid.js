@@ -3098,6 +3098,26 @@ function installExecutedMerge(node) {
  * exactly once per extension load. */
 export function init() {
   installExecutionRefreshListener()
+  // 2026-07-30 (remote-regression audit): on an insecure origin (plain http
+  // to another machine -- the owner's primary mode) CORE's selection-toolbox
+  // "Copy Image"/"Paste Image" items silently no-op: its
+  // pasteClipboardImageToNode/copyImage bail on the missing
+  // `navigator.clipboard` with only a console.warn, and that popover is
+  // built from useImageMenuOptions -- it never consults getExtraMenuOptions,
+  // so this pack's degraded right-click fallbacks can't reach it. Nothing
+  // can be intercepted from here; the honest floor is naming the working
+  // alternatives once, where a debugging user will look. (Ctrl+V paste uses
+  // the DOM paste event's clipboardData, which has no secure-context
+  // requirement, and this pack's right-click "Copy image" degrades with an
+  // explanation -- both work everywhere.)
+  if (typeof window !== 'undefined' && window.isSecureContext === false) {
+    console.info(
+      PREFIX,
+      'Insecure origin (http, non-localhost): the selection-toolbox ' +
+        'Copy/Paste Image items are disabled by the browser Clipboard API. ' +
+        'Ctrl+V paste and right-click > "Copy image" still work.'
+    )
+  }
 }
 
 /** Per-node-instance attach; no-op unless *node* is an EPSImageGrid. */

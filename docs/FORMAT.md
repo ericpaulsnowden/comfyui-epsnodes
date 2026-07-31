@@ -1911,6 +1911,31 @@ hand-bypassing groups. Roadmap: `research/roadmap-eps-distributor.md`.
     whatever mode it loaded with — so "works on the Linux machine, broken
     from the Mac" can be nothing but the two browsers' render modes. This is
     the first thing to check for any works-here-not-there report.
+  - **Window-level gesture listeners must be CAPTURE-phase.** The Vue node
+    wrapper stops pointer events from BUBBLING out of the node's DOM, so a
+    plain `window.addEventListener('pointerup', …)` never fires there — and
+    every gesture that COMMITS in such a listener silently dies: the
+    Notebook's row clicks stopped selecting, drags stopped dropping,
+    double-click pairs never completed, while element-level listeners
+    (typing, buttons) kept working. Capture-phase listeners descend from the
+    window before any bubble-path `stopPropagation` can intervene, so they
+    fire identically in both renderers; the matching `removeEventListener`
+    must pass the same flag or it silently fails to detach. Pinned across
+    `notebook.js`/`resolution.js` in `tests/test_vue_nodes_compat.py`.
+  - **LAN latency is a first-class test condition** (2026-07-30, the owner's
+    "rename does not save from my mac" report — reproduced on the rig only
+    after injecting 600ms into every `/lora_library/*` fetch). Two races in
+    the Notebook's editor were invisible on loopback (~1ms windows) and wide
+    open across machines: a LATE `loadEntryText` resolution overwrote a
+    mid-typing name field and hard-reset dirty (fix: `populateEditor` never
+    overwrites a focused, user-edited field; baselines still update and
+    `refreshDirty` re-derives), and the save path re-baselined
+    `lastSavedName` from the LIVE field at RESPONSE time, silently absorbing
+    anything typed during the round trip (fix: the baseline is what was
+    SENT). Disk-truth parts of a save response (`entries`, `mtime`) fold in
+    even when the selection moved on mid-flight, and a rename remaps the
+    selection either way. When a frontend race won't reproduce, add latency
+    before concluding it doesn't exist.
   Until the pack ships Vue-native widgets (roadmap), `web/eps_image.js`
   detects the mode once per session (`warnIfVueNodesMode`) and toasts the
   honest state of things, naming the setting to turn off. The EPS Image Grid

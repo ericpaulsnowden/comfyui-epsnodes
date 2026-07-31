@@ -1138,9 +1138,9 @@ function attachGridDrag(node, canvasEl) {
         // Not captured, or already released — nothing to do.
       }
     }
-    window.removeEventListener('pointermove', onMove)
-    window.removeEventListener('pointerup', endDrag)
-    window.removeEventListener('pointercancel', endDrag)
+    window.removeEventListener('pointermove', onMove, { capture: true })
+    window.removeEventListener('pointerup', endDrag, { capture: true })
+    window.removeEventListener('pointercancel', endDrag, { capture: true })
     drag = null
   }
 
@@ -1165,9 +1165,14 @@ function attachGridDrag(node, canvasEl) {
       // Best-effort, mirrors notebook.js's wireSplitter — the window-level
       // listeners below still cover the drag either way.
     }
-    window.addEventListener('pointermove', onMove)
-    window.addEventListener('pointerup', endDrag)
-    window.addEventListener('pointercancel', endDrag)
+    // Capture phase, deliberately -- notebook.js's 2026-07-30 finding: the
+    // Vue-nodes DOM wrapper stops pointer events from BUBBLING to window, so
+    // plain window listeners never fire there and the drag never ends.
+    // Capture descends from the window first, so it fires in both renderers;
+    // the removeEventListener calls above must pass the same flag.
+    window.addEventListener('pointermove', onMove, { capture: true })
+    window.addEventListener('pointerup', endDrag, { capture: true })
+    window.addEventListener('pointercancel', endDrag, { capture: true })
     // Defensive per the round brief — see file header's pointer-event
     // paragraph for why this is (structurally) redundant on THIS frontend's
     // sibling-DOM-widget model, and why it's kept anyway.

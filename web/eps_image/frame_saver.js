@@ -1432,6 +1432,26 @@ async function startProbe(state, path) {
   } catch (error) {
     if (token !== state.probeToken) return
     state.probe = null
+    // Self-healing remote detection (2026-07-30, remote-regression audit):
+    // `refreshGating` fails OPEN -- one failed /config fetch at attach time
+    // leaves `isLocal` null (treated local) forever, and a remote viewer
+    // then reaches this catch with the probe route's raw loopback-only 403,
+    // which reads like a broken node rather than a documented boundary. The
+    // 403 itself IS the ground truth that this viewer is remote, so adopt
+    // it: flip the gating (which hides Browse, shows the host note, and
+    // clears the video via refreshVideoSource's remote branch) and show the
+    // same calm message the properly-gated path uses.
+    if (error?.status === 403) {
+      state.isLocal = false
+      applyGating(state) // also re-runs refreshVideoSource's remote branch
+      setPathBarStatus(
+        state,
+        'Video preview and probing run on the machine hosting ComfyUI -- ' +
+          'open ComfyUI there to scrub this video. The saved frames still ' +
+          'flow through the graph normally from here.'
+      )
+      return
+    }
     setPathBarStatus(state, error.message || 'Could not probe this video.', true)
     refreshFrameUi(state)
   }

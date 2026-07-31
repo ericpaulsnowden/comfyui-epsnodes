@@ -167,7 +167,10 @@ def test_inline_rename_conflict_retry_actually_drops_the_stale_mtime(source: str
     block = source.split("async function commitInlineRename(state)", 1)[1]
     block = block.split("\n/**", 1)[0]
     assert "const force = Boolean(active.force)" in block
-    close_at = block.index("state.inlineRename = null")
+    # Anchored on the NORMAL-path close (its comment), not the first
+    # `state.inlineRename = null` -- the busy-collision guard added
+    # 2026-07-30 legitimately closes the editor earlier in the function.
+    close_at = block.index("// Close the editor first")
     capture_at = block.index("const force = Boolean(active.force)")
     assert capture_at < close_at, "force must be captured before the editor is closed"
     # ...and it must reach the request functions as an argument.

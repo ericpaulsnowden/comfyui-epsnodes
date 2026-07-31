@@ -1150,8 +1150,8 @@ function wireSplitter(state, splitter) {
     } catch {
       // Not captured, or already released — nothing to do.
     }
-    window.removeEventListener('pointermove', onPointerMove)
-    window.removeEventListener('pointerup', stopDragging)
+    window.removeEventListener('pointermove', onPointerMove, { capture: true })
+    window.removeEventListener('pointerup', stopDragging, { capture: true })
   }
   splitter.addEventListener('pointerdown', (event) => {
     dragging = true
@@ -1162,8 +1162,19 @@ function wireSplitter(state, splitter) {
     } catch {
       // Best-effort; the window-level listeners below still cover dragging.
     }
-    window.addEventListener('pointermove', onPointerMove)
-    window.addEventListener('pointerup', stopDragging)
+  // CAPTURE-phase window listeners, deliberately (2026-07-30, owner's Mac
+  // report, reproduced on the rig): under Vue nodes ("New node design") the
+  // node's DOM wrapper stops pointer-event propagation on the way UP, so a
+  // plain (bubble-phase) window listener never fires and the gesture never
+  // commits -- clicks stopped selecting, drags stopped dropping, while
+  // element-level listeners (typing, buttons) kept working, which made the
+  // panel look half-broken. Capture descends from the window BEFORE any
+  // bubble-path stopPropagation can intervene, and nothing above window
+  // exists to stop it -- so these fire in BOTH renderers. The matching
+  // removeEventListener calls must pass the same capture flag or they
+  // silently fail to detach.
+    window.addEventListener('pointermove', onPointerMove, { capture: true })
+    window.addEventListener('pointerup', stopDragging, { capture: true })
     event.preventDefault()
   })
 }
@@ -2112,18 +2123,40 @@ function fetchCategory(state, name) {
  * either — callers just pass the right pair. `name` (the entry or category
  * name this text belongs to) also seeds the name field (FORMAT.md §7.2
  * rename-via-header amendment) — omitted only by callers that manage the
- * name field themselves right after (confirmNewEntry()'s inline path). */
+ * name field themselves right after (confirmNewEntry()'s inline path).
+ *
+ * **A field the user is MID-EDIT in is never overwritten** (2026-07-30,
+ * owner's Mac report, reproduced on the rig with 600ms of injected fetch
+ * latency): this function used to rewrite both fields and hard-reset dirty
+ * unconditionally, which is invisible on loopback (the click→populate window
+ * is ~1ms — nobody can type inside it) but on a LAN round-trip to another
+ * machine the window is wide open: click a row, start typing the new name,
+ * and the LATE load lands and wipes the typing AND disables Save — his
+ * exact "changing the title text does not enable the save button". The
+ * focus check is what keeps ordinary selection changes unaffected: clicking
+ * a row moves focus to the row itself, so a load that lands after a normal
+ * click always sees the field unfocused and populates as before. Baselines
+ * (`lastSaved*`, `baseMtime`) always update — they describe the DISK — and
+ * `refreshDirty` (not a blanket `setDirty(false)`) then re-derives dirty, so
+ * preserved mid-edit typing correctly re-enables Save against the fresh
+ * baseline. */
 function populateEditor(state, text, mtime, name) {
-  state.textarea.value = text ?? ''
-  state.lastSavedText = state.textarea.value
+  const nameMidEdit =
+    document.activeElement === state.nameFieldEl &&
+    currentNameFieldValue(state) !== state.lastSavedName
+  const textMidEdit =
+    document.activeElement === state.textarea &&
+    state.textarea.value !== state.lastSavedText
+  if (!textMidEdit) state.textarea.value = text ?? ''
+  state.lastSavedText = text ?? ''
   state.baseMtime = typeof mtime === 'number' ? mtime : null
   state.textarea.disabled = false
   if (name !== undefined) {
-    state.nameFieldEl.value = name ?? ''
-    state.lastSavedName = currentNameFieldValue(state)
+    if (!nameMidEdit) state.nameFieldEl.value = name ?? ''
+    state.lastSavedName = (name ?? '').trim()
     state.nameFieldEl.disabled = false
   }
-  setDirty(state, false)
+  refreshDirty(state)
   updateDeleteButtonEnabled(state)
   clearConflict(state)
 }
@@ -2603,9 +2636,9 @@ function onEntryPointerDown(state, event, name) {
     state.drag = null
   }
   function detach() {
-    window.removeEventListener('pointermove', onMove)
-    window.removeEventListener('pointerup', onUp)
-    window.removeEventListener('pointercancel', onCancel)
+    window.removeEventListener('pointermove', onMove, { capture: true })
+    window.removeEventListener('pointerup', onUp, { capture: true })
+    window.removeEventListener('pointercancel', onCancel, { capture: true })
   }
   // Escape hatch for teardown() — a node removal mid-drag has no pointerup
   // of its own, so it must be able to detach + restore visuals itself.
@@ -2614,9 +2647,20 @@ function onEntryPointerDown(state, event, name) {
     if (drag.active) cancelDrag(state, drag)
   }
 
-  window.addEventListener('pointermove', onMove)
-  window.addEventListener('pointerup', onUp)
-  window.addEventListener('pointercancel', onCancel)
+// CAPTURE-phase window listeners, deliberately (2026-07-30, owner's Mac
+  // report, reproduced on the rig): under Vue nodes ("New node design") the
+  // node's DOM wrapper stops pointer-event propagation on the way UP, so a
+  // plain (bubble-phase) window listener never fires and the gesture never
+  // commits -- clicks stopped selecting, drags stopped dropping, while
+  // element-level listeners (typing, buttons) kept working, which made the
+  // panel look half-broken. Capture descends from the window BEFORE any
+  // bubble-path stopPropagation can intervene, and nothing above window
+  // exists to stop it -- so these fire in BOTH renderers. The matching
+  // removeEventListener calls must pass the same capture flag or they
+  // silently fail to detach.
+  window.addEventListener('pointermove', onMove, { capture: true })
+  window.addEventListener('pointerup', onUp, { capture: true })
+  window.addEventListener('pointercancel', onCancel, { capture: true })
 }
 
 function beginDrag(state, drag) {
@@ -3084,18 +3128,29 @@ function onCategoryPointerDown(state, event, category) {
     state.drag = null
   }
   function detach() {
-    window.removeEventListener('pointermove', onMove)
-    window.removeEventListener('pointerup', onUp)
-    window.removeEventListener('pointercancel', onCancel)
+    window.removeEventListener('pointermove', onMove, { capture: true })
+    window.removeEventListener('pointerup', onUp, { capture: true })
+    window.removeEventListener('pointercancel', onCancel, { capture: true })
   }
   drag.cleanup = () => {
     detach()
     if (drag.active) cancelDrag(state, drag)
   }
 
-  window.addEventListener('pointermove', onMove)
-  window.addEventListener('pointerup', onUp)
-  window.addEventListener('pointercancel', onCancel)
+// CAPTURE-phase window listeners, deliberately (2026-07-30, owner's Mac
+  // report, reproduced on the rig): under Vue nodes ("New node design") the
+  // node's DOM wrapper stops pointer-event propagation on the way UP, so a
+  // plain (bubble-phase) window listener never fires and the gesture never
+  // commits -- clicks stopped selecting, drags stopped dropping, while
+  // element-level listeners (typing, buttons) kept working, which made the
+  // panel look half-broken. Capture descends from the window BEFORE any
+  // bubble-path stopPropagation can intervene, and nothing above window
+  // exists to stop it -- so these fire in BOTH renderers. The matching
+  // removeEventListener calls must pass the same capture flag or they
+  // silently fail to detach.
+  window.addEventListener('pointermove', onMove, { capture: true })
+  window.addEventListener('pointerup', onUp, { capture: true })
+  window.addEventListener('pointercancel', onCancel, { capture: true })
 }
 
 // ---------------------------------------------------------------------------
@@ -3268,7 +3323,21 @@ function cancelInlineRename(state) {
  */
 async function commitInlineRename(state) {
   const active = state.inlineRename
-  if (!active || state.busy) return
+  if (!active) return
+  if (state.busy) {
+    // 2026-07-30 (LAN-latency audit): a bare return here left the editor
+    // OPEN in state -- and since renderList() re-mounts an open editor after
+    // every rebuild (restoreInlineRename) and mounting ends in
+    // focus()+select(), a blur-commit that collided with a busy window (a
+    // save/move/delete round trip -- much longer over a LAN) left a zombie
+    // editor stealing keyboard focus on every subsequent list render. The
+    // typed name can't be committed mid-busy (the §3.5 mtime baseline is in
+    // flux), so close the editor and SAY so rather than haunting the panel.
+    state.inlineRename = null
+    setStatus(state, 'Still saving -- rename again in a moment.')
+    renderList(state)
+    return
+  }
   const { kind, name } = active
   const requested = (active.value || '').trim()
   // Captured BEFORE the editor is closed below: `force` is set only by the
@@ -3302,11 +3371,16 @@ async function commitInlineRename(state) {
     return
   }
 
+  // busy=true is released in `finally`, and the status/renderList calls sit
+  // INSIDE the try (2026-07-30): with them outside, any throw between
+  // busy=true and the request left busy stuck true forever -- which
+  // permanently disables Save and silently no-ops every later performSave,
+  // with every caller swallowing the evidence via .catch(api.warn).
   state.busy = true
-  updateSaveButtonEnabled(state)
-  setStatus(state, 'Renaming…')
-  renderList(state)
   try {
+    updateSaveButtonEnabled(state)
+    setStatus(state, 'Renaming…')
+    renderList(state)
     const data =
       kind === 'category'
         ? await renameCategoryRequest(state, name, requested, force)
@@ -3331,6 +3405,15 @@ async function commitInlineRename(state) {
     } else {
       api.warn('failed to rename', error)
       setStatus(state, `Rename failed: ${error.message}`)
+    }
+  } finally {
+    // Both branches above already clear busy on their own paths; this is the
+    // backstop for a throw INSIDE those handlers (a renderList error, a
+    // toast error) so busy can never wedge true -- see the comment above the
+    // try.
+    if (state.busy) {
+      state.busy = false
+      updateSaveButtonEnabled(state)
     }
   }
 }
@@ -3747,23 +3830,51 @@ async function performSave(state, { force = false } = {}) {
 
     const data = await api.postJson('/lora_library/notebook/entry', body)
     state.busy = false
+    // The DISK-truth parts of the response are folded in UNCONDITIONALLY --
+    // before the selection-moved-on early return below (2026-07-30, LAN-
+    // latency audit): the file HAS changed on the server whether or not the
+    // user clicked elsewhere during the round trip, and skipping this left
+    // the list showing pre-rename names (a later save/delete addressed at
+    // the old name would then re-CREATE it -- the server's upsert treats an
+    // unknown name as a create).
+    state.baseMtime = typeof data.mtime === 'number' ? data.mtime : state.baseMtime
+    state.entries = Array.isArray(data.entries) ? data.entries : state.entries
     if (state.activeName !== name) {
-      // Selection moved on while the request was in flight; nothing left to
-      // reconcile against the (now stale) textarea/name-field contents.
+      // Selection moved on while the request was in flight. The EDITOR
+      // bookkeeping below (field values, lastSaved* baselines) belongs to the
+      // now-displayed entry and must not be touched -- but the rename still
+      // has to be reflected in the selection + entry widget, or they keep a
+      // name the file no longer has.
+      if (renameTo) {
+        const remapped = state.selection.map((n) => (n === name ? renameTo : n))
+        setSelection(state, remapped, state.activeName)
+      } else {
+        renderList(state)
+      }
       updateSaveButtonEnabled(state)
       return
     }
     state.lastSavedText = text
-    state.baseMtime = typeof data.mtime === 'number' ? data.mtime : state.baseMtime
-    state.entries = Array.isArray(data.entries) ? data.entries : state.entries
     if (renameTo) {
       const nextSelection = state.selection.map((n) => (n === name ? renameTo : n))
       setSelection(state, nextSelection, renameTo) // also re-renders the list
-      state.nameFieldEl.value = renameTo
+      // Show the committed name -- but never over TYPING that happened while
+      // the save was in flight (the same mid-edit rule populateEditor
+      // documents; on a LAN the flight is long enough to type in).
+      if (currentNameFieldValue(state) === renameTo || currentNameFieldValue(state) === name) {
+        state.nameFieldEl.value = renameTo
+      }
     } else {
       renderList(state)
     }
-    state.lastSavedName = currentNameFieldValue(state)
+    // Baseline = what was SENT, never the live field (2026-07-30, owner's
+    // Mac report): reading the DOM at RESPONSE time absorbed anything typed
+    // during the round trip into the "saved" baseline, so refreshDirty saw
+    // nameChanged=false and Save went (and stayed) grey with unsaved typing
+    // sitting right there in the field -- his "changing the title text does
+    // not enable the save button", amplified by LAN latency. With the sent
+    // value as baseline, refreshDirty below re-flags mid-flight typing.
+    state.lastSavedName = renameTo || name
     refreshDirty(state)
     updateModeHint(state)
     setStatus(state, renameTo ? `Saved. Renamed to "${renameTo}".` : 'Saved.')
@@ -3825,26 +3936,30 @@ async function performSaveCategory(state, { force = false } = {}) {
 
     const data = await api.postJson('/lora_library/notebook/category', body)
     state.busy = false
+    // Disk truth first, unconditionally -- performSave()'s 2026-07-30 rule.
+    state.baseMtime = typeof data.mtime === 'number' ? data.mtime : state.baseMtime
+    state.entries = Array.isArray(data.entries) ? data.entries : state.entries
+    state.categories = Array.isArray(data.categories) ? data.categories : state.categories
+    if (renameTo && state.collapsedCategories.delete(name)) {
+      // Collapse tracks by NAME -- migrate the key whether or not the user
+      // moved on mid-flight, or the renamed category springs open.
+      state.collapsedCategories.add(renameTo)
+    }
     if (state.activeCategory !== name) {
+      renderList(state)
       updateSaveButtonEnabled(state)
       return
     }
     state.lastSavedText = description
-    state.baseMtime = typeof data.mtime === 'number' ? data.mtime : state.baseMtime
-    state.entries = Array.isArray(data.entries) ? data.entries : state.entries
-    state.categories = Array.isArray(data.categories) ? data.categories : state.categories
     if (renameTo) {
       state.activeCategory = renameTo
-      state.nameFieldEl.value = renameTo
-      // Single-tap collapse (FORMAT.md §7.2 amendment) tracks collapse by
-      // NAME (state.collapsedCategories is a bare Set<string>) — without
-      // this, a renamed category that was collapsed would silently render
-      // expanded post-rename, since the Set still holds the OLD string.
-      if (state.collapsedCategories.delete(name)) {
-        state.collapsedCategories.add(renameTo)
+      // Same mid-edit rule as performSave(): never over in-flight typing.
+      if (currentNameFieldValue(state) === renameTo || currentNameFieldValue(state) === name) {
+        state.nameFieldEl.value = renameTo
       }
     }
-    state.lastSavedName = currentNameFieldValue(state)
+    // Baseline = what was SENT, never the live field (see performSave()).
+    state.lastSavedName = renameTo || name
     refreshDirty(state)
     renderList(state)
     updateModeHint(state)

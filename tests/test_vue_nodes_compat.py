@@ -60,6 +60,7 @@ def _input_options(node_class, name: str) -> dict:
         (EPSFrameSaver, "video_path"),
         (EPSFrameSaver, "frame"),
         (LoraLibraryNotebook, "file"),
+        (LoraLibraryNotebook, "entry"),
     ],
 )
 def test_plumbing_inputs_carry_the_vue_hidden_flag(node_class, input_name: str) -> None:
@@ -145,3 +146,45 @@ def test_add_buttons_carry_the_user_activation_diagnostic() -> None:
     assert "openPicker(state)" in body.split("activation === false", 1)[1], (
         "the pick must still be attempted after the diagnostic"
     )
+
+
+# ---------------------------------------------------------------------------
+# v0.43.1: window-level pointer listeners must be CAPTURE-phase (owner's Mac
+# report 2026-07-30, reproduced on the rig with Vue nodes enabled: the Vue
+# node wrapper stops pointer events from BUBBLING to window, so every gesture
+# that commits in a plain window listener silently died -- entry clicks never
+# selected, drags never dropped, dblclick pairs never completed -- while
+# element-level listeners (typing, buttons) kept working. Capture descends
+# from the window before any bubble-path stopPropagation can intervene, so
+# capture-phase listeners fire in BOTH renderers.)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "rel",
+    ["web/lora_library/notebook.js", "web/eps_image/resolution.js"],
+)
+def test_window_pointer_listeners_are_capture_phase(rel: str) -> None:
+    """Every window.add/removeEventListener for pointer events must pass
+    `{ capture: true }` -- and add/remove must MATCH, because a remove without
+    the same flag silently fails to detach (a leak that would re-fire stale
+    drag handlers forever)."""
+    source = _source(rel)
+    plain_adds = re.findall(
+        r"window\.addEventListener\('pointer\w+', \w+\)", source
+    )
+    assert not plain_adds, (
+        f"{rel}: bubble-phase window pointer listener(s) {plain_adds} -- these "
+        "never fire under Vue nodes; use {{ capture: true }}"
+    )
+    plain_removes = re.findall(
+        r"window\.removeEventListener\('pointer\w+', \w+\)", source
+    )
+    assert not plain_removes, (
+        f"{rel}: removeEventListener without the capture flag never detaches "
+        f"a capture-phase listener: {plain_removes}"
+    )
+    cap = r"Listener\('pointer\w+', \w+, \{ capture: true \}\)"
+    adds = len(re.findall("window\\.addEvent" + cap, source))
+    removes = len(re.findall("window\\.removeEvent" + cap, source))
+    assert adds > 0 and removes > 0, f"{rel}: expected capture-phase pairs, found {adds}/{removes}"

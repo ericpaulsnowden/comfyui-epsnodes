@@ -214,6 +214,9 @@ function applyStrengthScaleVisibility(node) {
   // the row from drawing/layout/size, it does not just blank the value, and
   // the value itself keeps flowing to apply()/IS_CHANGED() while hidden.
   widget.hidden = node.properties?.[PROP_SHOW_STRENGTH_SCALE] !== true
+  // Vue nodes decide visibility from options.hidden and ignore the litegraph
+  // flag (FORMAT.md section 7.5) -- keep both in lockstep, both directions.
+  widget.options = { ...(widget.options || {}), hidden: widget.hidden }
   node.setDirtyCanvas(true, true)
 }
 
@@ -232,6 +235,8 @@ function applyLoaderSlotVisibility(node) {
   const widget = (node.widgets ?? []).find((w) => w.name === LOADER_SLOT_WIDGET_NAME)
   if (!widget) return
   widget.hidden = node.properties?.[PROP_SHOW_LOADER_SLOT] !== true
+  // Same Vue-nodes lockstep as applyStrengthScaleVisibility() above.
+  widget.options = { ...(widget.options || {}), hidden: widget.hidden }
   node.setDirtyCanvas(true, true)
 }
 

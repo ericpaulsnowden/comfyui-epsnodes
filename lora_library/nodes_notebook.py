@@ -180,6 +180,11 @@ class LoraLibraryNotebook:
                     "STRING",
                     {
                         "default": "",
+                        # Vue-nodes hide flag, same as `file` above (the panel
+                        # owns selection; this widget is serialization
+                        # plumbing that leaked into Vue nodes as a raw
+                        # editable field). Canvas ignores this key.
+                        "hidden": True,
                         "tooltip": (
                             "The selected entry name(s), one per line, in "
                             "selection order. This is normally filled in "
