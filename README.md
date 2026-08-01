@@ -23,6 +23,7 @@ section further down; this is the map.
 | [**EPS Switcher**](#eps-switcher-shipped) | Any number of image inputs, each independently on/off; the enabled ones fan out (N enabled → N runs). Disabled branches never execute. | Nothing — drag-and-drop with core nodes. |
 | [**EPS Model / CLIP / VAE Switcher**](#eps-model--clip--vae-switcher-shipped) | The image Switcher's exact mechanism for models, CLIPs, and VAEs: any number of inputs, each on/off, enabled ones fan out (N enabled → N runs), disabled branches — including their checkpoint loads — never execute. | Nothing — drag-and-drop with core nodes. |
 | [**EPS Distributor**](#eps-distributor-shipped) | The mirror of the Switcher: one image in, up to sixteen branches out, each independently on/off. New outputs appear as you wire them up. Toggle a branch off and only that branch is skipped — everything happens in one run. | Nothing — drag-and-drop with core nodes. |
+| [**EPS Checkpoint Switcher**](#eps-checkpoint-switcher-shipped) | Tick several checkpoint files in a list; one queue runs the workflow once per ticked checkpoint, with each run's model, CLIP, and VAE kept together and a label for save paths. | Your checkpoint files — drag-and-drop with core nodes. |
 | [**EPS Resolution**](#eps-resolution-shipped) | Image-first resize + size in one node: target size (with a drag pad), four resize modes, and the original image + both sets of dimensions passed through. | Nothing — drag-and-drop with core nodes. |
 | [**EPS Image Grid**](#eps-image-grid-shipped) | Collects images across separate Runs into a buffer that survives restarts, shows them as a thumbnail grid, and fans the whole set out on demand. Add whole batches at once — a multiselect picker, a folder importer, or one big drag. | Nothing — drag-and-drop with core nodes. |
 | [**EPS Cross Product**](#eps-cross-product-shipped) | Pairs every image with every text — 2 images × 4 prompts = 8 runs. (ComfyUI's own list pairing zips index-by-index instead.) | Two lists to multiply — pairs naturally with Image Grid + Prompt Notebook, but any list sources work. |
@@ -366,6 +367,30 @@ rewiring, no dragging bypass boxes around groups.
   or off, it changes nothing.
 - Toggle states and the visible-output count save with the workflow and
   survive reload.
+
+## EPS Checkpoint Switcher (shipped)
+
+`EPSNodes → EPS Checkpoint Switcher`: a checkbox list of every checkpoint
+ComfyUI can see. Tick the ones you want, wire `model`/`clip`/`vae` where a
+Load Checkpoint's outputs would go, and one queue runs the rest of the
+workflow **once per ticked checkpoint** — each run using that checkpoint's
+own model, CLIP, and VAE together, plus a `label` (the filename) you can
+wire into save paths so results land in folders named by model.
+
+- **Why this beats three separate switchers for model testing:** a
+  checkpoint's model/CLIP/VAE can never drift out of alignment (they travel
+  as a group), there's nothing to wire up per checkpoint, and the label
+  gives every run a name.
+- **The list is searchable and grouped by folder;** a ticked file that has
+  since been deleted shows with a ⚠ so you can untick it — it's skipped at
+  run time (with a log line) rather than failing the whole queue.
+- **Ticking nothing is valid:** the queue succeeds and downstream simply
+  doesn't run. A typo'd file name (hand-edited workflow/API) fails the
+  queue up front with a message naming it.
+- **Go easy on the count.** Every ticked checkpoint really loads: three or
+  four is a sweep; ten is a disk-churning afternoon. ComfyUI unloads between
+  runs, but start small.
+- Selections save with the workflow and survive reload.
 
 ## EPS Resolution (shipped)
 

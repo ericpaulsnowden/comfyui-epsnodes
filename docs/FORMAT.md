@@ -1737,6 +1737,64 @@ hand-bypassing groups. Roadmap: `research/roadmap-eps-distributor.md`.
   other 2; two off saves exactly 1; ALL off reports `success` with nothing
   saved; `{"out_2": null}` stays enabled.
 
+## §6.12 `EPSCheckpointSwitcher` (display: "EPS Checkpoint Switcher") — tick N checkpoints, run N times
+
+The grouped answer to "try the same prompt across several models" (owner ask
+2026-08-01). Tick checkpoint FILES in a panel; ONE queue emits four
+index-aligned `OUTPUT_IS_LIST` lists — `model`/`clip`/`vae`/`label` (label =
+filename stem) — one element per ticked checkpoint, in a stable order, so
+core list fan-out runs everything downstream once per checkpoint with that
+checkpoint's OWN model+CLIP+VAE travelling together. Three per-type
+switchers (§6.4b) cannot express this: separately-wired axes zip (§6.9), and
+model/CLIP/VAE from one checkpoint must never drift out of alignment.
+
+- **State is one `selection` STRING widget** (optional, default `"[]"`,
+  Vue-hidden per §7.5): a JSON ARRAY of checkpoint filenames exactly as
+  `folder_paths.get_filename_list("checkpoints")` spells them, order =
+  emission order. ONE widget, deliberately — a per-row grown-widget design
+  was rejected because `widgets_values` restores POSITIONALLY, so a variable
+  widget count mis-restores saved workflows; a single JSON value is
+  restore-proof. Empty/omitted = nothing ticked (no sockets to default-
+  enable, unlike §6.4's toggles) → the §6.4 all-off convention: four
+  `[ExecutionBlocker(None)]` outputs, queue succeeds, downstream skips.
+- **Loading = core's own.** Per name: `folder_paths.get_full_path_or_raise`
+  + `comfy.sd.load_checkpoint_guess_config(..., output_vae=True,
+  output_clip=True, embedding_directory=...)`, `out[:3]` — read off
+  `CheckpointLoaderSimple` (nodes.py ~:609), not guessed; the actual call
+  lives in one seam (`_load_checkpoint`) that tests monkeypatch. A selected
+  file that has vanished from disk is SKIPPED with a warning (one stale tick
+  must not sink the sweep); every-file-missing → the blocker path; any other
+  load failure (corrupt file) propagates like the core loader's would.
+  Repeat queues don't re-load: ComfyUI caches node OUTPUTS by input hash, so
+  an unchanged `selection` never re-runs execute at all.
+- **`VALIDATE_INPUTS`** re-checks names against the live checkpoints list
+  and fails the QUEUE naming the unknown files (live-verified: the 400
+  carries "unknown checkpoint file(s) ... nope/not-real.safetensors").
+  Degrades to True whenever `folder_paths` is unavailable (bare import).
+- **Route** `GET /eps_ckpt/checkpoints` → `{"checkpoints": [...]}` feeds the
+  panel; no loopback gate (same list `/object_info` already exposes to every
+  viewer). Registered defensively like the grid/frame-saver routes.
+- **Panel** (`web/eps_image/checkpoint_switcher.js`): an `addDOMWidget`
+  checkbox list — filter (substring, keydown-stopPropagation'd),
+  folder-grouped rows, count line, ⚠ rows for selected-but-missing files
+  (still untickable-off, never silently dropped from the JSON), empty/error
+  +Retry states, ~320px width floor. Writes `selection` re-sorted to the
+  SERVER list's order (click order is not emission order), missing names
+  appended after. Restore-safe via the §7.2 `wireConfigureReload` pattern:
+  `onConfigure` chained, and both it and the fetch reconcile through one
+  shared reload so whichever finishes last wins. No window-level listeners
+  at all (§7.5 trivially satisfied).
+- **Memory note** (docs duty, not code): N ticked checkpoints load N models
+  in one queue; ComfyUI's model management offloads between runs, but users
+  should start small — README says so.
+- Live-verified on the rig (2026-08-01, placeholder checkpoint files):
+  object_info shape; route list; panel render/group/count; tick/untick
+  writing server-ordered JSON; save→reload restoring ticks; ⚠ missing row;
+  filter; empty-selection queue succeeding through a real `VAEDecode`
+  consumer (blocker path); queue-time rejection naming an unknown file.
+  Real model loading needs real checkpoints — checklist item for the owner's
+  machines.
+
 ## §7 Frontend surfaces
 
 - **§7.1 Extension entry** `web/lora_library.js`: exactly one

@@ -119,6 +119,7 @@ _NODE_SPECS = [
     ("eps_image.nodes_cross", "EPSCrossProduct", "EPS Cross Product"),
     ("eps_image.nodes_cross_sweep", "EPSCrossSweep", "EPS Cross Sweep"),
     ("eps_image.nodes_distributor", "EPSDistributor", "EPS Distributor"),
+    ("eps_image.nodes_checkpoint_switcher", "EPSCheckpointSwitcher", "EPS Checkpoint Switcher"),
 ]
 
 NODE_CLASS_MAPPINGS = {}
@@ -164,6 +165,19 @@ try:
 except Exception:
     logger.exception("EPSNodes: eps_image.routes_frame_saver failed to register")
 
+# EPSCheckpointSwitcher's own route module (`GET /eps_ckpt/checkpoints`) --
+# same reasoning as eps_image.routes_image_grid/routes_frame_saver just
+# above: no LibraryContext needed (it lists straight from `folder_paths`),
+# so it isn't folded into `_routes.register(_context)`, and registered just
+# as defensively.
+try:
+    _checkpoint_switcher_routes_path = "eps_image.routes_checkpoint_switcher"
+    if _TOP_PREFIX:
+        _checkpoint_switcher_routes_path = f"{_TOP_PREFIX}.{_checkpoint_switcher_routes_path}"
+    _checkpoint_switcher_routes = importlib.import_module(_checkpoint_switcher_routes_path)
+    _checkpoint_switcher_routes.register()
+except Exception:
+    logger.exception("EPSNodes: eps_image.routes_checkpoint_switcher failed to register")
 
 WEB_DIRECTORY = "./web"
 
