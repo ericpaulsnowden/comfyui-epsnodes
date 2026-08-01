@@ -69,6 +69,26 @@ one-element list holding a ``comfy_execution.graph.ExecutionBlocker``
 instead of raising -- a deliberate downgrade from the v0.14.0 behavior (a
 queue-time ``ValueError`` naming the reason). See ``execute``'s own comment
 for why an ``ExecutionBlocker`` beats a bare empty list here.
+
+**Generalized to MODEL/CLIP/VAE (this module also defines
+EPSModelSwitcher/EPSClipSwitcher/EPSVaeSwitcher).** Everything above is
+still exactly what ``EPSSwitcher`` does -- its class id, ``image_N`` input
+names, ``toggles`` semantics, and every behavior documented above are
+unchanged. What changed is HOW it's built: ``_make_switcher_ns`` (near the
+bottom of this module) factors the INPUT_TYPES/check_lazy_status/execute
+shape into one parameterized builder -- unbounded ``<prefix>_N`` inputs via
+a parameterized ``_make_flexible_optional_inputs_class``, the same hidden
+``toggles`` bridge, the same INPUT_IS_LIST/OUTPUT_IS_LIST list fan-out, the
+same lazy per-slot skip, the same all-off ``ExecutionBlocker`` -- so the
+MODEL/CLIP/VAE siblings are the identical mechanism with a different
+prefix/IO type/wording. ``EPSSwitcher`` is now ALSO built by a call into
+that same factory (``prefix="image"``, ``io_type="IMAGE"``); only its
+construction moved from a hand-written class body to a factory call. The
+sibling-emptiness check (``_slots_fed_by_an_empty_switcher`` /
+``_switcher_is_statically_all_off``) now recognizes an upstream of ANY of
+the four classes via a small ``class_id -> that class's own slot pattern``
+registry (``_SWITCHER_SLOT_PATTERNS``), populated as each class is built --
+not just a single hardcoded class id.
 """
 
 from __future__ import annotations
@@ -80,29 +100,49 @@ from typing import Any
 
 logger = logging.getLogger("eps_image")
 
-#: Shared between ``_FlexibleOptionalImageInputs`` (INPUT_TYPES validation)
-#: and ``_connected_image_indices`` (execute-/check_lazy_status-time
-#: collection), so both agree on what counts as an image slot. Modeled on
-#: the sibling pack's ``cprb/nodes_save.py`` ``_VIDEO_INPUT_PATTERN``.
+#: Slot-name patterns for each switcher's unbounded ``<prefix>_N`` inputs.
+#: Shared between that type's flexible-optional-inputs class (INPUT_TYPES
+#: validation) and the connected-slot/lazy-skip helpers below, so all of
+#: them agree on what counts as that class's own slot. Modeled on the
+#: sibling pack's ``cprb/nodes_save.py`` ``_VIDEO_INPUT_PATTERN``.
 _IMAGE_INPUT_PATTERN = re.compile(r"image_(\d+)")
+_MODEL_INPUT_PATTERN = re.compile(r"model_(\d+)")
+_CLIP_INPUT_PATTERN = re.compile(r"clip_(\d+)")
+_VAE_INPUT_PATTERN = re.compile(r"vae_(\d+)")
 
-#: Shared verbatim between the hardcoded ``image_1`` entry and every
-#: dynamically-grown slot ``_FlexibleOptionalImageInputs.__getitem__``
-#: synthesizes, so image_2 and up read identically to image_1 on hover.
+#: Per-type hover tooltip for slot 1 and every dynamically-grown slot alike,
+#: so e.g. model_2+ reads identically to model_1 on hover -- see
+#: _make_flexible_optional_inputs_class's docstring for the mechanism.
 _IMAGE_INPUT_TOOLTIP = (
     "An image to include when enabled. Toggle it from the row on the node; "
+    "when off, nothing upstream of this socket runs at all."
+)
+_MODEL_INPUT_TOOLTIP = (
+    "A model to include when enabled. Toggle it from the row on the node; "
+    "when off, nothing upstream of this socket runs at all."
+)
+_CLIP_INPUT_TOOLTIP = (
+    "A CLIP to include when enabled. Toggle it from the row on the node; "
+    "when off, nothing upstream of this socket runs at all."
+)
+_VAE_INPUT_TOOLTIP = (
+    "A VAE to include when enabled. Toggle it from the row on the node; "
     "when off, nothing upstream of this socket runs at all."
 )
 
 #: Default ``toggles`` widget value: no overrides recorded yet, so every
 #: connected slot is enabled (see the module docstring's default-enabled
-#: rationale).
+#: rationale). Shared by all four classes -- the JSON shape doesn't depend
+#: on the noun, only its keys (``<prefix>_N``) do.
 DEFAULT_TOGGLES = "{}"
 
-#: This node's own class id, as it appears in a prompt's ``class_type`` --
-#: used to spot an UPSTREAM sibling switcher (see
-#: :func:`_slots_fed_by_an_empty_switcher`).
-_CLASS_ID = "EPSSwitcher"
+#: class_id -> that class's own slot pattern, for every switcher class this
+#: module defines. Populated by _make_switcher_ns as each class is built
+#: (bottom of this module); read by _switcher_is_statically_all_off so a
+#: sibling-emptiness check recognizes an upstream of ANY of the four
+#: classes -- using THAT upstream's own prefix to scan its wired slots,
+#: never the calling class's prefix.
+_SWITCHER_SLOT_PATTERNS: dict[str, re.Pattern[str]] = {}
 
 
 def _unwrap_hidden(value: Any) -> Any:
@@ -118,133 +158,6 @@ def _unwrap_hidden(value: Any) -> Any:
     if isinstance(value, (list, tuple)):
         return value[0] if value else None
     return value
-
-
-def _switcher_is_statically_all_off(node: dict) -> bool:
-    """True when *node* is a prompt entry for an EPSSwitcher that provably
-    emits nothing: every ``image_N`` it has wired is turned off in its own
-    ``toggles`` (or it has none wired at all).
-
-    "Provably" from the PROMPT ALONE -- ``toggles`` must be a literal string
-    (it is: a hidden widget value). If it arrives as a link, or as anything
-    this can't parse, the answer is False: unknown means "assume it produces
-    something", so the caller behaves exactly as it did before this check
-    existed.
-    """
-    if str(node.get("class_type") or "") != _CLASS_ID:
-        return False
-    inputs = node.get("inputs")
-    if not isinstance(inputs, dict):
-        return False
-    toggles = inputs.get("toggles", DEFAULT_TOGGLES)
-    if not isinstance(toggles, str):
-        return False  # wired from another node -- not statically knowable
-    toggle_map = _parse_toggles(toggles)
-    wired = [
-        key
-        for key, value in inputs.items()
-        if _IMAGE_INPUT_PATTERN.fullmatch(key)
-        and isinstance(value, (list, tuple))
-        and len(value) == 2
-    ]
-    return all(toggle_map.get(key, True) is False for key in wired)
-
-
-def _slots_fed_by_an_empty_switcher(prompt: Any, unique_id: Any) -> set[str]:
-    """The ``image_N`` input names of THIS node whose upstream is an
-    EPSSwitcher that provably emits nothing (:func:`_switcher_is_statically_all_off`).
-
-    Why this exists (owner report 2026-07-26): "if one of them has all of the
-    inputs unchecked the entire workflow won't run. Even if it's earlier in
-    the workflow than the second one." Reproduced exactly. An all-off switcher
-    emits ``[ExecutionBlocker(None)]``, and core's pre-execution scan
-    (``execution.py``'s ``process_inputs``) blocks a node when ANY element of
-    ANY of its inputs is a blocker -- core has no notion of blocking just one
-    input. So an all-off switcher feeding a SECOND switcher killed that
-    second switcher outright, even though it had a perfectly good enabled
-    image of its own. That is wrong: a switcher's job is "pass on the enabled
-    inputs", and an empty upstream should contribute nothing, not veto us.
-
-    The fix has to live HERE, on the consumer, and it has to work through the
-    LAZY mechanism: by not REQUESTING such a slot, the upstream switcher never
-    runs at all, so no blocker is ever created (rather than being created and
-    then swallowed -- core gives us no way to swallow one).
-
-    Rejected alternative, with live proof: having the all-off switcher emit a
-    bare ``[]`` when it can see that all its consumers tolerate one. That is
-    unsound because it makes a node's OUTPUT depend on the GRAPH while
-    ComfyUI's cache key depends only on its INPUTS -- ``IsChangedCache`` even
-    calls ``get_input_data`` with ``dynprompt=None`` ("We only want constants
-    in IS_CHANGED"), so a graph-derived decision can never participate in the
-    cache key. Tried it: the cached ``[]`` from a graph where it WAS safe got
-    replayed into one where it wasn't, and SaveImage died with
-    ``IndexError`` in ``slice_dict``. Never make an output graph-dependent.
-    """
-    if not isinstance(prompt, dict) or unique_id is None:
-        return set()
-    me = prompt.get(str(unique_id))
-    if not isinstance(me, dict):
-        return set()
-    my_inputs = me.get("inputs")
-    if not isinstance(my_inputs, dict):
-        return set()
-    skip: set[str] = set()
-    for name, value in my_inputs.items():
-        if not _IMAGE_INPUT_PATTERN.fullmatch(name):
-            continue
-        if not (isinstance(value, (list, tuple)) and len(value) == 2):
-            continue
-        upstream = prompt.get(str(value[0]))
-        if isinstance(upstream, dict) and _switcher_is_statically_all_off(upstream):
-            skip.add(name)
-    return skip
-
-
-class _FlexibleOptionalImageInputs(dict):
-    """The ``optional`` half of INPUT_TYPES: accepts ANY ``image_N`` key.
-
-    FORMAT.md §6.4's unbounded ``image_N`` needs ComfyUI's own input
-    validation -- which checks ``input_name in class_inputs['optional']``
-    (the ``in`` operator, i.e. ``__contains__``) before letting a workflow
-    wire a given input on this node -- to say yes to ``image_5``,
-    ``image_37``, etc. even though only ``image_1`` is ever actually stored
-    in this dict. Directly modeled on the sibling comfyui-premiere-bridge
-    pack's ``cprb/nodes_save.py`` ``_FlexibleOptionalVideoInputs`` (itself
-    modeled on rgthree-comfy's ``FlexibleOptionalInputType`` trick,
-    reimplemented locally -- this pack does not depend on rgthree):
-    override ``__contains__`` (and, for safety, ``__getitem__`` in case
-    something subscripts rather than uses ``in``/``.get``) to treat any key
-    matching ``_IMAGE_INPUT_PATTERN`` as present with type
-    ``("IMAGE", {"lazy": True})`` -- the ``lazy`` flag matters here just as
-    much as it does on the hardcoded ``image_1`` entry (module docstring
-    "Disabled slots are also genuinely lazy now"): ComfyUI reads it straight
-    off whatever ``INPUT_TYPES()["optional"][input_name]`` returns for THAT
-    input name when deciding whether to eagerly walk its upstream
-    (``comfy_execution/graph.py`` ``TopologicalSort.add_node``/
-    ``get_input_info``), so a dynamically-grown slot this ``__getitem__``
-    synthesizes (``image_5`` and up, never actually inserted into this
-    dict) must carry the identical options dict as ``image_1`` or its
-    upstream would eagerly execute regardless of toggle state -- silently
-    reopening the bug this module's ``INPUT_IS_LIST``/lazy pair fixes, but
-    only for slot 2 and beyond.
-    Plain dict iteration/``.items()``/``.keys()`` is left untouched, so it
-    still only yields whatever was actually inserted (``image_1``) -- which
-    is what ``/object_info`` (and thus the frontend's default socket
-    rendering) sees, giving the node exactly one visible socket out of the
-    box; ``switcher.js`` grows the rest.
-    """
-
-    def __contains__(self, key: object) -> bool:
-        if isinstance(key, str) and _IMAGE_INPUT_PATTERN.fullmatch(key):
-            return True
-        return super().__contains__(key)
-
-    def __getitem__(self, key: str) -> Any:
-        if super().__contains__(key):
-            return super().__getitem__(key)
-        if isinstance(key, str) and _IMAGE_INPUT_PATTERN.fullmatch(key):
-            return ("IMAGE", {"lazy": True, "tooltip": _IMAGE_INPUT_TOOLTIP})
-        raise KeyError(key)
 
 
 def _unwrap_toggles(toggles: Any) -> Any:
@@ -268,39 +181,20 @@ def _unwrap_toggles(toggles: Any) -> Any:
     return toggles
 
 
-def _connected_image_indices(kwargs: dict[str, Any]) -> list[int]:
-    """Ascending slot numbers for every ``image_N`` key present in *kwargs*
-    with a non-``None`` value.
-
-    Presence-of-KEY (not value-truthiness) is what "connected" means here,
-    on purpose: with every ``image_N`` slot now ``lazy``, a connected slot
-    that hasn't resolved YET is still a key in *kwargs* -- ComfyUI fills it
-    with a placeholder (a one-element tuple holding ``None``) rather than
-    omitting it -- so it must still count as connected for
-    ``check_lazy_status`` to be able to request it. A genuinely unconnected
-    optional slot is never a key at all (ComfyUI's own input collection
-    only populates what the prompt actually wires). A bare ``None`` VALUE
-    (as opposed to the one-tuple placeholder, or an absent key) is kept as
-    the "not connected" tolerance direct callers/older call sites rely on
-    (a disconnected middle slot, or a hand-edited prompt) -- real ComfyUI
-    never actually produces a bare ``None`` here itself (only the one-tuple
-    placeholder or a real list), so this never excludes a genuinely-pending
-    slot.
-    """
-    return sorted(
-        int(match.group(1))
-        for key, value in kwargs.items()
-        if value is not None and (match := _IMAGE_INPUT_PATTERN.fullmatch(key))
-    )
-
-
-def _parse_toggles(toggles: str) -> dict[str, Any]:
+def _parse_toggles(
+    toggles: str, *, log_prefix: str = "EPS Switcher", noun: str = "image"
+) -> dict[str, Any]:
     """Best-effort JSON object parse of the ``toggles`` widget value.
 
     Never raises: a malformed/foreign value (a hand-edited workflow, an API
     caller sending garbage) degrades to "no overrides recorded" -- i.e.
     every slot enabled -- rather than crashing the node, logging a warning
-    so the cause is visible without being fatal.
+    so the cause is visible without being fatal. *log_prefix*/*noun* name
+    the calling switcher class and its slot noun in that warning and default
+    to EPSSwitcher's own original "EPS Switcher"/"image" wording, so every
+    pre-existing call site (which never passed them) logs byte-identical
+    text to before this function was shared across all four switcher
+    classes.
     """
     if not toggles:
         return {}
@@ -308,136 +202,306 @@ def _parse_toggles(toggles: str) -> dict[str, Any]:
         parsed = json.loads(toggles)
     except (TypeError, ValueError) as exc:
         logger.warning(
-            "EPS Switcher: malformed `toggles` value (%s); treating every "
-            "connected image as enabled",
+            "%s: malformed `toggles` value (%s); treating every connected %s as enabled",
+            log_prefix,
             exc,
+            noun,
         )
         return {}
     if not isinstance(parsed, dict):
         logger.warning(
-            "EPS Switcher: `toggles` was not a JSON object (got %r); treating "
-            "every connected image as enabled",
+            "%s: `toggles` was not a JSON object (got %r); treating every "
+            "connected %s as enabled",
+            log_prefix,
             type(parsed).__name__,
+            noun,
         )
         return {}
     return parsed
 
 
-class EPSSwitcher:
-    """Any number of ``image_N`` inputs, each independently on/off, fanned
-    into one ``IMAGE`` list output (FORMAT.md §6.4).
+def _connected_slot_indices(kwargs: dict[str, Any], pattern: re.Pattern[str]) -> list[int]:
+    """Ascending slot numbers for every ``<prefix>_N`` key (matching
+    *pattern*) present in *kwargs* with a non-``None`` value.
 
-    ``INPUT_IS_LIST = True`` (own class attribute; ``execute`` and
-    ``check_lazy_status`` both receive every input already wrapped in a
-    list -- see the module docstring): required so a list-producing
-    upstream -- ``EPSImageGrid``, itself ``OUTPUT_IS_LIST`` -- is merged
-    element-wise into the output instead of ComfyUI silently re-running
-    THIS node once per upstream element with every OTHER input
-    broadcast-repeated (core's own ``execution.py``
-    ``slice_dict``/map-over-list machinery -- the default for any node that
-    does NOT declare ``INPUT_IS_LIST``). That default was the root cause of
-    a real, owner-reported bug: a grid input toggled off alongside a single
-    enabled Load Image still ran the downstream branch once per grid
-    element instead of once, producing repeated identical edits of the one
-    Load Image picture.
+    Presence-of-KEY (not value-truthiness) is what "connected" means here,
+    on purpose: with every slot now ``lazy``, a connected slot that hasn't
+    resolved YET is still a key in *kwargs* -- ComfyUI fills it with a
+    placeholder (a one-element tuple holding ``None``) rather than omitting
+    it -- so it must still count as connected for ``check_lazy_status`` to
+    be able to request it. A genuinely unconnected optional slot is never a
+    key at all (ComfyUI's own input collection only populates what the
+    prompt actually wires). A bare ``None`` VALUE (as opposed to the
+    one-tuple placeholder, or an absent key) is kept as the "not connected"
+    tolerance direct callers/older call sites rely on (a disconnected
+    middle slot, or a hand-edited prompt) -- real ComfyUI never actually
+    produces a bare ``None`` here itself (only the one-tuple placeholder or
+    a real list), so this never excludes a genuinely-pending slot.
+    """
+    return sorted(
+        int(match.group(1))
+        for key, value in kwargs.items()
+        if value is not None and (match := pattern.fullmatch(key))
+    )
 
-    Each ``image_N`` slot is ALSO ``lazy`` (INPUT_TYPES options,
-    ``check_lazy_status`` below): a toggled-off slot's upstream is never
-    requested and so never executes at all -- a genuine branch-skip, not
-    just an output-side filter (superseding the earlier "their upstream
-    nodes still execute regardless of toggle state" behavior this docstring
-    used to describe -- owner ask: "where in the workflow we disable the
-    run... Seems like something we should fix").
 
-    Zero enabled images -- everything toggled off, or nothing connected at
-    all -- is a VALID queue, not an error (FORMAT.md §6.4 "All-off /
-    none-connected is a VALID state"): ``execute`` returns an
-    ``ExecutionBlocker`` instead of raising, so the queue succeeds and the
-    downstream image branch simply doesn't run for it.
+def _switcher_is_statically_all_off(node: dict) -> bool:
+    """True when *node* is a prompt entry for one of this module's switcher
+    classes (EPSSwitcher/EPSModelSwitcher/EPSClipSwitcher/EPSVaeSwitcher)
+    that provably emits nothing: every ``<prefix>_N`` slot it has wired is
+    turned off in its own ``toggles`` (or it has none wired at all).
 
-    Re-derives the enabled set from ``toggles`` + the connected ``image_N``
-    kwargs on every execution -- there is no other state to go stale, so
-    unlike the Prompt Notebook this node needs no ``IS_CHANGED`` override:
-    ``toggles`` and every ``image_N`` are ordinary tracked inputs already
-    covered by ComfyUI's own input-hash caching.
+    Generalized beyond a single hardcoded class id (FORMAT.md §6.4, grown to
+    MODEL/CLIP/VAE): *node*'s ``class_type`` is looked up in
+    ``_SWITCHER_SLOT_PATTERNS`` to find THAT class's own slot-name pattern --
+    e.g. an EPSModelSwitcher upstream is scanned for ``model_N`` keys, not
+    whatever prefix the CALLER happens to use -- so any of the four classes
+    is recognized as a sibling, not just the caller's own type.
+
+    "Provably" from the PROMPT ALONE -- ``toggles`` must be a literal string
+    (it is: a hidden widget value). If it arrives as a link, or as anything
+    this can't parse, or *node* isn't one of this module's switcher classes
+    at all, the answer is False: unknown means "assume it produces
+    something", so the caller behaves exactly as it did before this check
+    existed.
+    """
+    class_type = str(node.get("class_type") or "")
+    pattern = _SWITCHER_SLOT_PATTERNS.get(class_type)
+    if pattern is None:
+        return False
+    inputs = node.get("inputs")
+    if not isinstance(inputs, dict):
+        return False
+    toggles = inputs.get("toggles", DEFAULT_TOGGLES)
+    if not isinstance(toggles, str):
+        return False  # wired from another node -- not statically knowable
+    toggle_map = _parse_toggles(toggles)
+    wired = [
+        key
+        for key, value in inputs.items()
+        if pattern.fullmatch(key) and isinstance(value, (list, tuple)) and len(value) == 2
+    ]
+    return all(toggle_map.get(key, True) is False for key in wired)
+
+
+def _slots_fed_by_an_empty_switcher(
+    prompt: Any, unique_id: Any, pattern: re.Pattern[str]
+) -> set[str]:
+    """The ``<prefix>_N`` input names of THIS node (matching *pattern*, this
+    class's own slot prefix) whose upstream is a switcher of ANY of the four
+    classes that provably emits nothing (:func:`_switcher_is_statically_all_off`).
+
+    Why this exists (owner report 2026-07-26, originally observed on
+    EPSSwitcher alone): "if one of them has all of the inputs unchecked the
+    entire workflow won't run. Even if it's earlier in the workflow than the
+    second one." Reproduced exactly. An all-off switcher emits
+    ``[ExecutionBlocker(None)]``, and core's pre-execution scan
+    (``execution.py``'s ``process_inputs``) blocks a node when ANY element of
+    ANY of its inputs is a blocker -- core has no notion of blocking just one
+    input. So an all-off switcher feeding a SECOND switcher killed that
+    second switcher outright, even though it had a perfectly good enabled
+    input of its own. That is wrong: a switcher's job is "pass on the enabled
+    inputs", and an empty upstream should contribute nothing, not veto us.
+
+    The fix has to live HERE, on the consumer, and it has to work through the
+    LAZY mechanism: by not REQUESTING such a slot, the upstream switcher never
+    runs at all, so no blocker is ever created (rather than being created and
+    then swallowed -- core gives us no way to swallow one).
+
+    Rejected alternative, with live proof: having the all-off switcher emit a
+    bare ``[]`` when it can see that all its consumers tolerate one. That is
+    unsound because it makes a node's OUTPUT depend on the GRAPH while
+    ComfyUI's cache key depends only on its INPUTS -- ``IsChangedCache`` even
+    calls ``get_input_data`` with ``dynprompt=None`` ("We only want constants
+    in IS_CHANGED"), so a graph-derived decision can never participate in the
+    cache key. Tried it (for EPSSwitcher): the cached ``[]`` from a graph
+    where it WAS safe got replayed into one where it wasn't, and SaveImage
+    died with ``IndexError`` in ``slice_dict``. Never make an output
+    graph-dependent.
+    """
+    if not isinstance(prompt, dict) or unique_id is None:
+        return set()
+    me = prompt.get(str(unique_id))
+    if not isinstance(me, dict):
+        return set()
+    my_inputs = me.get("inputs")
+    if not isinstance(my_inputs, dict):
+        return set()
+    skip: set[str] = set()
+    for name, value in my_inputs.items():
+        if not pattern.fullmatch(name):
+            continue
+        if not (isinstance(value, (list, tuple)) and len(value) == 2):
+            continue
+        upstream = prompt.get(str(value[0]))
+        if isinstance(upstream, dict) and _switcher_is_statically_all_off(upstream):
+            skip.add(name)
+    return skip
+
+
+def _make_flexible_optional_inputs_class(
+    pattern: re.Pattern[str], io_type: str, tooltip: str
+) -> type[dict]:
+    """Build a dict-subclass accepting ANY ``<prefix>_N`` key -- the
+    ``optional`` half of a switcher's INPUT_TYPES (FORMAT.md §6.4).
+
+    ComfyUI's own input validation checks ``input_name in
+    class_inputs['optional']`` (the ``in`` operator, i.e. ``__contains__``)
+    before letting a workflow wire a given input on a node -- unbounded
+    ``<prefix>_N`` growth needs that check to say yes to ``model_5``,
+    ``clip_37``, etc. even though only slot 1 is ever actually stored in the
+    dict. Originally written once for IMAGE (``_FlexibleOptionalImageInputs``,
+    itself modeled on the sibling comfyui-premiere-bridge pack's
+    ``cprb/nodes_save.py`` ``_FlexibleOptionalVideoInputs``, in turn modeled
+    on rgthree-comfy's ``FlexibleOptionalInputType`` trick, reimplemented
+    locally -- this pack does not depend on rgthree); this factory
+    parameterizes that same mechanism by *pattern* (which ``<prefix>_N``
+    shape to accept), *io_type* (what type each synthesized slot reports),
+    and *tooltip* (its hover text) so MODEL/CLIP/VAE don't each duplicate the
+    class body.
+
+    Both ``__contains__`` and ``__getitem__`` are overridden (the latter for
+    safety, in case something subscripts rather than uses ``in``/``.get``):
+    any key matching *pattern* is treated as present with type
+    ``(io_type, {"lazy": True, "tooltip": tooltip})`` -- the ``lazy`` flag
+    matters here just as much as it does on the hardcoded slot-1 entry
+    (module docstring "Disabled slots are also genuinely lazy now"): ComfyUI
+    reads it straight off whatever ``INPUT_TYPES()["optional"][input_name]``
+    returns for THAT input name when deciding whether to eagerly walk its
+    upstream (``comfy_execution/graph.py`` ``TopologicalSort.add_node``/
+    ``get_input_info``), so a dynamically-grown slot this ``__getitem__``
+    synthesizes must carry the identical options dict as slot 1 or its
+    upstream would eagerly execute regardless of toggle state.
+
+    Plain dict iteration/``.items()``/``.keys()`` is left untouched, so it
+    still only yields whatever was actually inserted (slot 1) -- which is
+    what ``/object_info`` (and thus the frontend's default socket rendering)
+    sees, giving the node exactly one visible socket out of the box; the
+    frontend JS grows the rest.
     """
 
-    CATEGORY = "EPSNodes"
-    RETURN_TYPES = ("IMAGE",)
-    RETURN_NAMES = ("images",)
-    INPUT_IS_LIST = True
-    OUTPUT_IS_LIST = (True,)
-    OUTPUT_TOOLTIPS = (
-        "Every enabled image, in slot order, as a list -- the rest of the "
-        "workflow runs once per element.",
-    )
-    FUNCTION = "execute"
-    DESCRIPTION = (
-        "Toggle any number of image inputs on or off; the enabled ones fan "
-        "out in slot order, so N enabled inputs make the rest of the "
-        "workflow run N times (a list-producing input, like EPS Image Grid, "
-        "counts for as many images as it holds). A toggled-off input's "
-        "upstream branch never executes at all -- not just filtered out "
-        "afterward. Turning every input off, or connecting none at all, is "
-        "a valid state: the queue still succeeds and the downstream branch "
-        "simply doesn't run. A value wired further downstream, like a seed, "
-        "repeats identically across every run unless you give it an "
-        "explicit per-image list."
-    )
+    class _FlexibleOptionalInputs(dict):
+        def __contains__(self, key: object) -> bool:
+            if isinstance(key, str) and pattern.fullmatch(key):
+                return True
+            return super().__contains__(key)
 
-    @classmethod
+        def __getitem__(self, key: str) -> Any:
+            if super().__contains__(key):
+                return super().__getitem__(key)
+            if isinstance(key, str) and pattern.fullmatch(key):
+                return (io_type, {"lazy": True, "tooltip": tooltip})
+            raise KeyError(key)
+
+    return _FlexibleOptionalInputs
+
+
+# The IMAGE instantiation keeps its original module-level name -- unchanged
+# from before this factory existed -- because tests/test_switcher.py imports
+# it directly (`from eps_image.nodes_switcher import ... _FlexibleOptionalImageInputs`)
+# and constructs instances of it itself. Built via the shared factory just
+# like the three siblings below, so EPSSwitcher's own INPUT_TYPES() uses this
+# exact class (see its `flexible_cls=` argument at the bottom of this module).
+_FlexibleOptionalImageInputs = _make_flexible_optional_inputs_class(
+    _IMAGE_INPUT_PATTERN, "IMAGE", _IMAGE_INPUT_TOOLTIP
+)
+
+
+def _make_switcher_ns(
+    *,
+    class_id: str,
+    prefix: str,
+    pattern: re.Pattern[str],
+    io_type: str,
+    output_name: str,
+    log_prefix: str,
+    noun: str,
+    input_tooltip: str,
+    output_tooltip: str,
+    description: str,
+    class_doc: str,
+    flexible_cls: type[dict] | None = None,
+) -> type:
+    """Build one switcher class (FORMAT.md §6.4 and its MODEL/CLIP/VAE
+    generalization). ``EPSSwitcher`` (IMAGE) and its three siblings
+    (``EPSModelSwitcher``/``EPSClipSwitcher``/``EPSVaeSwitcher``) are all
+    just different parameterizations of this one shape: unbounded
+    ``<prefix>_N`` optional inputs (via
+    :func:`_make_flexible_optional_inputs_class`), a hidden ``toggles``
+    STRING bridge, ``INPUT_IS_LIST``/``OUTPUT_IS_LIST`` list fan-out, lazy
+    per-slot skip (:func:`_slots_fed_by_an_empty_switcher`), and an
+    ``ExecutionBlocker`` when nothing ends up enabled. See ``EPSSwitcher``'s
+    own class docstring (the IMAGE instantiation, at the bottom of this
+    module) for the full historical mechanism write-up -- only the noun and
+    IO type genuinely vary per class; the mechanics are identical.
+
+    Registers *class_id* -> *pattern* into ``_SWITCHER_SLOT_PATTERNS`` as a
+    side effect, so :func:`_switcher_is_statically_all_off` recognizes this
+    class as a sibling switcher from here on (this module calls this factory
+    for all four classes before any of them can actually execute, so the
+    registry is always fully populated by the time a real prompt runs).
+
+    *flexible_cls*, when given, is used as-is instead of building a fresh
+    one -- solely so ``EPSSwitcher`` can keep using the pre-existing,
+    externally-imported ``_FlexibleOptionalImageInputs`` object identity;
+    every other class lets this factory build its own private one.
+    """
+    if flexible_cls is None:
+        flexible_cls = _make_flexible_optional_inputs_class(pattern, io_type, input_tooltip)
+    _SWITCHER_SLOT_PATTERNS[class_id] = pattern
+
     def INPUT_TYPES(cls) -> dict[str, Any]:
         return {
             "required": {},
-            "optional": _FlexibleOptionalImageInputs(
+            "optional": flexible_cls(
                 {
-                    # `lazy: True` -- see the module docstring's "Disabled
-                    # slots are also genuinely lazy now" and this class's
-                    # own docstring; `_FlexibleOptionalImageInputs.__getitem__`
-                    # synthesizes the SAME options dict (including the same
-                    # tooltip, `_IMAGE_INPUT_TOOLTIP`) for every dynamically
-                    # grown slot (image_2 and up) so they're all equally lazy
-                    # and read identically on hover.
-                    "image_1": ("IMAGE", {"lazy": True, "tooltip": _IMAGE_INPUT_TOOLTIP}),
-                    # Serialized bridge to the frontend's per-row/header toggle
-                    # UI (module docstring "Enabled-set mechanism"); switcher.js
-                    # hides this widget's on-canvas row (`.hidden = true`, same
-                    # trick FORMAT.md §7.2 uses for the Prompt Notebook's `file`
-                    # widget) but keeps writing its value, so it still
-                    # serializes with the workflow and still reaches execute()
-                    # untouched for a plain API caller who never loads our JS.
+                    # `lazy: True` -- module docstring "Disabled slots are
+                    # also genuinely lazy now"; __getitem__ above synthesizes
+                    # the SAME options dict (including the same tooltip) for
+                    # every dynamically grown slot (slot 2 and up) so they're
+                    # all equally lazy and read identically on hover.
+                    f"{prefix}_1": (io_type, {"lazy": True, "tooltip": input_tooltip}),
+                    # Serialized bridge to the frontend's per-row/header
+                    # toggle UI (module docstring "Enabled-set mechanism");
+                    # the frontend hides this widget's on-canvas row but
+                    # keeps writing its value, so it still serializes with
+                    # the workflow and still reaches execute() untouched for
+                    # a plain API caller who never loads our JS.
                     #
-                    # In `optional`, NOT `required`: ComfyUI's validate_inputs
-                    # rejects a /prompt whose inputs omit any REQUIRED key
-                    # BEFORE the node runs (there is no backend default-fill),
-                    # which would make the documented "API caller who never
-                    # heard of this widget" path (module docstring) unreachable.
-                    # execute()'s own `toggles=DEFAULT_TOGGLES` default covers
-                    # the omitted case; the frontend still serializes it.
+                    # In `optional`, NOT `required`: ComfyUI's
+                    # validate_inputs rejects a /prompt whose inputs omit any
+                    # REQUIRED key BEFORE the node runs (there is no backend
+                    # default-fill), which would make the documented "API
+                    # caller who never heard of this widget" path (module
+                    # docstring) unreachable. execute()'s own
+                    # `toggles=DEFAULT_TOGGLES` default covers the omitted
+                    # case; the frontend still serializes it.
                     #
                     # Deliberately NOT lazy (module docstring "Enabled-set
-                    # mechanism"): `check_lazy_status` needs it immediately to
-                    # decide which `image_N` slots are even worth asking for.
-                # "hidden": True is the VUE-nodes ("New node design") hide
-                # flag (2026-07-29): that renderer decides widget visibility
-                # from the input spec's options (`options.hidden`,
-                # useProcessedWidgets.ts) and IGNORES the litegraph
-                # `widget.hidden` the frontend sets -- without this, this
-                # internal widget leaked into Vue nodes as a raw editable
-                # field. The classic canvas renderer ignores this key right
-                # back, so it changes nothing there.
+                    # mechanism"): `check_lazy_status` needs it immediately
+                    # to decide which slots are even worth asking for.
+                    #
+                    # "hidden": True is the VUE-nodes ("New node design")
+                    # hide flag (2026-07-29): that renderer decides widget
+                    # visibility from the input spec's options
+                    # (`options.hidden`, useProcessedWidgets.ts) and IGNORES
+                    # the litegraph `widget.hidden` the frontend sets --
+                    # without this, this internal widget leaks into Vue nodes
+                    # as a raw editable field. The classic canvas renderer
+                    # ignores this key right back, so it changes nothing
+                    # there.
                     "toggles": (
-                    "STRING",
-                    {"default": DEFAULT_TOGGLES, "multiline": False, "hidden": True},
-                ),
+                        "STRING",
+                        {"default": DEFAULT_TOGGLES, "multiline": False, "hidden": True},
+                    ),
                 }
             ),
-            # Server-supplied, never user-facing: lets the all-off branch see
-            # WHO consumes this output before choosing between an empty list
-            # and a blocker (see _EMPTY_TOLERANT_CONSUMERS). Hidden inputs
-            # can't be omitted by an API caller in a way that breaks us --
-            # `execute`'s own defaults cover their absence, and the fallback
-            # is the pre-2026-07-26 behavior.
+            # Server-supplied, never user-facing: lets check_lazy_status
+            # inspect the prompt for a provably-empty sibling switcher before
+            # requesting a slot fed by one. Hidden inputs can't be omitted by
+            # an API caller in a way that breaks us -- both methods' own
+            # defaults cover their absence, and the fallback is "assume the
+            # upstream produces something".
             "hidden": {"prompt": "PROMPT", "unique_id": "UNIQUE_ID"},
         }
 
@@ -448,58 +512,43 @@ class EPSSwitcher:
         unique_id: Any = None,
         **kwargs: Any,
     ) -> list[str]:
-        """Which ``image_N`` inputs ComfyUI should actually resolve.
+        """Which ``<prefix>_N`` inputs ComfyUI should actually resolve.
 
         Called by core through the SAME ``INPUT_IS_LIST``-gated dispatch as
-        ``execute`` (``execution.py``'s ``_async_map_node_over_list``, keyed
-        off this class's own ``INPUT_IS_LIST`` -- not a separate mechanism),
-        so it receives kwargs shaped exactly like ``execute``'s: ``toggles``
-        list-wrapped (unwrapped the same way, via ``_unwrap_toggles``), and
-        each connected ``image_N`` either its fully-resolved list (if some
-        earlier round already resolved it) or the one-tuple ``(None,)``
-        placeholder core uses for "connected but not resolved yet" on an
-        ``INPUT_IS_LIST`` node. An unconnected slot is simply absent from
-        *kwargs*, exactly like in ``execute``.
-
-        Returns every ENABLED, connected slot's name, regardless of whether
-        it has already resolved -- core's own post-filter (it only actually
-        requests a name that is still genuinely unresolved, and keeps
-        calling this method until nothing new is needed) makes that safe
-        and self-terminating; this is also the documented contract of
-        ComfyUI's own ``check_lazy_status`` (see
+        ``execute`` (``execution.py``'s ``_async_map_node_over_list``), so it
+        receives kwargs shaped exactly like ``execute``'s. Returns every
+        ENABLED, connected slot's name, regardless of whether it has already
+        resolved -- core's own post-filter makes that safe and
+        self-terminating (the documented contract of
         ``comfy.comfy_types.node_typing.CheckLazyMixin``: "Will be executed
         repeatedly until it returns an empty list, or all requested items
-        were already evaluated"). DISABLED connected slots, and slots that
-        aren't connected at all, are never named here -- so core never asks
-        for their upstream, which is the actual branch-skip: an upstream
-        that's never requested is never added to the execution graph and
-        never runs (``comfy_execution/graph.py``
-        ``TopologicalSort.add_node``'s ``is_lazy`` branch skips a lazy
-        input's producer entirely unless/until something promotes it via
-        ``make_input_strong_link`` -- which only happens for a name THIS
-        method returns).
+        were already evaluated"). DISABLED connected slots, slots that
+        aren't connected at all, and slots fed by a provably-empty sibling
+        switcher (:func:`_slots_fed_by_an_empty_switcher`) are never named
+        here -- so core never asks for their upstream, which is the actual
+        branch-skip.
         """
-        toggle_map = _parse_toggles(_unwrap_toggles(toggles))
+        toggle_map = _parse_toggles(_unwrap_toggles(toggles), log_prefix=log_prefix, noun=noun)
         # 2026-07-26: never request a slot fed by a provably-empty sibling
-        # switcher -- see _slots_fed_by_an_empty_switcher for the full why.
-        # Not requesting it means that switcher never runs, so its blocker is
-        # never created and it cannot veto this node's OTHER enabled inputs.
+        # switcher of ANY of the four classes -- see
+        # _slots_fed_by_an_empty_switcher for the full why. Not requesting it
+        # means that switcher never runs, so its blocker is never created and
+        # it cannot veto this node's OTHER enabled inputs.
         skip = _slots_fed_by_an_empty_switcher(
-            _unwrap_hidden(prompt), _unwrap_hidden(unique_id)
+            _unwrap_hidden(prompt), _unwrap_hidden(unique_id), pattern
         )
         if skip:
             logger.info(
-                "EPS Switcher: not requesting %s -- fed by an EPS Switcher "
-                "with everything toggled off, so it would only contribute an "
-                "execution block; this node's other enabled inputs are "
-                "unaffected",
+                "%s: not requesting %s -- fed by a switcher with everything "
+                "toggled off, so it would only contribute an execution "
+                "block; this node's other enabled inputs are unaffected",
+                log_prefix,
                 ", ".join(sorted(skip)),
             )
         return [
             name
-            for index in _connected_image_indices(kwargs)
-            if (name := f"image_{index}") not in skip
-            and toggle_map.get(name, True) is not False
+            for index in _connected_slot_indices(kwargs, pattern)
+            if (name := f"{prefix}_{index}") not in skip and toggle_map.get(name, True) is not False
         ]
 
     def execute(
@@ -509,23 +558,24 @@ class EPSSwitcher:
         unique_id: Any = None,
         **kwargs: Any,
     ) -> tuple[list[Any]]:
-        toggle_map = _parse_toggles(_unwrap_toggles(toggles))
-        connected = _connected_image_indices(kwargs)
+        toggle_map = _parse_toggles(_unwrap_toggles(toggles), log_prefix=log_prefix, noun=noun)
+        connected = _connected_slot_indices(kwargs, pattern)
 
-        # A slot is enabled unless its key is present and EXPLICITLY the boolean
-        # `false` (matches switcher.js's `!== false` and this module's own
-        # docstring). Plain truthiness would wrongly drop a slot whose value is
-        # a non-bool falsy like null/0/"" from a hand-edited workflow or a
-        # non-frontend API caller -- the frontend renders those as ON, so the
-        # backend must too, or the fan-out count silently disagrees with the UI.
+        # A slot is enabled unless its key is present and EXPLICITLY the
+        # boolean `false` (matches the frontend's `!== false` and this
+        # module's own docstring). Plain truthiness would wrongly drop a slot
+        # whose value is a non-bool falsy like null/0/"" from a hand-edited
+        # workflow or a non-frontend API caller -- the frontend renders those
+        # as ON, so the backend must too, or the fan-out count silently
+        # disagrees with the UI.
         #
         # Every ENABLED slot's value is itself a list here (INPUT_IS_LIST --
         # module docstring): an ordinary upstream's single value arrives
-        # wrapped as a length-1 list, a list-producing upstream (EPSImageGrid)
-        # arrives as its full multi-element list. Extending the output with
-        # each slot's elements (one level of flattening) reproduces the exact
-        # same per-slot batch semantics as before INPUT_IS_LIST for the
-        # length-1 case, while correctly merging a list-producing upstream
+        # wrapped as a length-1 list, a list-producing upstream arrives as
+        # its full multi-element list. Extending the output with each slot's
+        # elements (one level of flattening) reproduces the exact same
+        # per-slot batch semantics as before INPUT_IS_LIST for the length-1
+        # case, while correctly merging a list-producing upstream
         # element-wise instead of counting it as one opaque item. A bare
         # (non-list) value -- a direct caller/test that skips the wrapping,
         # since real ComfyUI never sends one for a connected input -- is
@@ -534,35 +584,34 @@ class EPSSwitcher:
         # list are skipped defensively (a partial/misbehaving upstream, or
         # the lazy "not resolved" placeholder for a slot that -- because it's
         # disabled -- was never actually requested and so never resolved).
-        enabled_images: list[Any] = []
+        enabled_values: list[Any] = []
         for index in connected:
-            if toggle_map.get(f"image_{index}", True) is False:
+            key = f"{prefix}_{index}"
+            if toggle_map.get(key, True) is False:
                 continue
-            elements = kwargs[f"image_{index}"]
+            elements = kwargs[key]
             if isinstance(elements, (list, tuple)):
-                enabled_images.extend(element for element in elements if element is not None)
+                enabled_values.extend(element for element in elements if element is not None)
             else:
-                enabled_images.append(elements)
+                enabled_values.append(elements)
 
-        if not enabled_images:
+        if not enabled_values:
             # FORMAT.md §6.4 "All-off / none-connected is a VALID state"
-            # (owner decision 2026-07-20, supersedes the v0.14.0 behavior this
-            # used to raise here -- "there will be times when a user might
-            # want to turn them all off"). Returning a list holding a single
-            # ExecutionBlocker(None) makes ComfyUI's own list-fanout machinery
-            # (execution.py `merge_result_data`) treat THIS WHOLE LIST as
-            # "blocked": every downstream node whose input traces back to it
-            # is silently skipped -- no `execution_error` event (that only
-            # fires when `.message` is not None, per execution.py's
-            # `execution_block_cb`), no exception, a normal SUCCESS queue. A
-            # bare `[]` was tried and rejected: with no co-input it still hits
-            # the `max_len_input == 0` path and calls the downstream function
+            # (owner decision 2026-07-20). Returning a list holding a single
+            # ExecutionBlocker(None) makes ComfyUI's own list-fanout
+            # machinery (execution.py `merge_result_data`) treat THIS WHOLE
+            # LIST as "blocked": every downstream node whose input traces
+            # back to it is silently skipped -- no `execution_error` event
+            # (that only fires when `.message` is not None, per
+            # execution.py's `execution_block_cb`), no exception, a normal
+            # SUCCESS queue. A bare `[]` was tried (for EPSSwitcher) and
+            # rejected: with no co-input it still hits the
+            # `max_len_input == 0` path and calls the downstream function
             # with ZERO kwargs (a crash for any node whose signature requires
             # the list), and mixed with a second, non-empty list input on the
             # same downstream node it IndexErrors inside `slice_dict`'s
-            # `v[-1]` on an empty list. Verified live with a real /prompt +
-            # /history round trip -- see tests/test_switcher.py and the
-            # round-10 report.
+            # `v[-1]` on an empty list. See tests/test_switcher.py and the
+            # round-10 report for the original EPSSwitcher verification.
             # NOTE (2026-07-26): the blocker below is UNCONDITIONAL on
             # purpose. Emitting a bare [] for graphs whose consumers tolerate
             # one was tried and REVERTED -- it makes the output depend on the
@@ -573,23 +622,280 @@ class EPSSwitcher:
             # `_slots_fed_by_an_empty_switcher`.
             if not connected:
                 logger.info(
-                    "EPS Switcher: no image inputs are connected -- "
-                    "returning an execution blocker so the queue succeeds "
-                    "and downstream nodes are silently skipped"
+                    "%s: no %s inputs are connected -- returning an execution "
+                    "blocker so the queue succeeds and downstream nodes are "
+                    "silently skipped",
+                    log_prefix,
+                    noun,
                 )
             else:
                 logger.info(
-                    "EPS Switcher: %d image input(s) connected but all are "
-                    "toggled off -- returning an execution blocker so the "
-                    "queue succeeds and downstream nodes are silently "
-                    "skipped",
+                    "%s: %d %s input(s) connected but all are toggled off -- "
+                    "returning an execution blocker so the queue succeeds and "
+                    "downstream nodes are silently skipped",
+                    log_prefix,
                     len(connected),
+                    noun,
                 )
             # Lazy import: keeps this module importable with no ComfyUI on
-            # the path (module docstring's "no torch/ComfyUI import" promise;
-            # see tests/test_switcher.py's test_module_never_imports_comfy_or_torch).
+            # the path (module docstring's no-ComfyUI-at-module-scope
+            # promise; see tests/test_switcher.py's
+            # test_module_never_imports_comfy_or_torch).
             from comfy_execution.graph import ExecutionBlocker
 
             return ([ExecutionBlocker(None)],)
 
-        return (enabled_images,)
+        return (enabled_values,)
+
+    namespace: dict[str, Any] = {
+        "__module__": __name__,
+        "__doc__": class_doc,
+        "CATEGORY": "EPSNodes",
+        "RETURN_TYPES": (io_type,),
+        "RETURN_NAMES": (output_name,),
+        "INPUT_IS_LIST": True,
+        "OUTPUT_IS_LIST": (True,),
+        "OUTPUT_TOOLTIPS": (output_tooltip,),
+        "FUNCTION": "execute",
+        "DESCRIPTION": description,
+        "INPUT_TYPES": classmethod(INPUT_TYPES),
+        "check_lazy_status": check_lazy_status,
+        "execute": execute,
+    }
+    return type(class_id, (), namespace)
+
+
+# --------------------------------------------------------------- EPSSwitcher
+
+_EPS_SWITCHER_CLASS_DOC = """Any number of ``image_N`` inputs, each independently on/off, fanned
+into one ``IMAGE`` list output (FORMAT.md §6.4).
+
+``INPUT_IS_LIST = True`` (own class attribute; ``execute`` and
+``check_lazy_status`` both receive every input already wrapped in a
+list -- see the module docstring): required so a list-producing
+upstream -- ``EPSImageGrid``, itself ``OUTPUT_IS_LIST`` -- is merged
+element-wise into the output instead of ComfyUI silently re-running
+THIS node once per upstream element with every OTHER input
+broadcast-repeated (core's own ``execution.py``
+``slice_dict``/map-over-list machinery -- the default for any node that
+does NOT declare ``INPUT_IS_LIST``). That default was the root cause of
+a real, owner-reported bug: a grid input toggled off alongside a single
+enabled Load Image still ran the downstream branch once per grid
+element instead of once, producing repeated identical edits of the one
+Load Image picture.
+
+Each ``image_N`` slot is ALSO ``lazy`` (INPUT_TYPES options,
+``check_lazy_status`` below): a toggled-off slot's upstream is never
+requested and so never executes at all -- a genuine branch-skip, not
+just an output-side filter (superseding the earlier "their upstream
+nodes still execute regardless of toggle state" behavior this docstring
+used to describe -- owner ask: "where in the workflow we disable the
+run... Seems like something we should fix").
+
+Zero enabled images -- everything toggled off, or nothing connected at
+all -- is a VALID queue, not an error (FORMAT.md §6.4 "All-off /
+none-connected is a VALID state"): ``execute`` returns an
+``ExecutionBlocker`` instead of raising, so the queue succeeds and the
+downstream image branch simply doesn't run for it.
+
+Re-derives the enabled set from ``toggles`` + the connected ``image_N``
+kwargs on every execution -- there is no other state to go stale, so
+unlike the Prompt Notebook this node needs no ``IS_CHANGED`` override:
+``toggles`` and every ``image_N`` are ordinary tracked inputs already
+covered by ComfyUI's own input-hash caching.
+"""
+
+EPSSwitcher = _make_switcher_ns(
+    class_id="EPSSwitcher",
+    prefix="image",
+    pattern=_IMAGE_INPUT_PATTERN,
+    io_type="IMAGE",
+    output_name="images",
+    log_prefix="EPS Switcher",
+    noun="image",
+    input_tooltip=_IMAGE_INPUT_TOOLTIP,
+    output_tooltip=(
+        "Every enabled image, in slot order, as a list -- the rest of the "
+        "workflow runs once per element."
+    ),
+    description=(
+        "Toggle any number of image inputs on or off; the enabled ones fan "
+        "out in slot order, so N enabled inputs make the rest of the "
+        "workflow run N times (a list-producing input, like EPS Image Grid, "
+        "counts for as many images as it holds). A toggled-off input's "
+        "upstream branch never executes at all -- not just filtered out "
+        "afterward. Turning every input off, or connecting none at all, is "
+        "a valid state: the queue still succeeds and the downstream branch "
+        "simply doesn't run. A value wired further downstream, like a seed, "
+        "repeats identically across every run unless you give it an "
+        "explicit per-image list."
+    ),
+    class_doc=_EPS_SWITCHER_CLASS_DOC,
+    flexible_cls=_FlexibleOptionalImageInputs,
+)
+
+
+# ---------------------------------------------------------- EPSModelSwitcher
+
+_EPS_MODEL_SWITCHER_CLASS_DOC = """Any number of ``model_N`` inputs, each
+independently on/off, fanned into one ``MODEL`` list output (FORMAT.md
+§6.4's mechanism, generalized from ``EPSSwitcher``'s IMAGE case to MODEL
+via ``_make_switcher_ns`` -- see that class's own docstring, above, for
+the full historical write-up; this is the identical shape with "model"
+in place of "image").
+
+``INPUT_IS_LIST = True``: a list-producing upstream is merged element-wise
+into the output instead of ComfyUI silently re-running this node once per
+upstream element with every OTHER input broadcast-repeated. Each
+``model_N`` slot is ALSO ``lazy`` (``check_lazy_status`` below): a
+toggled-off slot's upstream -- for example, a checkpoint load feeding a
+disabled model slot -- is never requested and so never executes at all, a
+genuine branch-skip rather than an output-side filter.
+
+Zero enabled models -- everything toggled off, or nothing connected at
+all -- is a VALID queue, not an error: ``execute`` returns an
+``ExecutionBlocker`` instead of raising, so the queue succeeds and the
+downstream model branch simply doesn't run for it.
+
+Re-derives the enabled set from ``toggles`` + the connected ``model_N``
+kwargs on every execution -- there is no other state to go stale, so this
+node needs no ``IS_CHANGED`` override.
+"""
+
+EPSModelSwitcher = _make_switcher_ns(
+    class_id="EPSModelSwitcher",
+    prefix="model",
+    pattern=_MODEL_INPUT_PATTERN,
+    io_type="MODEL",
+    output_name="models",
+    log_prefix="EPS Model Switcher",
+    noun="model",
+    input_tooltip=_MODEL_INPUT_TOOLTIP,
+    output_tooltip=(
+        "Every enabled model, in slot order, as a list -- the rest of the "
+        "workflow runs once per element."
+    ),
+    description=(
+        "Toggle any number of model inputs on or off; the enabled ones fan "
+        "out in slot order, so N enabled inputs make the rest of the "
+        "workflow run N times. A toggled-off input's upstream branch never "
+        "executes at all -- for example, a checkpoint load feeding a "
+        "disabled model slot never runs, not just filtered out afterward. "
+        "Turning every input off, or connecting none at all, is a valid "
+        "state: the queue still succeeds and the downstream branch simply "
+        "doesn't run. A value wired further downstream that isn't itself a "
+        "list, like a fixed seed, repeats identically across every run "
+        "unless you give it an explicit per-model list."
+    ),
+    class_doc=_EPS_MODEL_SWITCHER_CLASS_DOC,
+)
+
+
+# ----------------------------------------------------------- EPSClipSwitcher
+
+_EPS_CLIP_SWITCHER_CLASS_DOC = """Any number of ``clip_N`` inputs, each independently on/off, fanned
+into one ``CLIP`` list output (FORMAT.md §6.4's mechanism, generalized
+from ``EPSSwitcher``'s IMAGE case to CLIP via ``_make_switcher_ns`` --
+see that class's own docstring, above, for the full historical write-up;
+this is the identical shape with "clip" in place of "image").
+
+``INPUT_IS_LIST = True``: a list-producing upstream is merged element-wise
+into the output instead of ComfyUI silently re-running this node once per
+upstream element with every OTHER input broadcast-repeated. Each
+``clip_N`` slot is ALSO ``lazy`` (``check_lazy_status`` below): a
+toggled-off slot's upstream -- for example, a checkpoint load feeding a
+disabled CLIP slot -- is never requested and so never executes at all, a
+genuine branch-skip rather than an output-side filter.
+
+Zero enabled CLIPs -- everything toggled off, or nothing connected at
+all -- is a VALID queue, not an error: ``execute`` returns an
+``ExecutionBlocker`` instead of raising, so the queue succeeds and the
+downstream CLIP branch simply doesn't run for it.
+
+Re-derives the enabled set from ``toggles`` + the connected ``clip_N``
+kwargs on every execution -- there is no other state to go stale, so this
+node needs no ``IS_CHANGED`` override.
+"""
+
+EPSClipSwitcher = _make_switcher_ns(
+    class_id="EPSClipSwitcher",
+    prefix="clip",
+    pattern=_CLIP_INPUT_PATTERN,
+    io_type="CLIP",
+    output_name="clips",
+    log_prefix="EPS CLIP Switcher",
+    noun="clip",
+    input_tooltip=_CLIP_INPUT_TOOLTIP,
+    output_tooltip=(
+        "Every enabled CLIP, in slot order, as a list -- the rest of the "
+        "workflow runs once per element."
+    ),
+    description=(
+        "Toggle any number of CLIP inputs on or off; the enabled ones fan "
+        "out in slot order, so N enabled inputs make the rest of the "
+        "workflow run N times. A toggled-off input's upstream branch never "
+        "executes at all -- for example, a checkpoint load feeding a "
+        "disabled CLIP slot never runs, not just filtered out afterward. "
+        "Turning every input off, or connecting none at all, is a valid "
+        "state: the queue still succeeds and the downstream branch simply "
+        "doesn't run. A value wired further downstream that isn't itself a "
+        "list, like a fixed seed, repeats identically across every run "
+        "unless you give it an explicit per-CLIP list."
+    ),
+    class_doc=_EPS_CLIP_SWITCHER_CLASS_DOC,
+)
+
+
+# ------------------------------------------------------------ EPSVaeSwitcher
+
+_EPS_VAE_SWITCHER_CLASS_DOC = """Any number of ``vae_N`` inputs, each independently on/off, fanned
+into one ``VAE`` list output (FORMAT.md §6.4's mechanism, generalized
+from ``EPSSwitcher``'s IMAGE case to VAE via ``_make_switcher_ns`` --
+see that class's own docstring, above, for the full historical write-up;
+this is the identical shape with "vae" in place of "image").
+
+``INPUT_IS_LIST = True``: a list-producing upstream is merged element-wise
+into the output instead of ComfyUI silently re-running this node once per
+upstream element with every OTHER input broadcast-repeated. Each
+``vae_N`` slot is ALSO ``lazy`` (``check_lazy_status`` below): a
+toggled-off slot's upstream -- for example, a checkpoint load feeding a
+disabled VAE slot -- is never requested and so never executes at all, a
+genuine branch-skip rather than an output-side filter.
+
+Zero enabled VAEs -- everything toggled off, or nothing connected at
+all -- is a VALID queue, not an error: ``execute`` returns an
+``ExecutionBlocker`` instead of raising, so the queue succeeds and the
+downstream VAE branch simply doesn't run for it.
+
+Re-derives the enabled set from ``toggles`` + the connected ``vae_N``
+kwargs on every execution -- there is no other state to go stale, so this
+node needs no ``IS_CHANGED`` override.
+"""
+
+EPSVaeSwitcher = _make_switcher_ns(
+    class_id="EPSVaeSwitcher",
+    prefix="vae",
+    pattern=_VAE_INPUT_PATTERN,
+    io_type="VAE",
+    output_name="vaes",
+    log_prefix="EPS VAE Switcher",
+    noun="vae",
+    input_tooltip=_VAE_INPUT_TOOLTIP,
+    output_tooltip=(
+        "Every enabled VAE, in slot order, as a list -- the rest of the "
+        "workflow runs once per element."
+    ),
+    description=(
+        "Toggle any number of VAE inputs on or off; the enabled ones fan "
+        "out in slot order, so N enabled inputs make the rest of the "
+        "workflow run N times. A toggled-off input's upstream branch never "
+        "executes at all -- for example, a checkpoint load feeding a "
+        "disabled VAE slot never runs, not just filtered out afterward. "
+        "Turning every input off, or connecting none at all, is a valid "
+        "state: the queue still succeeds and the downstream branch simply "
+        "doesn't run. A value wired further downstream that isn't itself a "
+        "list, like a fixed seed, repeats identically across every run "
+        "unless you give it an explicit per-VAE list."
+    ),
+    class_doc=_EPS_VAE_SWITCHER_CLASS_DOC,
+)

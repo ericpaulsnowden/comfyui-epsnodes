@@ -1,7 +1,24 @@
 /**
  * @file EPS Switcher frontend (FORMAT.md §6.4). Exports the `init()`/
- * `attach(node)` hooks `web/eps_image.js` calls; `attach` no-ops for every
- * node type other than `EPSSwitcher`.
+ * `attach(node)` hooks `web/eps_image.js` calls; `attach` no-ops for any
+ * node class not listed in the `SWITCHER_CLASSES` registry below.
+ *
+ * **Generalized to four switcher classes** (originally `EPSSwitcher` only):
+ * `SWITCHER_CLASSES` maps each backend class id to its own growing-socket
+ * prefix and default input type -- `EPSSwitcher` (`image_N` / IMAGE, the
+ * original class, still the concrete example used throughout the rest of
+ * this file header), `EPSModelSwitcher` (`model_N` / MODEL),
+ * `EPSClipSwitcher` (`clip_N` / CLIP), and `EPSVaeSwitcher` (`vae_N` / VAE).
+ * Every mechanism below -- growing sockets, per-row toggle, header
+ * tri-state, renamable rows, the `toggles` JSON bridge -- is driven off
+ * that node's own registry entry (`switcherSpecOf(node)`) instead of a
+ * single hardcoded class id / regex / type, so it applies identically to
+ * all four; nothing about the MECHANISM changed, only what previously read
+ * a fixed `IMAGE_INPUT_RE`/`'IMAGE'` now reads whichever entry matches the
+ * node in hand. The verification narrative below (citations, line numbers,
+ * live-drag testing on the rig) was carried out against `EPSSwitcher`'s
+ * `image_N` specifically -- it documents the mechanism these four classes
+ * all now share, not an independent re-verification of the three new ones.
  *
  * Three pieces, each borrowed from a proven pattern already in the
  * comfy_ps monorepo (cited FORMAT.md §6.4 asks for exactly these two
@@ -162,10 +179,12 @@
  *    only mechanism used -- no node-property map.
  *
  * **`toggles` is the enabled-set bridge to the backend** (module docstring,
- * `eps_image/nodes_switcher.py`): a hidden (`.hidden = true`, same trick
- * FORMAT.md §7.2 uses for the Prompt Notebook's `file` widget) STRING
- * widget holding a JSON object of `{"image_N": false}` overrides -- absent
- * key means enabled. Every toggle/connection-change call here keeps it in
+ * e.g. `eps_image/nodes_switcher.py` for `EPSSwitcher` -- each sibling class
+ * carries the identical widget in its own backend module): a hidden
+ * (`.hidden = true`, same trick FORMAT.md §7.2 uses for the Prompt
+ * Notebook's `file` widget) STRING widget holding a JSON object of
+ * `{"<prefix>_N": false}` overrides -- absent key means enabled. Every
+ * toggle/connection-change call here keeps it in
  * lockstep so the backend's filtering (which is authoritative; this file
  * only drives what the backend already trusts) always matches what's on
  * screen, and pruned to slots that still exist so it never grows unbounded
@@ -185,9 +204,34 @@
 
 import { app } from '../../../scripts/app.js'
 
-const CLASS_ID = 'EPSSwitcher'
 const PREFIX = '[eps_image:switcher]'
-const IMAGE_INPUT_RE = /^image_(\d+)$/
+
+/**
+ * Registry of every backend class this file's per-node experience attaches
+ * to. `prefix` names that class's growing optional inputs (`<prefix>_N`);
+ * `type` is the socket/default type for a freshly-added slot (see
+ * `addImageInput`'s template fallback below). `inputRe` is precompiled once
+ * here, `^<prefix>_(\d+)$` -- the exact shape `IMAGE_INPUT_RE` used to be,
+ * now per-class -- rather than rebuilt on every call. `EPSSwitcher` is the
+ * original, live-verified class (file header above); the other three reuse
+ * every mechanism in this file unchanged, parameterized only by their own
+ * entry here. Exported (read-only in practice) so tests/test_switcher_js.py
+ * can pin its contents directly, the same convention distributor.js uses
+ * for its own pure constants.
+ */
+export const SWITCHER_CLASSES = {
+  EPSSwitcher: { prefix: 'image', type: 'IMAGE' },
+  EPSModelSwitcher: { prefix: 'model', type: 'MODEL' },
+  // `noun` overrides the header label's naive `<prefix>s` pluralization
+  // where the prefix is an initialism -- "no CLIPs connected" reads right,
+  // "no clips connected" reads like film clips.
+  EPSClipSwitcher: { prefix: 'clip', type: 'CLIP', noun: 'CLIPs' },
+  EPSVaeSwitcher: { prefix: 'vae', type: 'VAE', noun: 'VAEs' }
+}
+for (const spec of Object.values(SWITCHER_CLASSES)) {
+  spec.inputRe = new RegExp(`^${spec.prefix}_(\\d+)$`)
+}
+
 const TOGGLES_WIDGET_NAME = 'toggles'
 const HEADER_WIDGET_NAME = '__eps_switcher_toggle_all'
 
@@ -220,6 +264,21 @@ function nodeClassOf(node) {
   if (node.comfyClass) return node.comfyClass
   if (node.constructor && node.constructor.comfyClass) return node.constructor.comfyClass
   return null
+}
+
+/**
+ * @param {object} node
+ * @returns {{prefix: string, type: string, inputRe: RegExp}|null} *node*'s
+ *   own SWITCHER_CLASSES entry, or null for any node class this file does
+ *   not attach to. Every function below that used to read the single
+ *   `IMAGE_INPUT_RE`/`'IMAGE'` constants now calls this instead -- always
+ *   non-null in practice, since none of them ever run against a node
+ *   `attach()` didn't already gate through the same lookup, but every call
+ *   site still degrades gracefully (falls back to the original `image`/
+ *   `IMAGE` literals) rather than trust that invariant blindly.
+ */
+function switcherSpecOf(node) {
+  return SWITCHER_CLASSES[nodeClassOf(node)] || null
 }
 
 function findWidget(node, name) {
@@ -279,9 +338,9 @@ function toggleRowEnabled(node, name) {
 /**
  * Drops toggle-map entries for slots that no longer exist OR are currently
  * disconnected. A disconnected slot's on/off override is meaningless (the
- * backend ignores an unconnected image_N entirely), and -- the bug this
- * guards against -- keeping a stale `false` on a disconnected MIDDLE (gap)
- * slot would silently disable a DIFFERENT image later re-wired into that same
+ * backend ignores an unconnected slot entirely), and -- the bug this guards
+ * against -- keeping a stale `false` on a disconnected MIDDLE (gap) slot
+ * would silently disable a DIFFERENT value later re-wired into that same
  * slot number. Clearing it on every converge means a freshly (re)wired socket
  * always starts enabled, matching the backend's absent-key-means-enabled
  * contract. A CONNECTED slot deliberately toggled off keeps its `false`
@@ -316,7 +375,7 @@ function hideTogglesWidget(node) {
   if (!widget) {
     console.warn(
       PREFIX,
-      'EPSSwitcher node is missing its `toggles` widget; per-row state will not persist'
+      `${nodeClassOf(node)} node is missing its \`toggles\` widget; per-row state will not persist`
     )
     return
   }
@@ -344,10 +403,12 @@ function hideTogglesWidget(node) {
  */
 function imageInputEntries(node) {
   const entries = []
+  const spec = switcherSpecOf(node)
+  if (!spec) return entries
   const inputs = node.inputs || []
   for (let idx = 0; idx < inputs.length; idx++) {
     const input = inputs[idx]
-    const match = input && IMAGE_INPUT_RE.exec(input.name)
+    const match = input && spec.inputRe.exec(input.name)
     if (!match) continue
     entries.push({
       idx,
@@ -361,17 +422,23 @@ function imageInputEntries(node) {
 }
 
 function addImageInput(node, n, template) {
-  const type = template?.type ?? 'IMAGE'
+  const spec = switcherSpecOf(node)
+  const prefix = spec ? spec.prefix : 'image'
+  const type = template?.type ?? (spec ? spec.type : 'IMAGE')
   const extraInfo = template && template.shape !== undefined ? { shape: template.shape } : undefined
-  return node.addInput(`image_${n}`, type, extraInfo)
+  return node.addInput(`${prefix}_${n}`, type, extraInfo)
 }
 
 /**
- * Grows/shrinks *node*'s `image_N` sockets to the one invariant: every
- * CONNECTED `image_N` keeps its name/link untouched, and exactly one
- * trailing EMPTY slot exists, numbered one past the highest connected
- * `image_N` (`image_1` itself, empty, when nothing is connected). Idempotent
- * -- every call site below calls it unconditionally.
+ * Grows/shrinks *node*'s growing-socket inputs (`image_N`/`model_N`/
+ * `clip_N`/`vae_N`, per SWITCHER_CLASSES/switcherSpecOf) to the one
+ * invariant: every CONNECTED slot keeps its name/link untouched, and
+ * exactly one trailing EMPTY slot exists, numbered one past the highest
+ * connected slot (slot 1 itself, empty, when nothing is connected).
+ * Idempotent -- every call site below calls it unconditionally. A no-op
+ * (via imageInputEntries'/addImageInput's own registry lookup) for any node
+ * whose class isn't in the registry, though in practice this never runs
+ * against one (attach() already gates on the same lookup).
  * @param {object} node
  */
 function convergeImageInputs(node) {
@@ -406,12 +473,15 @@ function convergeImageInputs(node) {
 }
 
 /**
- * Chains *node*'s `configure` and `onConnectionsChange` so its `image_N`
- * sockets converge per convergeImageInputs() above. See the file header for
- * why two hooks (not one) and the `state.restoring` guard.
+ * Chains *node*'s `configure` and `onConnectionsChange` so its growing-
+ * socket inputs converge per convergeImageInputs() above. See the file
+ * header for why two hooks (not one) and the `state.restoring` guard.
  * @param {object} node
  */
 function wireImageInputGrowth(node) {
+  // Resolved once (node's class never changes across its lifetime) rather
+  // than re-derived on every onConnectionsChange -- see switcherSpecOf.
+  const spec = switcherSpecOf(node)
   const state = { restoring: false, convergeScheduled: false }
 
   /**
@@ -468,7 +538,7 @@ function wireImageInputGrowth(node) {
     if (typeof originalOnConnectionsChange === 'function') {
       result = originalOnConnectionsChange.apply(this, arguments)
     }
-    if (!state.restoring && IMAGE_INPUT_RE.test(inputOrOutput?.name || '')) {
+    if (!state.restoring && spec && spec.inputRe.test(inputOrOutput?.name || '')) {
       scheduleConverge(this)
     }
     return result
@@ -636,6 +706,12 @@ function addHeaderWidget(node) {
     return
   }
 
+  // Drives the "no <noun> connected" header label below -- naive pluralized
+  // prefix (image -> images, model -> models, clip -> clips, vae -> vaes).
+  // For EPSSwitcher this reproduces the original hardcoded 'images' exactly.
+  const spec = switcherSpecOf(node)
+  const noun = spec ? spec.noun || `${spec.prefix}s` : 'images'
+
   const widget = {
     name: HEADER_WIDGET_NAME,
     type: 'custom',
@@ -664,7 +740,7 @@ function addHeaderWidget(node) {
       const enabledCount = entries.filter((entry) => isRowEnabled(drawNode, entry.name)).length
       const label =
         entries.length === 0
-          ? 'Toggle All (no images connected)'
+          ? `Toggle All (no ${noun} connected)`
           : `Toggle All  (${enabledCount}/${entries.length} enabled)`
       ctx.fillText(label, boxX + HEADER_BOX + 8, y + height / 2)
       ctx.restore()
@@ -762,8 +838,8 @@ function activeCanvas() {
  * @param {object} node
  * @param {number} localY node-local Y (graph Y minus node.pos[1])
  * @returns {{idx: number, n: number, name: string, input: object}|null} the
- *   image_N row at *localY* -- connected or the trailing spare -- or null
- *   if no row is close enough.
+ *   growing-socket row at *localY* -- connected or the trailing spare -- or
+ *   null if no row is close enough.
  */
 function rowAtLocalY(node, localY) {
   if (typeof node.getConnectionPos !== 'function') return null
@@ -780,8 +856,8 @@ function rowAtLocalY(node, localY) {
 }
 
 /**
- * Wraps `onInputDblClick` and `onDblClick` so double-clicking an `image_N`
- * row -- connected or the trailing spare -- opens the rename prompt.
+ * Wraps `onInputDblClick` and `onDblClick` so double-clicking a growing-
+ * socket row -- connected or the trailing spare -- opens the rename prompt.
  * `onInputDblClick(index, e)` fires when the double-click lands within
  * litegraph's OWN input hit-region (the socket dot and its name/label text,
  * per `measureSlots.ts` `getNodeInputOnPos` -- `LGraphCanvas.ts`'s inputs
@@ -801,6 +877,8 @@ function rowAtLocalY(node, localY) {
  * @param {object} node
  */
 function wireRowRename(node) {
+  // Resolved once, same reasoning as wireImageInputGrowth's own `spec`.
+  const spec = switcherSpecOf(node)
   const originalOnInputDblClick = node.onInputDblClick
   node.onInputDblClick = function (index, e) {
     let result
@@ -809,7 +887,7 @@ function wireRowRename(node) {
     }
     try {
       const input = this.inputs?.[index]
-      if (input && IMAGE_INPUT_RE.test(input.name || '')) {
+      if (input && spec && spec.inputRe.test(input.name || '')) {
         promptForLabel(this, input, activeCanvas(), e)
       }
     } catch (error) {
@@ -867,11 +945,13 @@ function ensureMinNodeWidth(node) {
  * Kept as an export because eps_image.js calls it unconditionally. */
 export function init() {}
 
-/** Per-node-instance attach; no-op unless *node* is an EPSSwitcher. */
+/** Per-node-instance attach; no-op unless *node*'s class is a key in
+ * SWITCHER_CLASSES (EPSSwitcher, EPSModelSwitcher, EPSClipSwitcher,
+ * EPSVaeSwitcher). */
 export function attach(node) {
   try {
     if (!node) return
-    if (nodeClassOf(node) !== CLASS_ID) return
+    if (!switcherSpecOf(node)) return
     if (attachedNodes.has(node)) return
     attachedNodes.add(node)
 

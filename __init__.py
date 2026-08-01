@@ -110,6 +110,9 @@ _NODE_SPECS = [
     ("lora_library.nodes_sets", "LoraLibraryApplySet", "EPS Apply LoRA Set"),
     ("lora_library.nodes_sweep", "LoraLibrarySweep", "EPS LoRA Sweep"),
     ("eps_image.nodes_switcher", "EPSSwitcher", "EPS Switcher"),
+    ("eps_image.nodes_switcher", "EPSModelSwitcher", "EPS Model Switcher"),
+    ("eps_image.nodes_switcher", "EPSClipSwitcher", "EPS CLIP Switcher"),
+    ("eps_image.nodes_switcher", "EPSVaeSwitcher", "EPS VAE Switcher"),
     ("eps_image.nodes_resolution", "EPSResolution", "EPS Resolution"),
     ("eps_image.nodes_image_grid", "EPSImageGrid", "EPS Image Grid"),
     ("eps_image.nodes_frame_saver", "EPSFrameSaver", "EPS Frame Saver"),
@@ -160,6 +163,7 @@ try:
     _frame_saver_routes.register()
 except Exception:
     logger.exception("EPSNodes: eps_image.routes_frame_saver failed to register")
+
 
 WEB_DIRECTORY = "./web"
 

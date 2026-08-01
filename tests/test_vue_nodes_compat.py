@@ -35,7 +35,12 @@ import pytest
 from eps_image.nodes_distributor import EPSDistributor
 from eps_image.nodes_frame_saver import EPSFrameSaver
 from eps_image.nodes_image_grid import EPSImageGrid
-from eps_image.nodes_switcher import EPSSwitcher
+from eps_image.nodes_switcher import (
+    EPSClipSwitcher,
+    EPSModelSwitcher,
+    EPSSwitcher,
+    EPSVaeSwitcher,
+)
 from lora_library.nodes_notebook import LoraLibraryNotebook
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -56,6 +61,9 @@ def _input_options(node_class, name: str) -> dict:
     [
         (EPSDistributor, "toggles"),
         (EPSSwitcher, "toggles"),
+        (EPSModelSwitcher, "toggles"),
+        (EPSClipSwitcher, "toggles"),
+        (EPSVaeSwitcher, "toggles"),
         (EPSImageGrid, "grid_uuid"),
         (EPSFrameSaver, "video_path"),
         (EPSFrameSaver, "frame"),

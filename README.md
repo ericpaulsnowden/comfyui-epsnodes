@@ -21,6 +21,7 @@ section further down; this is the map.
 | [**EPS Lora Loader State Controller**](#eps-lora-loader-state-controller-shipped-requires-rgthree-comfy) | Captures and applies those states directly on an [rgthree Power Lora Loader](https://github.com/rgthree/rgthree-comfy) — rgthree stays the loader, this moves whole configurations in and out of it. | **rgthree-comfy**'s Power Lora Loader — third-party, self-disables without it. |
 | [**EPS LoRA Sweep**](#eps-lora-sweep-shipped) | Auditions any `LORA_STACK` by strength: set min/max/increment and one queue runs your workflow once per step (per lora, or all together). | A `LORA_STACK` source (usually Apply LoRA Set) + a model. |
 | [**EPS Switcher**](#eps-switcher-shipped) | Any number of image inputs, each independently on/off; the enabled ones fan out (N enabled → N runs). Disabled branches never execute. | Nothing — drag-and-drop with core nodes. |
+| [**EPS Model / CLIP / VAE Switcher**](#eps-model--clip--vae-switcher-shipped) | The image Switcher's exact mechanism for models, CLIPs, and VAEs: any number of inputs, each on/off, enabled ones fan out (N enabled → N runs), disabled branches — including their checkpoint loads — never execute. | Nothing — drag-and-drop with core nodes. |
 | [**EPS Distributor**](#eps-distributor-shipped) | The mirror of the Switcher: one image in, up to sixteen branches out, each independently on/off. New outputs appear as you wire them up. Toggle a branch off and only that branch is skipped — everything happens in one run. | Nothing — drag-and-drop with core nodes. |
 | [**EPS Resolution**](#eps-resolution-shipped) | Image-first resize + size in one node: target size (with a drag pad), four resize modes, and the original image + both sets of dimensions passed through. | Nothing — drag-and-drop with core nodes. |
 | [**EPS Image Grid**](#eps-image-grid-shipped) | Collects images across separate Runs into a buffer that survives restarts, shows them as a thumbnail grid, and fans the whole set out on demand. Add whole batches at once — a multiselect picker, a folder importer, or one big drag. | Nothing — drag-and-drop with core nodes. |
@@ -288,6 +289,32 @@ off means three runs.
   toggles, and the backend still see `image_N`), persists with the
   workflow, and an empty name resets it.
 - Toggle states save with the workflow and survive reload.
+
+## EPS Model / CLIP / VAE Switcher (shipped)
+
+`EPSNodes → EPS Model Switcher / EPS CLIP Switcher / EPS VAE Switcher`: the
+[EPS Switcher](#eps-switcher-shipped), one per data type. Wire in any number
+of models (or CLIPs, or VAEs), tick them on and off, and the enabled ones
+fan out in slot order — three enabled models means the rest of the workflow
+runs three times, once per model. Built for "try the same prompt across
+several models/VAEs in one queue".
+
+- **Everything the image Switcher does, identically:** growing sockets (wire
+  the last one and a new one appears), per-row toggles, Toggle All,
+  double-click rename, all-off is valid (queue succeeds, downstream skips).
+- **A toggled-off branch never runs at all.** Wire three Load Checkpoint
+  nodes into a Model Switcher, tick one off, and that checkpoint is never
+  even loaded — not loaded-then-discarded. Verified against a real loader.
+- **One switcher = one axis.** ComfyUI pairs two fanned lists index-by-index
+  (it does NOT multiply them): a 3-model switcher plus a 2-VAE switcher into
+  the same sampler gives **3 runs** — (m1,v1), (m2,v2), (m3,v2) — not 6. To
+  actually multiply axes, run them through [EPS Cross
+  Product](#eps-cross-product-shipped) / [EPS Cross
+  Sweep](#eps-cross-sweep-shipped), or use the [EPS Checkpoint
+  Switcher](#eps-checkpoint-switcher-shipped) which keeps model+CLIP+VAE
+  aligned as one axis by construction.
+- Loading several checkpoints in one queue is heavy on disk and RAM/VRAM;
+  ComfyUI offloads between runs, but start with two or three, not ten.
 
 ## EPS Distributor (shipped)
 

@@ -725,6 +725,52 @@ per-input toggle + toggle-all header + N-enabled→N-runs fan-out.
   fanned runs — surface this in the node description (per-image variation
   needs an explicit seed list).
 
+## §6.4b `EPSModelSwitcher` / `EPSClipSwitcher` / `EPSVaeSwitcher` (v0.44.0)
+
+Three sibling classes of §6.4's `EPSSwitcher`, built by the SAME factory
+(`nodes_switcher.py`'s `_make_switcher_ns`) and attached by the SAME frontend
+(`switcher.js`'s `SWITCHER_CLASSES` registry): every §6.4 contract — growing
+`<prefix>_N` optional inputs resolved BY NAME through the flexible-dict
+`INPUT_TYPES` proxy, the hidden `toggles` JSON bridge (`{"<prefix>_N":
+false}`, absent = enabled, only literal `false` disables), per-slot `lazy`
+inputs whose toggled-off upstream branch never executes,
+`INPUT_IS_LIST`/`OUTPUT_IS_LIST` one-level flatten, and the all-off/none-
+connected `[ExecutionBlocker(None)]` success path — applies verbatim, with
+only the prefix and IO type substituted:
+
+| class | display | inputs | type | output |
+| --- | --- | --- | --- | --- |
+| `EPSModelSwitcher` | EPS Model Switcher | `model_N` | MODEL | `models` |
+| `EPSClipSwitcher` | EPS CLIP Switcher | `clip_N` | CLIP | `clips` |
+| `EPSVaeSwitcher` | EPS VAE Switcher | `vae_N` | VAE | `vaes` |
+
+- **`EPSSwitcher` itself is untouched** — same class id, `image_N` names,
+  behavior byte-identical (its pre-refactor class attributes and
+  `INPUT_TYPES()` output were diffed against the factory's, not just
+  test-equivalent; `tests/test_switcher.py` passes unmodified). §8's freeze
+  holds: the factory is an internal reorganization, not a contract change.
+- **The empty-sibling consumer skip (§6.4) is cross-type.** The
+  statically-all-off recognition now keys off a class-id → slot-pattern
+  registry (`_SWITCHER_SLOT_PATTERNS`) covering all four classes, each
+  scanned with the UPSTREAM's own prefix — so e.g. a `vae_N` slot fed by an
+  all-off `EPSModelSwitcher` is still skipped, pinned by a cross-class test.
+- **Pass-through safety**: these nodes only select and return; they never
+  mutate. That matters because ComfyUI caches node outputs BY REFERENCE
+  (verified against execution/caching source, 2026-08-01) — a MODEL/CLIP/VAE
+  handed downstream is the upstream loader's own cached object. Anything
+  that needs to modify one must follow that type's own clone convention
+  (MODEL/CLIP `.clone()`; VAE has none) — never this node's concern.
+- **The zip trap still applies ACROSS switchers** (§6.9's founding bug): two
+  switchers wired into one sampler pair index-by-index (3 models × 2 VAEs =
+  3 runs, not 6). One switcher = one axis; crossing axes needs §6.9/§6.10.
+  README documents this loudly for users.
+- Live-verified on the rig (2026-08-01): typed socket growth per class,
+  litegraph refusing MODEL→IMAGE while accepting MODEL→KSampler,
+  save/reload keeping wired sockets + one spare + prefixed toggles, and —
+  with a REAL `CheckpointLoaderSimple` wired upstream of a toggled-off
+  `model_1` pointing at a deliberately-invalid placeholder file — a
+  successful queue, proving the lazy skip (the loader would have raised).
+
 ## §6.5 `EPSResolution` (display: "EPS Resolution") — M1 core
 
 Roadmap: `research/roadmap-eps-resolution.md` (M1 = this section; grid=M2,
