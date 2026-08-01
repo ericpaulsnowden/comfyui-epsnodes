@@ -1535,6 +1535,26 @@ label, so two chained Cross Products cannot express it.
   only moving variables). No `IS_CHANGED` (pure function of inputs). No
   torch/ComfyUI import at module scope (elements are opaque).
 
+- **v0.46.0 — the sweep group gains `vae`, and pairs can be text-only.**
+  Both additive and §8-safe:
+  - `vae` (optional input, index-aligned with model/clip/label — wire from
+    §6.12's Checkpoint Switcher) rides each STEP; the new `vae` output is
+    TAIL-APPENDED to `RETURN_TYPES` (outputs are positional; inserting
+    mid-tuple would repoint saved workflows' wires). Unwired, the vae
+    OUTPUT emits one silent `ExecutionBlocker` per run — only its own
+    consumers skip; there is no sensible fallback VAE. Wired-but-empty
+    clamps `steps` to 0 → the whole-node blocker path, like an empty model
+    list. Length disagreements warn and clamp, naming vae in the message.
+  - `image` moved REQUIRED → OPTIONAL (validation loosens only). Unwired =
+    text-only mode: `pairs = len(texts)` and the `image` output emits a
+    per-run blocker — this is what makes Checkpoint Switcher × a
+    multi-select Notebook compose for txt2img with no input images
+    anywhere. `save_prefix` still shapes as `<base>/<label>/<name|pair_NN>`,
+    so a checkpoint sweep lands one folder per checkpoint.
+  - Per-run blockers (not one blocker list, not None, not `[]`) keep every
+    output the same length — index alignment is this node's whole contract,
+    and §6.9 documents why `[]` and `None` both crash consumers.
+
 ### §6.11 `EPSDistributor` (display: "EPS Distributor") — one in, N gated out
 
 NON-lora node in `eps_image/`, category "EPSNodes". Class id `EPSDistributor`

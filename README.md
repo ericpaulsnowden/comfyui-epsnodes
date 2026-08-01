@@ -27,7 +27,7 @@ section further down; this is the map.
 | [**EPS Resolution**](#eps-resolution-shipped) | Image-first resize + size in one node: target size (with a drag pad), four resize modes, and the original image + both sets of dimensions passed through. | Nothing — drag-and-drop with core nodes. |
 | [**EPS Image Grid**](#eps-image-grid-shipped) | Collects images across separate Runs into a buffer that survives restarts, shows them as a thumbnail grid, and fans the whole set out on demand. Add whole batches at once — a multiselect picker, a folder importer, or one big drag. | Nothing — drag-and-drop with core nodes. |
 | [**EPS Cross Product**](#eps-cross-product-shipped) | Pairs every image with every text — 2 images × 4 prompts = 8 runs. (ComfyUI's own list pairing zips index-by-index instead.) | Two lists to multiply — pairs naturally with Image Grid + Prompt Notebook, but any list sources work. |
-| [**EPS Cross Sweep**](#eps-cross-sweep-shipped) | Multiplies a whole LoRA Sweep across all of those pairs, grouped by strength, with per-run save paths so big runs land in tidy folders. | EPS LoRA Sweep + EPS Cross Product wired in — the pack's most assembly-required node. |
+| [**EPS Cross Sweep**](#eps-cross-sweep-shipped) | Multiplies a sweep group (LoRA Sweep, or Checkpoint Switcher with its VAEs) across image/text pairs — or across texts alone for txt2img — grouped by step, with per-run save paths so big runs land in tidy folders. | EPS LoRA Sweep or EPS Checkpoint Switcher on one side; EPS Cross Product or just a multi-select Prompt Notebook on the other. |
 | [**EPS Frame Saver**](#eps-frame-saver-shipped) | Loads a video by path, lets you scrub or play to a frame, and outputs that frame as an image. | A video file on the ComfyUI machine. |
 
 > **Status: pre-release.** Contracts live in
@@ -513,6 +513,16 @@ images × 4 prompts = 8 runs, not 4.
 `EPSNodes → EPS Cross Sweep`: run a **whole lora sweep across a whole set
 of image/prompt pairs** — 11 strengths × 8 pairs = 88 runs, grouped by
 strength, each landing in its own folder.
+
+**Model iteration (v0.46.0):** wire the [EPS Checkpoint
+Switcher](#eps-checkpoint-switcher-shipped)'s `model`/`clip`/`vae`/`label`
+into this node's sweep side, and either Cross Product pairs or **just a
+multi-select Prompt Notebook's `text`** (leave `image` unwired for txt2img)
+on the other — every ticked checkpoint runs against every prompt, each run
+with its checkpoint's own VAE, saving into a folder named by checkpoint.
+The `vae` output only means something when the sweep side supplies VAEs;
+unwired, anything connected to it is skipped.
+
 
 - **Why you need it:** the same list-zipping that made Cross Product
   necessary happens again one level up — a sweep wired alongside crossed

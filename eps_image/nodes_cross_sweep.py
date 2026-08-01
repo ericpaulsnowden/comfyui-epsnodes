@@ -8,7 +8,11 @@ fan-out. Wiring both into one sampler ZIPS them instead (core list
 execution, the same `slice_dict` repeat-last behavior §6.9 documents), so a
 sweep of 11 steps and 8 image/prompt pairs yields 11 runs, not 88. This
 node is the multiplier: it crosses the sweep GROUP (model/clip/label, three
-index-aligned lists) with the pair GROUP (image/text, plus optionally name)
+index-aligned lists, plus optionally vae -- v0.46.0, wired from EPS
+Checkpoint Switcher so each run carries its checkpoint's own VAE) with the
+pair GROUP (image/text, plus optionally name; image optional since v0.46.0
+-- unwired means TEXT-ONLY pairs for txt2img iteration, with the image
+output emitting a per-run blocker so only its own consumers skip)
 while keeping each group internally aligned — something two chained
 Cross Products cannot express, because a model is only meaningful alongside
 ITS clip and label.
@@ -91,9 +95,13 @@ class EPSCrossSweep:
     """Sweep group x pair group, strength-major, with per-run save paths."""
 
     CATEGORY = "EPSNodes"
-    RETURN_TYPES = ("MODEL", "CLIP", "IMAGE", "STRING", "STRING", "STRING")
-    RETURN_NAMES = ("model", "clip", "image", "text", "save_prefix", "label")
-    OUTPUT_IS_LIST = (True, True, True, True, True, True)
+    # `vae` is TAIL-APPENDED (v0.46.0): outputs resolve positionally against
+    # this tuple (a saved link records [origin_id, origin_slot]), so appending
+    # is the only §8-safe way to add one -- inserting next to `clip` would
+    # silently repoint every saved workflow's image/text/save_prefix wires.
+    RETURN_TYPES = ("MODEL", "CLIP", "IMAGE", "STRING", "STRING", "STRING", "VAE")
+    RETURN_NAMES = ("model", "clip", "image", "text", "save_prefix", "label", "vae")
+    OUTPUT_IS_LIST = (True, True, True, True, True, True, True)
     INPUT_IS_LIST = True
     OUTPUT_TOOLTIPS = (
         "This run's patched model.",
@@ -103,6 +111,9 @@ class EPSCrossSweep:
         "A ready-to-wire Save Image filename_prefix for this run: "
         "base_folder/<sweep label>/<pair name>.",
         "This run's strength label, unchanged from the sweep.",
+        "This run's VAE, index-aligned with model/clip -- only when the "
+        "optional vae input is wired (e.g. from EPS Checkpoint Switcher); "
+        "unwired, this output blocks whatever consumes it.",
     )
     FUNCTION = "run"
     DESCRIPTION = (
@@ -151,15 +162,7 @@ class EPSCrossSweep:
                         ),
                     },
                 ),
-                "image": (
-                    "IMAGE",
-                    {
-                        "tooltip": (
-                            "The images to pair with the sweep -- wire "
-                            "from EPS Cross Product's image output."
-                        ),
-                    },
-                ),
+
                 "text": (
                     "STRING",
                     {
@@ -172,6 +175,43 @@ class EPSCrossSweep:
                 ),
             },
             "optional": {
+                # v0.46.0: image moved REQUIRED -> OPTIONAL (loosens
+                # validation only; saved workflows and API callers are
+                # unaffected). Unwired = text-only mode: pairs are just the
+                # texts (txt2img iteration -- e.g. Checkpoint Switcher x a
+                # multi-select Prompt Notebook, no input images anywhere),
+                # and the `image` OUTPUT emits one ExecutionBlocker per run
+                # so only nodes wired to IT skip.
+                "image": (
+                    "IMAGE",
+                    {
+                        "tooltip": (
+                            "The images to pair with the sweep -- wire "
+                            "from EPS Cross Product's image output. "
+                            "Optional: leave unwired for text-only "
+                            "(txt2img) iteration; pairs are then just the "
+                            "texts, and this node's image output blocks "
+                            "whatever consumes it."
+                        ),
+                    },
+                ),
+                # v0.46.0: the sweep group's optional fourth list -- wire
+                # from EPS Checkpoint Switcher's vae output so each run
+                # carries its checkpoint's OWN VAE. Index-aligned with
+                # model/clip/label; unwired, the vae OUTPUT blocks whatever
+                # consumes it (there is no sensible fallback VAE).
+                "vae": (
+                    "VAE",
+                    {
+                        "tooltip": (
+                            "Optional per-step VAEs, index-aligned with "
+                            "model/clip/label -- wire from EPS Checkpoint "
+                            "Switcher's vae output. Leave unwired when the "
+                            "sweep side has no VAE (EPS LoRA Sweep); the "
+                            "vae output then blocks whatever consumes it."
+                        ),
+                    },
+                ),
                 # Cross Product's `name` output (usually the Prompt
                 # Notebook entry heading riding through it) -- the
                 # human-readable half of save_prefix. Optional: unwired
@@ -213,6 +253,7 @@ class EPSCrossSweep:
         text: Any = None,
         name: Any = None,
         base_folder: Any = "",
+        vae: Any = None,
     ) -> tuple[list[Any], ...]:
         models = _as_clean_list(model)
         clips = _as_clean_list(clip)
@@ -220,18 +261,34 @@ class EPSCrossSweep:
         images = _as_clean_list(image)
         texts = _as_clean_list(text)
         names = _as_clean_list(name)
+        vaes = _as_clean_list(vae)
         base_parts = _safe_base(_unwrap_scalar(base_folder, ""))
 
-        steps = min(len(models), len(clips), len(labels))
-        pairs = min(len(images), len(texts))
-        if len({len(models), len(clips), len(labels)}) > 1:
+        # `vae is None` distinguishes UNWIRED (emit blockers on the vae
+        # output; steps unaffected) from wired-but-empty (a real upstream
+        # emitted nothing -> steps clamps to 0 -> the whole-node blocker
+        # path, same as an empty model list).
+        vae_wired = vae is not None
+        # image is None likewise = text-only mode (v0.46.0): pairs are the
+        # texts alone and the image OUTPUT blocks its consumers per run.
+        text_only = image is None
+
+        sweep_lengths = [len(models), len(clips), len(labels)]
+        if vae_wired:
+            sweep_lengths.append(len(vaes))
+        steps = min(sweep_lengths)
+        pairs = len(texts) if text_only else min(len(images), len(texts))
+        if len(set(sweep_lengths)) > 1:
             logger.warning(
                 "EPS Cross Sweep: sweep-side lists disagree (model=%d, clip=%d, "
-                "label=%d) -- using the first %d step(s). Wire all three from "
-                "the SAME EPS LoRA Sweep node.",
-                len(models), len(clips), len(labels), steps,
+                "label=%d%s) -- using the first %d step(s). Wire all of them "
+                "from the SAME sweep-side node (EPS LoRA Sweep or EPS "
+                "Checkpoint Switcher).",
+                len(models), len(clips), len(labels),
+                f", vae={len(vaes)}" if vae_wired else "",
+                steps,
             )
-        if len(images) != len(texts):
+        if not text_only and len(images) != len(texts):
             logger.warning(
                 "EPS Cross Sweep: pair-side lists disagree (image=%d, text=%d) "
                 "-- using the first %d pair(s). Wire both from the SAME "
@@ -251,7 +308,18 @@ class EPSCrossSweep:
             from comfy_execution.graph import ExecutionBlocker
 
             blocked = [ExecutionBlocker(None)]
-            return (blocked, blocked, blocked, blocked, blocked, blocked)
+            return (blocked, blocked, blocked, blocked, blocked, blocked, blocked)
+
+        # Unwired optional OUTPUTS emit one silent blocker PER RUN, keeping
+        # every output list the same length (index alignment is this node's
+        # whole contract). A blocker only skips the nodes wired to THAT
+        # output; a None would crash them and an empty list breaks
+        # slice_dict (§6.9). Imported lazily, once, only when needed.
+        run_blocker = None
+        if text_only or not vae_wired:
+            from comfy_execution.graph import ExecutionBlocker
+
+            run_blocker = ExecutionBlocker(None)
 
         out: dict[str, list[Any]] = {k: [] for k in self.RETURN_NAMES}
         for s in range(steps):  # strength-major: sweep step is the OUTER loop
@@ -262,10 +330,11 @@ class EPSCrossSweep:
                 ) or f"pair_{p + 1:02d}"
                 out["model"].append(models[s])
                 out["clip"].append(clips[s])
-                out["image"].append(images[p])
+                out["image"].append(run_blocker if text_only else images[p])
                 out["text"].append(texts[p])
                 out["label"].append(labels[s])
                 out["save_prefix"].append(
                     "/".join([*base_parts, label_component, pair_component])
                 )
+                out["vae"].append(vaes[s] if vae_wired else run_blocker)
         return tuple(out[k] for k in self.RETURN_NAMES)
