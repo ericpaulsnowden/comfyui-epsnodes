@@ -157,11 +157,52 @@ class TestUnrepresentableHeadingLine:
 # ------------------------------------------------------------------ mutation
 
 
+class TestDemoteUnrepresentableHeadings:
+    """§3.4's write-time transform (v0.48.1) -- the pure function behind
+    every demote-don't-refuse pin in the classes below."""
+
+    def test_h1_and_h2_demote_two_levels(self) -> None:
+        assert ms.demote_unrepresentable_headings("# a\n## b") == ("### a\n#### b", 2)
+
+    def test_bare_markers_demote_too(self) -> None:
+        assert ms.demote_unrepresentable_headings("#\n##") == ("###\n####", 2)
+
+    def test_indented_heading_keeps_its_indent(self) -> None:
+        assert ms.demote_unrepresentable_headings("  # a") == ("  ### a", 1)
+
+    def test_fenced_headings_are_left_alone(self) -> None:
+        text = "```\n# not a heading\n```"
+        assert ms.demote_unrepresentable_headings(text) == (text, 0)
+
+    def test_h3_and_no_space_hash_are_already_body_text(self) -> None:
+        text = "### fine\n#also-fine"
+        assert ms.demote_unrepresentable_headings(text) == (text, 0)
+
+    def test_untouched_text_round_trips_byte_for_byte(self) -> None:
+        # Trailing newline + interior blank lines survive -- the transform
+        # must never alter a text it has no headings to demote.
+        text = "prose\n\nmore\n"
+        assert ms.demote_unrepresentable_headings(text) == (text, 0)
+
+    def test_trailing_newline_survives_a_demotion(self) -> None:
+        assert ms.demote_unrepresentable_headings("# a\n") == ("### a\n", 1)
+
+    def test_demoted_output_is_stable_under_a_second_pass(self) -> None:
+        first, adjusted = ms.demote_unrepresentable_headings("# a\n## b")
+        assert adjusted == 2
+        assert ms.demote_unrepresentable_headings(first) == (first, 0)
+
+
 class TestUpsertCreate:
     def test_create_into_empty_file_with_no_category(self) -> None:
         parsed = ms.parse("")
         result = ms.upsert_entry(parsed, "New Entry", "hello")
-        assert result == {"name": "New Entry", "category": ""}
+        assert result == {
+            "name": "New Entry",
+            "category": "",
+            "text": "hello",
+            "adjusted_headings": 0,
+        }
         assert ms.list_entries(parsed) == [{"name": "New Entry", "category": ""}]
         assert ms.get_entry(parsed, "New Entry")["text"] == "hello"
 
@@ -205,26 +246,37 @@ class TestUpsertCreate:
         with pytest.raises(ms.InvalidEntryNameError):
             ms.upsert_entry(parsed, "   ", "text")
 
-    def test_create_rejects_text_with_h1_line(self) -> None:
+    def test_create_demotes_h1_line_two_levels(self) -> None:
+        # §3.4 demote-don't-refuse (v0.48.1): pasted LLM content routinely
+        # contains headings, and refusing the save read as "it just fails".
         parsed = ms.parse("")
-        with pytest.raises(ms.InvalidEntryTextError):
-            ms.upsert_entry(parsed, "Name", "line one\n# oops\n")
+        result = ms.upsert_entry(parsed, "Name", "line one\n# oops\n")
+        assert result["adjusted_headings"] == 1
+        assert result["text"] == "line one\n### oops\n"
+        assert ms.get_entry(parsed, "Name")["text"] == "line one\n### oops"
 
-    def test_create_rejects_text_with_h2_line(self) -> None:
+    def test_create_demotes_h2_line_two_levels_keeping_hierarchy(self) -> None:
         parsed = ms.parse("")
-        with pytest.raises(ms.InvalidEntryTextError):
-            ms.upsert_entry(parsed, "Name", "## oops")
+        result = ms.upsert_entry(parsed, "Name", "# h1\n## h2")
+        assert result["adjusted_headings"] == 2
+        assert result["text"] == "### h1\n#### h2"
 
     def test_create_allows_heading_line_inside_a_fence_in_the_text(self) -> None:
         parsed = ms.parse("")
         ms.upsert_entry(parsed, "Name", "```\n## fake\n```")
         assert ms.get_entry(parsed, "Name")["text"] == "```\n## fake\n```"
 
-    def test_rejected_create_leaves_the_notebook_unmodified(self) -> None:
+    def test_demoted_create_round_trips_as_one_entry(self) -> None:
+        # THE corruption this transform exists to prevent: without demotion
+        # a stored `## oops` would read back as a second entry boundary.
         parsed = ms.parse("## Existing\nBody\n")
-        with pytest.raises(ms.InvalidEntryTextError):
-            ms.upsert_entry(parsed, "New", "# oops")
-        assert ms.list_entries(parsed) == [{"name": "Existing", "category": ""}]
+        ms.upsert_entry(parsed, "New", "intro\n## oops\ntail")
+        reparsed = ms.parse("\n".join(ms.serialize(parsed)))
+        assert ms.list_entries(reparsed) == [
+            {"name": "Existing", "category": ""},
+            {"name": "New", "category": ""},
+        ]
+        assert ms.get_entry(reparsed, "New")["text"] == "intro\n#### oops\ntail"
 
 
 class TestUpsertCreateAfter:
@@ -313,18 +365,23 @@ class TestUpsertUpdate:
         assert ms.list_entries(parsed) == [{"name": "E1", "category": "Cat A"}]
         assert ms.serialize(parsed) == ["# Cat A", "## E1", "new"]
 
-    def test_update_rejects_text_with_heading_line_and_leaves_body_untouched(self) -> None:
+    def test_update_demotes_heading_line_and_replaces_body(self) -> None:
         parsed = ms.parse("## E1\noriginal\n")
-        with pytest.raises(ms.InvalidEntryTextError):
-            ms.upsert_entry(parsed, "E1", "# oops")
-        assert ms.get_entry(parsed, "E1")["text"] == "original"
+        result = ms.upsert_entry(parsed, "E1", "# oops")
+        assert result["adjusted_headings"] == 1
+        assert ms.get_entry(parsed, "E1")["text"] == "### oops"
 
 
 class TestUpsertRename:
     def test_rename_changes_heading_and_body_keeps_position(self) -> None:
         parsed = ms.parse("# Cat A\n## Old Name\nBody\n")
         result = ms.upsert_entry(parsed, "Old Name", "new body", rename_to="New Name")
-        assert result == {"name": "New Name", "category": "Cat A"}
+        assert result == {
+            "name": "New Name",
+            "category": "Cat A",
+            "text": "new body",
+            "adjusted_headings": 0,
+        }
         assert ms.get_entry(parsed, "Old Name") is None
         assert ms.get_entry(parsed, "New Name")["text"] == "new body"
         assert ms.serialize(parsed) == ["# Cat A", "## New Name", "new body"]
@@ -432,7 +489,7 @@ class TestCreateCategory:
     def test_create_into_empty_file_with_no_description(self) -> None:
         parsed = ms.parse("")
         result = ms.create_category(parsed, "Styles")
-        assert result == {"name": "Styles", "description": ""}
+        assert result == {"name": "Styles", "description": "", "adjusted_headings": 0}
         assert ms.list_categories(parsed) == ["Styles"]
         assert ms.get_category_description(parsed, "Styles") == ""
         assert ms.serialize(parsed) == ["# Styles"]
@@ -440,7 +497,11 @@ class TestCreateCategory:
     def test_create_with_a_description(self) -> None:
         parsed = ms.parse("")
         result = ms.create_category(parsed, "Styles", "Prose about styles.")
-        assert result == {"name": "Styles", "description": "Prose about styles."}
+        assert result == {
+            "name": "Styles",
+            "description": "Prose about styles.",
+            "adjusted_headings": 0,
+        }
         assert ms.get_category_description(parsed, "Styles") == "Prose about styles."
         assert ms.serialize(parsed) == ["# Styles", "Prose about styles."]
 
@@ -473,11 +534,12 @@ class TestCreateCategory:
         with pytest.raises(ms.InvalidEntryNameError):
             ms.create_category(parsed, "Cat\nA")
 
-    def test_create_rejects_description_with_heading_line(self) -> None:
+    def test_create_demotes_description_heading_line(self) -> None:
         parsed = ms.parse("")
-        with pytest.raises(ms.InvalidEntryTextError):
-            ms.create_category(parsed, "Styles", "line one\n## oops")
-        assert ms.list_categories(parsed) == []
+        result = ms.create_category(parsed, "Styles", "line one\n## oops")
+        assert result["adjusted_headings"] == 1
+        assert result["description"] == "line one\n#### oops"
+        assert ms.get_category_description(parsed, "Styles") == "line one\n#### oops"
 
 
 class TestCreateCategoryAfter:
@@ -551,7 +613,7 @@ class TestSetCategoryDescription:
     def test_replace_description_on_a_bare_heading(self) -> None:
         parsed = ms.parse("# Cat A\n## E1\nB1\n")
         result = ms.set_category_description(parsed, "Cat A", "New prose.")
-        assert result == {"name": "Cat A", "description": "New prose."}
+        assert result == {"name": "Cat A", "description": "New prose.", "adjusted_headings": 0}
         assert ms.get_category_description(parsed, "Cat A") == "New prose."
         assert ms.list_entries(parsed) == [{"name": "E1", "category": "Cat A"}]
 
@@ -607,11 +669,13 @@ class TestSetCategoryDescription:
         with pytest.raises(ms.CategoryNotFoundError):
             ms.set_category_description(parsed, "", "text")
 
-    def test_rejects_description_with_heading_line_and_leaves_it_untouched(self) -> None:
+    def test_demotes_description_heading_line_and_replaces_it(self) -> None:
         parsed = ms.parse("# Cat A\nOriginal.\n## E1\nB1\n")
-        with pytest.raises(ms.InvalidEntryTextError):
-            ms.set_category_description(parsed, "Cat A", "# oops")
-        assert ms.get_category_description(parsed, "Cat A") == "Original."
+        result = ms.set_category_description(parsed, "Cat A", "# oops")
+        assert result["adjusted_headings"] == 1
+        assert ms.get_category_description(parsed, "Cat A") == "### oops"
+        # The demoted description cannot swallow the entries that follow it.
+        assert ms.list_entries(parsed) == [{"name": "E1", "category": "Cat A"}]
 
     def test_set_description_on_crlf_file_round_trips_and_stays_crlf(self, tmp_path: Path) -> None:
         path = tmp_path / "loras.md"

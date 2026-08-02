@@ -69,6 +69,14 @@ captions).
 - **Drag to reorder:** drag entries within the list (an insertion line
   shows the landing spot); drop onto a category header to move an entry
   into that category — the file is rewritten to match, byte-safe.
+- **Paste anything — `#` headings included.** The file uses `#`/`##`
+  headings as its own structure, so pasted content (LLM output, notes)
+  that starts lines with `#` or `##` used to be refused. Now it just
+  saves: those lines are automatically demoted two levels (`# Title` →
+  `### Title`) so they stay inside your entry, the status line tells you
+  how many were adjusted, and the editor shows exactly what was stored.
+  `###`-and-deeper headings, and anything inside a code fence, were
+  always fine and are untouched.
 - **Renaming, two ways** (whichever you reach for first):
   - **Double-click the name** — in the list, on a prompt or a category
     header — and type over it. Enter saves, Esc cancels, clicking away

@@ -3788,6 +3788,21 @@ async function performDeleteRun(state, names, startIndex, { force = false } = {}
 // Save
 // ---------------------------------------------------------------------------
 
+/**
+ * Status-line suffix for the §3.4 demote-don't-refuse transform (v0.48.1):
+ * the server DEMOTES pasted `#`/`##` heading lines two levels (`# X` ->
+ * `### X`) instead of failing the save -- the owner's "can't save when
+ * content has # in the body" report, hit constantly when pasting LLM
+ * output. Empty string for the ordinary zero-adjustment save so the
+ * everyday "Saved." message stays untouched.
+ */
+function adjustedHeadingsSuffix(data) {
+  const n = typeof data?.adjusted_headings === 'number' ? data.adjusted_headings : 0
+  if (n <= 0) return ''
+  const noun = n === 1 ? '1 pasted heading line' : `${n} pasted heading lines`
+  return ` ${noun} demoted (# → ###) so they stay inside this entry.`
+}
+
 async function performSave(state, { force = false } = {}) {
   // The editor is contextual (FORMAT.md §7.2 amendment): category mode owns
   // Save whenever it's active, entirely independent of `activeName` (which
@@ -3854,7 +3869,18 @@ async function performSave(state, { force = false } = {}) {
       updateSaveButtonEnabled(state)
       return
     }
-    state.lastSavedText = text
+    // §3.4 demote-don't-refuse (v0.48.1): when the server demoted pasted
+    // heading lines, `data.text` carries the STORED body. Fold it into the
+    // editor -- but never over TYPING that happened while the save was in
+    // flight (populateEditor's mid-edit rule): the textarea is replaced
+    // only while it still shows exactly what was sent. The baseline below
+    // becomes disk truth EITHER way, so mid-flight typing stays flagged
+    // dirty (vs the sent-value baseline it would otherwise match).
+    const storedText = typeof data.text === 'string' ? data.text : text
+    if (storedText !== text && state.textarea.value === text) {
+      state.textarea.value = storedText
+    }
+    state.lastSavedText = storedText
     if (renameTo) {
       const nextSelection = state.selection.map((n) => (n === name ? renameTo : n))
       setSelection(state, nextSelection, renameTo) // also re-renders the list
@@ -3874,10 +3900,15 @@ async function performSave(state, { force = false } = {}) {
     // sitting right there in the field -- his "changing the title text does
     // not enable the save button", amplified by LAN latency. With the sent
     // value as baseline, refreshDirty below re-flags mid-flight typing.
+    // (Since v0.48.1 "what was sent" is refined to "what the server STORED
+    // for what was sent" -- identical except when headings were demoted.)
     state.lastSavedName = renameTo || name
     refreshDirty(state)
     updateModeHint(state)
-    setStatus(state, renameTo ? `Saved. Renamed to "${renameTo}".` : 'Saved.')
+    setStatus(
+      state,
+      (renameTo ? `Saved. Renamed to "${renameTo}".` : 'Saved.') + adjustedHeadingsSuffix(data)
+    )
   } catch (error) {
     state.busy = false
     updateSaveButtonEnabled(state)
@@ -3950,7 +3981,14 @@ async function performSaveCategory(state, { force = false } = {}) {
       updateSaveButtonEnabled(state)
       return
     }
-    state.lastSavedText = description
+    // §3.4 demote-don't-refuse fold, same rules as performSave() above --
+    // `data.description` is the STORED (demoted, trimmed) text when any
+    // heading line was adjusted.
+    const storedDescription = typeof data.description === 'string' ? data.description : description
+    if (storedDescription !== description && state.textarea.value === description) {
+      state.textarea.value = storedDescription
+    }
+    state.lastSavedText = storedDescription
     if (renameTo) {
       state.activeCategory = renameTo
       // Same mid-edit rule as performSave(): never over in-flight typing.
@@ -3963,7 +4001,10 @@ async function performSaveCategory(state, { force = false } = {}) {
     refreshDirty(state)
     renderList(state)
     updateModeHint(state)
-    setStatus(state, renameTo ? `Saved. Renamed to "${renameTo}".` : 'Saved.')
+    setStatus(
+      state,
+      (renameTo ? `Saved. Renamed to "${renameTo}".` : 'Saved.') + adjustedHeadingsSuffix(data)
+    )
   } catch (error) {
     state.busy = false
     updateSaveButtonEnabled(state)

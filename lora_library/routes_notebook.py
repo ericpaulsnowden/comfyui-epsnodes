@@ -156,23 +156,28 @@ def register(context: LibraryContext, routes: web.RouteTableDef) -> None:
 
         try:
             if markdown_store.get_category_description(parsed, name) is None:
-                markdown_store.create_category(parsed, name, description or "", after=after)
+                result = markdown_store.create_category(
+                    parsed, name, description or "", after=after
+                )
             else:
-                markdown_store.set_category_description(parsed, name, description or "")
+                result = markdown_store.set_category_description(parsed, name, description or "")
                 if rename_to and rename_to.strip():
                     markdown_store.set_category_name(parsed, name, rename_to)
         except markdown_store.MarkdownStoreError as exc:
             return error_response(400, str(exc))
 
         new_mtime = markdown_store.save_notebook(path, parsed, line_ending)
-        return web.json_response(
-            {
-                "ok": True,
-                "mtime": new_mtime,
-                "entries": markdown_store.list_entries(parsed),
-                "categories": markdown_store.list_categories(parsed),
-            }
-        )
+        response = {
+            "ok": True,
+            "mtime": new_mtime,
+            "entries": markdown_store.list_entries(parsed),
+            "categories": markdown_store.list_categories(parsed),
+            # §3.4 demote-don't-refuse (v0.48.1) -- see post_notebook_entry.
+            "adjusted_headings": result["adjusted_headings"],
+        }
+        if result["adjusted_headings"]:
+            response["description"] = result["description"]
+        return web.json_response(response)
 
     @routes.get("/lora_library/notebook/entry")
     async def get_notebook_entry(request: web.Request) -> web.Response:
@@ -239,16 +244,28 @@ def register(context: LibraryContext, routes: web.RouteTableDef) -> None:
             return web.json_response({"error": str(exc), "mtime": exc.current_mtime}, status=409)
 
         try:
-            markdown_store.upsert_entry(
+            result = markdown_store.upsert_entry(
                 parsed, name, text, category=category, rename_to=rename_to, after=after
             )
         except markdown_store.MarkdownStoreError as exc:
             return error_response(400, str(exc))
 
         new_mtime = markdown_store.save_notebook(path, parsed, line_ending)
-        return web.json_response(
-            {"ok": True, "mtime": new_mtime, "entries": markdown_store.list_entries(parsed)}
-        )
+        response = {
+            "ok": True,
+            "mtime": new_mtime,
+            "entries": markdown_store.list_entries(parsed),
+            # §3.4 demote-don't-refuse (v0.48.1): how many heading-looking
+            # lines were demoted to keep the file format safe -- 0 for the
+            # overwhelming majority of saves.
+            "adjusted_headings": result["adjusted_headings"],
+        }
+        if result["adjusted_headings"]:
+            # Only when something changed: the STORED text, so the editor
+            # can fold disk truth in rather than silently diverging from
+            # the file until the next reload.
+            response["text"] = result["text"]
+        return web.json_response(response)
 
     @routes.post("/lora_library/notebook/delete")
     async def post_notebook_delete(request: web.Request) -> web.Response:

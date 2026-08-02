@@ -166,13 +166,24 @@ Writers re-emit the file from the parse, with these guarantees:
   entry leaves the (now empty) category heading in place — categories are
   the user's prose, not derived state.
 - A body line that itself starts with `# ` or `## ` (outside a fence) cannot
-  be represented; saves containing one are refused with 400 and a message
-  telling the user to use `###`, indentation, or a code fence.
+  be represented — it would read back as a boundary. **Since v0.48.1 saves
+  containing one succeed anyway: the writer DEMOTES each such line by two
+  levels** (`# X` → `### X`, `## X` → `#### X`, bare `#`/`##` likewise,
+  leading indentation kept), landing it in the H3+ range §3.1 defines as
+  body text while keeping every heading a heading and h1-vs-h2 hierarchy
+  intact. (Until v0.48.1 these saves were refused with a 400 — the owner
+  hit that constantly pasting LLM output, 2026-08-02, and a refused save
+  reads as "it just fails".) The save response reports
+  `adjusted_headings` (0 on the ordinary save) and, only when non-zero,
+  echoes the STORED `text` so the editor can fold disk truth in; fenced
+  heading-looking lines are body text already and are never touched.
 - **Create category** appends a new `# Name` heading at end-of-file (name
   must be unique among categories, non-empty after trimming, no newlines);
   **Set category description** replaces the §3.1 description block under
-  an existing heading (same un-representable-line rule as entry bodies:
-  a description line starting with `# `/`## ` outside a fence is refused).
+  an existing heading (same demote-two-levels rule as entry bodies for a
+  description line starting with `# `/`## ` outside a fence, reported as
+  `adjusted_headings` + a stored-`description` echo on the category
+  route's response).
 - **Move** relocates one entry (drag-reorder's primitive): to just before a
   named sibling entry, or to the END of a named category (creating that
   category heading at end-of-file when new), or to the end of the file

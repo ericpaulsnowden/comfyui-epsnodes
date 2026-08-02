@@ -322,17 +322,24 @@ async def test_post_category_non_string_description_is_400(
     assert resp.status == 400
 
 
-async def test_post_category_description_with_heading_line_is_400(
+async def test_post_category_description_heading_line_is_demoted_not_400(
     context: LibraryContext, aiohttp_client
 ) -> None:
+    # §3.4 demote-don't-refuse (v0.48.1) -- this used to be a 400.
     client = await aiohttp_client(make_app(context))
     resp = await client.post(
         "/lora_library/notebook/category",
         json={"file": "loras.md", "name": "Styles", "description": "line\n## looks like heading"},
     )
-    assert resp.status == 400
+    assert resp.status == 200
     body = await resp.json()
-    assert "error" in body
+    assert body["adjusted_headings"] == 1
+    assert body["description"] == "line\n#### looks like heading"
+
+    read_back = await client.get(
+        "/lora_library/notebook/category", params={"file": "loras.md", "name": "Styles"}
+    )
+    assert (await read_back.json())["description"] == "line\n#### looks like heading"
 
 
 async def test_post_category_malformed_json_body_is_400(
@@ -698,17 +705,41 @@ async def test_post_entry_blank_name_on_create_is_400(
     assert resp.status == 400
 
 
-async def test_post_entry_text_with_heading_line_is_400(
+async def test_post_entry_heading_line_is_demoted_not_400(
     context: LibraryContext, aiohttp_client
 ) -> None:
+    # §3.4 demote-don't-refuse (v0.48.1) -- this used to be a 400, which
+    # surfaced as "notebooks can't save when content has # in the body".
     client = await aiohttp_client(make_app(context))
     resp = await client.post(
         "/lora_library/notebook/entry",
         json={"file": "loras.md", "name": "Foo", "text": "line\n# looks like a heading"},
     )
-    assert resp.status == 400
+    assert resp.status == 200
     body = await resp.json()
-    assert "error" in body
+    assert body["adjusted_headings"] == 1
+    assert body["text"] == "line\n### looks like a heading"
+
+    read_back = await client.get(
+        "/lora_library/notebook/entry", params={"file": "loras.md", "name": "Foo"}
+    )
+    assert (await read_back.json())["text"] == "line\n### looks like a heading"
+
+
+async def test_post_entry_without_headings_reports_zero_and_omits_text(
+    context: LibraryContext, aiohttp_client
+) -> None:
+    # The ordinary save's wire shape: the counter rides every response, the
+    # stored-text echo only when something was actually adjusted.
+    client = await aiohttp_client(make_app(context))
+    resp = await client.post(
+        "/lora_library/notebook/entry",
+        json={"file": "loras.md", "name": "Foo", "text": "plain ### body"},
+    )
+    assert resp.status == 200
+    body = await resp.json()
+    assert body["adjusted_headings"] == 0
+    assert "text" not in body
 
 
 async def test_post_entry_missing_name_is_400(context: LibraryContext, aiohttp_client) -> None:

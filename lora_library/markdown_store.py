@@ -34,9 +34,11 @@ class InvalidEntryNameError(MarkdownStoreError):
 
 class InvalidEntryTextError(MarkdownStoreError):
     """Entry text contains a line that would be read back as a heading
-    (FORMAT.md §3.4's "cannot be represented" rule) — also reused by
-    :func:`create_category`/:func:`set_category_description` for the same
-    problem in a category's §3.1 description text."""
+    (FORMAT.md §3.4's original "cannot be represented" rule). NO LONGER
+    RAISED anywhere in this module since v0.48.1 — the write paths demote
+    such lines instead (:func:`demote_unrepresentable_headings`). Kept for
+    API compatibility with external callers of the strict
+    :func:`find_unrepresentable_heading_line` check."""
 
 
 class NameCollisionError(MarkdownStoreError):
@@ -232,11 +234,61 @@ def entry_text(entry: Entry) -> str:
 def find_unrepresentable_heading_line(text: str) -> int | None:
     """1-based line number of the first line in *text* that would be read
     back as an H1/H2 heading outside a fence, or ``None`` if *text* is safe
-    to store as an entry body (FORMAT.md §3.4)."""
+    to store as an entry body (FORMAT.md §3.4).
+
+    Since v0.48.1 the write paths no longer REFUSE such lines — they run
+    :func:`demote_unrepresentable_headings` instead (owner ask 2026-08-02:
+    LLM-pasted content routinely contains ``#``/``##`` headings, and a
+    refused save reads as "it just fails"). Kept public for callers that
+    want the strict check.
+    """
     for line_no, _line, level in _iter_lines_with_heading_level(text):
         if level:
             return line_no
     return None
+
+
+def demote_unrepresentable_headings(text: str) -> tuple[str, int]:
+    """Return *text* with every line that would read back as an H1/H2
+    heading outside a fence demoted BY TWO levels (``# X`` -> ``### X``,
+    ``## X`` -> ``#### X``, bare ``#``/``##`` likewise), plus how many
+    lines were adjusted (FORMAT.md §3.4, write-time transform).
+
+    Two levels, not a strip: the owner pastes LLM output whose headings
+    carry real structure — demotion keeps every heading a heading AND keeps
+    h1-vs-h2 hierarchy (h3 vs h4), while landing squarely in the H3+ range
+    §3.1 defines as body text, so the result round-trips byte-for-byte
+    forever after. Runs on the SAME fence-aware line classifier as
+    :func:`parse` (``_iter_lines_with_heading_level``), so "would read back
+    as a heading" here and "is a boundary" there can never disagree —
+    heading-looking lines inside code fences are already body text and are
+    left untouched. The ``##`` marker is inserted after any leading
+    whitespace (an indented `` # X`` is a heading per ``_heading_level``'s
+    strip, and stays indented after demotion). Everything else is preserved
+    byte-for-byte.
+
+    Splits on ``"\\n"`` exactly like the body-storage code in
+    :func:`upsert_entry` (NOT ``str.splitlines``, which
+    ``_iter_lines_with_heading_level`` uses): rejoining ``splitlines``
+    output would silently drop a trailing newline and rewrite ``\\r``/exotic
+    separators on EVERY save, adjusted or not. The predicates
+    (``_heading_level`` + the ``\\`\\`\\``` fence toggle) are the shared ones,
+    so classification still can't drift from :func:`parse` for any text a
+    real editor produces.
+    """
+    adjusted = 0
+    out_lines: list[str] = []
+    in_fence = False
+    for line in text.split("\n"):
+        level = 0 if in_fence else _heading_level(line)
+        if level:
+            indent = len(line) - len(line.lstrip())
+            line = line[:indent] + "##" + line[indent:]
+            adjusted += 1
+        out_lines.append(line)
+        if line.strip().startswith("```"):
+            in_fence = not in_fence
+    return "\n".join(out_lines), adjusted
 
 
 # -------------------------------------------------------------------- lookup
@@ -345,23 +397,24 @@ def upsert_entry(
     silently ignored once *name* already exists, same "update never moves
     the entry" rule.
 
-    Raises :class:`InvalidEntryTextError` if *text* contains an
-    unrepresentable heading-looking line, :class:`InvalidEntryNameError` for
-    a blank *name* on create, or :class:`NameCollisionError` if *rename_to*
-    already names a different entry.
+    Heading-looking lines in *text* are DEMOTED, not refused, since
+    v0.48.1 (:func:`demote_unrepresentable_headings`); the stored text and
+    the adjusted-line count ride back in the return dict. Raises
+    :class:`InvalidEntryNameError` for a blank *name* on create, or
+    :class:`NameCollisionError` if *rename_to* already names a different
+    entry.
     """
     name = (name or "").strip()
     category = (category or "").strip()
     rename_to = (rename_to or "").strip()
     after = (after or "").strip()
 
-    bad_line = find_unrepresentable_heading_line(text)
-    if bad_line is not None:
-        raise InvalidEntryTextError(
-            f"line {bad_line} of the entry text starts with '#'/'##', which would be "
-            "read back as a heading; use '###', indentation, or a code fence instead "
-            "— FORMAT.md §3.4"
-        )
+    # §3.4 write-time transform (was a refusal until v0.48.1): heading-
+    # looking lines are DEMOTED two levels rather than 400'd -- see
+    # demote_unrepresentable_headings' docstring for the owner ask and why
+    # two levels. The stored text + count ride back in the return dict so
+    # the route can tell the editor what actually landed on disk.
+    text, adjusted_headings = demote_unrepresentable_headings(text)
     body_lines = text.split("\n")
 
     existing = _find_addressable(parsed, name) if name else None
@@ -375,7 +428,12 @@ def upsert_entry(
             entry.name = rename_to
             entry.heading_line = f"## {rename_to}"
         entry.body = body_lines
-        return {"name": entry.name, "category": block.name}
+        return {
+            "name": entry.name,
+            "category": block.name,
+            "text": text,
+            "adjusted_headings": adjusted_headings,
+        }
 
     if not name:
         raise InvalidEntryNameError("entry name must not be empty — FORMAT.md §3.2")
@@ -385,14 +443,24 @@ def upsert_entry(
     if after_target is not None:
         after_block, after_entry = after_target
         after_block.entries.insert(after_block.entries.index(after_entry) + 1, new_entry)
-        return {"name": name, "category": after_block.name}
+        return {
+            "name": name,
+            "category": after_block.name,
+            "text": text,
+            "adjusted_headings": adjusted_headings,
+        }
 
     target = _find_last_block(parsed, category) if category else parsed.blocks[-1]
     if target is None:
         target = CategoryBlock(name=category, heading_line=f"# {category}")
         parsed.blocks.append(target)
     target.entries.append(new_entry)
-    return {"name": name, "category": target.name}
+    return {
+        "name": name,
+        "category": target.name,
+        "text": text,
+        "adjusted_headings": adjusted_headings,
+    }
 
 
 def remove_entry(parsed: ParsedNotebook, name: str) -> bool:
@@ -448,10 +516,11 @@ def create_category(
     *after* naming neither an entry nor a category, or omitted, falls back
     to the end-of-file append.
 
-    Raises :class:`InvalidEntryNameError` for a blank or newline-containing
-    *name*, :class:`NameCollisionError` if *name* already names a category,
-    or :class:`InvalidEntryTextError` if *description* contains an
-    unrepresentable heading-looking line (FORMAT.md §3.4).
+    Heading-looking lines in *description* are DEMOTED, not refused, since
+    v0.48.1 (:func:`demote_unrepresentable_headings`); the count rides back
+    in the return dict. Raises :class:`InvalidEntryNameError` for a blank
+    or newline-containing *name*, or :class:`NameCollisionError` if *name*
+    already names a category.
     """
     name = (name or "").strip()
     if not name:
@@ -462,13 +531,9 @@ def create_category(
         raise NameCollisionError(f"a category named {name!r} already exists — FORMAT.md §3.4")
 
     description = description or ""
-    bad_line = find_unrepresentable_heading_line(description)
-    if bad_line is not None:
-        raise InvalidEntryTextError(
-            f"line {bad_line} of the category description starts with '#'/'##', which would "
-            "be read back as a heading; use '###', indentation, or a code fence instead — "
-            "FORMAT.md §3.4"
-        )
+    # Same §3.4 demote-don't-refuse transform as upsert_entry — see
+    # demote_unrepresentable_headings.
+    description, adjusted_headings = demote_unrepresentable_headings(description)
 
     block = CategoryBlock(
         name=name, heading_line=f"# {name}", preamble=description.split("\n") if description else []
@@ -488,7 +553,11 @@ def create_category(
             parsed.blocks.insert(parsed.blocks.index(src_block) + 1, block)
         else:
             parsed.blocks.append(block)
-    return {"name": name, "description": _trimmed_text(block.preamble)}
+    return {
+        "name": name,
+        "description": _trimmed_text(block.preamble),
+        "adjusted_headings": adjusted_headings,
+    }
 
 
 def set_category_description(parsed: ParsedNotebook, name: str, description: str) -> dict:
@@ -498,21 +567,17 @@ def set_category_description(parsed: ParsedNotebook, name: str, description: str
     route composes the two). A repeated category name targets the LAST
     block with that name, same convention as :func:`create_category`'s
     uniqueness check and ``move_entry``'s category placement. Mutates
-    *parsed*; returns ``{"name","description"}``.
+    *parsed*; returns ``{"name","description","adjusted_headings"}`` —
+    heading-looking description lines are demoted, not refused, since
+    v0.48.1 (:func:`demote_unrepresentable_headings`).
 
-    Raises :class:`InvalidEntryTextError` if *description* contains an
-    unrepresentable heading-looking line (FORMAT.md §3.4, checked first —
-    same order :func:`upsert_entry` uses for entry text vs. name lookup), or
-    :class:`CategoryNotFoundError` if no category named *name* exists.
+    Raises :class:`CategoryNotFoundError` if no category named *name*
+    exists.
     """
     description = description or ""
-    bad_line = find_unrepresentable_heading_line(description)
-    if bad_line is not None:
-        raise InvalidEntryTextError(
-            f"line {bad_line} of the category description starts with '#'/'##', which would "
-            "be read back as a heading; use '###', indentation, or a code fence instead — "
-            "FORMAT.md §3.4"
-        )
+    # Same §3.4 demote-don't-refuse transform as upsert_entry — see
+    # demote_unrepresentable_headings.
+    description, adjusted_headings = demote_unrepresentable_headings(description)
 
     name = (name or "").strip()
     block = _find_last_block(parsed, name) if name else None
@@ -522,7 +587,11 @@ def set_category_description(parsed: ParsedNotebook, name: str, description: str
     # Same "empty stores zero lines" rule as create_category — see its
     # docstring.
     block.preamble = description.split("\n") if description else []
-    return {"name": name, "description": _trimmed_text(block.preamble)}
+    return {
+        "name": name,
+        "description": _trimmed_text(block.preamble),
+        "adjusted_headings": adjusted_headings,
+    }
 
 
 def set_category_name(parsed: ParsedNotebook, name: str, new_name: str) -> dict:
