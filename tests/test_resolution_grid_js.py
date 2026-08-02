@@ -150,6 +150,12 @@ def grid_api(tmp_path_factory: pytest.TempPathFactory) -> dict:
     # with no extensionManager exercises the same optional-chaining the
     # browser path relies on.
     (scripts / "app.js").write_text("export const app = {}\n", encoding="utf-8")
+    # M3 (size presets) added a second static import, `../../../scripts/
+    # api.js` -- ES modules resolve every static import eagerly regardless
+    # of whether this probe's own calls ever reach it, so it must exist too
+    # (identical stub to test_checkpoint_switcher_js.py's own `api.js`,
+    # which needed this for the same reason).
+    (scripts / "api.js").write_text("export const api = { fetchApi: () => {} }\n", encoding="utf-8")
 
     module_dir = layout / "extensions" / "comfyui-epsnodes" / "eps_image"
     module_dir.mkdir(parents=True)

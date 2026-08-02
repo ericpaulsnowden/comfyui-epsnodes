@@ -24,7 +24,7 @@ section further down; this is the map.
 | [**EPS Model / CLIP / VAE Switcher**](#eps-model--clip--vae-switcher-shipped) | The image Switcher's exact mechanism for models, CLIPs, and VAEs: any number of inputs, each on/off, enabled ones fan out (N enabled → N runs), disabled branches — including their checkpoint loads — never execute. | Nothing — drag-and-drop with core nodes. |
 | [**EPS Distributor**](#eps-distributor-shipped) | The mirror of the Switcher: one image in, up to sixteen branches out, each independently on/off. New outputs appear as you wire them up. Toggle a branch off and only that branch is skipped — everything happens in one run. | Nothing — drag-and-drop with core nodes. |
 | [**EPS Checkpoint Switcher**](#eps-checkpoint-switcher-shipped) | Tick several checkpoint files in a list; one queue runs the workflow once per ticked checkpoint, with each run's model, CLIP, and VAE kept together and a label for save paths. | Your checkpoint files — drag-and-drop with core nodes. |
-| [**EPS Resolution**](#eps-resolution-shipped) | Image-first resize + size in one node: target size (with a drag pad), four resize modes, and the original image + both sets of dimensions passed through. | Nothing — drag-and-drop with core nodes. |
+| [**EPS Resolution**](#eps-resolution-shipped) | Image-first resize + size in one node: target size (with a drag pad), four resize modes, and the original image + both sets of dimensions passed through. Named size presets are shared across your machines — tick several and one Run resizes once per preset. | Nothing — drag-and-drop with core nodes. |
 | [**EPS Image Grid**](#eps-image-grid-shipped) | Collects images across separate Runs into a buffer that survives restarts, shows them as a thumbnail grid, and fans the whole set out on demand. Add whole batches at once — a multiselect picker, a folder importer, or one big drag. | Nothing — drag-and-drop with core nodes. |
 | [**EPS Cross Product**](#eps-cross-product-shipped) | Pairs every image with every text — 2 images × 4 prompts = 8 runs. (ComfyUI's own list pairing zips index-by-index instead.) | Two lists to multiply — pairs naturally with Image Grid + Prompt Notebook, but any list sources work. |
 | [**EPS Cross Sweep**](#eps-cross-sweep-shipped) | Multiplies a sweep group (LoRA Sweep, or Checkpoint Switcher with its VAEs) across image/text pairs — or across texts alone for txt2img — grouped by step, with per-run save paths so big runs land in tidy folders. | EPS LoRA Sweep or EPS Checkpoint Switcher on one side; EPS Cross Product or just a multi-select Prompt Notebook on the other. |
@@ -422,6 +422,21 @@ dimensions. It replaces a resize node + a reroute + a get-image-size node.
   and `pad` (black), with a choice of interpolation. `multiple_of` snaps the
   result to a multiple (e.g. 64) for latent-friendly sizes.
 - **Set one axis to `0`** to derive it from the other and the image's aspect.
+- **Size presets, shared across machines:** the `preset` dropdown (with
+  **Save** and **Delete** right under it, above the pad) saves all five
+  fields — width, height, mode, interpolation, `multiple_of` — as a named
+  preset. Pick one to apply it; **Shift-click the dropdown to tick
+  several**, and one Run then resizes once per preset (2 presets → the same
+  image at 2 sizes, like the Prompt Notebook's multi-select). Presets live
+  in one small JSON file in the same shared library folder as the Prompt
+  Notebook (local or NAS), so your other machines — and a browser on
+  another machine — all see the same list, and edits made anywhere are
+  picked up on the next Run. Save with exactly one preset chosen pre-fills
+  its name (that's "update"); Delete only lights up with exactly one
+  chosen. A preset renamed or deleted elsewhere shows as `name (missing)`
+  and **fails the Run with a clear error** naming it — never a silent
+  substitute. Don't want presets on a node? Right-click → Properties →
+  `Presets` off hides the whole cluster.
 - **Outputs:** `resized_image`, `width`, `height` out of the box —
   `width`/`height` report the actual resized dimensions, and with no image
   wired the node still emits your target size, so it doubles as a pure size

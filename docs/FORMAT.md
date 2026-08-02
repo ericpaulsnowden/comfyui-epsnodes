@@ -978,9 +978,66 @@ is the functional core WITHOUT the grid.
     as before) — the Notebook's own cross-machine staleness fix. Context via
     `set_context` (mirrors `nodes_notebook`; `__init__.py`'s generic
     `hasattr(_module, "set_context")` loop wires it).
-- **M3 — the preset UI, frontend half:** see the "M3: size presets" header
-  comment in `web/eps_image/resolution.js` (documented with §6.5's frontend
-  amendment when it ships).
+- **M3 — the preset UI, frontend half (v0.48.0, `web/eps_image/
+  resolution.js`).** A real `combo` widget `preset` plus `Save`/`Delete`
+  BUTTON widgets — standard widget types, so Vue nodes render all three
+  natively (unlike the M2 pad's canvas-drawn readout). Inserted AFTER all
+  six backend widgets, immediately above the M2 pad, deliberately NOT
+  above `width` even though the owner's brief asked for that literally:
+  `widgets_values` serialize/restore is POSITIONAL (and hole-asymmetric
+  for `serialize:false` widgets — serialize skips at the RAW index leaving
+  a null hole, restore reads DENSELY), so any leading widget corrupts
+  every pre-existing workflow's width/height on reload, and a SERIALIZED
+  leading widget additionally breaks files on version DOWNGRADE (an older
+  pack build restoring a new file reads the combo's string into `width`)
+  — fatal for the owner's update-machines-at-different-times reality. The
+  tail is the one provably safe region; the file's "M3: size presets"
+  header carries the full LGraphNode.ts citation trail, and image_grid.js
+  ("Clear button") + controller.js document the same constraint
+  independently. All three widgets are `serialize:false` both ways
+  (top-level flag for widgets_values, `options.serialize` for the API
+  prompt), so a saved file keeps exactly the six dense backend values:
+  old files restore via the early-exit, new files stay downgrade-safe.
+  - **Combo contract:** `.value` is always a REAL token — a `(none)`
+    sentinel, the sole selected NAME (kept even when no longer in the
+    fetched store), or a multi sentinel — never an ad-hoc display string,
+    because Vue cross-checks value ∈ options.values and draws an invalid
+    ring otherwise; `options.values` is a live FUNCTION folding the
+    current value in. Labels via `getOptionLabel`: `(none)`, the name
+    (suffixed ` (missing)` when absent from the store), or `N presets`.
+    A plain pick applies that preset's five values onto the visible
+    widgets (a courtesy preview — the BACKEND ignores those fields and
+    resolves from the store) and selects it; `(none)` clears.
+    SHIFT/Ctrl/Cmd+click opens a checkbox-style stay-open ContextMenu
+    (each row's callback returns `true` — the verified `close_parent`
+    mechanism) for multi-select; canvas-only, since Vue's combobox never
+    calls `widget.onClick` (a documented §7.5-class renderer gap, not an
+    oversight). Selection is normalized to FETCHED order on every write
+    (checkpoint_switcher's convention); still-selected names missing from
+    the store are KEPT (appended, prior relative order) so the backend can
+    fail the queue loudly.
+  - **Save/Delete:** Save prompts via `LGraphCanvas.prompt`, prefilled
+    with the active preset's name when EXACTLY one is selected (that is
+    the definition of "active") — i.e. update-in-place — blank otherwise;
+    the saved preset becomes the sole selection. Delete is enabled only at
+    exactly one selected; no confirm dialog (re-saving recreates). A 409
+    on either → warn toast + refetch, deliberately NOT the Notebook's
+    Reload/Overwrite dialog — a five-field record has no partial-merge
+    story. Every selection write funnels through ONE path
+    (`commitSelection`: normalize → widget.value + callback → combo/
+    Delete re-render).
+  - **`Presets` node property** (boolean, default true): false hides all
+    three widgets (BOTH hide flags each, §7.5) and force-clears the
+    selection to `"[]"` so the backend provably runs classic mode; the
+    reconcile also enforces that invariant on restore of a saved
+    `Presets: false` file.
+  - **Restore-safety:** an `onConfigure`-chained reconcile re-derives
+    selection from the hidden widget's CURRENT value (checkpoint_switcher
+    `reloadFromWidget` pattern), so whichever of {initial fetch,
+    configure} lands LAST renders correctly — verified on the rig with a
+    600 ms latency wrap (§7.5's test condition): mid-flight the sole name
+    already labels ` (missing)`, and the store's answer relabels or
+    confirms it.
 - **Deferred (M4):** multi-image list fan-out. Do NOT build it yet.
 
 ## §6.6 `EPSImageGrid` (display: "EPS Image Grid") — accumulate + fan out

@@ -1,7 +1,15 @@
 /**
  * @file EPS Resolution frontend (FORMAT.md §6.5). M1 = hideable outputs.
- * M2 (this round) adds the size-grid DOM widget and flips both hideable-
- * output properties' default to OFF.
+ * M2 adds the size-grid DOM widget and flips both hideable-output
+ * properties' default to OFF. M3 (this round) adds server-side size
+ * PRESETS -- a `preset` combo + Save/Delete buttons over the backend's
+ * hidden `presets` JSON-array-of-names widget, built against the parallel
+ * backend contract in `eps_image/nodes_resolution.py`/
+ * `routes_resolution_presets.py`. See the "M3: size presets" section
+ * (search for that heading) for the full design, including a verified,
+ * deliberate divergence from the literal brief's widget ordering (a
+ * correctness constraint, not a style choice) and the ContextMenu/Vue-mode
+ * verification trail.
  *
  * ---- Hideable outputs: how, and why it's two different mechanisms ----
  *
@@ -207,6 +215,7 @@
  */
 
 import { app } from '../../../scripts/app.js'
+import { api } from '../../../scripts/api.js'
 
 const NODE_TYPE = 'EPSResolution'
 const NODE_TITLE = 'EPS Resolution'
@@ -216,6 +225,7 @@ const PROP_SHOW_PASSTHROUGH = 'Show passthrough image'
 const PROP_SHOW_ORIGINAL_SIZE = 'Show original size'
 const PROP_SHOW_GRID = 'Show grid'
 const PROP_GRID_MAX = 'Grid max'
+const PROP_PRESETS_ENABLED = 'Presets'
 
 /** eps_image/nodes_resolution.py RETURN_NAMES — the one hideable leading
  * output, and the hideable trailing pair (order matters, see file header). */
@@ -1394,6 +1404,799 @@ function attachSizeGrid(node) {
   }
 }
 
+// --------------------------------------------------------------- M3: size presets
+//
+// A `preset` COMBO widget (NOT hand-drawn -- Vue nodes render standard
+// widget types natively, unlike the M2 grid's onDrawForeground-painted
+// readout) plus Save/Delete buttons, reflecting/writing the hidden
+// `presets` STRING widget the backend contract defines: JSON array of
+// preset NAMES, default `"[]"`. Non-empty selection = fan-out (backend
+// runs once per preset, ignoring the five typed fields); empty = classic
+// single-run, unchanged from M1/M2. eps_image/nodes_resolution.py's
+// INPUT_TYPES already ships `presets` with `"hidden": True` in its OWN
+// options (the §7.5 Vue-mode hide flag) -- this section adds the matching
+// canvas-mode `widget.hidden` flag and replaces it with real UI.
+//
+// ---- Widget-order divergence from the literal brief (verified, not an
+// oversight) ----
+//
+// The task brief calls for the `preset` combo at `node.widgets[0]`, above
+// `width`. That is NOT done here -- it would corrupt every reload of
+// width/height/resize_method/interpolation/multiple_of/presets for every
+// user's EXISTING saved workflow, verified directly against this rig's
+// installed `comfyui_frontend_package`'s `LGraphNode.ts`
+// (`api-BqIxvqZ8.js.map`, `../../src/lib/litegraph/src/LGraphNode.ts`):
+//   - SERIALIZE (`o.widgets_values[i] = val`, ~L972-980) writes at the
+//     widget's RAW index in `node.widgets`, `continue`-skipping (leaving a
+//     HOLE, which JSON round-trips to `null`) any `widget.serialize ===
+//     false` widget it passes over.
+//   - RESTORE (`widget.value = info.widgets_values[i++]`, ~L917-924) reads
+//     via a SEPARATE counter that only advances past NON-skipped widgets --
+//     i.e. it expects the saved array to already be dense/compacted, which
+//     the save side never produces once a skip sits before a kept widget.
+//   These two are provably NOT symmetric except when every `serialize:
+//   false` widget sits at the true TAIL of `node.widgets` (no kept widget
+//   after it) -- exactly this file's own `GRID_WIDGET_NAME` DOM widget, and
+//   exactly the reasoning `web/eps_image/image_grid.js`'s "Clear button"
+//   section and `web/lora_library/controller.js`'s header ALREADY document
+//   independently ("Two distinct ... serialize flags" / "declared last...
+//   do not reorder without re-checking this") -- this is a previously-
+//   verified, load-bearing constraint of this exact codebase, not a novel
+//   finding. A leading `preset` combo -- serialized or not -- also breaks
+//   EVERY pre-existing saved workflow outright: `configure()`'s restore is
+//   purely positional, so inserting anything before `width` shifts every
+//   later widget's read by one, silently reassigning width's saved value to
+//   the new widget, height's to width, etc. `migrateWidgetsValues`
+//   (`litegraphUtil.ts`, wired from `litegraphService.ts`'s node `configure`
+//   override) does NOT rescue this -- it only reconciles a widget that
+//   toggled `forceInput`, and bails (`return widgetsValues` unchanged)
+//   whenever the widget/value counts disagree, which is exactly this case.
+//   So instead: `preset`/`Save`/`Delete` are inserted immediately AFTER
+//   every real backend widget (i.e. after `presets`) and BEFORE the M2 pad
+//   -- the same provably-safe tail region `GRID_WIDGET_NAME` already
+//   occupies alone. Verified against a plain trace of both loops for the
+//   6-real+4-tail-frontend widget shape this file now has, both for a
+//   fresh save/reload round trip and for a pre-this-feature workflow
+//   loading (shorter `widgets_values`, no leading hole, the existing
+//   `if (i >= values.length) break` early-exit leaves `presets`/`preset`/
+//   `Save`/`Delete`/the pad at their fresh-construction defaults -- exactly
+//   the graceful degradation every OTHER new field in this file already
+//   relies on). "Save + Delete directly above the pad" (the brief's other
+//   position requirement) IS satisfied exactly as asked.
+//
+// ---- Vue-nodes scope boundary (verified, not assumed) ----
+//
+// The combo itself is a REAL `addWidget('combo', ...)` widget, so Vue nodes
+// render and single-pick it natively (confirmed against the installed
+// frontend's `WidgetSelectDefault.vue`/`useProcessedWidgets.ts`:
+// `createWidgetUpdateHandler` calls `widget.callback?.(newValue)` on a Vue
+// pick exactly like `BaseWidget.setValue()` does on canvas -- `combo.
+// callback` below is therefore the one write path both renderers share).
+// The SHIFT/Ctrl/Cmd multi-select gesture is canvas-only, and this is a
+// verified renderer limitation, not a missed case: Vue's combo
+// (`WidgetSelectDefault.vue`/`useWidgetSelectActions.ts`) implements its
+// OWN dropdown (a reka-ui Combobox) and never calls `widget.onClick` --
+// canvas's `LGraphCanvas.processWidgetClick` -> `ComboWidget.onClick` path
+// this file shadows below simply never runs under Vue, and there is no
+// extension point in the Vue component to intercept a raw pointer event's
+// modifier keys from outside core. Multi-select therefore degrades to
+// "not reachable" (no error, nothing drawn wrong) under Vue nodes mode,
+// consistent with this pack's existing, documented §7.5 Vue-mode gaps
+// (hand-drawn controls; see `web/eps_image.js`'s `warnIfVueNodesMode`) --
+// worth a follow-up if Eric wants it, not silently pretended away here.
+//
+// `LiteGraph` itself is referenced BELOW as an ambient global, unimported
+// -- `web/lora_library/controller.js`'s header already established (and
+// cites rgthree's own shipped `power_lora_loader.js` as prior art) that
+// `LiteGraph`/`LGraphNode` are not importable via any stable path from a
+// node pack's own web dir on real, currently-shipping ComfyUI frontends.
+//
+// ---- ContextMenu "stay open on click" verification ----
+//
+// VERIFIED against the SAME installed frontend's `ContextMenu.ts`
+// (`api-BqIxvqZ8.js.map`, `../../src/lib/litegraph/src/ContextMenu.ts`,
+// `inner_onclick()` ~L320-380): there is no `keep_open`/`closing` FIELD,
+// but the mechanism is real -- an item's own `value.callback(...)`
+// (distinct from the menu's top-level `options.callback`) is invoked with
+// `this` bound to the clicked row DIV (~L353-362), and `if (r === true)
+// close_parent = false` (~L361) means returning `true` from that callback
+// stops `that.close()` (~L379) from ever running. `openMultiSelectMenu`
+// below uses exactly that: each item's callback toggles the preset, mutates
+// `this.textContent` in place (no full menu rebuild needed to show the new
+// ✓ state), and returns `true`.
+//
+// ---- Vue "invalid" ring avoidance ----
+//
+// The combo's `.value` is never an ad-hoc display string. Canvas's
+// `_displayValue`/Vue's `WidgetSelectDefault.vue` both derive the shown
+// text from `options.getOptionLabel(value)`, but Vue ALSO cross-checks
+// `value` against `options.values` and renders an invalid/error ring
+// (`aria-invalid`, `ring-1 ring-destructive-background`) whenever it is
+// absent (verified in `WidgetSelectDefault.vue`'s `isInvalid`/
+// `selectedLabel`). So `.value` is always one of: `PRESET_NONE_VALUE`
+// (0 selected), a real preset NAME (1 selected -- even one that no longer
+// exists in the fetched store), or `PRESET_MULTI_VALUE` (2+ selected) --
+// and `presetComboValues()` (a LIVE `options.values` function; ComboWidget.
+// ts explicitly supports that, deprecation-warning aside -- controller.js's
+// header already used this same escape hatch for the same reason) always
+// folds the CURRENT value into the list even when it is not a "real"
+// pickable option, so it is provably always "known" on both renderers.
+
+const PRESETS_WIDGET_NAME = 'presets'
+const PRESET_COMBO_NAME = 'preset'
+const PRESET_COMBO_LABEL = 'preset'
+const PRESETS_ROUTE = '/eps_resolution/presets'
+const PRESETS_SAVE_ROUTE = '/eps_resolution/presets/save'
+const PRESETS_DELETE_ROUTE = '/eps_resolution/presets/delete'
+
+/** eps_image/nodes_resolution.py's 5-field preset "values" shape -- the
+ * fields Save reads off the visible widgets and a picked preset applies
+ * back onto them. */
+const PRESET_FIELD_NAMES = ['width', 'height', 'resize_method', 'interpolation', 'multiple_of']
+
+/** Sentinel `combo.value` tokens for the 0-/2+-selected states -- long,
+ * double-underscore-namespaced strings a user-typed preset name is
+ * exceedingly unlikely to collide with, and even if one somehow did,
+ * `presetComboValues()`'s function form always folds the CURRENT value in,
+ * so a collision would only ever cost a label, never a crash. See "Vue
+ * invalid ring avoidance" above for why real, addressable tokens matter at
+ * all instead of an arbitrary display string. */
+const PRESET_NONE_VALUE = '__eps_resolution_preset_none__'
+const PRESET_MULTI_VALUE = '__eps_resolution_preset_multi__'
+
+// --------------------------------------------------- M3: pure helpers (tested under Node)
+
+/** Parses the `presets` widget's raw JSON-array-of-names string. Identical
+ * degrade-never-throw contract to `checkpoint_switcher.js`'s
+ * `selectionFromWidgetValue` (this file's sibling precedent for a
+ * JSON-array selection widget) -- malformed JSON, a non-array value, or a
+ * missing/non-string *raw* all degrade to `[]`; non-string entries drop;
+ * duplicates collapse to their first occurrence. (The backend's own
+ * `_parse_preset_names`, `eps_image/nodes_resolution.py`, does NOT dedupe --
+ * a deliberate divergence: this function feeds UI STATE, and this file's
+ * own write path, `normalizeSelectionOrder`, can never itself produce a
+ * duplicate, so the two never disagree about what actually runs.) */
+export function selectionFromWidgetValue(raw) {
+  if (typeof raw !== 'string' || raw.trim() === '') return []
+  let parsed
+  try {
+    parsed = JSON.parse(raw)
+  } catch {
+    return []
+  }
+  if (!Array.isArray(parsed)) return []
+  const seen = new Set()
+  const out = []
+  for (const entry of parsed) {
+    if (typeof entry !== 'string' || seen.has(entry)) continue
+    seen.add(entry)
+    out.push(entry)
+  }
+  return out
+}
+
+/** Adds/removes *name* from *list*, preserving every other entry's relative
+ * order and never duplicating -- the ContextMenu multi-select toggle
+ * primitive. Identical shape to `checkpoint_switcher.js`'s `toggleName`. */
+export function toggleSelection(list, name, checked) {
+  const arr = Array.isArray(list) ? list : []
+  const has = arr.includes(name)
+  if (checked) return has ? arr.slice() : [...arr, name]
+  return has ? arr.filter((entry) => entry !== name) : arr.slice()
+}
+
+/** Re-sorts *selection* to the FETCHED list's own order (checkpoint_switcher
+ * .js's established "order is the fetched list's order, not click order"
+ * convention -- this file's `EPSCheckpointSwitcher` sibling), with any
+ * still-selected name absent from *fetchedNames* ("missing" -- deleted or
+ * renamed elsewhere) appended after, in ITS prior relative order rather
+ * than dropped (req. 5: "stays in the selection... server errors loudly at
+ * run time"). This is the ONE function every write path funnels through
+ * (`commitSelection`) and every read path re-derives through
+ * (`reconcilePresetsUi`), so the widget's serialized order is always
+ * deterministic regardless of pick order or reload timing. Pure; exported
+ * for tests. */
+export function normalizeSelectionOrder(selection, fetchedNames) {
+  const rawList = Array.isArray(selection) ? selection : []
+  const names = Array.isArray(fetchedNames) ? fetchedNames : []
+  const knownSet = new Set(names)
+  const selectedSet = new Set(rawList.filter((name) => typeof name === 'string'))
+  const known = names.filter((name) => selectedSet.has(name))
+  const missing = []
+  const seenMissing = new Set()
+  for (const name of rawList) {
+    if (typeof name !== 'string' || knownSet.has(name) || seenMissing.has(name)) continue
+    seenMissing.add(name)
+    missing.push(name)
+  }
+  return [...known, ...missing]
+}
+
+/** The combo's closed-box text for a given selection: "(none)" / the sole
+ * name / "N presets" (req. 2's exact three-state contract). Pure and
+ * state-free (no "(missing)" annotation -- that needs the fetched-name
+ * SET, layered on top by `labelForToken` below); exported for tests. */
+export function dropdownLabelFor(selection) {
+  const list = Array.isArray(selection) ? selection : []
+  if (list.length === 0) return '(none)'
+  if (list.length === 1) return list[0]
+  return `${list.length} presets`
+}
+
+/** Index of the widget named *name* in a plain widgets array -- the pure
+ * core of the "find the pad widget's position and splice before it"
+ * insertion arithmetic (`relocateBeforePad`), factored out so the index
+ * math is directly Node-probeable without a real litegraph node. Pure;
+ * exported for tests. */
+export function presetRowIndexFor(widgets, name) {
+  if (!Array.isArray(widgets)) return -1
+  return widgets.findIndex((widget) => widget && widget.name === name)
+}
+
+// ------------------------------------------------------- M3: state + lookups
+
+function presetsState(node) {
+  return node._epsPresets || null
+}
+
+function presetExists(state, name) {
+  return !!(state.presetsById && Object.prototype.hasOwnProperty.call(state.presetsById, name))
+}
+
+/** `combo.value` for the current selection -- the ONE place the 0/1/2+
+ * cases map to a token (see "Vue invalid ring avoidance" above for why
+ * these are real tokens, not ad-hoc strings). */
+function currentComboValue(selection) {
+  if (!selection || selection.length === 0) return PRESET_NONE_VALUE
+  if (selection.length === 1) return selection[0]
+  return PRESET_MULTI_VALUE
+}
+
+/** `options.getOptionLabel`'s implementation -- both renderers call this
+ * for EVERY row (list build) and for the closed-box value alike (BaseWidget
+ * ._displayValue / WidgetSelectDefault.vue's selectedLabel), so one token ->
+ * one label, uniformly. Reuses `dropdownLabelFor` for the none/multi cases
+ * so the closed-box text and a hypothetical multi-row's own label can never
+ * drift apart into two different strings for the same state. */
+function labelForToken(state, token) {
+  if (token === PRESET_NONE_VALUE) return dropdownLabelFor([])
+  if (token === PRESET_MULTI_VALUE) return dropdownLabelFor(state.selection)
+  return presetExists(state, token) ? token : `${token} (missing)`
+}
+
+/** Live `options.values` for the combo -- `(none)` + every fetched name,
+ * PLUS the combo's own CURRENT value if it isn't already one of those (the
+ * multi-sentinel, or a single missing/deleted name) so Vue's
+ * known-option check never flags it invalid. Deliberately a FUNCTION, not a
+ * static array: `ComboWidget.ts`'s `getValues()` explicitly supports this
+ * (deprecated-but-functional, per `lora_library/controller.js`'s own
+ * documented use of the identical escape hatch), and it has to be live
+ * anyway since the fetched list and the current value both change after
+ * construction. */
+function presetComboValues(state) {
+  const values = [PRESET_NONE_VALUE, ...state.presetNames]
+  const current = state.combo ? state.combo.value : PRESET_NONE_VALUE
+  if (!values.includes(current)) values.push(current)
+  return values
+}
+
+// ------------------------------------------------------- M3: selection commit
+
+/** Copies preset *name*'s five stored values onto the visible width/height/
+ * resize_method/interpolation/multiple_of widgets, through the file's own
+ * `setWidgetValue` (value + callback, so serialization and the M2 grid's
+ * width/height callback-wrap both see it -- `renderGrid` below is a second,
+ * explicit repaint in case a field's own value didn't actually change and
+ * `setWidgetValue`'s equal-value guard no-opped it). A courtesy preview
+ * only -- once selection is non-empty the BACKEND ignores these fields
+ * entirely and resolves straight from the store (nodes_resolution.py's own
+ * docstring) -- but showing what a preset contains, and leaving sane values
+ * behind if the user picks back to "(none)", is worth the two-line cost.
+ * Missing/garbled preset data (deleted elsewhere between fetch and click) is
+ * silently a no-op here; the backend is what "errors loudly at run time"
+ * (req. 5), not this preview path. */
+function applyPresetValues(node, name) {
+  const state = presetsState(node)
+  if (!state) return
+  const values = state.presetsById && state.presetsById[name]
+  if (!values || typeof values !== 'object') return
+  for (const field of PRESET_FIELD_NAMES) {
+    if (!(field in values)) continue
+    setWidgetValue(widgetByName(node, field), values[field])
+  }
+  renderGrid(node)
+}
+
+/**
+ * THE single write path for the selection -- every picker (plain combo
+ * pick, "(none)", the multi-select menu's toggles, Save, Delete) funnels
+ * through this. Normalizes to fetched order (`normalizeSelectionOrder`),
+ * writes the hidden `presets` widget as JSON via value + callback (this
+ * file's established `widget.value = x; widget.callback?.(x)` idiom, file
+ * header), applies the sole preset's values when the result is exactly one
+ * name (req. 2/req. "consistent regardless of the path that produced it" --
+ * a multi-select toggle that nets down to one name applies exactly like a
+ * plain pick), and re-renders the combo + Delete's enabled state.
+ */
+function commitSelection(node, nextSelection) {
+  const state = presetsState(node)
+  if (!state) return
+  const ordered = normalizeSelectionOrder(nextSelection, state.presetNames)
+  const json = JSON.stringify(ordered)
+  state.selection = ordered
+  if (state.widget.value !== json) {
+    state.widget.value = json
+    state.widget.callback?.(json)
+  }
+  if (ordered.length === 1) applyPresetValues(node, ordered[0])
+  renderPresetCombo(node)
+  node.graph?.setDirtyCanvas(true, true)
+}
+
+function renderPresetCombo(node) {
+  const state = presetsState(node)
+  if (!state) return
+  state.combo.value = currentComboValue(state.selection)
+  updateDeleteEnabled(node)
+  node.setDirtyCanvas(true, true)
+}
+
+/** Delete's disabled guard (req. 3): enabled only when exactly one preset is
+ * selected -- that is this file's definition of "ACTIVE preset", derived
+ * from `state.selection` rather than tracked as separate mutable state, so
+ * the two can never drift apart. */
+function updateDeleteEnabled(node) {
+  const state = presetsState(node)
+  if (!state || !state.deleteBtn) return
+  state.deleteBtn.disabled = state.selection.length !== 1
+}
+
+/**
+ * The shared reconciliation function -- checkpoint_switcher.js's
+ * `reloadFromWidget` pattern (file brief's own pointer): re-derives
+ * `state.selection` from the hidden widget's CURRENT value rather than
+ * trusting either caller's private snapshot, so whichever of {the initial
+ * fetch, `onConfigure`} finishes LAST produces the final, correct render
+ * (`wireConfigureReload`'s header, `web/eps_image/checkpoint_switcher.js`).
+ * Also enforces the "Presets off -> selection empty" invariant on every
+ * reconcile, not just on the property's own toggle handler -- a saved file
+ * with `Presets:false` and a stale non-empty `presets` array (should not
+ * normally happen; `applyPresetsPropertyVisibility` clears on toggle-off)
+ * self-corrects here too, and the correction is written BACK to the widget
+ * so a Run never silently sees a selection the UI disagrees with.
+ */
+function reconcilePresetsUi(node) {
+  const state = presetsState(node)
+  if (!state) return
+  const raw = selectionFromWidgetValue(state.widget.value)
+  const enabled = node.properties?.[PROP_PRESETS_ENABLED] !== false
+  if (!enabled && raw.length > 0) {
+    state.selection = []
+    const json = '[]'
+    if (state.widget.value !== json) {
+      state.widget.value = json
+      state.widget.callback?.(json)
+    }
+  } else {
+    state.selection = normalizeSelectionOrder(raw, state.presetNames)
+  }
+  renderPresetCombo(node)
+}
+
+// ------------------------------------------------------------- M3: fetch (GET)
+
+function applyPresetsPayload(node, data) {
+  const state = presetsState(node)
+  if (!state) return
+  const presetsObj =
+    data && typeof data.presets === 'object' && data.presets !== null ? data.presets : {}
+  state.presetsById = presetsObj
+  // Object.keys() preserves JSON insertion order for non-numeric-looking
+  // string keys (every preset name here) -- confirmed against the backend's
+  // own test (`test_get_presets_reflects_saved_presets_in_order`): this IS
+  // "the fetched list's order" checkpoint_switcher.js's convention means.
+  state.presetNames = Object.keys(presetsObj)
+  if (typeof data?.mtime === 'number') state.mtime = data.mtime
+  state.loaded = true
+}
+
+async function loadPresets(node) {
+  const state = presetsState(node)
+  if (!state) return
+  const token = ++state.loadToken
+  try {
+    const response = await api.fetchApi(PRESETS_ROUTE)
+    if (token !== state.loadToken) return // superseded by a newer fetch
+    let data = null
+    try {
+      data = await response.json()
+    } catch {
+      throw new Error(`Unexpected response (HTTP ${response.status})`)
+    }
+    if (!response.ok) {
+      throw new Error((data && typeof data.error === 'string' && data.error) || `HTTP ${response.status}`)
+    }
+    if (token !== state.loadToken) return
+    applyPresetsPayload(node, data)
+    reconcilePresetsUi(node) // race-safe reconcile -- see file header
+  } catch (error) {
+    if (token !== state.loadToken) return
+    console.warn(PREFIX, 'preset fetch failed', error)
+    toast(node, 'error', `Could not load presets: ${(error && error.message) || error}`)
+  }
+}
+
+// --------------------------------------------------------- M3: Save (POST)
+
+/** `LGraphCanvas.prompt` where present, else `window.prompt` -- identical
+ * fallback shape to `distributor.js`/`switcher.js`'s established
+ * `promptForOutputLabel`. `window.prompt` returns `null` on Cancel (skip)
+ * but `""` on an intentional OK-with-empty-field; either way an
+ * empty/whitespace name is refused client-side (the backend would 400 it
+ * anyway, but there is nothing useful to POST for an empty name). */
+function promptPresetName(node, prefill, onCommit) {
+  const canvas = app?.canvas ?? null
+  const commit = (value) => {
+    if (value === null || value === undefined) return
+    const trimmed = String(value).trim()
+    if (!trimmed) return
+    onCommit(trimmed)
+  }
+  try {
+    if (canvas && typeof canvas.prompt === 'function') {
+      canvas.prompt('Preset name', prefill || '', commit, null)
+      return
+    }
+  } catch (error) {
+    console.warn(PREFIX, 'canvas.prompt failed; falling back', error)
+  }
+  commit(window.prompt('Preset name', prefill || ''))
+}
+
+/** Save's entry point: prefilled with the ACTIVE preset's name (exactly one
+ * selected) -- that's "update"; blank otherwise -- "create new" (req. 3). */
+function openSaveDialog(node) {
+  const state = presetsState(node)
+  if (!state) return
+  const prefill = state.selection.length === 1 ? state.selection[0] : ''
+  promptPresetName(node, prefill, (name) => performSave(node, name))
+}
+
+async function performSave(node, name) {
+  const state = presetsState(node)
+  if (!state) return
+  const values = {}
+  for (const field of PRESET_FIELD_NAMES) {
+    const widget = widgetByName(node, field)
+    if (widget) values[field] = widget.value
+  }
+  const body = { name, values }
+  // Omitting base_mtime entirely skips the backend's conflict check
+  // (routes_resolution_presets.py/test_routes_resolution_presets.py's own
+  // "omitted base_mtime skips conflict check" case) -- correct here too:
+  // with no fetch/save/delete having resolved yet, there is no baseline to
+  // conflict against.
+  if (typeof state.mtime === 'number') body.base_mtime = state.mtime
+  try {
+    const response = await api.fetchApi(PRESETS_SAVE_ROUTE, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body)
+    })
+    let data = null
+    try {
+      data = await response.json()
+    } catch {
+      // handled by the status checks below
+    }
+    if (response.status === 409) {
+      // Divergence from the Notebook's fuller Reload/Overwrite UI
+      // (`web/lora_library/notebook.js` §3.5/§7.2): a 5-field record has no
+      // meaningful partial-merge story, so last-writer-wins-after-a-refresh
+      // is the whole story here -- toast + re-fetch, no Reload/Overwrite
+      // dialog, per the task brief's own explicit call.
+      toast(node, 'warn', `"${name}" changed elsewhere -- refreshing presets.`)
+      await loadPresets(node)
+      return
+    }
+    if (!response.ok) {
+      throw new Error((data && typeof data.error === 'string' && data.error) || `HTTP ${response.status}`)
+    }
+    applyPresetsPayload(node, data)
+    commitSelection(node, [name]) // saved preset becomes active + selected (req. 3)
+    toast(node, 'success', `Saved preset "${name}".`)
+  } catch (error) {
+    console.warn(PREFIX, 'preset save failed', error)
+    toast(node, 'error', `Could not save preset: ${(error && error.message) || error}`)
+  }
+}
+
+// ------------------------------------------------------- M3: Delete (POST)
+
+async function performDelete(node) {
+  const state = presetsState(node)
+  if (!state) return
+  const active = state.selection.length === 1 ? state.selection[0] : null
+  if (!active) return // belt-and-suspenders with widget.disabled -- see createDeleteButton
+  const body = { name: active }
+  if (typeof state.mtime === 'number') body.base_mtime = state.mtime
+  try {
+    const response = await api.fetchApi(PRESETS_DELETE_ROUTE, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body)
+    })
+    let data = null
+    try {
+      data = await response.json()
+    } catch {
+      // handled by the status checks below
+    }
+    if (response.status === 409) {
+      toast(node, 'warn', `"${active}" changed elsewhere -- refreshing presets.`)
+      await loadPresets(node)
+      return
+    }
+    if (!response.ok) {
+      // Covers the store's 404 (already gone) the same as any other
+      // failure -- a clear error toast; no confirm dialog either direction,
+      // matching the pack's low-friction style (task brief: "deletion is
+      // recoverable by re-saving").
+      throw new Error((data && typeof data.error === 'string' && data.error) || `HTTP ${response.status}`)
+    }
+    applyPresetsPayload(node, data)
+    commitSelection(node, state.selection.filter((entry) => entry !== active))
+    toast(node, 'success', `Deleted preset "${active}".`)
+  } catch (error) {
+    console.warn(PREFIX, 'preset delete failed', error)
+    toast(node, 'error', `Could not delete preset: ${(error && error.message) || error}`)
+  }
+}
+
+// -------------------------------------------------- M3: multi-select menu
+
+/** SHIFT/Ctrl/Cmd + click on the combo: a checkbox-style `LiteGraph.
+ * ContextMenu` (canvas-only -- see file header's Vue scope-boundary note).
+ * Each row's own `value.callback` toggles membership through the pure
+ * `toggleSelection` helper, commits via `commitSelection` (the one write
+ * path), repaints just its own row text in place, and returns `true` so
+ * the menu stays open across repeated toggles (verified mechanism -- file
+ * header's ContextMenu.ts citation). */
+function openMultiSelectMenu(node, opts) {
+  const state = presetsState(node)
+  if (!state) return
+  const names = state.presetNames
+  if (!names.length) {
+    toast(node, 'info', 'No saved presets to select.')
+    return
+  }
+  const event = opts && opts.e
+  const canvas = (opts && opts.canvas) || app.canvas
+  const scale = Math.max(1, (canvas && canvas.ds && canvas.ds.scale) || 1)
+
+  const rowLabel = (name, checked) => `${checked ? '✓ ' : '  '}${name}`
+
+  const items = names.map((name) => ({
+    title: rowLabel(name, state.selection.includes(name)),
+    value: name,
+    callback: function presetRowClicked() {
+      const nextChecked = !state.selection.includes(name)
+      commitSelection(node, toggleSelection(state.selection, name, nextChecked))
+      this.textContent = rowLabel(name, nextChecked)
+      return true // keep the menu open -- see ContextMenu.ts citation above
+    }
+  }))
+
+  new LiteGraph.ContextMenu(items, {
+    title: 'Select presets (click to toggle)',
+    event,
+    className: 'dark',
+    scale
+  })
+}
+
+// --------------------------------------------------- M3: widget construction
+
+/** BOTH hide flags (§7.5, req. 1) -- canvas reads `widget.hidden`; Vue reads
+ * `widget.options.hidden` and ignores the first outright. The backend
+ * already ships `options.hidden: true` in INPUT_TYPES (nodes_resolution.py)
+ * for the Vue-mode half; this sets it again anyway (idempotent, matches
+ * checkpoint_switcher.js's identical belt-and-suspenders) since a frontend
+ * cannot assume any particular backend already did its half. */
+function hidePresetsWidget(widget) {
+  widget.hidden = true
+  widget.options = { ...(widget.options || {}), hidden: true }
+}
+
+function createPresetCombo(node, state) {
+  // Plain pick (both renderers -- see file header: Vue's updateHandler
+  // calls `widget.callback?.(newValue)` exactly like canvas's setValue()
+  // does). "(none)" clears; the synthetic multi-sentinel is never itself
+  // "pickable" (no-op guard); any real name becomes the sole selection.
+  const onPick = (value) => {
+    if (value === PRESET_MULTI_VALUE) return
+    commitSelection(node, value === PRESET_NONE_VALUE ? [] : [String(value)])
+  }
+  const combo = node.addWidget('combo', PRESET_COMBO_NAME, PRESET_NONE_VALUE, onPick, {
+    values: () => presetComboValues(state),
+    getOptionLabel: (raw) => labelForToken(state, raw == null ? PRESET_NONE_VALUE : String(raw)),
+    serialize: false // excludes from the API prompt (utils/executionUtil.ts) -- see options.serialize note above
+  })
+  combo.label = PRESET_COMBO_LABEL
+  combo.serialize = false // the workflow.json / widgets_values flag -- see file header's widget-order section
+
+  // SHIFT/Ctrl/Cmd -> the multi-select ContextMenu; plain click falls
+  // through to the REAL stock ComboWidget.onClick, captured BEFORE
+  // shadowing. `LGraphNode.addWidget()`/`toConcreteWidget` hands back the
+  // actual ComboWidget INSTANCE (verified precedent:
+  // `lora_library/controller.js`'s 2026-07-19c section, `_hookSetWidgetMenu`
+  // -- since superseded there for unrelated reasons, but the shadowing
+  // technique itself was independently verified stable), so shadowing
+  // `.onClick` as an own property is a stable override, canvas-only by
+  // construction (Vue never reads `.onClick` at all -- file header).
+  const stockOnClick = typeof combo.onClick === 'function' ? combo.onClick.bind(combo) : null
+  combo.onClick = function presetComboOnClick(opts) {
+    const event = opts && opts.e
+    const multi = !!(event && (event.shiftKey || event.ctrlKey || event.metaKey))
+    if (multi) {
+      openMultiSelectMenu(node, opts)
+      return
+    }
+    if (stockOnClick) stockOnClick(opts)
+  }
+  return combo
+}
+
+/** Plain button widgets, matching `image_grid.js`'s `addClearButton`
+ * idiom exactly: an empty options bag, then the TOP-LEVEL `.serialize =
+ * false` (the flag `LGraphNode.ts` actually checks for `widgets_values` --
+ * `options.serialize` is a different, API-prompt-only flag; see that
+ * file's "Clear button" section and this file's widget-order note above). */
+function createSaveButton(node) {
+  const btn = node.addWidget('button', 'Save', null, () => openSaveDialog(node), {})
+  btn.serialize = false
+  return btn
+}
+
+function createDeleteButton(node, state) {
+  const btn = node.addWidget(
+    'button',
+    'Delete',
+    null,
+    () => {
+      // Belt-and-suspenders no-op guard (req. 3) alongside widget.disabled
+      // -- disabled excludes the widget from getWidgetOnPos() hit-testing
+      // on this rig's installed frontend (LGraphNode.ts, verified), but a
+      // future/forked build's click plumbing is not this file's to trust
+      // blindly.
+      if (!state.deleteBtn || state.deleteBtn.disabled) return
+      performDelete(node)
+    },
+    {}
+  )
+  btn.serialize = false
+  btn.disabled = true // no active preset yet -- updateDeleteEnabled() maintains this from here on
+  return btn
+}
+
+/** Moves *widget* to immediately before the M2 pad widget (req. 3's "find
+ * the pad widget's position... and splice before it"), or to the tail if
+ * the pad hasn't attached (fail-soft -- still provably safe per the
+ * widget-order section above, just not adjacent to a pad that doesn't
+ * exist). Called once per new widget, in [combo, Save, Delete] order, so
+ * each relocation's "insert right before the pad" naturally stacks them in
+ * that same order immediately above it. */
+function relocateBeforePad(node, widget) {
+  const widgets = node.widgets
+  if (!widgets || !widget) return
+  const currentIndex = widgets.indexOf(widget)
+  if (currentIndex !== -1) widgets.splice(currentIndex, 1)
+  const padIndex = presetRowIndexFor(widgets, GRID_WIDGET_NAME)
+  const insertAt = padIndex === -1 ? widgets.length : padIndex
+  widgets.splice(insertAt, 0, widget)
+}
+
+// ----------------------------------------------- M3: "Presets" property toggle
+
+/** The "Presets" node property (req. 4, default true -- addProperty seeds
+ * this silently, see file header's "Defaults flipped to OFF" for why a
+ * caller must still apply it explicitly once). When false: the combo +
+ * Save + Delete are hidden (BOTH flags each, same as `hidePresetsWidget`)
+ * and the selection is forced empty so the backend runs classic mode
+ * (`commitSelection(node, [])`), matching req. 7's "byte-identical when
+ * unused" bar -- with an empty selection, `applyPresetValues` never fires
+ * and every M1/M2 code path is untouched by this file's own construction
+ * (no shared mutable state outside `node._epsPresets`). */
+function applyPresetsPropertyVisibility(node) {
+  const state = presetsState(node)
+  if (!state) return
+  const enabled = node.properties?.[PROP_PRESETS_ENABLED] !== false
+  for (const widget of [state.combo, state.saveBtn, state.deleteBtn]) {
+    if (!widget) continue
+    widget.hidden = !enabled
+    widget.options = { ...(widget.options || {}), hidden: !enabled }
+  }
+  if (!enabled && state.selection.length > 0) commitSelection(node, [])
+  resyncSize(node)
+  node.graph?.setDirtyCanvas(true, true)
+}
+
+// --------------------------------------------------------- M3: attach entry
+
+/**
+ * Per-node-instance presets UI setup. Guarded against a double call (the
+ * `node._epsPresets` check, mirroring `attachSizeGrid`'s `node._epsGrid`
+ * guard) and wrapped in try/catch so a setup failure never blocks M1/M2 --
+ * called from `attach()` AFTER `attachSizeGrid(node)` so the pad widget
+ * already exists for `relocateBeforePad`'s splice target (still fail-soft
+ * if it doesn't -- see that function's own doc).
+ */
+function attachPresetsUi(node) {
+  if (node._epsPresets) return
+  try {
+    const widget = widgetByName(node, PRESETS_WIDGET_NAME)
+    if (!widget) {
+      console.warn(PREFIX, 'EPSResolution node is missing its `presets` widget; preset UI not attached')
+      return
+    }
+    hidePresetsWidget(widget)
+
+    const state = {
+      widget,
+      combo: null,
+      saveBtn: null,
+      deleteBtn: null,
+      presetsById: {},
+      presetNames: [],
+      mtime: null,
+      selection: selectionFromWidgetValue(widget.value),
+      loaded: false,
+      loadToken: 0
+    }
+    node._epsPresets = state
+
+    state.combo = createPresetCombo(node, state)
+    state.saveBtn = createSaveButton(node)
+    state.deleteBtn = createDeleteButton(node, state)
+    relocateBeforePad(node, state.combo)
+    relocateBeforePad(node, state.saveBtn)
+    relocateBeforePad(node, state.deleteBtn)
+
+    node.addProperty(PROP_PRESETS_ENABLED, true, 'boolean')
+    applyPresetsPropertyVisibility(node) // seeding alone fires no callback -- apply once explicitly (file header)
+    renderPresetCombo(node)
+    resyncSize(node)
+
+    // THE fix for the restore race (checkpoint_switcher.js's
+    // wireConfigureReload, cited in the task brief): onConfigure fires
+    // AFTER widgets_values are restored, for both a whole-workflow load
+    // and a paste, so this is what makes a reloaded selection actually
+    // show up in the combo (widgets_values restore itself is a bare
+    // assignment with no callback -- file header, "Widget-value writes").
+    // Wrapped defensively (own try/catch), distinct from attachSizeGrid's
+    // own onConfigure wrap already installed earlier in attach() -- chains
+    // on top of it rather than replacing it.
+    const originalOnConfigure = node.onConfigure
+    node.onConfigure = function presetsOnConfigure(info) {
+      let result
+      try {
+        result = originalOnConfigure?.call(this, info)
+      } finally {
+        try {
+          reconcilePresetsUi(this)
+        } catch (error) {
+          console.warn(PREFIX, 'preset post-configure resync failed', error)
+        }
+      }
+      return result
+    }
+
+    loadPresets(node).catch((error) => console.warn(PREFIX, 'initial preset load failed', error))
+  } catch (error) {
+    console.warn(PREFIX, 'preset UI setup failed', error)
+  }
+}
+
 // --------------------------------------------------------------- lifecycle
 
 /** Frontend-only one-time setup: inject the grid's stylesheet once. */
@@ -1421,6 +2224,8 @@ export function attach(node) {
       applyGridVisibility(this)
     } else if (name === PROP_GRID_MAX) {
       renderGrid(this)
+    } else if (name === PROP_PRESETS_ENABLED) {
+      applyPresetsPropertyVisibility(this)
     }
     return result
   }
@@ -1439,4 +2244,5 @@ export function attach(node) {
   applyOriginalSizeVisibility(node)
 
   attachSizeGrid(node)
+  attachPresetsUi(node)
 }
