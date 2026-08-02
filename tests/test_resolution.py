@@ -1,4 +1,5 @@
-"""Tests for eps_image.nodes_resolution (FORMAT.md §6.5, EPS Resolution M1).
+"""Tests for eps_image.nodes_resolution (FORMAT.md §6.5, EPS Resolution
+M1 + M3 server-side size presets).
 
 ``comfy.utils.common_upscale`` is faked via ``sys.modules`` (same convention
 as ``lora_library``'s ``fake_comfy`` fixture — see tests/test_nodes_sets.py)
@@ -8,10 +9,22 @@ core's actual crop-then-interpolate algorithm (``comfy/utils.py``,
 verified on the rig) restricted to torch-native interpolate modes, so shape
 and crop-region assertions below exercise real resize behavior, not a stub.
 Real ``torch`` tensors are used throughout (available in the rig venv).
+
+Every pre-existing M1 test below calls :func:`_resolve_scalar` rather than
+``node.resolve`` directly: with all six outputs now ``OUTPUT_IS_LIST``
+(M3), ``resolve`` always returns six LISTS, even on the (still default,
+still by far the most common) empty-presets path -- length-1 lists holding
+exactly the same values the old scalar return used to carry. That
+equivalence is itself pinned by
+``TestPresetsEmptyOrAbsent.test_resolve_wraps_scalar_result_in_length_one_lists``
+below; every other pre-existing test just needs the unwrapped scalars back
+to keep asserting what it always asserted, which is what
+:func:`_resolve_scalar` is for.
 """
 
 from __future__ import annotations
 
+import json
 import sys
 import types
 
@@ -22,6 +35,35 @@ pytest.importorskip("torch")
 import torch
 
 from eps_image import nodes_resolution
+from eps_image import resolution_presets_store as presets_store
+from lora_library.context import LibraryContext
+
+VALUES = {
+    "width": 300,
+    "height": 150,
+    "resize_method": "stretch",
+    "interpolation": "bilinear",
+    "multiple_of": 0,
+}
+
+
+def _other_values(**overrides: object) -> dict:
+    values = dict(VALUES)
+    values.update(overrides)
+    return values
+
+
+@pytest.fixture(autouse=True)
+def _wire_context(context: LibraryContext):
+    """Wires a fresh tmp_path-backed LibraryContext before every test in
+    this file (mirrors ``lora_library``'s own
+    ``test_nodes_notebook._wire_context`` convention exactly). Harmless for
+    the M1 tests below, which never select a preset and so never touch
+    ``_context`` at all; required for the M3 preset tests further down.
+    """
+    nodes_resolution.set_context(context)
+    yield
+    nodes_resolution.set_context(None)
 
 
 @pytest.fixture(autouse=True)
@@ -73,13 +115,30 @@ def _node() -> nodes_resolution.EPSResolution:
     return nodes_resolution.EPSResolution()
 
 
+def _resolve_scalar(node: nodes_resolution.EPSResolution, **kwargs: object):
+    """Call ``node.resolve`` and unwrap its six length-1 ``OUTPUT_IS_LIST``
+    lists back to plain scalars.
+
+    Every test using this helper exercises the empty/absent-presets path
+    (no ``presets`` kwarg passed), which the M3 feature contract requires
+    stay pixel-for-pixel identical to the pre-list-fan-out scalar
+    computation -- just each value now arrives wrapped in a length-1 list.
+    Asserting the length-1-ness here, on every call, is itself part of
+    that contract's coverage, not just a convenience unwrap.
+    """
+    out_image, resized, width, height, orig_w, orig_h = node.resolve(**kwargs)
+    lists = (out_image, resized, width, height, orig_w, orig_h)
+    assert all(isinstance(lst, list) and len(lst) == 1 for lst in lists)
+    return out_image[0], resized[0], width[0], height[0], orig_w[0], orig_h[0]
+
+
 # ------------------------------------------------------------------- stretch
 
 
 def test_stretch_produces_exact_target_shape_and_reports_it() -> None:
     image = _make_image(height=64, width=128)  # aspect 2:1
     node = _node()
-    out_image, resized, width, height, orig_w, orig_h = node.resolve(
+    out_image, resized, width, height, orig_w, orig_h = _resolve_scalar(node,
         width=50, height=200, resize_method="stretch", interpolation="bilinear", image=image
     )
     assert resized.shape == (1, 200, 50, 3)
@@ -94,7 +153,7 @@ def test_stretch_produces_exact_target_shape_and_reports_it() -> None:
 def test_keep_aspect_fit_produces_contained_size_not_the_full_box() -> None:
     image = _make_image(height=100, width=200)  # aspect 2:1
     node = _node()
-    _, resized, width, height, orig_w, orig_h = node.resolve(
+    _, resized, width, height, orig_w, orig_h = _resolve_scalar(node,
         width=100,
         height=100,
         resize_method="keep aspect (fit)",
@@ -113,7 +172,7 @@ def test_keep_aspect_fit_produces_contained_size_not_the_full_box() -> None:
 def test_crop_to_fill_produces_exact_target_shape() -> None:
     image = _make_image(height=200, width=100)  # portrait, aspect 0.5
     node = _node()
-    _, resized, width, height, _, _ = node.resolve(
+    _, resized, width, height, _, _ = _resolve_scalar(node,
         width=100, height=100, resize_method="crop to fill", interpolation="bilinear", image=image
     )
     assert resized.shape == (1, 100, 100, 3)
@@ -126,7 +185,7 @@ def test_crop_to_fill_produces_exact_target_shape() -> None:
 def test_pad_produces_exact_target_shape_with_black_borders() -> None:
     image = _make_image(height=100, width=200, value=1.0)  # aspect 2:1, all-ones content
     node = _node()
-    _, resized, width, height, _, _ = node.resolve(
+    _, resized, width, height, _, _ = _resolve_scalar(node,
         width=100, height=100, resize_method="pad", interpolation="nearest", image=image
     )
     assert resized.shape == (1, 100, 100, 3)
@@ -145,7 +204,7 @@ def test_pad_produces_exact_target_shape_with_black_borders() -> None:
 def test_zero_width_derives_from_height_and_image_aspect() -> None:
     image = _make_image(height=100, width=200)  # aspect 2:1
     node = _node()
-    _, resized, width, height, _, _ = node.resolve(
+    _, resized, width, height, _, _ = _resolve_scalar(node,
         width=0, height=50, resize_method="stretch", interpolation="bilinear", image=image
     )
     assert (width, height) == (100, 50)
@@ -155,7 +214,7 @@ def test_zero_width_derives_from_height_and_image_aspect() -> None:
 def test_zero_height_derives_from_width_and_image_aspect() -> None:
     image = _make_image(height=100, width=200)  # aspect 2:1
     node = _node()
-    _, resized, width, height, _, _ = node.resolve(
+    _, resized, width, height, _, _ = _resolve_scalar(node,
         width=80, height=0, resize_method="stretch", interpolation="bilinear", image=image
     )
     assert (width, height) == (80, 40)
@@ -165,7 +224,7 @@ def test_zero_height_derives_from_width_and_image_aspect() -> None:
 def test_zero_both_axes_derives_the_original_size() -> None:
     image = _make_image(height=60, width=90)
     node = _node()
-    _, resized, width, height, orig_w, orig_h = node.resolve(
+    _, resized, width, height, orig_w, orig_h = _resolve_scalar(node,
         width=0, height=0, resize_method="stretch", interpolation="bilinear", image=image
     )
     assert (width, height) == (90, 60)
@@ -179,7 +238,7 @@ def test_zero_both_axes_derives_the_original_size() -> None:
 def test_multiple_of_rounds_the_final_target_with_an_image() -> None:
     image = _make_image(height=10, width=10)
     node = _node()
-    _, resized, width, height, _, _ = node.resolve(
+    _, resized, width, height, _, _ = _resolve_scalar(node,
         width=1000, height=500, resize_method="stretch", interpolation="bilinear",
         multiple_of=64, image=image,
     )
@@ -190,7 +249,7 @@ def test_multiple_of_rounds_the_final_target_with_an_image() -> None:
 
 def test_multiple_of_rounds_the_pure_size_source_with_no_image() -> None:
     node = _node()
-    _, resized, width, height, orig_w, orig_h = node.resolve(
+    _, resized, width, height, orig_w, orig_h = _resolve_scalar(node,
         width=100, height=100, multiple_of=64, image=None
     )
     # 100/64 = 1.5625 -> round 2 -> 128.
@@ -201,7 +260,7 @@ def test_multiple_of_rounds_the_pure_size_source_with_no_image() -> None:
 
 def test_multiple_of_off_by_default_leaves_target_untouched() -> None:
     node = _node()
-    _, _, width, height, _, _ = node.resolve(width=101, height=203, image=None)
+    _, _, width, height, _, _ = _resolve_scalar(node, width=101, height=203, image=None)
     assert (width, height) == (101, 203)
 
 
@@ -222,7 +281,7 @@ def test_keep_aspect_fit_never_exceeds_box_with_multiple_of(box: int, orig_wh) -
     orig_w, orig_h = orig_wh
     image = _make_image(height=orig_h, width=orig_w)
     node = _node()
-    _, resized, width, height, _, _ = node.resolve(
+    _, resized, width, height, _, _ = _resolve_scalar(node,
         width=box,
         height=box,
         resize_method="keep aspect (fit)",
@@ -241,7 +300,7 @@ def test_keep_aspect_fit_multiple_of_keeps_a_tiny_box_contained() -> None:
     # instead, so the result still fits rather than collapsing or overflowing.
     image = _make_image(height=100, width=200)  # 2:1
     node = _node()
-    _, resized, width, height, _, _ = node.resolve(
+    _, resized, width, height, _, _ = _resolve_scalar(node,
         width=100,
         height=100,
         resize_method="keep aspect (fit)",
@@ -260,7 +319,7 @@ def test_keep_aspect_fit_multiple_of_keeps_a_tiny_box_contained() -> None:
 
 def test_no_image_returns_target_wh_and_safe_empty_resized() -> None:
     node = _node()
-    out_image, resized, width, height, orig_w, orig_h = node.resolve(
+    out_image, resized, width, height, orig_w, orig_h = _resolve_scalar(node,
         width=640, height=480, resize_method="crop to fill", interpolation="lanczos"
     )
     assert out_image is None
@@ -271,7 +330,9 @@ def test_no_image_returns_target_wh_and_safe_empty_resized() -> None:
 
 def test_no_image_with_zero_axis_cannot_derive_and_stays_zero() -> None:
     node = _node()
-    _, resized, width, height, orig_w, orig_h = node.resolve(width=0, height=512, image=None)
+    _, resized, width, height, orig_w, orig_h = _resolve_scalar(
+        node, width=0, height=512, image=None
+    )
     assert resized is None
     assert (width, height) == (0, 512)
     assert (orig_w, orig_h) == (0, 0)
@@ -279,7 +340,7 @@ def test_no_image_with_zero_axis_cannot_derive_and_stays_zero() -> None:
 
 def test_no_image_both_axes_zero_stays_zero() -> None:
     node = _node()
-    _, resized, width, height, _, _ = node.resolve(width=0, height=0, image=None)
+    _, resized, width, height, _, _ = _resolve_scalar(node, width=0, height=0, image=None)
     assert (width, height) == (0, 0)
     assert resized is None
 
@@ -290,14 +351,14 @@ def test_no_image_both_axes_zero_stays_zero() -> None:
 def test_image_output_is_the_exact_same_object_untouched() -> None:
     image = _make_image(height=32, width=32)
     node = _node()
-    out_image, *_ = node.resolve(width=16, height=16, image=image)
+    out_image, *_ = _resolve_scalar(node, width=16, height=16, image=image)
     assert out_image is image
 
 
 def test_original_size_outputs_report_the_input_images_actual_shape() -> None:
     image = _make_image(height=77, width=55)
     node = _node()
-    *_, orig_w, orig_h = node.resolve(width=10, height=10, image=image)
+    *_, orig_w, orig_h = _resolve_scalar(node, width=10, height=10, image=image)
     assert (orig_w, orig_h) == (55, 77)
 
 
@@ -345,3 +406,272 @@ def test_no_comfy_or_torch_bound_at_module_scope() -> None:
     installed."""
     assert "torch" not in vars(nodes_resolution)
     assert "comfy" not in vars(nodes_resolution)
+
+
+# ------------------------------------------------------------ size presets (M3)
+
+
+class TestPresetsEmptyOrAbsent:
+    """Empty/absent/malformed ``presets`` must be byte-for-byte identical to
+    the pre-M3 scalar behavior (feature contract). These tests call
+    ``node.resolve`` directly (not through ``_resolve_scalar``) to pin the
+    exact length-1-list shape itself; everything ELSE in this file relies
+    on that same equivalence via the helper.
+    """
+
+    def test_resolve_wraps_scalar_result_in_length_one_lists(self) -> None:
+        image = _make_image(height=64, width=128)
+        node = _node()
+        out_image, resized, width, height, orig_w, orig_h = node.resolve(
+            width=50, height=200, resize_method="stretch", interpolation="bilinear", image=image
+        )
+        for lst in (out_image, resized, width, height, orig_w, orig_h):
+            assert isinstance(lst, list)
+            assert len(lst) == 1
+        assert out_image[0] is image
+        assert resized[0].shape == (1, 200, 50, 3)
+        assert (width[0], height[0]) == (50, 200)
+        assert (orig_w[0], orig_h[0]) == (128, 64)
+
+    def test_absent_presets_kwarg_uses_the_default(self) -> None:
+        # An old workflow (or a raw API caller) that never sends `presets`
+        # at all must still work -- the function's own default parameter
+        # covers it, same as every other optional widget.
+        node = _node()
+        _, _, width, height, _, _ = node.resolve(width=10, height=10)
+        assert (width, height) == ([10], [10])
+
+    def test_empty_presets_works_even_with_no_context_configured(self) -> None:
+        # The empty/absent path must never touch _context at all -- backward
+        # compatible with every M1-era caller, none of which ever called
+        # set_context.
+        nodes_resolution.set_context(None)
+        result = _resolve_scalar(_node(), width=10, height=10)
+        assert result[2:4] == (10, 10)
+
+    def test_malformed_presets_json_falls_back_to_widget_fields_and_warns(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        node = _node()
+        with caplog.at_level("WARNING"):
+            result = _resolve_scalar(node, width=42, height=24, presets="not json{{{")
+        assert (result[2], result[3]) == (42, 24)
+        assert any("malformed" in r.message.lower() for r in caplog.records)
+
+    def test_presets_not_a_json_array_falls_back_and_warns(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        node = _node()
+        with caplog.at_level("WARNING"):
+            result = _resolve_scalar(node, width=42, height=24, presets='{"a": 1}')
+        assert (result[2], result[3]) == (42, 24)
+        assert any("JSON array" in r.message for r in caplog.records)
+
+    def test_presets_entries_must_be_strings_others_dropped_with_warning(
+        self, context: LibraryContext, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        presets_store.save_preset(context, "Good", VALUES)
+        presets_store.save_preset(context, "AlsoGood", _other_values(width=10))
+        node = _node()
+        with caplog.at_level("WARNING"):
+            _, _, width, _height, _, _ = node.resolve(
+                width=1, height=1, presets=json.dumps(["Good", 5, None, "AlsoGood"])
+            )
+        assert width == [VALUES["width"], 10]
+        assert any("not a string" in r.message for r in caplog.records)
+
+
+class TestPresetsInputDeclaration:
+    def test_presets_declared_as_hidden_optional_string_default_empty_array(self) -> None:
+        optional = nodes_resolution.EPSResolution.INPUT_TYPES()["optional"]
+        assert optional["presets"][0] == "STRING"
+        assert optional["presets"][1]["default"] == "[]"
+        assert optional["presets"][1]["hidden"] is True
+
+    def test_output_is_list_declared_for_all_six_outputs(self) -> None:
+        assert nodes_resolution.EPSResolution.OUTPUT_IS_LIST == (True, True, True, True, True, True)
+
+    def test_width_height_multiple_of_bounds_unchanged(self) -> None:
+        # The M3 refactor moved these into named constants -- pin the
+        # VALUES stayed byte-identical to the pre-refactor inline literals.
+        required = nodes_resolution.EPSResolution.INPUT_TYPES()["required"]
+        assert (required["width"][1]["min"], required["width"][1]["max"]) == (0, 16384)
+        assert (required["height"][1]["min"], required["height"][1]["max"]) == (0, 16384)
+        assert (required["multiple_of"][1]["min"], required["multiple_of"][1]["max"]) == (0, 1024)
+
+
+class TestPresetsSelected:
+    """K selected preset names -> K-length index-aligned lists, computed
+    entirely from the STORE's values; the node's own widget fields are
+    ignored (feature contract)."""
+
+    def test_single_preset_uses_store_values_ignoring_widget_fields(
+        self, context: LibraryContext
+    ) -> None:
+        image = _make_image(height=64, width=128)
+        presets_store.save_preset(
+            context,
+            "Insta Square",
+            {
+                "width": 64,
+                "height": 64,
+                "resize_method": "stretch",
+                "interpolation": "nearest",
+                "multiple_of": 0,
+            },
+        )
+        node = _node()
+        out_image, resized, width, height, orig_w, orig_h = node.resolve(
+            # Deliberately mismatched widget fields -- must be fully ignored
+            # whenever a preset is selected (feature contract).
+            width=9999,
+            height=1,
+            resize_method="pad",
+            interpolation="lanczos",
+            multiple_of=999,
+            image=image,
+            presets=json.dumps(["Insta Square"]),
+        )
+        assert (width, height) == ([64], [64])
+        assert resized[0].shape == (1, 64, 64, 3)
+        assert (orig_w, orig_h) == ([128], [64])
+        assert out_image == [image]
+
+    def test_k_presets_return_k_length_lists_in_selection_order(
+        self, context: LibraryContext
+    ) -> None:
+        image = _make_image(height=64, width=128)  # 2:1, same golden case as
+        # test_stretch_produces_exact_target_shape_and_reports_it /
+        # test_keep_aspect_fit_produces_contained_size_not_the_full_box above.
+        presets_store.save_preset(
+            context,
+            "P1",
+            {
+                "width": 50,
+                "height": 200,
+                "resize_method": "stretch",
+                "interpolation": "bilinear",
+                "multiple_of": 0,
+            },
+        )
+        presets_store.save_preset(
+            context,
+            "P2",
+            {
+                "width": 100,
+                "height": 100,
+                "resize_method": "keep aspect (fit)",
+                "interpolation": "bilinear",
+                "multiple_of": 0,
+            },
+        )
+        node = _node()
+        # Selected in the OPPOSITE order from how they were saved, to pin
+        # "selection order, not store order".
+        _, resized, width, height, orig_w, orig_h = node.resolve(
+            width=1, height=1, image=image, presets=json.dumps(["P2", "P1"])
+        )
+        assert width == [100, 50]
+        assert height == [50, 200]
+        assert resized[0].shape == (1, 50, 100, 3)  # P2: keep aspect (fit)
+        assert resized[1].shape == (1, 200, 50, 3)  # P1: stretch
+        assert orig_w == [128, 128]  # same source image both times
+        assert orig_h == [64, 64]
+
+    def test_k_presets_with_no_image_acts_as_calculator_per_element(
+        self, context: LibraryContext
+    ) -> None:
+        presets_store.save_preset(
+            context,
+            "Rounded",
+            {
+                "width": 100,
+                "height": 100,
+                "resize_method": "stretch",
+                "interpolation": "bilinear",
+                "multiple_of": 64,
+            },
+        )
+        presets_store.save_preset(
+            context,
+            "Exact",
+            {
+                "width": 1000,
+                "height": 500,
+                "resize_method": "stretch",
+                "interpolation": "bilinear",
+                "multiple_of": 0,
+            },
+        )
+        node = _node()
+        out_image, resized, width, height, orig_w, orig_h = node.resolve(
+            width=1, height=1, image=None, presets=json.dumps(["Rounded", "Exact"])
+        )
+        assert out_image == [None, None]
+        assert resized == [None, None]
+        # 100/64 = 1.5625 -> round 2 -> 128, matching
+        # test_multiple_of_rounds_the_pure_size_source_with_no_image's own
+        # golden computation above; "Exact" has multiple_of=0 (off).
+        assert width == [128, 1000]
+        assert height == [128, 500]
+        assert orig_w == [0, 0]
+        assert orig_h == [0, 0]
+
+    def test_missing_preset_name_raises_naming_it_and_the_file(
+        self, context: LibraryContext
+    ) -> None:
+        node = _node()
+        with pytest.raises(ValueError) as excinfo:
+            node.resolve(width=1, height=1, presets=json.dumps(["DoesNotExist"]))
+        message = str(excinfo.value)
+        assert "DoesNotExist" in message
+        assert presets_store.PRESETS_FILENAME in message
+
+    def test_one_missing_among_several_still_raises_naming_the_missing_one(
+        self, context: LibraryContext
+    ) -> None:
+        presets_store.save_preset(context, "Real", VALUES)
+        node = _node()
+        with pytest.raises(ValueError, match="Ghost"):
+            node.resolve(width=1, height=1, presets=json.dumps(["Real", "Ghost"]))
+
+    def test_no_context_configured_raises_runtime_error_when_presets_selected(self) -> None:
+        nodes_resolution.set_context(None)
+        node = _node()
+        with pytest.raises(RuntimeError):
+            node.resolve(width=1, height=1, presets=json.dumps(["Anything"]))
+
+
+class TestIsChanged:
+    """The M3 cache-busting token (module docstring/`IS_CHANGED` docstring):
+    a no-op for the common no-presets case, but sensitive to on-disk preset
+    edits once one or more presets are actually selected.
+    """
+
+    def test_no_presets_returns_a_constant_regardless_of_other_kwargs(self) -> None:
+        # Must contribute NOTHING beyond ComfyUI's own default input-value
+        # caching -- which already covers width/height/etc changes -- so a
+        # plain widget-driven node's caching is completely unaffected.
+        first = nodes_resolution.EPSResolution.IS_CHANGED(presets="[]", width=10)
+        second = nodes_resolution.EPSResolution.IS_CHANGED(presets="[]", width=999)
+        assert first == second
+
+    def test_absent_presets_kwarg_also_returns_the_constant(self) -> None:
+        assert nodes_resolution.EPSResolution.IS_CHANGED() == (
+            nodes_resolution.EPSResolution.IS_CHANGED(presets="[]")
+        )
+
+    def test_selected_preset_token_changes_when_its_values_are_edited(
+        self, context: LibraryContext
+    ) -> None:
+        presets_store.save_preset(context, "A", VALUES)
+        selection = json.dumps(["A"])
+        token_before = nodes_resolution.EPSResolution.IS_CHANGED(presets=selection)
+        presets_store.save_preset(context, "A", _other_values(width=1))
+        token_after = nodes_resolution.EPSResolution.IS_CHANGED(presets=selection)
+        assert token_before != token_after
+
+    def test_selected_preset_with_no_context_does_not_crash(self) -> None:
+        nodes_resolution.set_context(None)
+        token = nodes_resolution.EPSResolution.IS_CHANGED(presets=json.dumps(["A"]))
+        assert isinstance(token, str)

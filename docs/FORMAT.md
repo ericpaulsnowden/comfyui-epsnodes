@@ -936,9 +936,52 @@ is the functional core WITHOUT the grid.
       verified live instead: connect grew the node 510 → 525 and painted
       `in 768 x 768 1:1 0.59 MP` on its own baseline; disconnect returned it
       to 510.
-- **Deferred (M3–M4):** NAS presets (reuse `lora_library`
-  context/sets_store/settings), multi-image list fan-out. Do NOT build them
-  yet.
+- **M3 — server-side size presets, backend half (v0.47.0).** Named bundles
+  of the five fields in ONE JSON file, `resolution_presets.json`, directly
+  inside `context.library_dir()` (no subdirectory — one file, unlike
+  `sets/`): `{"format": 1, "presets": {"<name>": {width, height,
+  resize_method, interpolation, multiple_of}}}`. Same shared folder as the
+  Notebook's file and LoRA sets, so a preset travels across the owner's
+  machines identically (`eps_image/resolution_presets_store.py` — which
+  deliberately imports `lora_library.context`'s
+  `LibraryContext`/`_atomic_write_text`; its docstring records why that is
+  the sanctioned exception to eps_image's usual self-containment). Atomic
+  same-dir writes; a malformed file or entry degrades per-entry with a
+  WARNING, never crashes; §3.5's `base_mtime` conflict convention verbatim
+  (`check_conflict`/`ConflictError`, current mtime echoed in the 409 body).
+  - **Routes** (`eps_image/routes_resolution_presets.py`, registered
+    defensively from `__init__.py` with the shared `_context`):
+    `GET /eps_resolution/presets` → `{presets, mtime}`;
+    `POST /eps_resolution/presets/save` `{name, values{5}, base_mtime?}`;
+    `POST /eps_resolution/presets/delete` `{name, base_mtime?}`. The ROUTE
+    layer owns range/enum validation against `nodes_resolution`'s own
+    widget constants (`WIDTH_MIN/MAX` etc. — extracted so the two can never
+    drift); the STORE owns shape/type only. There is deliberately NO
+    loopback gate anywhere in the module: no client-supplied path exists,
+    and the file lives inside `library_dir`, which §2 already grants
+    non-loopback callers read AND write — that grant is exactly what makes
+    presets editable from the Mac against the PC/Linux box. Do not add one.
+  - **Node semantics:** a hidden `presets` STRING widget (JSON array of
+    preset NAMES in selection order, default `"[]"`; `options.hidden` in
+    INPUT_TYPES is the §7.5 Vue-mode hide flag). All six outputs became
+    `OUTPUT_IS_LIST` — an empty/absent/malformed selection wraps the
+    UNCHANGED M1 computation in length-1 lists (downstream-indistinguishable
+    from scalars; the Notebook's long-standing precedent), and K selected
+    names resolve against the store AT EXECUTE TIME (server-authoritative,
+    like Notebook entries) into six K-length index-aligned lists — one full
+    resize of the SAME wired image per preset, the node's own five widget
+    fields ignored entirely. A selected name absent from the store raises,
+    naming the preset(s) and the file — a rename/delete on another machine
+    must fail the queue loudly, never silently substitute. `IS_CHANGED`
+    folds the presets file's mtime+size into the cache key ONLY when a
+    selection exists (a constant otherwise, so no-preset nodes cache exactly
+    as before) — the Notebook's own cross-machine staleness fix. Context via
+    `set_context` (mirrors `nodes_notebook`; `__init__.py`'s generic
+    `hasattr(_module, "set_context")` loop wires it).
+- **M3 — the preset UI, frontend half:** see the "M3: size presets" header
+  comment in `web/eps_image/resolution.js` (documented with §6.5's frontend
+  amendment when it ships).
+- **Deferred (M4):** multi-image list fan-out. Do NOT build it yet.
 
 ## §6.6 `EPSImageGrid` (display: "EPS Image Grid") — accumulate + fan out
 

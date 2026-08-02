@@ -179,6 +179,25 @@ try:
 except Exception:
     logger.exception("EPSNodes: eps_image.routes_checkpoint_switcher failed to register")
 
+# EPSResolution's server-side size-presets route module (`GET/POST
+# /eps_resolution/presets*`) -- UNLIKE the three context-free eps_image
+# route blocks above, this one needs the shared LibraryContext (FORMAT.md
+# §6.5 roadmap: "NAS presets (reuse lora_library context/sets_store/
+# settings)" -- presets live inside the SAME library folder the Notebook/
+# sets already share), so it is registered defensively here with _context
+# passed through, mirroring lora_library.routes.register's own
+# context-taking shape (see routes_resolution_presets.register_live's own
+# docstring for why it isn't simply named `register` like the three blocks
+# above).
+try:
+    _resolution_presets_routes_path = "eps_image.routes_resolution_presets"
+    if _TOP_PREFIX:
+        _resolution_presets_routes_path = f"{_TOP_PREFIX}.{_resolution_presets_routes_path}"
+    _resolution_presets_routes = importlib.import_module(_resolution_presets_routes_path)
+    _resolution_presets_routes.register_live(_context)
+except Exception:
+    logger.exception("EPSNodes: eps_image.routes_resolution_presets failed to register")
+
 WEB_DIRECTORY = "./web"
 
 
