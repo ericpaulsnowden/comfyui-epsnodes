@@ -27,9 +27,9 @@ Two files here are **not** workflows — don't drag them onto the canvas:
 | [`eps-test-distributor.json`](eps-test-distributor.json) | One image, three independently-toggled branches, one run | none | yes — press Run |
 | [`eps-test-checkpoint-switcher.json`](eps-test-checkpoint-switcher.json) | Tick several checkpoints; one queue runs once per model, with matched model/CLIP/VAE | checkpoint (only to generate) | yes — but writes nothing until you tick a checkpoint |
 | [`eps-test-model-clip-vae-switchers.json`](eps-test-model-clip-vae-switchers.json) | Model / CLIP / VAE switchers as three independent axes | checkpoint | no — the two loaders ship with nothing chosen |
-| [`eps-test-cross-product.json`](eps-test-cross-product.json) | 2 images × 4 prompts = 8 runs | none | yes — copy `eps-cross-test-prompts.md` into your library first |
+| [`eps-test-run-multiplier.json`](eps-test-run-multiplier.json) | 2 images × 4 prompts = 8 runs | none | yes — copy `eps-cross-test-prompts.md` into your library first |
 | [`eps-test-cross-sweep.json`](eps-test-cross-sweep.json) | 3 lora strengths × 8 image/prompt pairs = 24 runs, foldered by strength | checkpoint, LoRA | no — pick a checkpoint and a saved lora state |
-| [`eps-full-pipeline.json`](eps-full-pipeline.json) | Eleven of the fifteen nodes stitched into one graph — the full tour | checkpoint, LoRA, rgthree | no — pick a checkpoint, images, a video path, prompts, and a lora state |
+| [`eps-full-pipeline.json`](eps-full-pipeline.json) | Eleven of the fourteen nodes stitched into one graph — the full tour | checkpoint, LoRA, rgthree | no — pick a checkpoint, images, a video path, prompts, and a lora state |
 
 ---
 
@@ -150,7 +150,7 @@ doesn't execute, so leaving options wired in and turned off costs nothing.
 The note also spells out the trap these three set: **one switcher is one
 axis**. Tick 3 models and 2 VAEs and you get **three** runs, not six —
 ComfyUI zips the lists and repeats the shorter one's last entry. For every
-combination, cross them deliberately with **EPS Cross Product**.
+combination, cross them deliberately with **EPS Run Multiplier**.
 
 And the honest recommendation, on the canvas: if your model, CLIP and VAE all
 come from the same checkpoint file — the normal case — use **EPS Checkpoint
@@ -162,13 +162,13 @@ either checkpoint, confirming a switched-off branch's checkpoint load truly
 never runs, so it's safe to explore the toggles before you've picked any
 files.
 
-## eps-test-cross-product.json — *press Run, no GPU needed*
+## eps-test-run-multiplier.json — *press Run, no GPU needed*
 
 **Needs:** [`eps-cross-test-prompts.md`](eps-cross-test-prompts.md) copied into
 your library folder. No checkpoint.
 
-Proves **2 images × 4 prompts = 8**: two Load Image nodes → EPS Image Switcher →
-EPS Cross Product → Save Image, with the crossed `name` output driving
+Proves **2 images × 4 prompts = 8** (EPS Run Multiplier, `pair_mode: multiply`, nothing on its sweep side): two Load Image nodes → EPS Image Switcher →
+EPS Run Multiplier → Save Image, with the crossed `name` output driving
 `filename_prefix` so the filenames themselves show the pairing.
 
 Expected output — 8 files, each prompt appearing exactly twice:
@@ -221,7 +221,7 @@ lora state are the only things standing between this file and a real run.
 lora state, and [rgthree-comfy](https://github.com/rgthree/rgthree-comfy) for
 the state-controller corner.
 
-Eleven of the fifteen nodes stitched into one complex workflow. This is the
+Eleven of the fourteen nodes stitched into one complex workflow. This is the
 tour, not the starting point — if you want to understand one node, the small
 `eps-test-*.json` files above are far quicker. The four switcher nodes
 (Checkpoint / Model / CLIP / VAE) don't appear here at all; they have their
@@ -236,7 +236,7 @@ The graph, stage by stage (numbered groups + notes on the canvas):
    EPS Image Grid records the stream (Collect) across runs; flip it to Emit
    to fan the whole collection out.
 3. **Prompts & Pairs** — an EPS Prompt Notebook (multi-select) and an EPS
-   Cross Product pair EVERY grid image with EVERY selected prompt; entry
+   Run Multiplier pair EVERY grid image with EVERY selected prompt; entry
    names ride along.
 4. **Loras & Sweep** — Checkpoint → EPS Apply LoRA Set (reads a saved state)
    → EPS LoRA Iterator (0.0–1.0 @ 0.5 to start = 3 steps). The controller

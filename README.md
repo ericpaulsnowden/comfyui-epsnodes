@@ -5,7 +5,7 @@ live in **plain files you own**. Everything appears under **EPSNodes** in
 the node browser and Settings. It started as a LoRA family and has grown
 beyond it — image-flow utilities now live here too.
 
-## The fifteen nodes
+## The fourteen nodes
 
 No third-party packs required — every node here runs on ComfyUI alone,
 except the Lora Loader State Controller, which is built to extend
@@ -26,14 +26,13 @@ section further down; this is the map.
 | [**EPS Checkpoint Switcher**](#eps-checkpoint-switcher-shipped) | Tick several checkpoint files in a list; one queue runs the workflow once per ticked checkpoint, with each run's model, CLIP, and VAE kept together and a label for save paths. | Your checkpoint files — drag-and-drop with core nodes. |
 | [**EPS Resolution**](#eps-resolution-shipped) | Image-first resize + size in one node: target size (with a drag pad), four resize modes, and the original image + both sets of dimensions passed through. Named size presets are shared across your machines — tick several and one Run resizes once per preset. | Nothing — drag-and-drop with core nodes. |
 | [**EPS Image Grid**](#eps-image-grid-shipped) | Collects images across separate Runs into a buffer that survives restarts, shows them as a thumbnail grid, and fans the whole set out on demand. Add whole batches at once — a multiselect picker, a folder importer, or one big drag. | Nothing — drag-and-drop with core nodes. |
-| [**EPS Cross Product**](#eps-cross-product-shipped) | Pairs every image with every text — 2 images × 4 prompts = 8 runs. (ComfyUI's own list pairing zips index-by-index instead.) Kept for existing workflows — the Run Multiplier now does this natively (`pair_mode: multiply`). | Two lists to multiply — pairs naturally with Image Grid + Prompt Notebook, but any list sources work. |
-| [**EPS Run Multiplier**](#eps-run-multiplier-shipped) | Multiplies whatever you wire in: a sweep group (LoRA Iterator, or Checkpoint Switcher with its VAEs) × images × texts, in one node — or just images × texts with no sweep at all — with per-run save paths so big runs land in tidy folders. | Any of: EPS LoRA Iterator / EPS Checkpoint Switcher on the sweep side; an Image Grid, Switcher, or Cross Product plus a multi-select Prompt Notebook on the pair side. |
+| [**EPS Run Multiplier**](#eps-run-multiplier-shipped) | Multiplies whatever you wire in: a sweep group (LoRA Iterator, or Checkpoint Switcher with its VAEs) × images × texts, in one node — or just images × texts with no sweep at all — with per-run save paths so big runs land in tidy folders. | Any of: EPS LoRA Iterator / EPS Checkpoint Switcher on the sweep side; an Image Grid or Image Switcher plus a multi-select Prompt Notebook on the pair side. |
 | [**EPS Frame Saver**](#eps-frame-saver-shipped) | Loads a video by path, lets you scrub or play to a frame, and outputs that frame as an image. | A video file on the ComfyUI machine. |
 
 > **Status: pre-release.** Contracts live in
 > [docs/FORMAT.md](docs/FORMAT.md). Want to see the nodes working? Every
 > workflow in [examples/](examples/) is annotated on the canvas and ready
-> to load — nine example files between them cover all fifteen nodes, some
+> to load — nine example files between them cover all fourteen nodes, some
 > sharing a graph. Most just want a Run; the LoRA trio (Apply LoRA Set,
 > LoRA Iterator, and the rgthree-dependent Lora Loader State Controller) only
 > shows up in `eps-test-cross-sweep.json` and `eps-full-pipeline.json`,
@@ -524,48 +523,27 @@ times to gather images, then send the whole set through a workflow at once.
     you so. **Copy (Clipspace)** works everywhere. For real OS image-copy, use
     the ComfyUI desktop app or open ComfyUI via `localhost`/`https`.
 
-## EPS Cross Product (shipped)
-
-*Still works and always will — but for new workflows the
-[EPS Run Multiplier](#eps-run-multiplier-shipped) does this same
-every-image-×-every-text cross natively (`pair_mode: multiply`), with or
-without a sweep side wired.*
-
-`EPSNodes → EPS Cross Product`: pair **every image with every text** — 2
-images × 4 prompts = 8 runs, not 4.
-
-- **Why you need it:** wiring two fanned lists (say, an EPS Image Grid and a
-  multi-select EPS Prompt Notebook) into the same path does NOT multiply
-  them — ComfyUI pairs lists index-by-index and repeats the shorter list's
-  last entry. Two images + four prompts comes out as four runs, three of
-  them reusing the last image. This node produces all the combinations
-  instead.
-- **How to wire it:** grid `image` → `images`, notebook `text` → `texts`
-  (and notebook `name` → `names` if you want each pair to carry its entry
-  name — EPS Run Multiplier uses it for folder names); then use this node's
-  `image`/`text`/`name` outputs downstream in place of the originals. They
-  stay paired index-for-index (image 1 with each prompt in order, then
-  image 2, …).
-- **Empty inputs** (an empty grid, no prompts selected) skip the branch
-  cleanly — never a crash.
-
 ## EPS Run Multiplier (shipped)
 
 *Renamed from "EPS Cross Sweep" in v0.48.4 (display name only — saved
 workflows keep working unchanged, and nodes already placed in an old
 workflow keep showing the name they were saved with).*
 
-**New in v0.49.0 — it multiplies on its own now.** The sweep side
+**One node, up to three axes.** The sweep side
 (`model`/`clip`/`label`/`vae`) is **optional**: wire none of it and the
-node is a pure image × text multiplier (Cross Product's job, absorbed).
-And a `pair_mode` switch controls the pair side: **`paired`** (default)
-runs image/text as the index-aligned pairs you wired (exactly as before);
-**`multiply`** crosses every image with every text right on this node —
-wire an Image Grid and a multi-select Prompt Notebook straight in, no
-Cross Product needed, names riding along per text. With a sweep wired too
+node is a pure image × text multiplier (it fully replaced the old EPS
+Cross Product node, removed in v0.50.0). A `pair_mode` switch controls
+the pair side: **`paired`** (default) runs image/text as index-aligned
+pairs you wired elsewhere; **`multiply`** crosses every image with every
+text right on this node — wire an Image Grid and a multi-select Prompt
+Notebook straight in, names riding along per text. With a sweep wired too
 that's a genuine three-axis batch — checkpoints × images × prompts from
 one Run — and `label` is optional as well (no label wired → folders fall
-back to `step_01, step_02, …`).
+back to `step_01, step_02, …`). **Sweep inputs must agree on length**:
+a length-1 input (one constant VAE for a whole sweep) repeats for every
+step, but two fanned sweep lists of different lengths fail the Run with
+an error naming them — that's always a miswire, usually a leftover wire
+into `label` from something unrelated.
 
 `EPSNodes → EPS Run Multiplier`: run a **whole lora sweep across a whole set
 of image/prompt pairs** — 11 strengths × 8 pairs = 88 runs, grouped by
@@ -573,29 +551,30 @@ strength, each landing in its own folder.
 
 **Model iteration:** wire the [EPS Checkpoint
 Switcher](#eps-checkpoint-switcher-shipped)'s `model`/`clip`/`vae`/`label`
-into this node's sweep side, and either Cross Product pairs or **just a
-multi-select Prompt Notebook's `text`** (leave `image` unwired for txt2img)
+into this node's sweep side, and **a multi-select Prompt Notebook's
+`text`** (leave `image` unwired for txt2img, or add images and set
+`pair_mode: multiply`)
 on the other — every ticked checkpoint runs against every prompt, each run
 with its checkpoint's own VAE, saving into a folder named by checkpoint.
 The `vae` output only means something when the sweep side supplies VAEs;
 unwired, anything connected to it is skipped.
 
 
-- **Why you need it:** the same list-zipping that made Cross Product
-  necessary happens again one level up — a sweep wired alongside crossed
-  pairs gives you max(11, 8) = 11 runs, not 11 × 8. This node multiplies
-  the sweep group (model/clip/label) by the pair group (image/text) while
-  keeping each group internally matched.
+- **Why you need it:** ComfyUI's own list pairing ZIPS index-by-index —
+  two fanned lists into one sampler give you max(11, 8) = 11 runs, not
+  11 × 8. This node is the pack's one true multiplier: sweep group ×
+  images × texts, each group internally matched.
 - **How to wire it:** EPS LoRA Iterator `model`/`clip`/`label` → the same
-  inputs here; EPS Cross Product `image`/`text` (and `name`) → likewise.
-  Use this node's outputs downstream. **Strength-grouped:** all pairs at
-  the first strength, then all pairs at the next.
+  inputs here; an image source → `image`, a Notebook's `text`/`name` →
+  likewise (set `pair_mode: multiply` to cross them). Use this node's
+  outputs downstream. **Strength-grouped:** all pairs at the first
+  strength, then all pairs at the next.
 - **Folders for free:** wire `save_prefix` into SaveImage's
   `filename_prefix` and every run lands at
   `output/<base_folder>/<sweep label>/<pair name>_00001_.png` — one folder
   per strength, files named by prompt entry. `base_folder` is a text field
   on the node (nesting with `/` works); the pair name comes from the
-  notebook via Cross Product, with a clean `pair_01` fallback.
+  notebook's `name` output, with a clean `pair_01` fallback.
 - **Mind the multiplication:** steps × pairs × (loras, in the sweep's
   independent mode). 2 loras × 11 steps × 8 pairs = 176 generations in one
   queue — deliberate-use / overnight territory, exactly as intended. A

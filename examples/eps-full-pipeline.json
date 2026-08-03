@@ -505,74 +505,6 @@
       ]
     },
     {
-      "id": 8,
-      "type": "EPSCrossProduct",
-      "pos": [
-        -40,
-        420
-      ],
-      "size": [
-        164.355078125,
-        66
-      ],
-      "flags": {},
-      "order": 18,
-      "mode": 0,
-      "inputs": [
-        {
-          "localized_name": "images",
-          "name": "images",
-          "type": "IMAGE",
-          "link": 6
-        },
-        {
-          "localized_name": "texts",
-          "name": "texts",
-          "type": "STRING",
-          "link": 7
-        },
-        {
-          "localized_name": "names",
-          "name": "names",
-          "shape": 7,
-          "type": "STRING",
-          "link": 8
-        }
-      ],
-      "outputs": [
-        {
-          "localized_name": "image",
-          "name": "image",
-          "shape": 6,
-          "type": "IMAGE",
-          "links": [
-            17
-          ]
-        },
-        {
-          "localized_name": "text",
-          "name": "text",
-          "shape": 6,
-          "type": "STRING",
-          "links": [
-            18
-          ]
-        },
-        {
-          "localized_name": "name",
-          "name": "name",
-          "shape": 6,
-          "type": "STRING",
-          "links": [
-            19
-          ]
-        }
-      ],
-      "properties": {
-        "Node name for S&R": "EPSCrossProduct"
-      }
-    },
-    {
       "id": 9,
       "type": "CheckpointLoaderSimple",
       "pos": [
@@ -889,20 +821,20 @@
           "localized_name": "image",
           "name": "image",
           "type": "IMAGE",
-          "link": 17
+          "link": 6
         },
         {
           "localized_name": "text",
           "name": "text",
           "type": "STRING",
-          "link": 18
+          "link": 7
         },
         {
           "localized_name": "name",
           "name": "name",
           "shape": 7,
           "type": "STRING",
-          "link": 19
+          "link": 8
         },
         {
           "localized_name": "base_folder",
@@ -974,8 +906,10 @@
         "Node name for S&R": "EPSCrossSweep"
       },
       "widgets_values": [
-        "eps_demo"
-      ]
+        "eps_demo",
+        "multiply"
+      ],
+      "title": "EPS Run Multiplier"
     },
     {
       "id": 13,
@@ -1486,7 +1420,7 @@
       "outputs": [],
       "properties": {},
       "widgets_values": [
-        "## 3. Pairs\n\nCross Product pairs EVERY grid image with EVERY selected prompt (2 x 4 = 8) - ComfyUI alone would zip them index-by-index instead. Entry names ride along for folder naming."
+        "## 3. Pairs\n\nRun Multiplier pairs EVERY grid image with EVERY selected prompt (2 x 4 = 8) - ComfyUI alone would zip them index-by-index instead. Entry names ride along for folder naming."
       ],
       "color": "#432",
       "bgcolor": "#653"
@@ -1532,7 +1466,7 @@
       "outputs": [],
       "properties": {},
       "widgets_values": [
-        "## 5. Cross Sweep -> generate\n\nSweep steps x pairs, strength-major: all pairs at 0.0, then 0.5, then 1.0. `save_prefix` -> SaveImage files each strength into its own folder: `output/eps_demo/<lora>_<strength>/<PromptName>_00001_.png`. Fixed seed 42 repeats across runs (clean A/B); denoise 0.6 img2img so the input images matter."
+        "## 5. Run Multiplier -> generate\n\nSweep steps x pairs, strength-major: all pairs at 0.0, then 0.5, then 1.0. `save_prefix` -> SaveImage files each strength into its own folder: `output/eps_demo/<lora>_<strength>/<PromptName>_00001_.png`. Fixed seed 42 repeats across runs (clean A/B); denoise 0.6 img2img so the input images matter."
       ],
       "color": "#432",
       "bgcolor": "#653"
@@ -1648,7 +1582,7 @@
       "title": "Note",
       "properties": {},
       "widgets_values": [
-        "## 6. Distributor -> branches\n\nOne decoded result, several destinations, **one run**. `out_1` saves it (with Cross Sweep's folder path still driving the filename); `out_2` previews it; `out_3` is spare.\n\nClick a socket's checkbox to switch that branch off - only that branch is skipped, everything else still runs. Turn them all off and the queue still succeeds.\n\nThis is the opposite of the Switcher at step 1: the Switcher makes the graph run once **per image**, the Distributor routes one image several ways **inside** a single run.\n\nRight-click -> Properties -> `Outputs` for up to sixteen. It won't hide a socket that's still wired."
+        "## 6. Distributor -> branches\n\nOne decoded result, several destinations, **one run**. `out_1` saves it (with Run Multiplier's folder path still driving the filename); `out_2` previews it; `out_3` is spare.\n\nClick a socket's checkbox to switch that branch off - only that branch is skipped, everything else still runs. Turn them all off and the queue still succeeds.\n\nThis is the opposite of the Switcher at step 1: the Switcher makes the graph run once **per image**, the Distributor routes one image several ways **inside** a single run.\n\nRight-click -> Properties -> `Outputs` for up to sixteen. It won't hide a socket that's still wired."
       ],
       "color": "#432",
       "bgcolor": "#653"
@@ -1699,24 +1633,24 @@
       6,
       6,
       0,
-      8,
-      0,
+      12,
+      3,
       "IMAGE"
     ],
     [
       7,
       7,
       0,
-      8,
-      1,
+      12,
+      4,
       "STRING"
     ],
     [
       8,
       7,
       1,
-      8,
-      2,
+      12,
+      5,
       "STRING"
     ],
     [
@@ -1781,30 +1715,6 @@
       2,
       12,
       2,
-      "STRING"
-    ],
-    [
-      17,
-      8,
-      0,
-      12,
-      3,
-      "IMAGE"
-    ],
-    [
-      18,
-      8,
-      1,
-      12,
-      4,
-      "STRING"
-    ],
-    [
-      19,
-      8,
-      2,
-      12,
-      5,
       "STRING"
     ],
     [

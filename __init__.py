@@ -116,7 +116,6 @@ _NODE_SPECS = [
     ("eps_image.nodes_resolution", "EPSResolution", "EPS Resolution"),
     ("eps_image.nodes_image_grid", "EPSImageGrid", "EPS Image Grid"),
     ("eps_image.nodes_frame_saver", "EPSFrameSaver", "EPS Frame Saver"),
-    ("eps_image.nodes_cross", "EPSCrossProduct", "EPS Cross Product"),
     ("eps_image.nodes_cross_sweep", "EPSCrossSweep", "EPS Run Multiplier"),
     ("eps_image.nodes_distributor", "EPSDistributor", "EPS Distributor"),
     ("eps_image.nodes_checkpoint_switcher", "EPSCheckpointSwitcher", "EPS Checkpoint Switcher"),

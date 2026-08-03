@@ -59,9 +59,13 @@ we keep the lora sweep separate?").** Two additive, §8-safe changes:
   is the new three-axis capability (sweep x images x texts) that used to
   take both nodes chained.
 
-``EPSCrossProduct`` itself stays registered and working (§8: its class id
-is frozen and saved workflows reference it) — it is simply no longer
-necessary for new graphs.
+``EPSCrossProduct`` was REMOVED outright in v0.50.0 at the owner's
+explicit direction ("Delete the old cross product node. I will remove
+from old workflows -- I would rather replace with the new one") — a
+deliberate §8 exception. Workflows that still contain one will show a
+missing-node error until that node is replaced with this one
+(`pair_mode: multiply`); the class id ``EPSCrossProduct`` is retired and
+must NEVER be reused for a different node.
 
 No torch/ComfyUI import at module scope: every element (model, clip,
 image) is treated as an opaque value, exactly like §6.4/§6.9.
@@ -181,10 +185,10 @@ class EPSCrossSweep:
                         "forceInput": True,
                         "tooltip": (
                             "The texts to run -- wire a multi-select EPS "
-                            "Prompt Notebook's text output straight in "
-                            "(set pair_mode to multiply to cross them "
-                            "with the images), or an EPS Cross Product's "
-                            "text output (keep pair_mode paired). "
+                            "Prompt Notebook's text output straight in; "
+                            "set pair_mode to multiply to cross them "
+                            "with the images, or keep paired when image "
+                            "and text are already index-aligned. "
                             "Wire-only."
                         ),
                     },
@@ -242,8 +246,8 @@ class EPSCrossSweep:
                     {
                         "tooltip": (
                             "The images to run. With pair_mode paired "
-                            "they arrive index-aligned with text (e.g. "
-                            "from EPS Cross Product); with multiply, "
+                            "they arrive index-aligned with text; with "
+                            "multiply, "
                             "EVERY image is crossed with EVERY text (wire "
                             "an EPS Image Grid or Switcher straight in). "
                             "Optional: leave unwired for text-only "
@@ -281,9 +285,9 @@ class EPSCrossSweep:
                         "tooltip": (
                             "Optional short name used for save_prefix's "
                             "folders. With pair_mode paired it aligns per "
-                            "PAIR (EPS Cross Product's name output); with "
-                            "multiply it aligns per TEXT (the Prompt "
-                            "Notebook's name output, wired straight in). "
+                            "PAIR; with multiply it aligns per TEXT (the "
+                            "Prompt Notebook's name output, wired "
+                            "straight in). "
                             "Falls back to pair_01, pair_02, ... when not "
                             "wired. Wire-only."
                         ),

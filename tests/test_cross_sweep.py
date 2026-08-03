@@ -302,17 +302,17 @@ class TestNoSweepPureMultiplier:
     """v0.49.0: no sweep member wired = Cross Product's old job, in here."""
 
     def test_multiply_matches_cross_product_byte_for_byte(self, fake_execution_blocker) -> None:
-        """The golden parity pin: multiply mode with no sweep reproduces
-        EPSCrossProduct's image/text/name outputs EXACTLY (same image-major
-        order, same names-per-text alignment, same padding)."""
-        from eps_image.nodes_cross import EPSCrossProduct
-
+        """The golden parity pin, now against an INLINE expectation:
+        EPSCrossProduct was removed in v0.50.0 (owner direction), so the
+        cross it used to compute -- image-major, names aligned per TEXT,
+        short name lists padded with "" -- is spelled out here verbatim.
+        This is the contract multiply mode must keep forever."""
         images = ["i1", "i2"]
         texts = ["tA", "tB", "tC"]
         names = ["A", "B"]  # deliberately short: pads with ""
-        cp_images, cp_texts, cp_names = EPSCrossProduct().run(
-            images=images, texts=texts, names=names
-        )
+        cp_images = ["i1", "i1", "i1", "i2", "i2", "i2"]
+        cp_texts = ["tA", "tB", "tC", "tA", "tB", "tC"]
+        cp_names = ["A", "B", "", "A", "B", ""]
         models, clips, out_images, out_texts, prefixes, labels, vaes = EPSCrossSweep().run(
             text=texts, image=images, name=names, pair_mode="multiply"
         )

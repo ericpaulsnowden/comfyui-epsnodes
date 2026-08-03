@@ -1592,44 +1592,27 @@ thing to wire with no benefit; see the roadmap for the full tradeoff.
   per node, never per swept step. `min`/`max` apply UNCLAMPED (−10..10) —
   deliberate over/under-strength testing is allowed.
 
-### §6.9 `EPSCrossProduct` (display: "EPS Cross Product") — every-with-every pairing
+### §6.9 `EPSCrossProduct` — REMOVED in v0.50.0 (tombstone)
 
-**Superseded for NEW graphs by §6.10's `pair_mode: multiply` (v0.49.0)**
-— the Run Multiplier now performs this exact cross itself (same
-image-major order, same names-per-text alignment, pinned by a golden
-parity test importing both classes). This node STAYS registered and
-working forever: its class id is frozen (§8) and saved workflows
-reference it. Do not remove or gut it; new documentation just points at
-§6.10 instead.
+**Deleted outright at the owner's explicit direction, 2026-08-03** ("Delete
+the old cross product node. I will remove from old workflows - I would
+rather replace with the new one") — a deliberate, owner-authorized §8
+exception, the pack's first. The node's every-image-×-every-text cross
+lives on verbatim as §6.10's `pair_mode: multiply` (image-major order,
+names aligned per TEXT, short name lists padded with `""` — pinned by the
+inline golden-parity test in `tests/test_cross_sweep.py`). Workflows still
+containing an `EPSCrossProduct` node show ComfyUI's missing-node error
+until it is replaced with an EPS Run Multiplier. Rules that survive the
+deletion:
 
-NON-lora node in `eps_image/`, category "EPSNodes". Class id `EPSCrossProduct`
-frozen once shipped (§8). Born from an owner report 2026-07-23: a 2-image EPS
-Image Grid feeding the same path as 4 selected EPS Prompt Notebook entries
-produced 4 downstream runs — (img1,p1), (img2,p2), (img2,p3), (img2,p4) —
-because core list execution ZIPS index-by-index and repeats the shorter
-list's last element (`execution.py` `slice_dict`, `v[i if len(v) > i else
--1]`). Core has no cross-product mechanism; this node is it.
-
-- **Inputs:** `images` (IMAGE) + `texts` (STRING, `forceInput` — wire-only)
-  required; `names` (STRING, `forceInput`) OPTIONAL (2026-07-23b, §6.10's
-  organization ask): the Prompt Notebook's `name` output, index-aligned
-  with its `text`, crossed identically so each pair keeps a short
-  human-readable identity. `INPUT_IS_LIST = True` for the same reason as
-  §6.4's switcher: without it core would map THIS node over the longer
-  list, zipping the very lists it exists to multiply.
-- **Outputs:** `image` + `text` + `name` (appended 2026-07-23b — additive,
-  existing wires keep their indices; unwired `names` → aligned empty
-  strings, and a short `names` list pads with "" rather than guessing),
-  all `OUTPUT_IS_LIST`, length N×M, IMAGE-MAJOR (image 1 with every text
-  in order, then image 2 with every text, …), index-aligned by
-  construction — wire them onward in place of the originals and downstream
-  runs N×M times with the pairs intact. A `[B,H,W,C]` batch element stays
-  ONE element (switcher-consistent; the node never unpacks upstream
-  batches).
-- **Empty side** (either list empty after dropping `None`s) → the §6.4
-  `[ExecutionBlocker(None)]` pattern on BOTH outputs: the branch silently
-  skips, the queue succeeds. No `IS_CHANGED` (pure function of inputs).
-  No torch/ComfyUI import at module scope (elements are opaque).
+- The class id `EPSCrossProduct` is RETIRED, not freed — it must NEVER be
+  reused for a different node (a stale saved workflow loading against a
+  same-named future node would silently mis-execute).
+- History: born 2026-07-23 from the owner's zip-trap report (core list
+  execution zips index-by-index and repeats the shorter list's last
+  element — `execution.py` `slice_dict`); grew the crossed `names` output
+  2026-07-23b. See git history for the removed module
+  (`eps_image/nodes_cross.py`) and its tests.
 
 ### §6.10 `EPSCrossSweep` (display: "EPS Run Multiplier") — sweep × pairs, organized
 

@@ -1,0 +1,582 @@
+{
+  "id": "00000000-0000-0000-0000-000000000000",
+  "revision": 0,
+  "last_node_id": 10,
+  "last_link_id": 7,
+  "nodes": [
+    {
+      "id": 1,
+      "type": "LoadImage",
+      "pos": [
+        -1100,
+        40
+      ],
+      "size": [
+        282.798828125,
+        102
+      ],
+      "flags": {},
+      "order": 0,
+      "mode": 0,
+      "inputs": [
+        {
+          "localized_name": "image",
+          "name": "image",
+          "type": "COMBO",
+          "widget": {
+            "name": "image"
+          },
+          "link": null
+        },
+        {
+          "localized_name": "choose file to upload",
+          "name": "upload",
+          "type": "IMAGEUPLOAD",
+          "widget": {
+            "name": "upload"
+          },
+          "link": null
+        }
+      ],
+      "outputs": [
+        {
+          "localized_name": "IMAGE",
+          "name": "IMAGE",
+          "type": "IMAGE",
+          "links": [
+            1
+          ]
+        },
+        {
+          "localized_name": "MASK",
+          "name": "MASK",
+          "type": "MASK",
+          "links": null
+        }
+      ],
+      "title": "Image A",
+      "properties": {
+        "Node name for S&R": "LoadImage"
+      },
+      "widgets_values": [
+        "example.png",
+        "image"
+      ]
+    },
+    {
+      "id": 2,
+      "type": "LoadImage",
+      "pos": [
+        -1100,
+        420
+      ],
+      "size": [
+        282.798828125,
+        102
+      ],
+      "flags": {},
+      "order": 1,
+      "mode": 0,
+      "inputs": [
+        {
+          "localized_name": "image",
+          "name": "image",
+          "type": "COMBO",
+          "widget": {
+            "name": "image"
+          },
+          "link": null
+        },
+        {
+          "localized_name": "choose file to upload",
+          "name": "upload",
+          "type": "IMAGEUPLOAD",
+          "widget": {
+            "name": "upload"
+          },
+          "link": null
+        }
+      ],
+      "outputs": [
+        {
+          "localized_name": "IMAGE",
+          "name": "IMAGE",
+          "type": "IMAGE",
+          "links": [
+            2
+          ]
+        },
+        {
+          "localized_name": "MASK",
+          "name": "MASK",
+          "type": "MASK",
+          "links": null
+        }
+      ],
+      "title": "Image B",
+      "properties": {
+        "Node name for S&R": "LoadImage"
+      },
+      "widgets_values": [
+        "example.png",
+        "image"
+      ]
+    },
+    {
+      "id": 3,
+      "type": "EPSSwitcher",
+      "pos": [
+        -700,
+        200
+      ],
+      "size": [
+        270,
+        98
+      ],
+      "flags": {},
+      "order": 7,
+      "mode": 0,
+      "inputs": [
+        {
+          "localized_name": "image_1",
+          "name": "image_1",
+          "shape": 7,
+          "type": "IMAGE",
+          "link": 1
+        },
+        {
+          "localized_name": "toggles",
+          "name": "toggles",
+          "shape": 7,
+          "type": "STRING",
+          "widget": {
+            "name": "toggles"
+          },
+          "link": null
+        },
+        {
+          "name": "image_2",
+          "shape": 7,
+          "type": "IMAGE",
+          "link": 2
+        },
+        {
+          "name": "image_3",
+          "shape": 7,
+          "type": "IMAGE",
+          "link": null
+        }
+      ],
+      "outputs": [
+        {
+          "localized_name": "images",
+          "name": "images",
+          "shape": 6,
+          "type": "IMAGE",
+          "links": [
+            3
+          ]
+        }
+      ],
+      "title": "Two images in",
+      "properties": {
+        "Node name for S&R": "EPSSwitcher"
+      },
+      "widgets_values": [
+        "{}"
+      ]
+    },
+    {
+      "id": 4,
+      "type": "LoraLibraryNotebook",
+      "pos": [
+        -700,
+        620
+      ],
+      "size": [
+        270,
+        102
+      ],
+      "flags": {},
+      "order": 2,
+      "mode": 0,
+      "inputs": [
+        {
+          "localized_name": "file",
+          "name": "file",
+          "type": "STRING",
+          "widget": {
+            "name": "file"
+          },
+          "link": null
+        },
+        {
+          "localized_name": "entry",
+          "name": "entry",
+          "type": "STRING",
+          "widget": {
+            "name": "entry"
+          },
+          "link": null
+        }
+      ],
+      "outputs": [
+        {
+          "localized_name": "text",
+          "name": "text",
+          "shape": 6,
+          "type": "STRING",
+          "links": [
+            4
+          ]
+        },
+        {
+          "localized_name": "name",
+          "name": "name",
+          "shape": 6,
+          "type": "STRING",
+          "links": [
+            5
+          ]
+        }
+      ],
+      "title": "Four prompts (pre-selected)",
+      "properties": {
+        "Node name for S&R": "LoraLibraryNotebook"
+      },
+      "widgets_values": [
+        "eps-cross-test-prompts.md",
+        "Neon City\nGolden Hour\nInk Sketch\nPastel Studio"
+      ]
+    },
+    {
+      "id": 5,
+      "type": "EPSCrossSweep",
+      "pos": [
+        -240,
+        380
+      ],
+      "size": [
+        164.355078125,
+        66
+      ],
+      "flags": {},
+      "order": 8,
+      "mode": 0,
+      "inputs": [
+        {
+          "localized_name": "images",
+          "name": "image",
+          "type": "IMAGE",
+          "link": 3
+        },
+        {
+          "localized_name": "texts",
+          "name": "text",
+          "type": "STRING",
+          "link": 4
+        },
+        {
+          "localized_name": "names",
+          "name": "name",
+          "shape": 7,
+          "type": "STRING",
+          "link": 5
+        }
+      ],
+      "outputs": [
+        {
+          "name": "model",
+          "type": "MODEL",
+          "links": null
+        },
+        {
+          "name": "clip",
+          "type": "CLIP",
+          "links": null
+        },
+        {
+          "name": "image",
+          "type": "IMAGE",
+          "links": [
+            6
+          ]
+        },
+        {
+          "name": "text",
+          "type": "STRING",
+          "links": null
+        },
+        {
+          "name": "save_prefix",
+          "type": "STRING",
+          "links": [
+            7
+          ]
+        },
+        {
+          "name": "label",
+          "type": "STRING",
+          "links": null
+        },
+        {
+          "name": "vae",
+          "type": "VAE",
+          "links": null
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "EPSCrossSweep"
+      },
+      "title": "EPS Run Multiplier",
+      "widgets_values": [
+        "",
+        "multiply"
+      ]
+    },
+    {
+      "id": 6,
+      "type": "SaveImage",
+      "pos": [
+        120,
+        380
+      ],
+      "size": [
+        270,
+        58
+      ],
+      "flags": {},
+      "order": 9,
+      "mode": 0,
+      "inputs": [
+        {
+          "localized_name": "images",
+          "name": "images",
+          "type": "IMAGE",
+          "link": 6
+        },
+        {
+          "localized_name": "filename_prefix",
+          "name": "filename_prefix",
+          "type": "STRING",
+          "widget": {
+            "name": "filename_prefix"
+          },
+          "link": 7
+        }
+      ],
+      "outputs": [
+        {
+          "localized_name": "images",
+          "name": "images",
+          "type": "IMAGE",
+          "links": null
+        }
+      ],
+      "title": "Saves 8 - filenames prove the pairing",
+      "properties": {},
+      "widgets_values": [
+        "ComfyUI"
+      ]
+    },
+    {
+      "id": 7,
+      "type": "MarkdownNote",
+      "pos": [
+        -1100,
+        -560
+      ],
+      "size": [
+        900,
+        470
+      ],
+      "flags": {},
+      "order": 3,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [],
+      "properties": {},
+      "widgets_values": [
+        "# TEST: EPS Run Multiplier - 2 images x 4 prompts = 8\n\n**Setup (one time):** copy `eps-cross-test-prompts.md` (ships beside this file) into your EPSNodes library folder - the one in Settings -> EPSNodes. That is the only prep.\n\n**Then just press Run.** No checkpoint, no lora, no GPU needed - it only moves images around.\n\n## What should happen\n\n**8 images** appear in your output folder, named by prompt:\n\n```\nNeon City_00001_.png      <- Image A\nGolden Hour_00001_.png    <- Image A\nInk Sketch_00001_.png     <- Image A\nPastel Studio_00001_.png  <- Image A\nNeon City_00002_.png      <- Image B\nGolden Hour_00002_.png    <- Image B\nInk Sketch_00002_.png     <- Image B\nPastel Studio_00002_.png  <- Image B\n```\n\nEach prompt name appears exactly **twice** (once per image). That is the fix: without EPS Run Multiplier you would get 4 images, three of them reusing the last picture.\n\n**Try it your way too:** swap the two Load Image nodes for your own, or replace the switcher with an **EPS Image Grid** set to *Emit* (wire its `image` output into Cross Product's `images`) - the count follows whatever is in the grid."
+      ],
+      "color": "#432",
+      "bgcolor": "#653"
+    },
+    {
+      "id": 8,
+      "type": "MarkdownNote",
+      "pos": [
+        -700,
+        -60
+      ],
+      "size": [
+        380,
+        180
+      ],
+      "flags": {},
+      "order": 4,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [],
+      "properties": {},
+      "widgets_values": [
+        "## Two images in\n\nAny 2-image source works. Both switcher rows are ON. An EPS Image Grid in Emit mode drops in here just as well."
+      ],
+      "color": "#432",
+      "bgcolor": "#653"
+    },
+    {
+      "id": 9,
+      "type": "MarkdownNote",
+      "pos": [
+        -700,
+        900
+      ],
+      "size": [
+        400,
+        200
+      ],
+      "flags": {},
+      "order": 5,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [],
+      "properties": {},
+      "widgets_values": [
+        "## Four prompts\n\nThe Prompt Notebook has all four entries pre-selected (ctrl/cmd+click toggles them). Selecting fewer changes the math: 2 images x 3 prompts = 6."
+      ],
+      "color": "#432",
+      "bgcolor": "#653"
+    },
+    {
+      "id": 10,
+      "type": "MarkdownNote",
+      "pos": [
+        -240,
+        100
+      ],
+      "size": [
+        400,
+        220
+      ],
+      "flags": {},
+      "order": 6,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [],
+      "properties": {},
+      "widgets_values": [
+        "## The multiply\n\nWith `pair_mode: multiply` (and nothing on the sweep side), every image runs with every prompt: 2 x 4 = **8**. The `save_prefix` output carries each prompt's title through, which is what names the files below."
+      ],
+      "color": "#432",
+      "bgcolor": "#653"
+    }
+  ],
+  "links": [
+    [
+      1,
+      1,
+      0,
+      3,
+      0,
+      "IMAGE"
+    ],
+    [
+      2,
+      2,
+      0,
+      3,
+      2,
+      "IMAGE"
+    ],
+    [
+      3,
+      3,
+      0,
+      5,
+      0,
+      "IMAGE"
+    ],
+    [
+      4,
+      4,
+      0,
+      5,
+      1,
+      "STRING"
+    ],
+    [
+      5,
+      4,
+      1,
+      5,
+      2,
+      "STRING"
+    ],
+    [
+      6,
+      5,
+      2,
+      6,
+      0,
+      "IMAGE"
+    ],
+    [
+      7,
+      5,
+      4,
+      6,
+      1,
+      "STRING"
+    ]
+  ],
+  "groups": [
+    {
+      "id": 1,
+      "title": "Sources",
+      "bounding": [
+        -1150,
+        -30,
+        780,
+        1000
+      ],
+      "color": "#3f789e",
+      "flags": {}
+    },
+    {
+      "id": 2,
+      "title": "Cross Product",
+      "bounding": [
+        -290,
+        60,
+        300,
+        480
+      ],
+      "color": "#8A8",
+      "flags": {}
+    },
+    {
+      "id": 3,
+      "title": "Result",
+      "bounding": [
+        60,
+        300,
+        380,
+        240
+      ],
+      "color": "#a1309b",
+      "flags": {}
+    }
+  ],
+  "config": {},
+  "extra": {
+    "ds": {
+      "scale": 0.6792452830188679,
+      "offset": [
+        146.66666666666674,
+        132.5
+      ]
+    }
+  },
+  "version": 0.4
+}
