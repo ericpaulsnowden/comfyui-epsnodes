@@ -190,7 +190,7 @@ library folder, a checkpoint, and a saved lora state.
 
 Proves **3 strengths × 8 pairs = 24**, foldered by strength. Same pair side
 (plus EPS Resolution normalizing to a 1024 fit / multiple of 8 so img2img is
-safe), crossed against an EPS LoRA Sweep, with `save_prefix` wired into Save
+safe), crossed against an EPS LoRA Iterator, with `save_prefix` wired into Save
 Image's `filename_prefix`.
 
 Pick two things before running (both marked on the canvas): a **checkpoint**
@@ -239,16 +239,16 @@ The graph, stage by stage (numbered groups + notes on the canvas):
    Cross Product pair EVERY grid image with EVERY selected prompt; entry
    names ride along.
 4. **Loras & Sweep** — Checkpoint → EPS Apply LoRA Set (reads a saved state)
-   → EPS LoRA Sweep (0.0–1.0 @ 0.5 to start = 3 steps). The controller
+   → EPS LoRA Iterator (0.0–1.0 @ 0.5 to start = 3 steps). The controller
    corner (EPS Lora Loader State Controller + Power Lora Loader) is where
    states get captured/renamed.
-5. **Cross Sweep & Generate** — EPS Cross Sweep multiplies sweep steps ×
+5. **Multiply & Generate** — EPS Run Multiplier multiplies sweep steps ×
    pairs (strength-major), then img2img sampling (fixed seed 42, denoise
    0.6) saves via `save_prefix` into
    `output/eps_demo/<lora>_<strength>/<PromptName>_00001_.png` — one folder
    per strength.
 6. **Distributor → branches** — the decoded result fans out through an EPS
-   Distributor: `out_1` to the Save Image (still using Cross Sweep's folder
+   Distributor: `out_1` to the Save Image (still using the Run Multiplier's folder
    path), `out_2` to a preview, `out_3` spare. Switch a socket off to drop
    that branch without touching the rest of the run.
 

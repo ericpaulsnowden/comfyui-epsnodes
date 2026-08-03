@@ -56,7 +56,7 @@ class EPSCrossProduct:
     optional ``names`` input (the Prompt Notebook's ``name`` output — its
     entry headings, index-aligned with its ``text``) rides through the
     SAME cross as a third output, so every pair downstream carries a short
-    human-readable identity — EPS Cross Sweep turns it into the pair half
+    human-readable identity — EPS Run Multiplier turns it into the pair half
     of ``save_prefix``. Additive only: the new output is APPENDED (existing
     workflows' wires keep their indices), and unwired ``names`` yields
     empty strings, never a shape change.
@@ -139,7 +139,7 @@ class EPSCrossProduct:
         text_list = _as_clean_list(texts)
         # Names align with TEXTS by index (the Notebook emits text/name as
         # parallel lists); a missing/short list pads with "" rather than
-        # guessing -- downstream fallbacks (EPS Cross Sweep's pair_NN) own
+        # guessing -- downstream fallbacks (EPS Run Multiplier's pair_NN) own
         # the empty case.
         name_list = _as_clean_list(names)
 

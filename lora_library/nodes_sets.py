@@ -119,7 +119,7 @@ class LoraLibraryApplySet:
         "The input CLIP, patched with this set's enabled loras -- or passed "
         "through unchanged under the same conditions as model.",
         "This set's enabled loras as a LORA_STACK, ready to wire into EPS "
-        "LoRA Sweep or another stack-consuming node.",
+        "LoRA Iterator or another stack-consuming node.",
         "The trigger words saved with this set, as one string.",
         "A compact, filename-safe summary of the applied loras and "
         "strengths, e.g. 'detailer_0.8 style_1' -- handy for Save Image's "

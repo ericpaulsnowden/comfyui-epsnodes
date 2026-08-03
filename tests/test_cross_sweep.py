@@ -1,4 +1,4 @@
-"""Tests for ``eps_image.nodes_cross_sweep`` (FORMAT.md §6.10, "EPS Cross Sweep").
+"""Tests for ``eps_image.nodes_cross_sweep`` (FORMAT.md §6.10, "EPS Run Multiplier").
 
 Pure-Python contract tests: sweep/pair elements are opaque sentinels."""
 

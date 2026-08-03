@@ -177,7 +177,7 @@ def build_sweep_plan(
     increment: float,
     mode: str,
 ) -> list[tuple[list[tuple[str, float, float]], str]]:
-    """The PURE core of EPS LoRA Sweep (FORMAT.md §6.8): every
+    """The PURE core of EPS LoRA Iterator (FORMAT.md §6.8): every
     ``(swept_stack, label)`` pair the node will apply, in emission order. No
     torch, no comfy, no I/O -- plain tuples/lists/strings in, plain
     tuples/lists/strings out -- so this is exhaustively unit-testable
@@ -277,7 +277,7 @@ class LoraLibrarySweep:
     """Sweeps a ``LORA_STACK``'s strengths across a min/max/increment range,
     applying each step to ``model``/``clip`` and fanning the results out as
     three parallel ``OUTPUT_IS_LIST`` lists (FORMAT.md §6.8, display: "EPS
-    LoRA Sweep").
+    LoRA Iterator").
 
     All the actual sweep-plan logic lives in the pure, torch-free
     :func:`build_sweep_plan` above; this class is a thin ComfyUI adapter:
@@ -447,7 +447,7 @@ class LoraLibrarySweep:
             # anything. Wrapped in one-element lists -- every output here is
             # OUTPUT_IS_LIST, so a bare (model, clip, label) tuple would
             # break every downstream node expecting a list to fan over.
-            logger.warning("EPSNodes: EPS LoRA Sweep has no context configured; passthrough")
+            logger.warning("EPSNodes: EPS LoRA Iterator has no context configured; passthrough")
             return [model], [clip], ["(no context configured)"]
 
         plan = build_sweep_plan(lora_stack, min, max, increment, mode)

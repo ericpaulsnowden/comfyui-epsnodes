@@ -1,9 +1,9 @@
-"""``EPSCrossSweep`` (FORMAT.md §6.10, display: "EPS Cross Sweep") — run a
+"""``EPSCrossSweep`` (FORMAT.md §6.10, display: "EPS Run Multiplier") — run a
 whole lora sweep across a whole set of image/text pairs, organized.
 
 Owner request (2026-07-23, the follow-up to §6.9's Cross Product): "if we
 then wanted to run a lora or multiple loras at multiple strengths across all
-of those images" — i.e. EPS LoRA Sweep's fan-out TIMES EPS Cross Product's
+of those images" — i.e. EPS LoRA Iterator's fan-out TIMES EPS Cross Product's
 fan-out. Wiring both into one sampler ZIPS them instead (core list
 execution, the same `slice_dict` repeat-last behavior §6.9 documents), so a
 sweep of 11 steps and 8 image/prompt pairs yields 11 runs, not 88. This
@@ -117,7 +117,7 @@ class EPSCrossSweep:
     )
     FUNCTION = "run"
     DESCRIPTION = (
-        "Runs a whole EPS LoRA Sweep across a whole set of EPS Cross "
+        "Runs a whole EPS LoRA Iterator across a whole set of EPS Cross "
         "Product pairs: wire the sweep's model, clip, and label outputs "
         "together with Cross Product's image and text (and optionally "
         "name) outputs, then continue the workflow from this node's "
@@ -139,7 +139,7 @@ class EPSCrossSweep:
                     {
                         "tooltip": (
                             "The swept models, one per strength step -- "
-                            "wire from EPS LoRA Sweep's model output."
+                            "wire from EPS LoRA Iterator's model output."
                         ),
                     },
                 ),
@@ -148,7 +148,7 @@ class EPSCrossSweep:
                     {
                         "tooltip": (
                             "The swept CLIPs, one per strength step -- "
-                            "wire from EPS LoRA Sweep's clip output."
+                            "wire from EPS LoRA Iterator's clip output."
                         ),
                     },
                 ),
@@ -207,7 +207,7 @@ class EPSCrossSweep:
                             "Optional per-step VAEs, index-aligned with "
                             "model/clip/label -- wire from EPS Checkpoint "
                             "Switcher's vae output. Leave unwired when the "
-                            "sweep side has no VAE (EPS LoRA Sweep); the "
+                            "sweep side has no VAE (EPS LoRA Iterator); the "
                             "vae output then blocks whatever consumes it."
                         ),
                     },
@@ -280,9 +280,9 @@ class EPSCrossSweep:
         pairs = len(texts) if text_only else min(len(images), len(texts))
         if len(set(sweep_lengths)) > 1:
             logger.warning(
-                "EPS Cross Sweep: sweep-side lists disagree (model=%d, clip=%d, "
+                "EPS Run Multiplier: sweep-side lists disagree (model=%d, clip=%d, "
                 "label=%d%s) -- using the first %d step(s). Wire all of them "
-                "from the SAME sweep-side node (EPS LoRA Sweep or EPS "
+                "from the SAME sweep-side node (EPS LoRA Iterator or EPS "
                 "Checkpoint Switcher).",
                 len(models), len(clips), len(labels),
                 f", vae={len(vaes)}" if vae_wired else "",
@@ -290,7 +290,7 @@ class EPSCrossSweep:
             )
         if not text_only and len(images) != len(texts):
             logger.warning(
-                "EPS Cross Sweep: pair-side lists disagree (image=%d, text=%d) "
+                "EPS Run Multiplier: pair-side lists disagree (image=%d, text=%d) "
                 "-- using the first %d pair(s). Wire both from the SAME "
                 "EPS Cross Product node.",
                 len(images), len(texts), pairs,
@@ -300,7 +300,7 @@ class EPSCrossSweep:
             # §6.4/§6.9's empty-safety pattern: nothing to run means the
             # branch silently skips; the queue succeeds.
             logger.info(
-                "EPS Cross Sweep: %d sweep step(s) x %d pair(s) -- nothing to "
+                "EPS Run Multiplier: %d sweep step(s) x %d pair(s) -- nothing to "
                 "run; returning an execution blocker so downstream is "
                 "silently skipped",
                 steps, pairs,

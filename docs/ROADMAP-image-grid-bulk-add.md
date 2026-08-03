@@ -59,7 +59,7 @@ picker, not a file picker. It cannot take an arbitrary subset, and re-uploading 
 folder name is blocked outright (`alert("A folder of the same name already exists")`).
 
 **Why build it anyway:** none of those feed *this* buffer. EPS Image Grid's value is the
-persistent cross-run buffer plus Emit fan-out plus Cross Product / Cross Sweep. Swapping in a
+persistent cross-run buffer plus Emit fan-out plus Cross Product / Run Multiplier (fka Cross Sweep). Swapping in a
 foreign loader means losing that pipeline. The button completes a node whose hard part is
 already built — it is catching up on table stakes, not competing on novelty. Plan and describe
 it that way; do not market it as new.

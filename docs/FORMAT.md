@@ -1450,7 +1450,14 @@ single-frame output (NOT a list); "close-enough preview, EXACT on output".
   counter (shared limitation of all prior art); output still lands on a real
   frame. No module-scope torch/av/ComfyUI import.
 
-### §6.8 `LoraLibrarySweep` (display: "EPS LoRA Sweep") — strength iterator
+### §6.8 `LoraLibrarySweep` (display: "EPS LoRA Iterator") — strength iterator
+
+Display name renamed from "EPS LoRA Sweep" in v0.48.4 (owner ask
+2026-08-02: the two sweep-named nodes do different jobs — this one
+GENERATES a strength iteration). Display-only: the class id is frozen
+(§8), saved workflows are untouched, and a node saved under the old name
+keeps showing its saved title (litegraph restores `info.title` verbatim —
+the §6.12-family lesson).
 
 Roadmap: `research/roadmap-eps-lora-sweep.md` (M1 = this section). Lives in
 `lora_library/` (a lora-family feature, unlike the `eps_image/` non-lora
@@ -1611,10 +1618,16 @@ list's last element (`execution.py` `slice_dict`, `v[i if len(v) > i else
   skips, the queue succeeds. No `IS_CHANGED` (pure function of inputs).
   No torch/ComfyUI import at module scope (elements are opaque).
 
-### §6.10 `EPSCrossSweep` (display: "EPS Cross Sweep") — sweep × pairs, organized
+### §6.10 `EPSCrossSweep` (display: "EPS Run Multiplier") — sweep × pairs, organized
+
+Display name renamed from "EPS Cross Sweep" in v0.48.4 (owner ask
+2026-08-02; his "EPS Node Multiplier" adjusted to "Run Multiplier" since
+it multiplies RUNS, not nodes). Display-only — same class-id/saved-title
+caveats as §6.8's note. The class id still contains "Sweep", so
+node-search for "sweep" keeps finding both nodes.
 
 NON-lora node in `eps_image/`, category "EPSNodes". Class id `EPSCrossSweep`
-frozen once shipped (§8). Owner ask 2026-07-23b: run an EPS LoRA Sweep
+frozen once shipped (§8). Owner ask 2026-07-23b: run an EPS LoRA Iterator
 across ALL of §6.9's image/text pairs — sweep(11 steps) × pairs(8) must be
 88 runs, but wiring both into one sampler ZIPS them (§6.9's core
 semantics), yielding 11. This node crosses the two GROUPS while keeping
@@ -1622,7 +1635,7 @@ each internally aligned — a model is only meaningful with ITS clip and
 label, so two chained Cross Products cannot express it.
 
 - **Inputs (required):** `model` + `clip` + `label` (the sweep's three
-  aligned lists — wire all three from the SAME EPS LoRA Sweep) and
+  aligned lists — wire all three from the SAME EPS LoRA Iterator) and
   `image` + `text` (from the SAME EPS Cross Product). Optional: `name`
   (Cross Product's `name` output) and a `base_folder` STRING widget (may
   be empty; `/` allowed for nesting). `INPUT_IS_LIST = True` (§6.9's

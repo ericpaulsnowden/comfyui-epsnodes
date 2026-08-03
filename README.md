@@ -19,7 +19,7 @@ section further down; this is the map.
 | [**EPS Prompt Notebook**](#eps-prompt-notebook-shipped) | Your prompt library as a node — a scrolling list of named prompts with an editor beside it, backed by a plain Markdown file you own (local or on a NAS). Select several and the workflow runs once per prompt. | Nothing — its own Markdown file (auto-created). |
 | [**EPS Apply LoRA Set**](#eps-apply-lora-set-shipped) | Pick a saved lora configuration ("state") from a dropdown and apply it — which loras, order, on/off, strengths. Standalone: MODEL/CLIP in → out, plus a `LORA_STACK` and trigger words. | Your LoRA files + a saved set (via the Controller, the API, or by hand). |
 | [**EPS Lora Loader State Controller**](#eps-lora-loader-state-controller-shipped-requires-rgthree-comfy) | Captures and applies those states directly on an [rgthree Power Lora Loader](https://github.com/rgthree/rgthree-comfy) — rgthree stays the loader, this moves whole configurations in and out of it. | **rgthree-comfy**'s Power Lora Loader — third-party, self-disables without it. |
-| [**EPS LoRA Sweep**](#eps-lora-sweep-shipped) | Auditions any `LORA_STACK` by strength: set min/max/increment and one queue runs your workflow once per step (per lora, or all together). | A `LORA_STACK` source (usually Apply LoRA Set) + a model. |
+| [**EPS LoRA Iterator**](#eps-lora-iterator-shipped) | Auditions any `LORA_STACK` by strength: set min/max/increment and one queue runs your workflow once per step (per lora, or all together). | A `LORA_STACK` source (usually Apply LoRA Set) + a model. |
 | [**EPS Switcher**](#eps-switcher-shipped) | Any number of image inputs, each independently on/off; the enabled ones fan out (N enabled → N runs). Disabled branches never execute. | Nothing — drag-and-drop with core nodes. |
 | [**EPS Model / CLIP / VAE Switcher**](#eps-model--clip--vae-switcher-shipped) | The image Switcher's exact mechanism for models, CLIPs, and VAEs: any number of inputs, each on/off, enabled ones fan out (N enabled → N runs), disabled branches — including their checkpoint loads — never execute. | Nothing — drag-and-drop with core nodes. |
 | [**EPS Distributor**](#eps-distributor-shipped) | The mirror of the Switcher: one image in, up to sixteen branches out, each independently on/off. New outputs appear as you wire them up. Toggle a branch off and only that branch is skipped — everything happens in one run. | Nothing — drag-and-drop with core nodes. |
@@ -27,7 +27,7 @@ section further down; this is the map.
 | [**EPS Resolution**](#eps-resolution-shipped) | Image-first resize + size in one node: target size (with a drag pad), four resize modes, and the original image + both sets of dimensions passed through. Named size presets are shared across your machines — tick several and one Run resizes once per preset. | Nothing — drag-and-drop with core nodes. |
 | [**EPS Image Grid**](#eps-image-grid-shipped) | Collects images across separate Runs into a buffer that survives restarts, shows them as a thumbnail grid, and fans the whole set out on demand. Add whole batches at once — a multiselect picker, a folder importer, or one big drag. | Nothing — drag-and-drop with core nodes. |
 | [**EPS Cross Product**](#eps-cross-product-shipped) | Pairs every image with every text — 2 images × 4 prompts = 8 runs. (ComfyUI's own list pairing zips index-by-index instead.) | Two lists to multiply — pairs naturally with Image Grid + Prompt Notebook, but any list sources work. |
-| [**EPS Cross Sweep**](#eps-cross-sweep-shipped) | Multiplies a sweep group (LoRA Sweep, or Checkpoint Switcher with its VAEs) across image/text pairs — or across texts alone for txt2img — grouped by step, with per-run save paths so big runs land in tidy folders. | EPS LoRA Sweep or EPS Checkpoint Switcher on one side; EPS Cross Product or just a multi-select Prompt Notebook on the other. |
+| [**EPS Run Multiplier**](#eps-run-multiplier-shipped) | Multiplies a sweep group (LoRA Iterator, or Checkpoint Switcher with its VAEs) across image/text pairs — or across texts alone for txt2img — grouped by step, with per-run save paths so big runs land in tidy folders. | EPS LoRA Iterator or EPS Checkpoint Switcher on one side; EPS Cross Product or just a multi-select Prompt Notebook on the other. |
 | [**EPS Frame Saver**](#eps-frame-saver-shipped) | Loads a video by path, lets you scrub or play to a frame, and outputs that frame as an image. | A video file on the ComfyUI machine. |
 
 > **Status: pre-release.** Contracts live in
@@ -35,7 +35,7 @@ section further down; this is the map.
 > workflow in [examples/](examples/) is annotated on the canvas and ready
 > to load — nine example files between them cover all fifteen nodes, some
 > sharing a graph. Most just want a Run; the LoRA trio (Apply LoRA Set,
-> LoRA Sweep, and the rgthree-dependent Lora Loader State Controller) only
+> LoRA Iterator, and the rgthree-dependent Lora Loader State Controller) only
 > shows up in `eps-test-cross-sweep.json` and `eps-full-pipeline.json`,
 > which need a real checkpoint and a saved LoRA state to actually generate.
 > See [examples/README.md](examples/README.md) for which need setup and
@@ -225,9 +225,13 @@ and `strength_scale`. It needs `torch` plus an importable ComfyUI (set
 `EPS_COMFYUI_ROOT=/path/to/ComfyUI` if `comfy` isn't already on the path)
 and skips cleanly where those are absent.
 
-## EPS LoRA Sweep (shipped)
+## EPS LoRA Iterator (shipped)
 
-`EPSNodes → EPS LoRA Sweep`: audition a lora (or several) by strength —
+*Renamed from "EPS LoRA Sweep" in v0.48.4 (display name only — saved
+workflows keep working unchanged, and nodes already placed in an old
+workflow keep showing the name they were saved with).*
+
+`EPSNodes → EPS LoRA Iterator`: audition a lora (or several) by strength —
 wire in a `LORA_STACK`, set `min` / `max` / `increment`, queue once, and
 the rest of your workflow runs at every step.
 
@@ -322,8 +326,8 @@ several models/VAEs in one queue".
   (it does NOT multiply them): a 3-model switcher plus a 2-VAE switcher into
   the same sampler gives **3 runs** — (m1,v1), (m2,v2), (m3,v2) — not 6. To
   actually multiply axes, run them through [EPS Cross
-  Product](#eps-cross-product-shipped) / [EPS Cross
-  Sweep](#eps-cross-sweep-shipped), or use the [EPS Checkpoint
+  Product](#eps-cross-product-shipped) / [EPS Run
+  Multiplier](#eps-run-multiplier-shipped), or use the [EPS Checkpoint
   Switcher](#eps-checkpoint-switcher-shipped) which keeps model+CLIP+VAE
   aligned as one axis by construction.
 - Loading several checkpoints in one queue is heavy on disk and RAM/VRAM;
@@ -528,16 +532,20 @@ images × 4 prompts = 8 runs, not 4.
   instead.
 - **How to wire it:** grid `image` → `images`, notebook `text` → `texts`
   (and notebook `name` → `names` if you want each pair to carry its entry
-  name — EPS Cross Sweep uses it for folder names); then use this node's
+  name — EPS Run Multiplier uses it for folder names); then use this node's
   `image`/`text`/`name` outputs downstream in place of the originals. They
   stay paired index-for-index (image 1 with each prompt in order, then
   image 2, …).
 - **Empty inputs** (an empty grid, no prompts selected) skip the branch
   cleanly — never a crash.
 
-## EPS Cross Sweep (shipped)
+## EPS Run Multiplier (shipped)
 
-`EPSNodes → EPS Cross Sweep`: run a **whole lora sweep across a whole set
+*Renamed from "EPS Cross Sweep" in v0.48.4 (display name only — saved
+workflows keep working unchanged, and nodes already placed in an old
+workflow keep showing the name they were saved with).*
+
+`EPSNodes → EPS Run Multiplier`: run a **whole lora sweep across a whole set
 of image/prompt pairs** — 11 strengths × 8 pairs = 88 runs, grouped by
 strength, each landing in its own folder.
 
@@ -556,7 +564,7 @@ unwired, anything connected to it is skipped.
   pairs gives you max(11, 8) = 11 runs, not 11 × 8. This node multiplies
   the sweep group (model/clip/label) by the pair group (image/text) while
   keeping each group internally matched.
-- **How to wire it:** EPS LoRA Sweep `model`/`clip`/`label` → the same
+- **How to wire it:** EPS LoRA Iterator `model`/`clip`/`label` → the same
   inputs here; EPS Cross Product `image`/`text` (and `name`) → likewise.
   Use this node's outputs downstream. **Strength-grouped:** all pairs at
   the first strength, then all pairs at the next.
