@@ -1070,6 +1070,17 @@ is the functional core WITHOUT the grid.
 
 ## §6.6 `EPSImageGrid` (display: "EPS Image Grid") — accumulate + fan out
 
+**Collect-mode dead-wire guard (v0.51.1, owner report 2026-08-03 — a grid
+left in Collect with nothing wired but a FULL buffer fed a
+switcher→multiplier chain, and the blocker silently skipped the whole
+flow):** when Collect has no image wired AND the prompt shows a consumer
+of this node (the `prompt`/`unique_id` hidden pair, §6.4's idiom held in
+lockstep via `nodes_cross_sweep`'s canonical `_consumed_output_slots`),
+the queue FAILS naming the fix — "buffer holds N; switch mode to Emit"
+or "wire an image in". Collect-with-input (the tee), unconsumed
+blockers, Emit's empty-buffer skip (a normal transient state), and
+promptless direct callers are all byte-identical to before.
+
 Roadmap/research: `research/roadmap-eps-image-grid.md`, `research-eps-image-grid.md`.
 NON-lora node in `eps_image/`, category "EPSNodes". Class id `EPSImageGrid`
 frozen once shipped (§8). Owner decisions locked 2026-07-20 (see roadmap):

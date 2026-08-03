@@ -217,6 +217,52 @@ class TestCollectMode:
             assert isinstance(lst[0], fake_execution_blocker)
         assert len(store.list_refs(VALID_UUID)) == 2  # buffer itself untouched
 
+    @staticmethod
+    def _prompt_consuming_me(uid="3"):
+        return {
+            "9": {"class_type": "PreviewImage", "inputs": {"images": [uid, 0]}},
+            uid: {"class_type": "EPSImageGrid", "inputs": {}},
+        }
+
+    def test_collect_unwired_with_consumer_errors_naming_emit(
+        self, fake_folder_paths: Path
+    ) -> None:
+        """v0.51.1 (owner report 2026-08-03): Collect + nothing wired + a
+        FULL buffer + a downstream consumer used to silently skip the whole
+        chain -- now it fails naming the Emit fix."""
+        node = _node()
+        node.run(mode="Collect", image=_make_batch(2), grid_uuid=VALID_UUID)
+        with pytest.raises(ValueError) as excinfo:
+            node.run(
+                mode="Collect", image=None, grid_uuid=VALID_UUID,
+                prompt=self._prompt_consuming_me(), unique_id="3",
+            )
+        message = str(excinfo.value)
+        assert "Collect" in message and "Emit" in message and "2 image(s)" in message
+
+    def test_collect_unwired_without_consumer_keeps_silent_blocker(
+        self, fake_folder_paths: Path, fake_execution_blocker: type
+    ) -> None:
+        node = _node()
+        result = node.run(
+            mode="Collect", image=None, grid_uuid=VALID_UUID,
+            prompt={"5": {"class_type": "X", "inputs": {}}}, unique_id="3",
+        )
+        for lst in result["result"]:
+            assert isinstance(lst[0], fake_execution_blocker)
+
+    def test_emit_empty_with_consumer_stays_a_silent_skip(
+        self, fake_folder_paths: Path, fake_execution_blocker: type
+    ) -> None:
+        # An empty buffer in Emit is a normal transient state, not a miswire.
+        node = _node()
+        result = node.run(
+            mode="Emit", image=None, grid_uuid=VALID_UUID,
+            prompt=self._prompt_consuming_me(), unique_id="3",
+        )
+        for lst in result["result"]:
+            assert isinstance(lst[0], fake_execution_blocker)
+
     def test_emitted_tensors_are_batch_of_one_each(self, fake_folder_paths: Path) -> None:
         node = _node()
         batch = _make_batch(2, height=8, width=10)

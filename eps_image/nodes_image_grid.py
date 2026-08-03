@@ -92,6 +92,11 @@ from typing import Any
 
 from . import image_grid_store as store
 
+# Canonical prompt-scan pair (v0.51.0, nodes_cross_sweep.py) -- consumers of
+# THIS node found by scanning the API prompt. Same-package import on purpose:
+# one canonical implementation, held in lockstep with the multiplier's guard.
+from .nodes_cross_sweep import _consumed_output_slots, _unwrap_hidden
+
 CATEGORY_NAME = "EPSNodes"
 
 #: FORMAT.md §6.6 — user-facing, stable identifiers (widget values persist
@@ -221,6 +226,9 @@ class EPSImageGrid:
                     {"default": DEFAULT_GRID_UUID, "multiline": False, "hidden": True},
                 ),
             },
+            # v0.51.1: lets run() see its own consumers (the Collect-mode
+            # dead-wire guard below) -- nodes_switcher's exact hidden pair.
+            "hidden": {"prompt": "PROMPT", "unique_id": "UNIQUE_ID"},
         }
 
     @classmethod
@@ -233,6 +241,8 @@ class EPSImageGrid:
         mode: str = MODE_COLLECT,
         image: Any = None,
         grid_uuid: str = DEFAULT_GRID_UUID,
+        prompt: Any = None,
+        unique_id: Any = None,
     ) -> dict[str, Any]:
         live = _expand_to_frames(image)
         #: Refs THIS run actually appended to disk — the ONLY thing `ui`
@@ -271,6 +281,35 @@ class EPSImageGrid:
             # makes `result_frames` non-empty too in Collect mode; Emit mode
             # never populates `new_refs` at all) -- so this path never needs
             # a `"ui"` key, matching point 1 for both modes uniformly.
+            # v0.51.1 (owner report 2026-08-03, the day's THIRD silent-skip
+            # sting): a grid left in Collect mode with nothing wired -- but a
+            # FULL buffer -- fed a switcher fed the Run Multiplier, and the
+            # blocker emitted here silently skipped that whole chain ("is it
+            # possible that killed the entire flow?" -- yes, exactly this).
+            # When something downstream actually consumes this node and
+            # Collect has nothing to pass through, that is always a dead
+            # graph: fail the queue naming the two real fixes. Emit mode's
+            # empty-buffer skip stays silent -- an empty buffer is a normal
+            # transient state, not a miswire.
+            if mode == MODE_COLLECT and not live:
+                consumed = _consumed_output_slots(
+                    _unwrap_hidden(prompt), _unwrap_hidden(unique_id)
+                )
+                if consumed:
+                    buffered = len(store.list_refs(grid_uuid))
+                    raise ValueError(
+                        "EPS Image Grid: this grid is in Collect mode with no image "
+                        "wired in, so it has nothing to pass through and everything "
+                        "downstream of it would be silently skipped"
+                        + (
+                            f" -- the buffer holds {buffered} image(s); switch mode "
+                            "to Emit to send them downstream"
+                            if buffered
+                            else " -- wire an image in to collect, or switch mode "
+                            "to Emit once the buffer has images"
+                        )
+                        + "."
+                    )
             from comfy_execution.graph import ExecutionBlocker
 
             blocked = [ExecutionBlocker(None)]
