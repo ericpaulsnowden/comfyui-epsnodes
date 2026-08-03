@@ -242,7 +242,15 @@ function hideSelectionWidget(state) {
 function buildFilterRow(state) {
   state.filterInput = el('input', {
     className: 'epscs-filter-input',
-    attrs: { type: 'text', placeholder: 'Filter…' }
+    attrs: {
+      type: 'text',
+      placeholder: 'Filter…',
+      // DOM widgets are skipped by ComfyUI's own tooltip layer on purpose
+      // ("these use native browser tooltips" -- NodeTooltip.vue).
+      title:
+        'Narrow the list below. Filtering only changes what is shown — ' +
+        'ticked checkpoints stay ticked even while hidden.'
+    }
   })
   state.filterInput.addEventListener('input', () => {
     state.filterText = state.filterInput.value
@@ -349,7 +357,12 @@ function buildRowEl(state, row) {
     className: row.missing ? 'epscs-row-label epscs-row-missing' : 'epscs-row-label',
     text: row.missing ? `⚠ ${stripExtension(row.base)}` : stripExtension(row.base)
   })
-  return el('label', { className: 'epscs-row', attrs: { title: row.name } }, [checkbox, label])
+  // The row title is the checkpoint's full path under the models folder;
+  // a ⚠ row says why it is marked, since the marker alone is cryptic.
+  const title = row.missing
+    ? `${row.name} — ticked, but this file is no longer on disk. It is skipped at run time.`
+    : row.name
+  return el('label', { className: 'epscs-row', attrs: { title } }, [checkbox, label])
 }
 
 function renderCount(state) {

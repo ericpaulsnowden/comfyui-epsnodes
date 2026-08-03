@@ -44,6 +44,20 @@ def error_response(status: int, message: str) -> web.Response:
     return web.json_response({"error": message}, status=status)
 
 
+def _bad_grid_id(value: object) -> str:
+    """The user-facing text for a missing/malformed grid id.
+
+    Rendered verbatim in a ComfyUI toast by ``web/eps_image/image_grid.js``,
+    so it names what the person can DO about it -- no internal section
+    references (the FORMAT.md §6.6 contract this implements is cited in the
+    module docstring instead, where developers read it).
+    """
+    return (
+        f"invalid image buffer id {value!r} -- this EPS Image Grid node lost "
+        "its buffer id; reload the workflow, then try again"
+    )
+
+
 def register_routes(routes: web.RouteTableDef) -> None:
     """Attach the Clear and Add routes to *routes* (FORMAT.md §6.6)."""
 
@@ -58,7 +72,7 @@ def register_routes(routes: web.RouteTableDef) -> None:
 
         grid_uuid = body.get("uuid")
         if not store.is_valid_grid_uuid(grid_uuid):
-            return error_response(400, f"invalid grid uuid {grid_uuid!r} -- FORMAT.md §6.6")
+            return error_response(400, _bad_grid_id(grid_uuid))
 
         cleared = store.clear(grid_uuid)
         return web.json_response({"ok": True, "uuid": grid_uuid, "cleared": cleared})
@@ -74,7 +88,7 @@ def register_routes(routes: web.RouteTableDef) -> None:
 
         grid_uuid = body.get("uuid")
         if not store.is_valid_grid_uuid(grid_uuid):
-            return error_response(400, f"invalid grid uuid {grid_uuid!r} -- FORMAT.md §6.6")
+            return error_response(400, _bad_grid_id(grid_uuid))
 
         filename = body.get("filename")
         if not isinstance(filename, str) or not filename:
@@ -109,7 +123,7 @@ def register_routes(routes: web.RouteTableDef) -> None:
 
         grid_uuid = body.get("uuid")
         if not store.is_valid_grid_uuid(grid_uuid):
-            return error_response(400, f"invalid grid uuid {grid_uuid!r} -- FORMAT.md §6.6")
+            return error_response(400, _bad_grid_id(grid_uuid))
 
         filename = body.get("filename")
         if not isinstance(filename, str) or not filename:
@@ -129,7 +143,7 @@ def register_routes(routes: web.RouteTableDef) -> None:
     async def get_list(request: web.Request) -> web.Response:
         grid_uuid = request.query.get("uuid")
         if not store.is_valid_grid_uuid(grid_uuid):
-            return error_response(400, f"invalid grid uuid {grid_uuid!r} -- FORMAT.md §6.6")
+            return error_response(400, _bad_grid_id(grid_uuid))
 
         refs = store.list_refs(grid_uuid)
         return web.json_response(
@@ -152,10 +166,10 @@ def register_routes(routes: web.RouteTableDef) -> None:
 
         src_uuid = body.get("from")
         if not store.is_valid_grid_uuid(src_uuid):
-            return error_response(400, f"invalid grid uuid {src_uuid!r} -- FORMAT.md §6.6")
+            return error_response(400, _bad_grid_id(src_uuid))
         dst_uuid = body.get("to")
         if not store.is_valid_grid_uuid(dst_uuid):
-            return error_response(400, f"invalid grid uuid {dst_uuid!r} -- FORMAT.md §6.6")
+            return error_response(400, _bad_grid_id(dst_uuid))
 
         refs = store.clone_buffer(src_uuid, dst_uuid)
         return web.json_response({"ok": True, "refs": refs})

@@ -197,8 +197,8 @@ only if bulk add lands and the buffer becomes hard to curate.
 - **Version bump on every push**: `scripts/bump_version.py` keeps `lora_library/version.py`,
   `pyproject.toml`, `web/lora_library/version.js` in lockstep (all at **0.35.8** today). Commit
   style: `Area: plain-language outcome (vX.Y.Z)`; docs-only changes don't bump.
-- **README**: update the node's `## EPS Image Grid (shipped)` section and the eleven-node table
-  row; owner-facing plain language, bolded lead-ins.
+- **README**: update the node's `## EPS Image Grid (shipped)` section and its row in the
+  node table under `## The fifteen nodes`; owner-facing plain language, bolded lead-ins.
 - **Tests**: pytest `asyncio_mode = "auto"`; JS tested headlessly under Node by copying the
   module into a served layout with stubbed `scripts/app.js`/`api.js` at the exact relative depth
   (`tests/test_image_grid_js.py:181-212`).

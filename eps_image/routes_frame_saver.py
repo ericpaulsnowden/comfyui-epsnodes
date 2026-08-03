@@ -175,7 +175,11 @@ def register_routes(routes: web.RouteTableDef) -> None:
     @routes.get("/eps_frame_saver/probe")
     async def get_probe(request: web.Request) -> web.Response:
         if not request_is_loopback(request):
-            return error_response(403, "video probing is host-machine-only -- FORMAT.md §6.7")
+            return error_response(
+                403,
+                "reading a video file only works in a browser on the machine "
+                "ComfyUI runs on",
+            )
         resolved, error = _validate_video_path(request.query.get("path", ""))
         if error is not None:
             return error_response(400, error)
@@ -193,7 +197,11 @@ def register_routes(routes: web.RouteTableDef) -> None:
     @routes.get("/eps_frame_saver/stream")
     async def get_stream(request: web.Request) -> web.Response:
         if not request_is_loopback(request):
-            return error_response(403, "video streaming is host-machine-only -- FORMAT.md §6.7")
+            return error_response(
+                403,
+                "the video preview only works in a browser on the machine "
+                "ComfyUI runs on",
+            )
         resolved, error = _validate_video_path(request.query.get("path", ""))
         if error is not None:
             return error_response(400, error)

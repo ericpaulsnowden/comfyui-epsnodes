@@ -63,10 +63,12 @@ export const SETTINGS = [
     category: [CATEGORY, 'Library', 'Folder'],
     name: 'Library folder',
     tooltip:
-      'Absolute path of the shared library folder (holds loras.md and sets/). ' +
+      'Absolute path of the shared library folder: it holds your prompt ' +
+      'notebooks (loras.md and any other .md file), sets/, and ' +
+      'resolution_presets.json. ' +
       'May be a NAS/network path readable by every machine that shares it. ' +
-      'Leave empty for the per-user default. Lives server-side (FORMAT.md §1) ' +
-      'and can only be CHANGED from the machine ComfyUI runs on — a browser ' +
+      'Leave empty for the per-user default. The setting lives on the ' +
+      'machine ComfyUI runs on and can only be CHANGED there — a browser ' +
       'on another computer sees the value but defers to the host.',
     type: 'text',
     attrs: libraryDirAttrs,
@@ -79,8 +81,8 @@ export const SETTINGS = [
     name: 'Folder status',
     tooltip:
       'Whether the machine ComfyUI runs on can currently see the library ' +
-      'folder above. A missing/unreachable folder is otherwise invisible ' +
-      'until a node errors at run time (FORMAT.md §7.3).',
+      'folder above. A missing or unreachable folder is otherwise invisible ' +
+      'until a node fails at run time.',
     type: () => folderStatusRow(),
     defaultValue: ''
   },

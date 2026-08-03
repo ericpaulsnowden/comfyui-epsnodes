@@ -38,10 +38,26 @@ const REPO_URL = 'https://github.com/ericpaulsnowden/comfyui-epsnodes'
  * off. Never thrown, never blocking — a missing settings store just means no
  * warning (canvas mode stays the silent default).
  */
+/**
+ * Every class whose controls are hand-drawn on the canvas, and so vanish in
+ * Vue-nodes mode. The four switcher classes are read from
+ * `switcher.SWITCHER_CLASSES` rather than listed by hand: EPS Model / CLIP /
+ * VAE Switcher go through the SAME `switcher.js` `onDrawForeground` toggle
+ * drawing as EPS Switcher, so a hardcoded list silently missed them (they
+ * were added after this warning was written) and their users got the silent
+ * missing-toggles failure this toast exists to prevent. Adding a fifth
+ * switcher class to that registry now covers it here for free.
+ */
+const VUE_AFFECTED_CLASSES = new Set([
+  ...Object.keys(switcher.SWITCHER_CLASSES ?? {}),
+  'EPSDistributor',
+  'EPSResolution'
+])
+
 let vueModeWarned = false
 function warnIfVueNodesMode(node) {
   if (vueModeWarned) return
-  const AFFECTED = new Set(['EPSSwitcher', 'EPSDistributor', 'EPSResolution'])
+  const AFFECTED = VUE_AFFECTED_CLASSES
   const type = node?.comfyClass || node?.type
   if (!AFFECTED.has(type)) return
   let enabled = false
@@ -53,11 +69,12 @@ function warnIfVueNodesMode(node) {
   if (!enabled) return
   vueModeWarned = true
   const detail =
-    'EPS Switcher / Distributor / Resolution draw their controls (per-row ' +
-    'toggles, size readouts, double-click rename) directly on the node, and ' +
+    'EPS Switcher (image, model, CLIP, VAE), EPS Distributor and EPS ' +
+    'Resolution draw their controls (per-row toggles, size readouts, ' +
+    'double-click rename) directly on the node, and ' +
     "ComfyUI's New node design (beta) does not run that drawing yet. " +
     'To use them, turn OFF Settings > Lite Graph > "New node design (beta)" ' +
-    '(Comfy.VueNodes.Enabled) and reload. Full support is on the roadmap.'
+    '(Comfy.VueNodes.Enabled) and reload. Full support is planned.'
   console.warn(PREFIX, detail)
   try {
     app.extensionManager?.toast?.add?.({

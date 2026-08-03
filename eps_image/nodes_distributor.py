@@ -217,8 +217,10 @@ class EPSDistributor:
     ) * MAX_OUTPUTS
     FUNCTION = "distribute"
     DESCRIPTION = (
-        "One image in, up to 8 independently-toggleable images out -- a tee "
-        "with a per-branch gate. Every out_N carries the same image unless "
+        "One image in, up to sixteen independently-toggleable images out -- "
+        "a tee with a per-branch gate. A new output socket appears as you "
+        "wire up the last visible one, to a ceiling of sixteen. Every out_N "
+        "carries the same image unless "
         "its own toggle is off, in which case only the branch wired to "
         "that socket is skipped; the rest still see the image and run "
         "normally, all in a single pass. Turning every output off is a "

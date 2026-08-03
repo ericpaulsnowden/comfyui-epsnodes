@@ -66,11 +66,14 @@ class EPSFrameSaver:
     )
     FUNCTION = "run"
     DESCRIPTION = (
-        "Picks a video file by path and scrubs to a single frame, right on "
-        "the node, using play/pause/step controls or by typing a frame "
-        "number. Running the node outputs that exact frame as an image, "
-        "along with its width and height. The video file itself is never "
-        "copied into ComfyUI's input folder. The in-node preview is an "
+        "Needs a video file the ComfyUI machine can reach: this node reads "
+        "it in place by path and never copies it into ComfyUI's input "
+        "folder. Scrub to a single frame right on the node with the "
+        "play/pause/step controls or by typing a frame number; running the "
+        "node then outputs that exact frame as an image, along with its "
+        "width and height. Browse works only in a browser on the ComfyUI "
+        "machine -- from another computer, select the node and paste the "
+        "full path (Ctrl/Cmd+V). The in-node preview is an "
         "approximation for scrubbing; the output frame is always decoded "
         "fresh from the source file, so what you get matches the file, not "
         "the preview."
@@ -111,7 +114,9 @@ class EPSFrameSaver:
         path = str(video_path or "").strip()
         if not path:
             raise ValueError(
-                "EPS Frame Saver: no video_path set -- Browse for a video file first."
+                "EPS Frame Saver: no video chosen yet -- click Browse on the "
+                "node, or paste a full path onto it (Ctrl/Cmd+V) if you are "
+                "working from another machine."
             )
         tensor, width, height = video.extract_frame(path, int(frame))
         return (tensor, width, height)

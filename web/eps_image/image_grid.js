@@ -984,6 +984,12 @@ function addClearButton(node) {
   const widget = node.addWidget('button', CLEAR_BUTTON_LABEL, null, () => onClearClicked(node), {})
   // See file header "Clear button" -- the top-level flag, not options.serialize.
   widget.serialize = false
+  // Hover text for a frontend-added widget: `NodeTooltip.vue` prefers a
+  // canvas widget's own `.tooltip` over the node def's, which is the only
+  // route open here (the backend declares no input by this name).
+  widget.tooltip =
+    'Empty this node’s buffer and delete its collected image files. ' +
+    'Cannot be undone; only this node’s buffer is touched.'
 }
 
 // ---------------------------------------------------------------------------
@@ -1207,6 +1213,9 @@ function addAddImagesButton(node) {
     {}
   )
   widget.serialize = false
+  widget.tooltip =
+    'Add image files straight to the buffer without running the workflow. ' +
+    'Pick as many as you like; click again while it works to cancel.'
 }
 
 //: M3 ("Add folder..." -- roadmap risk #7, "Emit fan-out means 100
@@ -1288,6 +1297,10 @@ function addAddFolderButton(node) {
     {}
   )
   widget.serialize = false
+  widget.tooltip =
+    'Add every image in a folder (and its subfolders) to the buffer, in ' +
+    'name order. In Emit mode each buffered image becomes one downstream ' +
+    'run, so large folders are confirmed first.'
 }
 
 /**

@@ -1063,7 +1063,14 @@ function buildUi(state) {
       spellcheck: 'false'
     }
   })
-  state.saveBtn = el('button', { className: 'llnb-btn llnb-btn-save', text: 'Save' })
+  // DOM widgets are skipped by ComfyUI's own tooltip layer on purpose
+  // ("these use native browser tooltips" -- NodeTooltip.vue), so every
+  // control in this panel documents itself with a plain `title`.
+  state.saveBtn = el('button', {
+    className: 'llnb-btn llnb-btn-save',
+    text: 'Save',
+    attrs: { title: 'Write your edits back to the Markdown file on disk' }
+  })
   state.statusTextEl = el('div', { className: 'llnb-status-text' })
   state.statusActionsEl = el('div', { className: 'llnb-status-actions' })
   state.statusHintEl = el('div', { className: 'llnb-status-hint' })
@@ -1504,8 +1511,9 @@ function updateShareToggle(state) {
   state.shareToggleLabelEl.textContent = 'Share this folder with remote browsers'
   state.shareToggleLabelEl.title =
     `Lets a browser on another machine open notebooks in ${folder}. ` +
-    'Without this, opening this workflow from another machine reports a ' +
-    'FORMAT.md §2 error. Only this machine can grant it.'
+    'Without this, opening this workflow from another machine reports that ' +
+    'the file is outside the shared library folder. Only this machine can ' +
+    'grant it.'
 }
 
 /** Commits the share toggle. Re-reads /config afterwards so the toggle (and
@@ -3526,8 +3534,16 @@ function renderFooter(state) {
     state.deleteBtn = null
     requestAnimationFrame(() => input.focus())
   } else {
-    const newBtn = el('button', { className: 'llnb-btn', text: '＋ New' })
-    const deleteBtn = el('button', { className: 'llnb-btn', text: '🗑 Delete' })
+    const newBtn = el('button', {
+      className: 'llnb-btn',
+      text: '＋ New',
+      attrs: { title: 'Add a new prompt entry, or a new category heading, to this file' }
+    })
+    const deleteBtn = el('button', {
+      className: 'llnb-btn',
+      text: '🗑 Delete',
+      attrs: { title: 'Delete the selected entry from the file. Click twice to confirm.' }
+    })
     newBtn.addEventListener('click', () => openNewEntryRow(state))
     deleteBtn.addEventListener('click', () => onDeleteClick(state))
 

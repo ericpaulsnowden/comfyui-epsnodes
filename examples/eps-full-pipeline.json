@@ -363,7 +363,8 @@
         1024,
         "keep aspect (fit)",
         "bilinear",
-        0
+        0,
+        "[]"
       ]
     },
     {
@@ -434,12 +435,11 @@
         }
       ],
       "properties": {
-        "Node name for S&R": "EPSImageGrid",
-        "uuid": "67785727-ef0d-4021-866e-541e97a559c9"
+        "Node name for S&R": "EPSImageGrid"
       },
       "widgets_values": [
         "Collect",
-        "67785727-ef0d-4021-866e-541e97a559c9"
+        ""
       ]
     },
     {
@@ -629,7 +629,9 @@
       },
       "widgets_values": [
         null
-      ]
+      ],
+      "color": "#322",
+      "bgcolor": "#533"
     },
     {
       "id": 10,
@@ -1415,7 +1417,7 @@
       "outputs": [],
       "properties": {},
       "widgets_values": [
-        "# EPS full pipeline sample\n\nEvery EPSNodes capability in one graph. **Before running:**\n\n1. Pick a checkpoint (red node), your two images, and a video path on the Frame Saver.\n2. In the Prompt Notebook, ctrl/cmd+click to select 2+ prompts.\n3. In Apply LoRA Set, pick a saved state (make one with the Controller corner below).\n4. Run a few times in **Collect** to fill the grid, then flip the grid to **Emit** for the big run.\n\n**Run count = loras x 3 strengths (0.0/0.5/1.0) x grid images x prompts.** Start small; raise the sweep increment later. Output lands in `output/eps_demo/<lora_strength>/<prompt name>_*.png`."
+        "# EPS full pipeline sample\n\nEleven of the fifteen nodes stitched into one graph - the tour, not the\nstarting point. If you just want to see one node do its thing, the small\n`eps-test-*.json` files next to this one are quicker; the four switcher\nnodes (Checkpoint / Model / CLIP / VAE) only appear over there.\n\n**Before running:**\n\n1. Pick a checkpoint (red node), your two images, and a video path on the Frame Saver.\n2. In the Prompt Notebook, ctrl/cmd+click to select 2+ prompts.\n3. In Apply LoRA Set, pick a saved state (make one with the Controller corner below).\n4. Run a few times in **Collect** to fill the grid, then flip the grid to **Emit** for the big run.\n\n**Run count = loras x 3 strengths (0.0/0.5/1.0) x grid images x prompts.** Start small; raise the sweep increment later. Output lands in `output/eps_demo/<lora>_<strength>/<PromptName>_00001_.png`."
       ],
       "color": "#432",
       "bgcolor": "#653"
@@ -1530,7 +1532,7 @@
       "outputs": [],
       "properties": {},
       "widgets_values": [
-        "## 5. Cross Sweep -> generate\n\nSweep steps x pairs, strength-major: all pairs at 0.0, then 0.5, then 1.0. `save_prefix` -> SaveImage files each strength into its own folder: `eps_demo/<lora>_0.5/<PromptName>_00001_.png`. Fixed seed 42 repeats across runs (clean A/B); denoise 0.6 img2img so the input images matter."
+        "## 5. Cross Sweep -> generate\n\nSweep steps x pairs, strength-major: all pairs at 0.0, then 0.5, then 1.0. `save_prefix` -> SaveImage files each strength into its own folder: `output/eps_demo/<lora>_<strength>/<PromptName>_00001_.png`. Fixed seed 42 repeats across runs (clean A/B); denoise 0.6 img2img so the input images matter."
       ],
       "color": "#432",
       "bgcolor": "#653"
@@ -1646,7 +1648,7 @@
       "title": "Note",
       "properties": {},
       "widgets_values": [
-        "## 6. Distributor -> branches\n\nOne decoded result, several destinations, **one run**. `out_1` saves it (with Cross Sweep's folder path still driving the filename); `out_2` previews it; `out_3` is spare.\n\nClick a socket's checkbox to switch that branch off - only that branch is skipped, everything else still runs. Turn them all off and the queue still succeeds.\n\nThis is the opposite of the Switcher at step 1: the Switcher makes the graph run once **per image**, the Distributor routes one image several ways **inside** a single run.\n\nRight-click -> Properties -> `Outputs` for up to 8. It won't hide a socket that's still wired."
+        "## 6. Distributor -> branches\n\nOne decoded result, several destinations, **one run**. `out_1` saves it (with Cross Sweep's folder path still driving the filename); `out_2` previews it; `out_3` is spare.\n\nClick a socket's checkbox to switch that branch off - only that branch is skipped, everything else still runs. Turn them all off and the queue still succeeds.\n\nThis is the opposite of the Switcher at step 1: the Switcher makes the graph run once **per image**, the Distributor routes one image several ways **inside** a single run.\n\nRight-click -> Properties -> `Outputs` for up to sixteen. It won't hide a socket that's still wired."
       ],
       "color": "#432",
       "bgcolor": "#653"

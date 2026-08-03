@@ -1212,6 +1212,13 @@ function attachSizeGrid(node) {
 
     const canvasEl = document.createElement('canvas')
     canvasEl.className = 'eps-res-grid-canvas'
+    // DOM widgets are skipped by ComfyUI's own tooltip layer on purpose
+    // ("these use native browser tooltips" -- NodeTooltip.vue), so the pad
+    // documents itself with a plain `title`.
+    canvasEl.title =
+      'Drag inside the pad to set the target size. The readout above shows ' +
+      'width x height, the aspect ratio, and the megapixel count. ' +
+      'Drag the far edge of the node to make the pad bigger.'
 
     const domWidget = node.addDOMWidget(GRID_WIDGET_NAME, GRID_WIDGET_TYPE, canvasEl, {
       hideOnZoom: true,
@@ -2024,6 +2031,14 @@ function createPresetCombo(node, state) {
   })
   combo.label = PRESET_COMBO_LABEL
   combo.serialize = false // the workflow.json / widgets_values flag -- see file header's widget-order section
+  // Hover text. `NodeTooltip.vue` shows a canvas widget's own `.tooltip`
+  // ahead of the node def's (`widget.tooltip ?? translatedTooltip`), which
+  // is the only route open to a frontend-added widget -- the backend has no
+  // input by this name to hang a tooltip on.
+  combo.tooltip =
+    'Pick a saved size preset to fill in the fields below. ' +
+    'Shift/Ctrl/Cmd-click instead to tick SEVERAL presets: one Run then ' +
+    'resizes once per ticked preset, in the order you ticked them.'
 
   // SHIFT/Ctrl/Cmd -> the multi-select ContextMenu; plain click falls
   // through to the REAL stock ComboWidget.onClick, captured BEFORE
@@ -2055,6 +2070,10 @@ function createPresetCombo(node, state) {
 function createSaveButton(node) {
   const btn = node.addWidget('button', 'Save', null, () => openSaveDialog(node), {})
   btn.serialize = false
+  btn.tooltip =
+    'Save the fields below as a named size preset, stored in your library ' +
+    'folder so every machine sharing it sees the same presets. Saving over ' +
+    'an existing name replaces it.'
   return btn
 }
 
@@ -2075,6 +2094,9 @@ function createDeleteButton(node, state) {
     {}
   )
   btn.serialize = false
+  btn.tooltip =
+    'Delete the currently picked preset from your library folder. ' +
+    'Available only when exactly one preset is picked.'
   btn.disabled = true // no active preset yet -- updateDeleteEnabled() maintains this from here on
   return btn
 }

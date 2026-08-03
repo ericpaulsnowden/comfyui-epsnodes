@@ -421,7 +421,11 @@ def register(context: LibraryContext, routes: web.RouteTableDef) -> None:
         remote callers doesn't apply, since this drives desktop UI that only
         makes sense on the server's own machine."""
         if not request_is_loopback(request):
-            return error_response(403, "revealing folders is host-machine-only — FORMAT.md §5")
+            return error_response(
+                403,
+                "opening a folder only works in a browser on the machine "
+                "ComfyUI runs on",
+            )
         try:
             body = await request.json()
         except Exception:  # broad: malformed body is a client error

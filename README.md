@@ -5,7 +5,7 @@ live in **plain files you own**. Everything appears under **EPSNodes** in
 the node browser and Settings. It started as a LoRA family and has grown
 beyond it — image-flow utilities now live here too.
 
-## The eleven nodes
+## The fifteen nodes
 
 No third-party packs required — every node here runs on ComfyUI alone,
 except the Lora Loader State Controller, which is built to extend
@@ -31,22 +31,26 @@ section further down; this is the map.
 | [**EPS Frame Saver**](#eps-frame-saver-shipped) | Loads a video by path, lets you scrub or play to a frame, and outputs that frame as an image. | A video file on the ComfyUI machine. |
 
 > **Status: pre-release.** Contracts live in
-> [docs/FORMAT.md](docs/FORMAT.md). Want to see everything working
-> together? Load
-> [examples/eps-full-pipeline.json](examples/eps-full-pipeline.json) —
-> all eleven nodes stitched into one annotated workflow — or one of the three
-> ready-to-run test graphs beside it ([examples/](examples/)).
+> [docs/FORMAT.md](docs/FORMAT.md). Want to see the nodes working? Every
+> workflow in [examples/](examples/) is annotated on the canvas and ready
+> to load — nine example files between them cover all fifteen nodes, some
+> sharing a graph. Most just want a Run; the LoRA trio (Apply LoRA Set,
+> LoRA Sweep, and the rgthree-dependent Lora Loader State Controller) only
+> shows up in `eps-test-cross-sweep.json` and `eps-full-pipeline.json`,
+> which need a real checkpoint and a saved LoRA state to actually generate.
+> See [examples/README.md](examples/README.md) for which need setup and
+> which just want a Run.
 
 ## A note on ComfyUI's "New node design (beta)"
 
 ComfyUI is rolling out a new way of drawing nodes (Settings → search "new
 node design", the `Comfy.VueNodes` option — the app may prompt you to try
 it). Several EPS controls are **drawn directly on the node** — the per-row
-toggles on the Switcher and Distributor, the Resolution size readouts, the
+toggles on all four Switchers and the Distributor, the Resolution size readouts, the
 double-click renames — and the new design **does not run that drawing yet**,
 so those controls disappear while it's on. Nothing errors; they're just gone.
 The pack now shows a one-time warning when it notices, and the fix is to turn
-the option off and reload. Full support for the new design is on the roadmap.
+the option off and reload. Full support for the new design is planned.
 
 Worth knowing: the prompt appears **per browser**, so two machines pointed at
 the same ComfyUI can end up in different modes — if the nodes look right on
@@ -537,7 +541,7 @@ images × 4 prompts = 8 runs, not 4.
 of image/prompt pairs** — 11 strengths × 8 pairs = 88 runs, grouped by
 strength, each landing in its own folder.
 
-**Model iteration (v0.46.0):** wire the [EPS Checkpoint
+**Model iteration:** wire the [EPS Checkpoint
 Switcher](#eps-checkpoint-switcher-shipped)'s `model`/`clip`/`vae`/`label`
 into this node's sweep side, and either Cross Product pairs or **just a
 multi-select Prompt Notebook's `text`** (leave `image` unwired for txt2img)
@@ -598,7 +602,9 @@ See [docs/INSTALL.md](docs/INSTALL.md). Short version: clone into
 
 ## The library folder
 
-Everything lives in one folder — `loras.md` plus `sets/*.json` (your prompt notebook + saved lora states) — configured
+Everything lives in one folder — `*.md` prompt notebooks (`loras.md` is
+just the default one), `sets/*.json` (saved lora states), and
+`resolution_presets.json` (saved size presets) — configured
 in **Settings → EPSNodes → Library folder** (server-side, so every
 browser sees the same value). Point it at a shared/NAS path to use the same
 library from multiple machines. This pack's HTTP routes (library browse/

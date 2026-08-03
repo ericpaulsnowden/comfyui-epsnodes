@@ -1183,6 +1183,13 @@ function addHeaderWidget(node) {
     name: HEADER_WIDGET_NAME,
     type: 'custom',
     value: null,
+    // Hover text. `NodeTooltip.vue` prefers a canvas widget's own
+    // `.tooltip` over the node def's, which is the only route open to a
+    // frontend-added widget like this one.
+    tooltip:
+      'Turn every output row on or off at once. A row that is off skips ' +
+      'only the branch wired to that socket; the other branches still run, ' +
+      'in the same single pass.',
     // Presentation-only control -- never persisted, never sent to the
     // backend (the real enabled-set lives in the `toggles` widget above).
     serialize: false,

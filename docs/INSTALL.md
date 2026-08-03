@@ -3,7 +3,9 @@
 ## Requirements
 
 - ComfyUI (a 2025+ build; the pack is developed against current ComfyUI).
-- Nothing else — no pip dependencies.
+- Nothing else — no pip dependencies. (`EPS Frame Saver` decodes video with
+  PyAV, which ComfyUI already installs as one of its own requirements, so
+  there is still nothing extra to install.)
 - Optional: [rgthree-comfy](https://github.com/rgthree/rgthree-comfy), only
   if you want the `EPS Lora Loader State Controller` to drive a Power Lora Loader. The
   rest of the pack works without it.

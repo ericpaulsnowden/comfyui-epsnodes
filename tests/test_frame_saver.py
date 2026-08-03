@@ -302,14 +302,21 @@ class TestRun:
         assert image.shape == first.shape
 
     def test_empty_video_path_raises_value_error_naming_it(self) -> None:
+        # The message must name the NODE (that is what the user sees in the
+        # queue error) and say what to do next. It deliberately does NOT name
+        # the `video_path` widget: that widget is hidden behind this node's
+        # own path bar, so naming it would send the reader looking for a
+        # control that isn't on screen.
         node = EPSFrameSaver()
-        with pytest.raises(ValueError, match="video_path"):
+        with pytest.raises(ValueError, match="EPS Frame Saver") as excinfo:
             node.run(video_path="", frame=0)
+        assert "Browse" in str(excinfo.value)
 
     def test_whitespace_only_video_path_raises_value_error(self) -> None:
         node = EPSFrameSaver()
-        with pytest.raises(ValueError, match="video_path"):
+        with pytest.raises(ValueError, match="EPS Frame Saver") as excinfo:
             node.run(video_path="   ", frame=0)
+        assert "Browse" in str(excinfo.value)
 
     def test_nonexistent_video_path_raises_value_error_naming_the_path(self) -> None:
         node = EPSFrameSaver()

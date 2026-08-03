@@ -1,0 +1,19 @@
+{
+  "format": 1,
+  "presets": {
+    "Square 1024": {
+      "width": 1024,
+      "height": 1024,
+      "resize_method": "stretch",
+      "interpolation": "bilinear",
+      "multiple_of": 0
+    },
+    "Portrait 832": {
+      "width": 832,
+      "height": 1216,
+      "resize_method": "crop to fill",
+      "interpolation": "lanczos",
+      "multiple_of": 64
+    }
+  }
+}

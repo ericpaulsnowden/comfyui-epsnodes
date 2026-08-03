@@ -421,12 +421,70 @@ function imageInputEntries(node) {
   return entries
 }
 
+/**
+ * The node-def store's `nodeDefsByName`, or `null` when the frontend
+ * internals have moved. Same access path (and same "never throw, just give
+ * up") contract as `web/lora_library/controller.js`'s
+ * `_fixLibraryDisplayName`, which has been live-verified on the rig.
+ */
+let cachedNodeDefsByName = null
+function nodeDefsByName() {
+  if (cachedNodeDefsByName) return cachedNodeDefsByName
+  try {
+    const el = document.querySelector('#vue-app') || document.querySelector('#app')
+    const vue = el && el.__vue_app__
+    const pinia = vue?.config?.globalProperties?.$pinia
+    cachedNodeDefsByName = pinia?.state?.value?.nodeDef?.nodeDefsByName || null
+    return cachedNodeDefsByName
+  } catch {
+    return null // no DOM (tests under Node) or the internals moved
+  }
+}
+
+/**
+ * Gives a GROWN socket (`image_2`, `model_3`, ...) the same hover tooltip
+ * slot 1 already has.
+ *
+ * The frontend's `NodeTooltip.vue` resolves an input tooltip by NAME off the
+ * node DEF (`nodeDef?.inputs[inputName]?.tooltip`), never off the litegraph
+ * slot -- so setting `input.tooltip` here would do nothing. The backend only
+ * declares `<prefix>_1` (every later slot is synthesized on demand by
+ * `nodes_switcher.py`'s `_FlexibleOptionalImageInputs`), which left every
+ * socket except the first with no tooltip at all.
+ *
+ * `ComfyNodeDefImpl.inputs` is the V2 view built once in the constructor
+ * (`nodeDefStore.ts`); node CONSTRUCTION reads the separate V1 `input`
+ * object, so adding a key here cannot add a socket to a freshly dropped
+ * node. Verified against comfyui_frontend_package's own bundled TS source.
+ *
+ * Fully guarded: if any of that moves, the socket simply keeps today's
+ * no-tooltip behavior.
+ */
+function mirrorSlotTooltip(node, name) {
+  const spec = switcherSpecOf(node)
+  if (!spec) return
+  try {
+    const defs = nodeDefsByName()
+    const def = defs && defs[node.comfyClass || node.type]
+    const inputs = def && def.inputs
+    if (!inputs) return
+    if (inputs[name]) return
+    const first = inputs[`${spec.prefix}_1`]
+    if (!first || !first.tooltip) return
+    inputs[name] = { ...first, name }
+  } catch (error) {
+    console.warn(PREFIX, 'could not mirror the slot tooltip onto', name, error)
+  }
+}
+
 function addImageInput(node, n, template) {
   const spec = switcherSpecOf(node)
   const prefix = spec ? spec.prefix : 'image'
   const type = template?.type ?? (spec ? spec.type : 'IMAGE')
   const extraInfo = template && template.shape !== undefined ? { shape: template.shape } : undefined
-  return node.addInput(`${prefix}_${n}`, type, extraInfo)
+  const name = `${prefix}_${n}`
+  if (n > 1) mirrorSlotTooltip(node, name)
+  return node.addInput(name, type, extraInfo)
 }
 
 /**
@@ -467,6 +525,12 @@ function convergeImageInputs(node) {
     const removeIdxs = trailingEmpties.map((entry) => entry.idx).sort((a, b) => b - a)
     for (const idx of removeIdxs) node.removeInput(idx)
     addImageInput(node, desiredSpareN, entries[0].input)
+  }
+
+  // Slots restored from a saved workflow never went through addImageInput,
+  // so mirror the tooltip onto them here too (idempotent + memoized).
+  for (const entry of entries) {
+    if (entry.n > 1) mirrorSlotTooltip(node, entry.name)
   }
 
   pruneToggles(node)
@@ -716,6 +780,13 @@ function addHeaderWidget(node) {
     name: HEADER_WIDGET_NAME,
     type: 'custom',
     value: null,
+    // Hover text. `NodeTooltip.vue` prefers a canvas widget's own
+    // `.tooltip` over the node def's, which is the only route open to a
+    // frontend-added widget like this one.
+    tooltip:
+      `Turn every ${noun.toLowerCase()} row on or off at once. ` +
+      'The count beside it is how many rows are on right now — that is how ' +
+      'many times the rest of the workflow will run.',
     // Presentation-only control -- never persisted, never sent to the
     // backend (the real enabled-set lives in the `toggles` widget above).
     serialize: false,

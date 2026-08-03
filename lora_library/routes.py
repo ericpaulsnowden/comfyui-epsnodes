@@ -917,7 +917,11 @@ def register_core(context: LibraryContext, routes: web.RouteTableDef) -> None:
         rather than an actual filesystem path.
         """
         if FS_LIST_LOCAL_ONLY and not request_is_loopback(request):
-            return error_response(403, "file browsing is host-machine-only — FORMAT.md §5")
+            return error_response(
+                403,
+                "browsing the server's folders only works in a browser on the "
+                "machine ComfyUI runs on — type or paste the full path instead",
+            )
         raw = (request.query.get("dir") or "").strip()
         windows = _is_windows()
         if raw == ROOTS:
@@ -997,7 +1001,11 @@ def register_core(context: LibraryContext, routes: web.RouteTableDef) -> None:
         # Changing library_dir moves the very boundary §2 enforces for
         # remote callers, so only the local machine may change it.
         if not request_is_loopback(request):
-            return error_response(403, "library folder can only be changed locally — FORMAT.md §2")
+            return error_response(
+                403,
+                "the library folder can only be changed from the machine "
+                "ComfyUI runs on",
+            )
         try:
             body = await request.json()
         except Exception:

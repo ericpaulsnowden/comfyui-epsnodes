@@ -1,0 +1,357 @@
+{
+  "id": "00000000-0000-0000-0000-000000000000",
+  "revision": 0,
+  "last_node_id": 6,
+  "last_link_id": 2,
+  "nodes": [
+    {
+      "id": 1,
+      "type": "LoadImage",
+      "pos": [
+        0,
+        40
+      ],
+      "size": [
+        274,
+        314
+      ],
+      "flags": {},
+      "order": 0,
+      "mode": 0,
+      "inputs": [
+        {
+          "localized_name": "image",
+          "name": "image",
+          "type": "COMBO",
+          "widget": {
+            "name": "image"
+          },
+          "link": null
+        }
+      ],
+      "outputs": [
+        {
+          "localized_name": "IMAGE",
+          "name": "IMAGE",
+          "type": "IMAGE",
+          "links": [
+            1
+          ]
+        },
+        {
+          "localized_name": "MASK",
+          "name": "MASK",
+          "type": "MASK",
+          "links": null
+        }
+      ],
+      "title": "Swap in any picture of your own",
+      "properties": {
+        "Node name for S&R": "LoadImage"
+      },
+      "widgets_values": [
+        "example.png"
+      ]
+    },
+    {
+      "id": 2,
+      "type": "EPSResolution",
+      "pos": [
+        360,
+        40
+      ],
+      "size": [
+        340,
+        430
+      ],
+      "flags": {},
+      "order": 1,
+      "mode": 0,
+      "inputs": [
+        {
+          "localized_name": "image",
+          "name": "image",
+          "shape": 7,
+          "type": "IMAGE",
+          "link": 1
+        },
+        {
+          "localized_name": "width",
+          "name": "width",
+          "type": "INT",
+          "widget": {
+            "name": "width"
+          },
+          "link": null
+        },
+        {
+          "localized_name": "height",
+          "name": "height",
+          "type": "INT",
+          "widget": {
+            "name": "height"
+          },
+          "link": null
+        },
+        {
+          "localized_name": "resize_method",
+          "name": "resize_method",
+          "type": "COMBO",
+          "widget": {
+            "name": "resize_method"
+          },
+          "link": null
+        },
+        {
+          "localized_name": "interpolation",
+          "name": "interpolation",
+          "type": "COMBO",
+          "widget": {
+            "name": "interpolation"
+          },
+          "link": null
+        },
+        {
+          "localized_name": "multiple_of",
+          "name": "multiple_of",
+          "type": "INT",
+          "widget": {
+            "name": "multiple_of"
+          },
+          "link": null
+        },
+        {
+          "localized_name": "presets",
+          "name": "presets",
+          "shape": 7,
+          "type": "STRING",
+          "widget": {
+            "name": "presets"
+          },
+          "link": null
+        }
+      ],
+      "outputs": [
+        {
+          "localized_name": "image",
+          "name": "image",
+          "type": "IMAGE",
+          "links": null
+        },
+        {
+          "localized_name": "resized_image",
+          "name": "resized_image",
+          "type": "IMAGE",
+          "links": [
+            2
+          ]
+        },
+        {
+          "localized_name": "width",
+          "name": "width",
+          "type": "INT",
+          "links": null
+        },
+        {
+          "localized_name": "height",
+          "name": "height",
+          "type": "INT",
+          "links": null
+        }
+      ],
+      "properties": {
+        "Show passthrough image": false,
+        "Show original size": false,
+        "Show grid": true,
+        "Grid max": 2048,
+        "Node name for S&R": "EPSResolution"
+      },
+      "widgets_values": [
+        1024,
+        1024,
+        "stretch",
+        "bilinear",
+        0,
+        "[]"
+      ]
+    },
+    {
+      "id": 3,
+      "type": "SaveImage",
+      "pos": [
+        780,
+        40
+      ],
+      "size": [
+        300,
+        270
+      ],
+      "flags": {},
+      "order": 2,
+      "mode": 0,
+      "inputs": [
+        {
+          "localized_name": "images",
+          "name": "images",
+          "type": "IMAGE",
+          "link": 2
+        },
+        {
+          "localized_name": "filename_prefix",
+          "name": "filename_prefix",
+          "type": "STRING",
+          "widget": {
+            "name": "filename_prefix"
+          },
+          "link": null
+        }
+      ],
+      "outputs": [],
+      "properties": {
+        "Node name for S&R": "SaveImage"
+      },
+      "widgets_values": [
+        "eps_restest/size"
+      ]
+    },
+    {
+      "id": 4,
+      "type": "MarkdownNote",
+      "pos": [
+        -40,
+        -900
+      ],
+      "size": [
+        900,
+        840
+      ],
+      "flags": {},
+      "order": 3,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [],
+      "title": "Note",
+      "properties": {},
+      "widgets_values": [
+        "# TEST: EPS Resolution - one node for the resize, and sizes you can save\n\n**Just press Run.** No checkpoint, no lora, no GPU. It loads a picture,\nresizes it to 1024 x 1024 and saves the result. A second, maybe.\n\nOne node does the resize *and* reports the numbers, so you are not wiring up\na resize node, a reroute and a get-size node to do one obvious thing.\n\n## Pass 1 - the basics\n\nRun once as it ships: `output/eps_restest/size_00001_.png`, 1024 x 1024,\nsquashed. Squashed is what **stretch** means.\n\nNow try each of these and Run again:\n\n- **resize_method -> keep aspect (fit)** - fits inside the box, no squash.\n- **crop to fill** - fills the box and trims the overflow.\n- **pad** - fits inside the box and fills the gap with black.\n- **height -> 0** - leave width at 1024 and the height works itself out from\n  the picture's own shape. Both at 0 keeps the original size.\n- **multiple_of -> 64** - rounds the result to a number samplers are happy\n  with. This is the setting that heads off \"your image is 1023 pixels tall\"\n  before it happens.\n\nDrag inside the pad on the node to set width and height by feel. The readout\nabove it shows `W x H`, the aspect ratio and the megapixels while you drag.\n\n## Pass 2 - presets, which is the actual point\n\nSet a size you like and press **Save** on the node. Give it a name. It now\nlives in your library folder next to your prompt notebooks and lora sets, so\nevery machine sharing that folder has it.\n\nNow tick **more than one** preset and press Run **once**.\n\nYou get one picture per ticked preset, out of a single queue. Two presets,\ntwo files. Five, five. Same source, same everything else - just every size\nyou care about, in one go. That is the whole reason to save sizes rather\nthan retype them.\n\n**This workflow ships with nothing ticked**, so it runs on a fresh install\nwithout you setting anything up first.\n\nIf you would rather not type presets in, `eps-resolution-test-presets.json`\nsits next to this file with two ready-made ones (`Square 1024` and\n`Portrait 832`). That one is **not a workflow** - do not drag it onto the\ncanvas. If you have no `resolution_presets.json` in your library folder yet,\ncopy it in there under that name. **If you already have one, do\nnot overwrite it** - just make the two by hand with Save. It takes ten\nseconds and you will not lose the presets you already had.\n\n## The one gotcha\n\nA ticked preset that no longer exists **fails the run**, on purpose, with a\nmessage naming it. That is deliberate: quietly falling back to some other\nsize would mean shipping the wrong pictures and never finding out. If you\nrenamed or deleted a preset on another machine, untick it here.\n\n## Hiding in Properties\n\nRight-click the node -> Properties.\n\n- **Show passthrough image** brings back the untouched original on the first\n  output, for when you want both sizes downstream.\n- **Show original size** adds the before-resize width and height as two more\n  outputs.\n- **Show grid** and **Grid max** control the drag pad.\n\nBoth extra outputs are off here to keep the node small.\n"
+      ],
+      "color": "#432",
+      "bgcolor": "#653"
+    },
+    {
+      "id": 5,
+      "type": "MarkdownNote",
+      "pos": [
+        360,
+        510
+      ],
+      "size": [
+        340,
+        250
+      ],
+      "flags": {},
+      "order": 4,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [],
+      "title": "Note",
+      "properties": {},
+      "widgets_values": [
+        "## What comes out\n\n`resized_image` is the one you want - it is wired to Save Image.\n\n`width` and `height` are the size *after* the resize, ready to feed an Empty\nLatent or a note-to-self. Wire them somewhere and you never have to do the\narithmetic yourself.\n\nThe first output, `image`, is the original untouched - hidden here to keep\nthe node tidy. Turn it back on in Properties if you want both.\n"
+      ],
+      "color": "#432",
+      "bgcolor": "#653"
+    },
+    {
+      "id": 6,
+      "type": "MarkdownNote",
+      "pos": [
+        780,
+        340
+      ],
+      "size": [
+        300,
+        220
+      ],
+      "flags": {},
+      "order": 5,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [],
+      "title": "Note",
+      "properties": {},
+      "widgets_values": [
+        "## One preset in, one file out\n\nNothing ticked - which is how this ships - means one run at whatever width\nand height the widgets say.\n\nTick two presets and this same Save Image writes two files from one Run, one\nper size. Tick five and you get five. The node fans out; nothing downstream\nhas to know.\n"
+      ],
+      "color": "#432",
+      "bgcolor": "#653"
+    }
+  ],
+  "links": [
+    [
+      1,
+      1,
+      0,
+      2,
+      0,
+      "IMAGE"
+    ],
+    [
+      2,
+      2,
+      1,
+      3,
+      0,
+      "IMAGE"
+    ]
+  ],
+  "groups": [
+    {
+      "id": 1,
+      "title": "1 - A picture to resize",
+      "bounding": [
+        -20,
+        -10,
+        320,
+        400
+      ],
+      "color": "#3f789e",
+      "flags": {}
+    },
+    {
+      "id": 2,
+      "title": "2 - Size it, or size it several ways at once",
+      "bounding": [
+        340,
+        -10,
+        380,
+        790
+      ],
+      "color": "#8A8",
+      "flags": {}
+    },
+    {
+      "id": 3,
+      "title": "3 - One file per size",
+      "bounding": [
+        760,
+        -10,
+        340,
+        590
+      ],
+      "color": "#b58b2a",
+      "flags": {}
+    }
+  ],
+  "config": {},
+  "extra": {
+    "ds": {
+      "scale": 0.6,
+      "offset": [
+        140,
+        980
+      ]
+    }
+  },
+  "version": 0.4
+}

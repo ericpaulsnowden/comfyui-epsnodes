@@ -1,0 +1,310 @@
+{
+  "id": "00000000-0000-0000-0000-000000000000",
+  "revision": 0,
+  "last_node_id": 6,
+  "last_link_id": 2,
+  "nodes": [
+    {
+      "id": 1,
+      "type": "LoadImage",
+      "pos": [
+        0,
+        40
+      ],
+      "size": [
+        274,
+        314
+      ],
+      "flags": {},
+      "order": 0,
+      "mode": 0,
+      "inputs": [
+        {
+          "localized_name": "image",
+          "name": "image",
+          "type": "COMBO",
+          "widget": {
+            "name": "image"
+          },
+          "link": null
+        }
+      ],
+      "outputs": [
+        {
+          "localized_name": "IMAGE",
+          "name": "IMAGE",
+          "type": "IMAGE",
+          "links": [
+            1
+          ]
+        },
+        {
+          "localized_name": "MASK",
+          "name": "MASK",
+          "type": "MASK",
+          "links": null
+        }
+      ],
+      "title": "Any picture - swap it between runs",
+      "properties": {
+        "Node name for S&R": "LoadImage"
+      },
+      "widgets_values": [
+        "example.png"
+      ]
+    },
+    {
+      "id": 2,
+      "type": "EPSImageGrid",
+      "pos": [
+        360,
+        40
+      ],
+      "size": [
+        340,
+        420
+      ],
+      "flags": {},
+      "order": 1,
+      "mode": 0,
+      "inputs": [
+        {
+          "localized_name": "image",
+          "name": "image",
+          "shape": 7,
+          "type": "IMAGE",
+          "link": 1
+        },
+        {
+          "localized_name": "mode",
+          "name": "mode",
+          "type": "COMBO",
+          "widget": {
+            "name": "mode"
+          },
+          "link": null
+        },
+        {
+          "localized_name": "grid_uuid",
+          "name": "grid_uuid",
+          "shape": 7,
+          "type": "STRING",
+          "widget": {
+            "name": "grid_uuid"
+          },
+          "link": null
+        }
+      ],
+      "outputs": [
+        {
+          "localized_name": "image",
+          "name": "image",
+          "shape": 6,
+          "type": "IMAGE",
+          "links": [
+            2
+          ]
+        },
+        {
+          "localized_name": "width",
+          "name": "width",
+          "shape": 6,
+          "type": "INT",
+          "links": null
+        },
+        {
+          "localized_name": "height",
+          "name": "height",
+          "shape": 6,
+          "type": "INT",
+          "links": null
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "EPSImageGrid"
+      },
+      "widgets_values": [
+        "Collect",
+        ""
+      ]
+    },
+    {
+      "id": 3,
+      "type": "SaveImage",
+      "pos": [
+        780,
+        40
+      ],
+      "size": [
+        300,
+        270
+      ],
+      "flags": {},
+      "order": 2,
+      "mode": 0,
+      "inputs": [
+        {
+          "localized_name": "images",
+          "name": "images",
+          "type": "IMAGE",
+          "link": 2
+        },
+        {
+          "localized_name": "filename_prefix",
+          "name": "filename_prefix",
+          "type": "STRING",
+          "widget": {
+            "name": "filename_prefix"
+          },
+          "link": null
+        }
+      ],
+      "outputs": [],
+      "properties": {
+        "Node name for S&R": "SaveImage"
+      },
+      "widgets_values": [
+        "eps_gridtest/frame"
+      ]
+    },
+    {
+      "id": 4,
+      "type": "MarkdownNote",
+      "pos": [
+        -40,
+        -700
+      ],
+      "size": [
+        880,
+        640
+      ],
+      "flags": {},
+      "order": 3,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [],
+      "title": "Note",
+      "properties": {},
+      "widgets_values": [
+        "# TEST: EPS Image Grid - a pile of pictures that survives between runs\n\n**Just press Run.** No checkpoint, no lora, no GPU, no setup - it loads one\nimage, drops a copy in the grid's buffer, and saves it. Takes a second.\n\nThe point of this node: normally a workflow only knows about the picture you\nhand it *this* run. The Image Grid remembers every picture you have fed it,\nrun after run, and can hand the whole pile back later. The buffer lives on\ndisk, so quitting ComfyUI does not lose it.\n\n## Pass 1 - collect three (about thirty seconds)\n\nThe node ships in **Collect** mode. Press **Run**. Then pick a different\npicture in the Load Image node and Run again. Then a third. Three runs.\n\n- Three thumbnails appear on the node.\n- Three files in `output/eps_gridtest/`.\n\nOne picture in, one picture out, every time. Collect passes **only the\npicture you just fed in** downstream - the buffer is a side effect, not the\noutput.\n\n## Pass 2 - flip to Emit (the real trick)\n\nChange **mode** to **Emit** and press Run **once**.\n\nYou get **four** files this time, not one. Emit sends the whole buffer\ndownstream in the order you collected it, and adds whatever is wired in\nright now on the end. Three collected + one wired = four, out of one Run.\n\nThat is the whole feature: gather things over a morning, fan them all out in\none go.\n\n## Pass 3 - restart and prove it stuck\n\nQuit ComfyUI. Start it again. Load this workflow, leave it on **Emit**, Run.\nStill four files. The buffer is not stored in the workflow - it is on disk,\ntied to this node.\n\n## Pass 4 - clear it\n\nPress **Clear** on the node. Thumbnails go, buffer goes, and an Emit run now\npasses through only the one wired picture again.\n\n## Worth knowing\n\n- **Add images...** and **Add folder...** on the node load straight into the\n  buffer without running anything. Handy for pointing it at a folder of\n  references you already have.\n- The node ships with an **empty** id on purpose. The first time it loads it\n  makes its own. That is why two copies of this workflow do not end up\n  fighting over one buffer - and why you should never type an id in by hand.\n- There is no size cap on the buffer. It is your disk, so keep half an eye on\n  it if you are collecting big pictures.\n"
+      ],
+      "color": "#432",
+      "bgcolor": "#653"
+    },
+    {
+      "id": 5,
+      "type": "MarkdownNote",
+      "pos": [
+        360,
+        500
+      ],
+      "size": [
+        340,
+        240
+      ],
+      "flags": {},
+      "order": 4,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [],
+      "title": "Note",
+      "properties": {},
+      "widgets_values": [
+        "## Collect vs Emit\n\n**Collect** - this run's picture goes downstream, *and* into the pile.\n\n**Emit** - the whole pile goes downstream, this run's picture last.\n\nEverything else on the node is buffer housekeeping: the thumbnails, **Clear**,\nand the two bulk **Add** buttons. Click a thumbnail to see it big; a\nthumbnail has its own little remove button.\n"
+      ],
+      "color": "#432",
+      "bgcolor": "#653"
+    },
+    {
+      "id": 6,
+      "type": "MarkdownNote",
+      "pos": [
+        780,
+        340
+      ],
+      "size": [
+        300,
+        210
+      ],
+      "flags": {},
+      "order": 5,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [],
+      "title": "Note",
+      "properties": {},
+      "widgets_values": [
+        "## Count the files, not the thumbnails\n\nYou get `eps_gridtest/frame_00001_.png`, `_00002_`, and so on.\n\nIn **Collect** mode that is one new file per Run.\n\nIn **Emit** mode it is one file per buffered picture, plus one for whatever\nis wired in. Same graph, same Run button - the mode is the only thing that\nchanged.\n"
+      ],
+      "color": "#432",
+      "bgcolor": "#653"
+    }
+  ],
+  "links": [
+    [
+      1,
+      1,
+      0,
+      2,
+      0,
+      "IMAGE"
+    ],
+    [
+      2,
+      2,
+      0,
+      3,
+      0,
+      "IMAGE"
+    ]
+  ],
+  "groups": [
+    {
+      "id": 1,
+      "title": "1 - One picture in",
+      "bounding": [
+        -20,
+        -10,
+        320,
+        400
+      ],
+      "color": "#3f789e",
+      "flags": {}
+    },
+    {
+      "id": 2,
+      "title": "2 - The pile that remembers",
+      "bounding": [
+        340,
+        -10,
+        380,
+        770
+      ],
+      "color": "#8A8",
+      "flags": {}
+    },
+    {
+      "id": 3,
+      "title": "3 - Straight out to disk",
+      "bounding": [
+        760,
+        -10,
+        340,
+        580
+      ],
+      "color": "#b58b2a",
+      "flags": {}
+    }
+  ],
+  "config": {},
+  "extra": {
+    "ds": {
+      "scale": 0.6,
+      "offset": [
+        140,
+        780
+      ]
+    }
+  },
+  "version": 0.4
+}

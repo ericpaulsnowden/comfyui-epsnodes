@@ -1747,8 +1747,12 @@ export function registerControllerNode() {
       // `title` — see _fixLibraryDisplayName below), so without this the
       // entry says "Frontend only node for LoraLibrarySetController".
       static description =
-        'Drives a Power Lora Loader (rgthree): capture its rows as named ' +
-        'states, re-apply or push them, and keep EPS Apply LoRA Set nodes in sync.'
+        'Needs rgthree-comfy: this node drives a Power Lora Loader rather ' +
+        'than loading loras itself, and does nothing without one in the ' +
+        'workflow. Capture that loader’s current rows as a named state, ' +
+        'apply a saved state back onto it, or push a state to every EPS ' +
+        'Apply LoRA Set node at once. States are plain JSON files in your ' +
+        'library folder. This node never runs at queue time.'
 
       constructor(title = NODE_TITLE) {
         super(title)
@@ -1916,6 +1920,14 @@ export function registerControllerNode() {
           () => this._guarded('target changed', () => this._probeAndUpdateStatus()),
           { values: () => this._targetComboValues() }
         )
+        // Canvas-widget hover text. This node is frontend-only, so it has no
+        // backend def to hang input tooltips on; `NodeTooltip.vue` reads a
+        // widget's own `.tooltip` first, which is the only route available.
+        this._w.target.tooltip =
+          'Which Power Lora Loader in this workflow the buttons act on. ' +
+          'Picked automatically when there is exactly one. With two or ' +
+          'more, "All Power Lora Loaders" captures and applies each one ' +
+          'separately, keeping their configs apart.'
 
         // FORMAT.md §6.3 TWO-PANE layout (owner ask 2026-07-21): the `set`
         // COMBO and its on-canvas dropdown are gone — state selection is now
@@ -1936,6 +1948,10 @@ export function registerControllerNode() {
         this._w.set.options = { ...(this._w.set.options || {}), hidden: true }
 
         this._w.name = this.addWidget('text', 'name', '', () => {}, {})
+        this._w.name.tooltip =
+          'The name for the next New State, and the name of the state ' +
+          'selected on the left. Edit it, then Save State to rename that ' +
+          'state. Leave it empty and New State numbers one for you.'
 
         // Read-only status line. VERIFY(live) FINDING, confirmed against the
         // live litegraph build: setting `.disabled = true` on a plain 'text'
@@ -1980,8 +1996,9 @@ export function registerControllerNode() {
        * (`_guarded()`'s own doc comment). Replaces the removed
        * `_addButton()`, which built a canvas `'button'`-type widget instead.
        */
-      _createActionButton(className, label, onClick) {
-        const button = el('button', { className, text: label })
+      _createActionButton(className, label, onClick, title) {
+        const attrs = title ? { title } : undefined
+        const button = el('button', { className, text: label, attrs })
         button.addEventListener('click', () => this._guarded(`${label} click`, onClick))
         return button
       }
@@ -2007,17 +2024,43 @@ export function registerControllerNode() {
         this._pane.listEl = el('div', { className: 'llsc-list' })
         const leftPane = el('div', { className: 'llsc-pane-left' }, [this._pane.listEl])
 
-        this._w.captureBtn = this._createActionButton('llsc-btn', LABEL_CAPTURE, () => this._onCaptureClick())
-        this._w.updateBtn = this._createActionButton('llsc-btn', LABEL_UPDATE, () => this._onUpdateClick())
-        this._w.deleteBtn = this._createActionButton('llsc-btn llsc-btn-danger', LABEL_DELETE, () =>
-          this._onDeleteClick()
+        // DOM widgets are skipped by ComfyUI's own tooltip layer on purpose
+        // ("these use native browser tooltips" -- NodeTooltip.vue), so each
+        // action button carries its own `title`.
+        this._w.captureBtn = this._createActionButton(
+          'llsc-btn',
+          LABEL_CAPTURE,
+          () => this._onCaptureClick(),
+          'Save the target Power Lora Loader’s current loras as a NEW state, ' +
+            'named from the field above. Never overwrites an existing state.'
+        )
+        this._w.updateBtn = this._createActionButton(
+          'llsc-btn',
+          LABEL_UPDATE,
+          () => this._onUpdateClick(),
+          'Overwrite the state selected on the left with the loader’s ' +
+            'current loras. Edit the name field first to rename it too.'
+        )
+        this._w.deleteBtn = this._createActionButton(
+          'llsc-btn llsc-btn-danger',
+          LABEL_DELETE,
+          () => this._onDeleteClick(),
+          'Delete the selected state’s file from your library folder. ' +
+            'Click twice to confirm.'
         )
         // FORMAT.md §6.3 Push State (2026-07-19): broadcasts to Apply LoRA
         // Set nodes, entirely independent of the rgthree target/probe this
         // pack drives above — deliberately NOT in `_actionButtons` below, so
         // it stays clickable even with no Power Lora Loader in the graph (or
         // rgthree not installed at all); see `_doPush()`.
-        this._w.pushBtn = this._createActionButton('llsc-btn', LABEL_PUSH, () => this._onPushClick())
+        this._w.pushBtn = this._createActionButton(
+          'llsc-btn',
+          LABEL_PUSH,
+          () => this._onPushClick(),
+          'Point the EPS Apply LoRA Set nodes in this workflow at the ' +
+            'selected state, so they all switch together. Works even with no ' +
+            'Power Lora Loader in the graph.'
+        )
         this._actionButtons = [this._w.captureBtn, this._w.updateBtn, this._w.deleteBtn]
 
         // 2026-07-22 (owner ask): Delete moved LAST — New State / Save State

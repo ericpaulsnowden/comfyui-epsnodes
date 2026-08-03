@@ -25,6 +25,18 @@ from .routes import SLUG_RE, error_response
 logger = logging.getLogger("lora_library")
 
 
+def _bad_set_id(value: object) -> str:
+    """The user-facing text for a set id that fails ``SLUG_RE``.
+
+    Shown verbatim in the set editor, so it names the rule rather than
+    the FORMAT.md §4 section that specifies it (cited in the module
+    docstring, where developers read it)."""
+    return (
+        f"invalid set id {value!r} — a set id may use only lowercase "
+        "letters, digits, - and _, and must start with a letter or digit"
+    )
+
+
 def register(context: LibraryContext, routes: web.RouteTableDef) -> None:
     """Attach the §5 set rows to *routes*."""
 
@@ -36,7 +48,7 @@ def register(context: LibraryContext, routes: web.RouteTableDef) -> None:
     async def get_set(request: web.Request) -> web.Response:
         slug = request.query.get("slug", "")
         if not SLUG_RE.match(slug):
-            return error_response(400, f"invalid set slug {slug!r} — FORMAT.md §4")
+            return error_response(400, _bad_set_id(slug))
         try:
             data = sets_store.load_set(context, slug)
         except sets_store.SetValidationError as exc:
@@ -61,7 +73,7 @@ def register(context: LibraryContext, routes: web.RouteTableDef) -> None:
         elif isinstance(raw_slug, str) and SLUG_RE.match(raw_slug):
             slug = raw_slug
         else:
-            return error_response(400, f"invalid set slug {raw_slug!r} — FORMAT.md §4")
+            return error_response(400, _bad_set_id(raw_slug))
 
         try:
             saved_slug, _normalized = sets_store.save_set(context, body.get("set"), slug=slug)
@@ -81,7 +93,7 @@ def register(context: LibraryContext, routes: web.RouteTableDef) -> None:
             return error_response(400, "body must be a JSON object")
         slug = body.get("slug")
         if not isinstance(slug, str) or not SLUG_RE.match(slug):
-            return error_response(400, f"invalid set slug {slug!r} — FORMAT.md §4")
+            return error_response(400, _bad_set_id(slug))
         if not sets_store.delete_set(context, slug):
             return error_response(404, f"no such set {slug!r}")
         return web.json_response({"ok": True, "sets": sets_store.list_sets(context)})

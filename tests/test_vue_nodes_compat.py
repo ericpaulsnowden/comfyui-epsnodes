@@ -133,13 +133,24 @@ def test_vue_mode_warning_is_wired_and_once_only() -> None:
     source = _source("web/eps_image.js")
     assert "function warnIfVueNodesMode(node)" in source
     assert "safely('vueModeWarning', () => warnIfVueNodesMode(node))" in source
-    body = source.split("function warnIfVueNodesMode(node)", 1)[1]
+    # Slice from the covered-class set (declared just above the function) so
+    # this covers both halves of the guard.
+    body = source.split("const VUE_AFFECTED_CLASSES", 1)[1]
     body = body.split("\napp.registerExtension", 1)[0]
     assert "if (vueModeWarned) return" in body, "must fire once per session"
     assert "'Comfy.VueNodes.Enabled'" in body, "must check the real setting key"
     assert "=== true" in body, "an absent settings store must read as OFF"
-    for node_type in ("EPSSwitcher", "EPSDistributor", "EPSResolution"):
+    for node_type in ("EPSDistributor", "EPSResolution"):
         assert node_type in body, f"{node_type} draws its controls; must be covered"
+    # The switcher family (EPSSwitcher + the Model/CLIP/VAE siblings, which
+    # share switcher.js's hand-drawn toggles) must be DERIVED from that
+    # module's registry, never re-listed here: the hand-written list missed
+    # the three siblings when they shipped. `SWITCHER_CLASSES`'s contents are
+    # pinned in tests/test_switcher_js.py.
+    assert "switcher.SWITCHER_CLASSES" in body, (
+        "the switcher family must come from switcher.js's registry, not a "
+        "hand-maintained list that a new switcher class can fall out of"
+    )
 
 
 def test_add_buttons_carry_the_user_activation_diagnostic() -> None:
