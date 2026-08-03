@@ -362,29 +362,50 @@ class EPSCrossSweep:
         text_only = image is None
         sweep_wired = model_wired or clip_wired or label_wired or vae_wired
 
-        wired_sweep_lengths = [
-            length
-            for wired, length in (
-                (model_wired, len(models)),
-                (clip_wired, len(clips)),
-                (label_wired, len(labels)),
-                (vae_wired, len(vaes)),
+        wired_sweep = {
+            input_name: length
+            for input_name, wired, length in (
+                ("model", model_wired, len(models)),
+                ("clip", clip_wired, len(clips)),
+                ("label", label_wired, len(labels)),
+                ("vae", vae_wired, len(vaes)),
             )
             if wired
-        ]
+        }
+        # v0.49.1 sweep-side length rules (owner bug report 2026-08-03: a
+        # stale 2-long `label` wire silently clamped a 4-model sweep to 2
+        # steps -- the old min()+console-warning was invisible from the
+        # browser, and the run just looked wrong):
+        #   - length 1 BROADCASTS: a single constant VAE (or label) across
+        #     an N-step sweep is legitimate and repeats for every step;
+        #   - lengths >1 must AGREE EXACTLY or the queue FAILS, naming
+        #     every wired input's length -- a disagreement between fanned
+        #     sweep lists is always a miswire, never something to clamp.
+        multi_lengths = {length for length in wired_sweep.values() if length > 1}
+        if len(multi_lengths) > 1:
+            listing = ", ".join(f"{k}={v}" for k, v in wired_sweep.items())
+            raise ValueError(
+                f"EPS Run Multiplier: the sweep-side inputs disagree about how many "
+                f"steps there are ({listing}). Wire model/clip/label (and vae) from "
+                f"the SAME node (EPS LoRA Iterator or EPS Checkpoint Switcher), and "
+                f"unwire any of them that came from somewhere else -- a length-1 "
+                f"input is fine (it repeats for every step), mismatched lists are "
+                f"not."
+            )
         # No sweep at all = ONE null step (a pure pair multiplier -- Cross
         # Product's old job); save_prefix then omits the sweep-label level.
-        steps = min(wired_sweep_lengths) if sweep_wired else 1
-        if len(set(wired_sweep_lengths)) > 1:
-            logger.warning(
-                "EPS Run Multiplier: sweep-side lists disagree (model=%d, clip=%d, "
-                "label=%d%s) -- using the first %d step(s). Wire all of them "
-                "from the SAME sweep-side node (EPS LoRA Iterator or EPS "
-                "Checkpoint Switcher).",
-                len(models), len(clips), len(labels),
-                f", vae={len(vaes)}" if vae_wired else "",
-                steps,
-            )
+        # A wired-but-EMPTY sweep list still collapses steps to 0 (the
+        # whole-node blocker path below), same as before.
+        if not sweep_wired:
+            steps = 1
+        elif 0 in wired_sweep.values():
+            steps = 0
+        else:
+            steps = next(iter(multi_lengths), 1)
+
+        def _sweep_index(length: int, step: int) -> int:
+            """Broadcast rule: a length-1 sweep list serves index 0 forever."""
+            return step if length > 1 else 0
 
         # The pair side (v0.49.0, module docstring): "paired" runs the
         # index-aligned lists as-is (min-clamped, warned); "multiply"
@@ -444,15 +465,22 @@ class EPSCrossSweep:
         out: dict[str, list[Any]] = {k: [] for k in self.RETURN_NAMES}
         for s in range(steps):  # strength-major: sweep step is the OUTER loop
             label_component = (
-                (_safe_component(labels[s]) if label_wired else "") or f"step_{s + 1:02d}"
+                (_safe_component(labels[_sweep_index(len(labels), s)]) if label_wired else "")
+                or f"step_{s + 1:02d}"
             )
             for p, (pair_image, pair_text, pair_name) in enumerate(pair_rows):
                 pair_component = _safe_component(pair_name) or f"pair_{p + 1:02d}"
-                out["model"].append(models[s] if model_wired else run_blocker)
-                out["clip"].append(clips[s] if clip_wired else run_blocker)
+                out["model"].append(
+                    models[_sweep_index(len(models), s)] if model_wired else run_blocker
+                )
+                out["clip"].append(
+                    clips[_sweep_index(len(clips), s)] if clip_wired else run_blocker
+                )
                 out["image"].append(run_blocker if text_only else pair_image)
                 out["text"].append(pair_text)
-                out["label"].append(labels[s] if label_wired else run_blocker)
+                out["label"].append(
+                    labels[_sweep_index(len(labels), s)] if label_wired else run_blocker
+                )
                 # No sweep wired at all -> no sweep-label folder level: the
                 # save path is just <base>/<pair>, exactly what a plain
                 # image x text multiplication wants on disk.
@@ -462,5 +490,7 @@ class EPSCrossSweep:
                     else [*base_parts, label_component, pair_component]
                 )
                 out["save_prefix"].append("/".join(prefix_parts))
-                out["vae"].append(vaes[s] if vae_wired else run_blocker)
+                out["vae"].append(
+                    vaes[_sweep_index(len(vaes), s)] if vae_wired else run_blocker
+                )
         return tuple(out[k] for k in self.RETURN_NAMES)

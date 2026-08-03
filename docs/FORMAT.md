@@ -1660,10 +1660,16 @@ label, so two chained Cross Products cannot express it.
   every text, IMAGE-MAJOR in Cross Product's exact emission order,
   `name` aligned per TEXT (Notebook wired straight in). Also optional:
   `name` and the `base_folder` STRING widget (may be empty; `/` allowed
-  for nesting). `INPUT_IS_LIST = True` (§6.9's rationale). Mismatched
-  lengths within a group log a warning and use the min; either side
-  empty → the §6.4 `[ExecutionBlocker(None)]` pattern on all seven
-  outputs.
+  for nesting). `INPUT_IS_LIST = True` (§6.9's rationale). Sweep-side
+  lengths (v0.49.1, owner bug 2026-08-03 — a stale 2-long `label` wire
+  silently clamped a 4-model sweep to 2 steps behind a console-only
+  warning): length 1 BROADCASTS across the steps (one constant VAE/label
+  for the whole sweep is the legitimate common case), and wired lengths
+  >1 must AGREE EXACTLY or the QUEUE FAILS naming every wired input's
+  length — a disagreement between fanned sweep lists is always a
+  miswire, never something to clamp. Pair-side mismatches (paired mode)
+  still warn and use the min. Either side empty → the §6.4
+  `[ExecutionBlocker(None)]` pattern on all seven outputs.
 - **Outputs (all `OUTPUT_IS_LIST`, length steps×pairs):** `model`, `clip`,
   `image`, `text`, `save_prefix`, `label` — **STRENGTH-MAJOR** (owner
   decision 2026-07-23b: outer loop = sweep step, so each strength's

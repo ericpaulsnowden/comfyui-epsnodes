@@ -105,12 +105,38 @@ class TestCrossSweep:
         assert prefixes[0].endswith("/pair_01")
         assert prefixes[1].endswith("/RealName")
 
-    def test_mismatched_sweep_side_uses_min_and_survives(self) -> None:
-        models, clips, _i, _t, _p, labels, _v = run(model=["m0", "m1", "m2"])
-        # clip/label have 2 -> steps = 2
-        assert models == ["m0", "m0", "m1", "m1"]
-        assert clips == ["c0", "c0", "c1", "c1"]
-        assert labels[-1] == "lora_0.5"
+    def test_mismatched_sweep_side_fails_loudly_naming_lengths(self) -> None:
+        """v0.49.1 (owner bug 2026-08-03): a stale 2-long label wire clamped
+        a 4-model sweep to 2 steps with only a console warning -- invisible
+        from the browser. Disagreeing >1 lengths now FAIL the queue."""
+        with pytest.raises(ValueError) as excinfo:
+            run(model=["m0", "m1", "m2"])
+        message = str(excinfo.value)
+        assert "model=3" in message and "clip=2" in message and "label=2" in message
+
+    def test_length_one_sweep_inputs_broadcast_across_steps(self) -> None:
+        """A single constant VAE/label across an N-step sweep is legitimate:
+        length-1 sweep inputs repeat for every step instead of clamping."""
+        models, _c, _i, _t, prefixes, labels, vaes = run(
+            label=["shared"], vae=["v_shared"]
+        )
+        assert models == ["m0", "m0", "m1", "m1"]  # steps still 2
+        assert labels == ["shared"] * 4
+        assert vaes == ["v_shared"] * 4
+        assert prefixes[0].startswith("shared/")
+
+    def test_owner_report_4_models_x_2_images_x_2_texts_is_16(self) -> None:
+        """The 2026-08-03 report's EXPECTED shape, pinned: only model wired
+        sweep-side, multiply mode -> 4 x (2 x 2) = 16 runs, every model
+        distinct in strength-major blocks of 4."""
+        models, _c, images, texts, _p, _l, _v = EPSCrossSweep().run(
+            model=["m1", "m2", "m3", "m4"],
+            image=["iA", "iB"], text=["p1", "p2"], pair_mode="multiply",
+        )
+        assert len(models) == 16
+        assert models == [m for m in ["m1", "m2", "m3", "m4"] for _ in range(4)]
+        assert images[:4] == ["iA", "iA", "iB", "iB"]
+        assert texts[:4] == ["p1", "p2", "p1", "p2"]
 
     def test_mismatched_pair_side_uses_min_and_survives(self) -> None:
         _m, _c, images, texts, _p, _l, _v = run(image=["iA", "iB", "iC"])
@@ -208,14 +234,19 @@ class TestVaePassthrough:
         assert all(isinstance(v, fake_execution_blocker) for v in vaes)
         assert all(v.message is None for v in vaes)  # silent skip, no error event
 
-    def test_vae_length_disagree_clamps_and_warns(self, caplog) -> None:
-        import logging
+    def test_single_vae_broadcasts_across_the_sweep(self) -> None:
+        """v0.49.1 supersedes the v0.46 clamp-and-warn: ONE constant VAE
+        across an N-step sweep is the legitimate common case (a lora sweep
+        doesn't change the VAE), so length-1 broadcasts instead of
+        clamping the whole sweep to one step."""
+        models, _c, _i, _t, _p, _l, vaes = run(vae=["v0"])  # 1 vae, 2 steps
+        assert models == ["m0", "m0", "m1", "m1"]  # steps stay 2
+        assert vaes == ["v0"] * 4
 
-        with caplog.at_level(logging.WARNING):
-            models, _c, _i, _t, _p, _l, vaes = run(vae=["v0"])  # 1 vae, 2 steps
-        assert models == ["m0", "m0"]  # clamped to 1 step x 2 pairs
-        assert vaes == ["v0", "v0"]
-        assert any("vae=1" in r.message for r in caplog.records)
+    def test_multi_vae_length_disagree_fails_loudly(self) -> None:
+        with pytest.raises(ValueError) as excinfo:
+            run(vae=["v0", "v1", "v2"])  # 3 vaes vs 2-step sweep
+        assert "vae=3" in str(excinfo.value)
 
     def test_wired_but_empty_vae_takes_the_whole_node_blocker_path(
         self, fake_execution_blocker: type
