@@ -36,6 +36,33 @@ back to a stable `pair_NN` when absent. All components are sanitized for
 filesystem use (path separators and other hostile characters become `_`;
 `..` segments are dropped) — SaveImage gets organization, never traversal.
 
+**v0.49.0 — the Run Multiplier absorbs Cross Product (owner ask
+2026-08-03: "what about the cross product and cross sweep combination? if
+we keep the lora sweep separate?").** Two additive, §8-safe changes:
+
+- The sweep group (``model``/``clip``/``label``) moved REQUIRED ->
+  OPTIONAL, each member independently (the same validation-only loosening
+  ``image`` already went through in v0.46.0 — saved workflows/API callers
+  unaffected, since links and prompt inputs resolve by NAME). ``steps`` is
+  the min over the WIRED sweep lists only; each UNWIRED sweep member's
+  OUTPUT emits one blocker per run (the established per-run-blocker
+  pattern below). With NO sweep member wired at all the node is a pure
+  pair multiplier — one "null step", no ``<sweep label>`` level in
+  ``save_prefix`` — i.e. exactly Cross Product's job.
+- A ``pair_mode`` widget: ``"paired"`` (the DEFAULT — byte-identical to
+  every workflow saved before it existed) keeps today's semantics, where
+  ``image``/``text`` arrive index-ALIGNED (usually from a Cross Product)
+  and ``name`` aligns per PAIR; ``"multiply"`` absorbs §6.9's cross:
+  every image x every text, IMAGE-MAJOR in Cross Product's exact emission
+  order, with ``name`` aligned per TEXT (the Notebook's ``name`` wired
+  straight in, no Cross Product needed). ``multiply`` with a sweep wired
+  is the new three-axis capability (sweep x images x texts) that used to
+  take both nodes chained.
+
+``EPSCrossProduct`` itself stays registered and working (§8: its class id
+is frozen and saved workflows reference it) — it is simply no longer
+necessary for new graphs.
+
 No torch/ComfyUI import at module scope: every element (model, clip,
 image) is treated as an opaque value, exactly like §6.4/§6.9.
 """
@@ -51,6 +78,12 @@ logger = logging.getLogger("eps_image")
 #: Characters replaced with ``_`` inside a single path component: path
 #: separators, Windows-reserved punctuation, and control characters.
 _HOSTILE = re.compile(r'[\\/:*?"<>|\x00-\x1f]')
+
+#: ``pair_mode`` widget values (v0.49.0, module docstring). Stable
+#: identifiers -- widget values persist in saved workflows (§8).
+PAIR_MODE_PAIRED = "paired"
+PAIR_MODE_MULTIPLY = "multiply"
+PAIR_MODES = [PAIR_MODE_PAIRED, PAIR_MODE_MULTIPLY]
 
 
 def _as_clean_list(value: Any) -> list[Any]:
@@ -104,42 +137,72 @@ class EPSCrossSweep:
     OUTPUT_IS_LIST = (True, True, True, True, True, True, True)
     INPUT_IS_LIST = True
     OUTPUT_TOOLTIPS = (
-        "This run's patched model.",
-        "This run's patched CLIP.",
+        "This run's model -- only when the optional model input is wired; "
+        "unwired, this output blocks whatever consumes it.",
+        "This run's CLIP -- only when the optional clip input is wired; "
+        "unwired, this output blocks whatever consumes it.",
         "This run's image.",
         "This run's text.",
         "A ready-to-wire Save Image filename_prefix for this run: "
-        "base_folder/<sweep label>/<pair name>.",
-        "This run's strength label, unchanged from the sweep.",
+        "base_folder/<sweep label>/<pair name> (no sweep wired: "
+        "base_folder/<pair name>).",
+        "This run's label, unchanged from the sweep side -- only when the "
+        "optional label input is wired; unwired, this output blocks "
+        "whatever consumes it.",
         "This run's VAE, index-aligned with model/clip -- only when the "
         "optional vae input is wired (e.g. from EPS Checkpoint Switcher); "
         "unwired, this output blocks whatever consumes it.",
     )
     FUNCTION = "run"
     DESCRIPTION = (
-        "Runs a whole EPS LoRA Iterator across a whole set of EPS Cross "
-        "Product pairs: wire the sweep's model, clip, and label outputs "
-        "together with Cross Product's image and text (and optionally "
-        "name) outputs, then continue the workflow from this node's "
-        "outputs instead -- 11 sweep steps across 8 pairs, for example, "
-        "means 88 runs. Strength-major order: every pair runs at the first "
-        "strength, then every pair at the next, and so on, so results from "
-        "the same strength land together. Wire save_prefix into Save "
-        "Image's filename_prefix and every strength gets its own folder, "
-        "named from the sweep label and the pair name, so a big run stays "
-        "organized on disk."
+        "Multiplies whatever you wire in into one organized batch of runs. "
+        "Wire a sweep side (EPS LoRA Iterator's or EPS Checkpoint "
+        "Switcher's model/clip/label, plus vae from the latter) and a pair "
+        "side (images and texts), and every sweep step runs every pair -- "
+        "11 steps across 8 pairs means 88 runs, grouped step by step. The "
+        "pair side runs index-aligned as wired (pair_mode: paired, e.g. "
+        "from an EPS Cross Product), or set pair_mode to multiply and "
+        "every image is crossed with every text right here -- an Image "
+        "Grid and a multi-select Prompt Notebook wired straight in, no "
+        "Cross Product needed. The sweep side is optional: wire none of "
+        "it and this node is a pure image x text multiplier. Wire "
+        "save_prefix into Save Image's filename_prefix and runs land in "
+        "folders named by step and pair, so big batches stay organized on "
+        "disk."
     )
 
     @classmethod
     def INPUT_TYPES(cls) -> dict[str, Any]:
         return {
             "required": {
+                "text": (
+                    "STRING",
+                    {
+                        "forceInput": True,
+                        "tooltip": (
+                            "The texts to run -- wire a multi-select EPS "
+                            "Prompt Notebook's text output straight in "
+                            "(set pair_mode to multiply to cross them "
+                            "with the images), or an EPS Cross Product's "
+                            "text output (keep pair_mode paired). "
+                            "Wire-only."
+                        ),
+                    },
+                ),
+            },
+            "optional": {
+                # v0.49.0: the whole sweep group moved REQUIRED -> OPTIONAL
+                # (module docstring) -- wire none of these to use the node
+                # as a pure pair multiplier (Cross Product's old job).
                 "model": (
                     "MODEL",
                     {
                         "tooltip": (
-                            "The swept models, one per strength step -- "
-                            "wire from EPS LoRA Iterator's model output."
+                            "The swept models, one per step -- wire from "
+                            "EPS LoRA Iterator or EPS Checkpoint Switcher. "
+                            "Optional: leave the whole sweep side unwired "
+                            "to just multiply images x texts; this output "
+                            "then blocks whatever consumes it."
                         ),
                     },
                 ),
@@ -147,8 +210,10 @@ class EPSCrossSweep:
                     "CLIP",
                     {
                         "tooltip": (
-                            "The swept CLIPs, one per strength step -- "
-                            "wire from EPS LoRA Iterator's clip output."
+                            "The swept CLIPs, one per step, index-aligned "
+                            "with model -- same source as model. Optional; "
+                            "unwired, this node's clip output blocks "
+                            "whatever consumes it."
                         ),
                     },
                 ),
@@ -157,24 +222,14 @@ class EPSCrossSweep:
                     {
                         "forceInput": True,
                         "tooltip": (
-                            "Each step's strength label -- wire from EPS "
-                            "LoRA Sweep's label output. Wire-only."
+                            "Each step's label, index-aligned with model "
+                            "-- wire from the same sweep-side node. "
+                            "Optional; unwired, save_prefix uses step_01, "
+                            "step_02, ... and the label output blocks "
+                            "whatever consumes it. Wire-only."
                         ),
                     },
                 ),
-
-                "text": (
-                    "STRING",
-                    {
-                        "forceInput": True,
-                        "tooltip": (
-                            "The texts to pair with the sweep -- wire from "
-                            "EPS Cross Product's text output. Wire-only."
-                        ),
-                    },
-                ),
-            },
-            "optional": {
                 # v0.46.0: image moved REQUIRED -> OPTIONAL (loosens
                 # validation only; saved workflows and API callers are
                 # unaffected). Unwired = text-only mode: pairs are just the
@@ -186,8 +241,11 @@ class EPSCrossSweep:
                     "IMAGE",
                     {
                         "tooltip": (
-                            "The images to pair with the sweep -- wire "
-                            "from EPS Cross Product's image output. "
+                            "The images to run. With pair_mode paired "
+                            "they arrive index-aligned with text (e.g. "
+                            "from EPS Cross Product); with multiply, "
+                            "EVERY image is crossed with EVERY text (wire "
+                            "an EPS Image Grid or Switcher straight in). "
                             "Optional: leave unwired for text-only "
                             "(txt2img) iteration; pairs are then just the "
                             "texts, and this node's image output blocks "
@@ -221,11 +279,13 @@ class EPSCrossSweep:
                     {
                         "forceInput": True,
                         "tooltip": (
-                            "Optional short name per pair, wired from EPS "
-                            "Cross Product's name output -- used to name "
-                            "save_prefix's folders. Falls back to "
-                            "pair_01, pair_02, ... when not wired. "
-                            "Wire-only."
+                            "Optional short name used for save_prefix's "
+                            "folders. With pair_mode paired it aligns per "
+                            "PAIR (EPS Cross Product's name output); with "
+                            "multiply it aligns per TEXT (the Prompt "
+                            "Notebook's name output, wired straight in). "
+                            "Falls back to pair_01, pair_02, ... when not "
+                            "wired. Wire-only."
                         ),
                     },
                 ),
@@ -238,6 +298,29 @@ class EPSCrossSweep:
                             "e.g. shoots/today. May contain / to nest "
                             "folders. Leave empty to start save_prefix at "
                             "the output directory's root."
+                        ),
+                    },
+                ),
+                # v0.49.0, APPENDED after base_folder on purpose: widgets_
+                # values restores positionally, so a widget added BEFORE
+                # base_folder would swallow every saved workflow's folder
+                # value (the same tail-append law resolution.js documents
+                # for its preset widgets).
+                "pair_mode": (
+                    PAIR_MODES,
+                    {
+                        "default": PAIR_MODE_PAIRED,
+                        "tooltip": (
+                            "How image and text combine. paired: they "
+                            "arrive already index-aligned (one image per "
+                            "text -- e.g. from an EPS Cross Product) and "
+                            "run as-is. multiply: EVERY image is crossed "
+                            "with EVERY text right here (image-major, "
+                            "exactly what EPS Cross Product does), so you "
+                            "can wire an Image Grid and a multi-select "
+                            "Prompt Notebook straight in with no Cross "
+                            "Product node. Workflows saved before this "
+                            "widget existed behave as paired."
                         ),
                     },
                 ),
@@ -254,6 +337,7 @@ class EPSCrossSweep:
         name: Any = None,
         base_folder: Any = "",
         vae: Any = None,
+        pair_mode: Any = PAIR_MODE_PAIRED,
     ) -> tuple[list[Any], ...]:
         models = _as_clean_list(model)
         clips = _as_clean_list(clip)
@@ -263,22 +347,35 @@ class EPSCrossSweep:
         names = _as_clean_list(name)
         vaes = _as_clean_list(vae)
         base_parts = _safe_base(_unwrap_scalar(base_folder, ""))
+        multiply = _unwrap_scalar(pair_mode, PAIR_MODE_PAIRED) == PAIR_MODE_MULTIPLY
 
-        # `vae is None` distinguishes UNWIRED (emit blockers on the vae
-        # output; steps unaffected) from wired-but-empty (a real upstream
-        # emitted nothing -> steps clamps to 0 -> the whole-node blocker
-        # path, same as an empty model list).
+        # `x is None` distinguishes UNWIRED (emit blockers on that output;
+        # counts unaffected) from wired-but-empty (a real upstream emitted
+        # nothing -> the corresponding count clamps to 0 -> the whole-node
+        # blocker path). v0.49.0 generalized this from image/vae to every
+        # sweep-group member: steps is the min over the WIRED sweep lists
+        # only, and each unwired member's output blocks per run.
+        model_wired = model is not None
+        clip_wired = clip is not None
+        label_wired = label is not None
         vae_wired = vae is not None
-        # image is None likewise = text-only mode (v0.46.0): pairs are the
-        # texts alone and the image OUTPUT blocks its consumers per run.
         text_only = image is None
+        sweep_wired = model_wired or clip_wired or label_wired or vae_wired
 
-        sweep_lengths = [len(models), len(clips), len(labels)]
-        if vae_wired:
-            sweep_lengths.append(len(vaes))
-        steps = min(sweep_lengths)
-        pairs = len(texts) if text_only else min(len(images), len(texts))
-        if len(set(sweep_lengths)) > 1:
+        wired_sweep_lengths = [
+            length
+            for wired, length in (
+                (model_wired, len(models)),
+                (clip_wired, len(clips)),
+                (label_wired, len(labels)),
+                (vae_wired, len(vaes)),
+            )
+            if wired
+        ]
+        # No sweep at all = ONE null step (a pure pair multiplier -- Cross
+        # Product's old job); save_prefix then omits the sweep-label level.
+        steps = min(wired_sweep_lengths) if sweep_wired else 1
+        if len(set(wired_sweep_lengths)) > 1:
             logger.warning(
                 "EPS Run Multiplier: sweep-side lists disagree (model=%d, clip=%d, "
                 "label=%d%s) -- using the first %d step(s). Wire all of them "
@@ -288,22 +385,45 @@ class EPSCrossSweep:
                 f", vae={len(vaes)}" if vae_wired else "",
                 steps,
             )
-        if not text_only and len(images) != len(texts):
-            logger.warning(
-                "EPS Run Multiplier: pair-side lists disagree (image=%d, text=%d) "
-                "-- using the first %d pair(s). Wire both from the SAME "
-                "EPS Cross Product node.",
-                len(images), len(texts), pairs,
-            )
 
-        if steps == 0 or pairs == 0:
+        # The pair side (v0.49.0, module docstring): "paired" runs the
+        # index-aligned lists as-is (min-clamped, warned); "multiply"
+        # crosses every image with every text right here, image-major --
+        # §6.9's exact emission order, with names aligned per TEXT (the
+        # Notebook wired straight in) rather than per pair.
+        pair_rows: list[tuple[Any, Any, str]]  # (image-or-None, text, name)
+        if text_only:
+            pair_rows = [
+                (None, texts[p], names[p] if p < len(names) else "") for p in range(len(texts))
+            ]
+        elif multiply:
+            pair_rows = [
+                (img, texts[t], names[t] if t < len(names) else "")
+                for img in images
+                for t in range(len(texts))
+            ]
+        else:
+            pairs = min(len(images), len(texts))
+            if len(images) != len(texts):
+                logger.warning(
+                    "EPS Run Multiplier: pair-side lists disagree (image=%d, text=%d) "
+                    "-- using the first %d pair(s). Wire both from the SAME "
+                    "EPS Cross Product node, or set pair_mode to multiply to "
+                    "cross them here instead.",
+                    len(images), len(texts), pairs,
+                )
+            pair_rows = [
+                (images[p], texts[p], names[p] if p < len(names) else "") for p in range(pairs)
+            ]
+
+        if steps == 0 or not pair_rows:
             # §6.4/§6.9's empty-safety pattern: nothing to run means the
             # branch silently skips; the queue succeeds.
             logger.info(
                 "EPS Run Multiplier: %d sweep step(s) x %d pair(s) -- nothing to "
                 "run; returning an execution blocker so downstream is "
                 "silently skipped",
-                steps, pairs,
+                steps, len(pair_rows),
             )
             from comfy_execution.graph import ExecutionBlocker
 
@@ -316,25 +436,31 @@ class EPSCrossSweep:
         # output; a None would crash them and an empty list breaks
         # slice_dict (§6.9). Imported lazily, once, only when needed.
         run_blocker = None
-        if text_only or not vae_wired:
+        if text_only or not (model_wired and clip_wired and label_wired and vae_wired):
             from comfy_execution.graph import ExecutionBlocker
 
             run_blocker = ExecutionBlocker(None)
 
         out: dict[str, list[Any]] = {k: [] for k in self.RETURN_NAMES}
         for s in range(steps):  # strength-major: sweep step is the OUTER loop
-            label_component = _safe_component(labels[s]) or f"step_{s + 1:02d}"
-            for p in range(pairs):
-                pair_component = (
-                    _safe_component(names[p]) if p < len(names) else ""
-                ) or f"pair_{p + 1:02d}"
-                out["model"].append(models[s])
-                out["clip"].append(clips[s])
-                out["image"].append(run_blocker if text_only else images[p])
-                out["text"].append(texts[p])
-                out["label"].append(labels[s])
-                out["save_prefix"].append(
-                    "/".join([*base_parts, label_component, pair_component])
+            label_component = (
+                (_safe_component(labels[s]) if label_wired else "") or f"step_{s + 1:02d}"
+            )
+            for p, (pair_image, pair_text, pair_name) in enumerate(pair_rows):
+                pair_component = _safe_component(pair_name) or f"pair_{p + 1:02d}"
+                out["model"].append(models[s] if model_wired else run_blocker)
+                out["clip"].append(clips[s] if clip_wired else run_blocker)
+                out["image"].append(run_blocker if text_only else pair_image)
+                out["text"].append(pair_text)
+                out["label"].append(labels[s] if label_wired else run_blocker)
+                # No sweep wired at all -> no sweep-label folder level: the
+                # save path is just <base>/<pair>, exactly what a plain
+                # image x text multiplication wants on disk.
+                prefix_parts = (
+                    [*base_parts, pair_component]
+                    if not sweep_wired
+                    else [*base_parts, label_component, pair_component]
                 )
+                out["save_prefix"].append("/".join(prefix_parts))
                 out["vae"].append(vaes[s] if vae_wired else run_blocker)
         return tuple(out[k] for k in self.RETURN_NAMES)

@@ -1589,6 +1589,14 @@ thing to wire with no benefit; see the roadmap for the full tradeoff.
 
 ### §6.9 `EPSCrossProduct` (display: "EPS Cross Product") — every-with-every pairing
 
+**Superseded for NEW graphs by §6.10's `pair_mode: multiply` (v0.49.0)**
+— the Run Multiplier now performs this exact cross itself (same
+image-major order, same names-per-text alignment, pinned by a golden
+parity test importing both classes). This node STAYS registered and
+working forever: its class id is frozen (§8) and saved workflows
+reference it. Do not remove or gut it; new documentation just points at
+§6.10 instead.
+
 NON-lora node in `eps_image/`, category "EPSNodes". Class id `EPSCrossProduct`
 frozen once shipped (§8). Born from an owner report 2026-07-23: a 2-image EPS
 Image Grid feeding the same path as 4 selected EPS Prompt Notebook entries
@@ -1634,14 +1642,28 @@ semantics), yielding 11. This node crosses the two GROUPS while keeping
 each internally aligned — a model is only meaningful with ITS clip and
 label, so two chained Cross Products cannot express it.
 
-- **Inputs (required):** `model` + `clip` + `label` (the sweep's three
-  aligned lists — wire all three from the SAME EPS LoRA Iterator) and
-  `image` + `text` (from the SAME EPS Cross Product). Optional: `name`
-  (Cross Product's `name` output) and a `base_folder` STRING widget (may
-  be empty; `/` allowed for nesting). `INPUT_IS_LIST = True` (§6.9's
-  rationale). Mismatched lengths within a group log a warning and use the
-  min; either group empty → the §6.4 `[ExecutionBlocker(None)]` pattern on
-  all six outputs.
+- **Inputs:** only `text` is required (v0.49.0). The sweep group —
+  `model` + `clip` + `label` (+ `vae`) — is OPTIONAL, each member
+  independently (the same validation-only REQUIRED→OPTIONAL loosening
+  `image` went through in v0.46.0; links/prompt inputs resolve by name,
+  so saved workflows are untouched): `steps` = min over the WIRED sweep
+  lists only, each UNWIRED member's OUTPUT emits one blocker per run, an
+  unwired `label` falls back to `step_NN` folders. NO sweep member wired
+  = one "null step": the node is then a pure pair multiplier (§6.9's
+  job) and `save_prefix` drops the sweep-label level. Pair side: `image`
+  optional (unwired = text-only mode) + a `pair_mode` widget (v0.49.0,
+  values `paired`/`multiply`, default `paired` — APPENDED after
+  `base_folder`, never before: widgets_values restores positionally).
+  `paired` = the original contract: image/text arrive index-ALIGNED
+  (min-clamped, warned), `name` aligns per PAIR — Cross Product's
+  outputs wire in unchanged. `multiply` = §6.9 absorbed: every image ×
+  every text, IMAGE-MAJOR in Cross Product's exact emission order,
+  `name` aligned per TEXT (Notebook wired straight in). Also optional:
+  `name` and the `base_folder` STRING widget (may be empty; `/` allowed
+  for nesting). `INPUT_IS_LIST = True` (§6.9's rationale). Mismatched
+  lengths within a group log a warning and use the min; either side
+  empty → the §6.4 `[ExecutionBlocker(None)]` pattern on all seven
+  outputs.
 - **Outputs (all `OUTPUT_IS_LIST`, length steps×pairs):** `model`, `clip`,
   `image`, `text`, `save_prefix`, `label` — **STRENGTH-MAJOR** (owner
   decision 2026-07-23b: outer loop = sweep step, so each strength's
