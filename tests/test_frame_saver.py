@@ -25,8 +25,10 @@ from __future__ import annotations
 
 import inspect
 import re
+import socket
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -375,6 +377,78 @@ async def client(aiohttp_client):
 
 
 REMOTE_HEADERS = {"X-Forwarded-For": "192.168.1.50"}
+
+
+class TestRequestIsLoopback:
+    """The 2026-08-02 back-port of ``lora_library/routes.py``'s 2026-07-30
+    same-machine-via-LAN fix (roadmap P0-1): a browser on the HOST that
+    reaches ComfyUI via the machine's own LAN address must classify as
+    LOCAL, while a genuinely foreign machine's address stays remote.
+    ``request_is_loopback`` only touches ``.headers`` and ``.remote``, so a
+    ``SimpleNamespace`` stands in for the request; the ownership probe is
+    monkeypatched where the test needs a specific verdict, and exercised
+    for real in :func:`test_machine_owns_address_bind_test` below
+    (mirroring ``test_routes_notebook.py``'s canonical-copy test)."""
+
+    def test_lan_address_the_machine_owns_is_local(self, monkeypatch) -> None:
+        probed = []
+
+        def owns(address: str) -> bool:
+            probed.append(address)
+            return address == "192.168.1.23"
+
+        monkeypatch.setattr(routes_frame_saver, "_machine_owns_address", owns)
+        request = SimpleNamespace(headers={}, remote="192.168.1.23")
+        assert routes_frame_saver.request_is_loopback(request) is True
+        assert probed == ["192.168.1.23"], "non-loopback peers must hit the bind probe"
+
+    def test_foreign_lan_address_is_still_remote(self, monkeypatch) -> None:
+        monkeypatch.setattr(
+            routes_frame_saver, "_machine_owns_address", lambda address: False
+        )
+        request = SimpleNamespace(headers={}, remote="192.168.1.99")
+        assert routes_frame_saver.request_is_loopback(request) is False
+
+    def test_forwarded_request_is_remote_even_from_an_owned_address(
+        self, monkeypatch
+    ) -> None:
+        # The peer of a forwarded request is the PROXY, not the client -- an
+        # owned peer address must not launder a foreign origin into "local".
+        monkeypatch.setattr(
+            routes_frame_saver, "_machine_owns_address", lambda address: True
+        )
+        request = SimpleNamespace(
+            headers={"X-Forwarded-For": "192.168.1.50"}, remote="192.168.1.23"
+        )
+        assert routes_frame_saver.request_is_loopback(request) is False
+
+    def test_loopback_fast_path_never_probes(self, monkeypatch) -> None:
+        def boom(address: str) -> bool:
+            raise AssertionError("loopback peers must not reach the bind probe")
+
+        monkeypatch.setattr(routes_frame_saver, "_machine_owns_address", boom)
+        assert routes_frame_saver.request_is_loopback(
+            SimpleNamespace(headers={}, remote="127.0.0.1")
+        ) is True
+        assert routes_frame_saver.request_is_loopback(
+            SimpleNamespace(headers={}, remote=None)
+        ) is True
+
+
+def test_machine_owns_address_bind_test() -> None:
+    """The real UDP-bind probe, no monkeypatching -- mirrors the canonical
+    copy's test in ``test_routes_notebook.py``: an address this machine
+    actually owns (discovered via a UDP connect that sends nothing) binds,
+    TEST-NET-1 never does, and an IPv4-mapped IPv6 peer reduces to IPv4."""
+    probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        probe.connect(("192.0.2.1", 9))  # UDP connect sends nothing
+        own_ip = probe.getsockname()[0]
+    finally:
+        probe.close()
+    assert routes_frame_saver._machine_owns_address(own_ip) is True
+    assert routes_frame_saver._machine_owns_address("::ffff:127.0.0.1") is True
+    assert routes_frame_saver._machine_owns_address("192.0.2.1") is False  # TEST-NET-1
 
 
 class TestProbeRoute:

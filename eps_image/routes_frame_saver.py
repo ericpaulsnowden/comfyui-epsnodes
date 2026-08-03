@@ -8,7 +8,10 @@ rather than imported, since ``eps_image/`` is a sibling FEATURE FAMILY
 (FORMAT.md's naming note: "future non-lora features arrive as sibling
 modules ... without repo churn") that must not reach into ``lora_library/``'s
 internals; ``eps_image/routes_image_grid.py`` makes the identical choice to
-stay self-contained. Unlike ``/lora_library/fs/list``'s "still fine inside
+stay self-contained. Self-containment cuts both ways: this copy MISSED the
+canonical guard's 2026-07-30 same-machine-via-LAN fix until 2026-08-02, so
+when the canonical ``request_is_loopback``/``_machine_owns_address`` pair
+changes, change this one too. Unlike ``/lora_library/fs/list``'s "still fine inside
 the library folder" carve-out for remote callers, there is no such
 carve-out here: a video's path is arbitrary filesystem, never confined to
 one shared folder, so FORMAT.md §6.7 is unconditionally loopback-only for
@@ -28,6 +31,7 @@ from __future__ import annotations
 
 import ipaddress
 import logging
+import socket
 from pathlib import Path
 
 from aiohttp import web
@@ -46,12 +50,26 @@ VIDEO_EXTENSIONS = (".mp4", ".mov", ".webm", ".mkv", ".avi", ".m4v", ".ogv")
 def request_is_loopback(request: web.Request) -> bool:
     """True when *request* comes from this machine (FORMAT.md §2's rule,
     reimplemented here -- see module docstring for why not imported from
-    ``lora_library.routes``).
+    ``lora_library.routes``, which holds the CANONICAL copy of this pair of
+    functions; keep them in lockstep).
 
     A forwarded request (``X-Forwarded-For``) is never loopback -- the proxy
     hop hides the real origin, so it gets the restricted tier. ``remote``
     being absent (unix sockets, aiohttp test clients) counts as loopback:
     both mean "not a foreign machine".
+
+    **Same-machine-via-LAN-address counts as local** (the canonical copy's
+    2026-07-30 fix, back-ported 2026-08-02 -- this copy predated it and
+    wrongly 403'd the host): a literal ``is_loopback`` check classifies a
+    browser on the HOST machine that reaches ComfyUI via the machine's own
+    LAN address (``--listen`` + ``http://192.168.x.x:8188``) as REMOTE --
+    breaking Frame Saver's probe/stream player on the very machine the
+    video sits on. A hostname can't answer "is this browser on my machine"
+    (the same URL is used from both machines); the OS can: a process can
+    only ``bind()`` a socket to an address this machine owns, so a
+    throwaway UDP bind to the PEER address is a deterministic ownership
+    test. Loopback stays the fast path; forwarded requests stay remote
+    (the peer is the proxy, not the client).
     """
     if "X-Forwarded-For" in request.headers:
         return False
@@ -59,9 +77,50 @@ def request_is_loopback(request: web.Request) -> bool:
     if remote is None:
         return True
     try:
-        return ipaddress.ip_address(remote).is_loopback
+        if ipaddress.ip_address(remote.partition("%")[0]).is_loopback:
+            return True
     except ValueError:
         return False
+    return _machine_owns_address(remote)
+
+
+def _machine_owns_address(address: str) -> bool:
+    """Throwaway UDP bind test: True only if this machine owns *address*.
+
+    Ported verbatim from ``lora_library/routes.py``'s ``_machine_owns_address``
+    (the canonical copy; itself cpsb/locality.py's ``_can_bind``, adapted):
+    binding to any address the machine does not own fails with ``OSError`` on
+    every platform (Windows surfaces ``WSAEADDRNOTAVAIL`` as a plain
+    ``OSError`` too, so no branching). An IPv6 zone id (``fe80::1%en0``) is
+    passed as the scoped 4-tuple's ``scope_id`` -- folded into the address
+    string it is rejected. IPv4-mapped IPv6 peers (``::ffff:192.0.2.7``, from
+    a dual-stack socket) are reduced to plain IPv4 first so the bind uses the
+    right family.
+    """
+    lowered = address.lower()
+    if lowered.startswith("::ffff:") and "." in address:
+        address = address[7:]
+    bare, _, zone = address.partition("%")
+    family = socket.AF_INET6 if ":" in bare else socket.AF_INET
+    scope_id = 0
+    if zone:
+        try:
+            scope_id = int(zone)
+        except ValueError:
+            try:
+                scope_id = socket.if_nametoindex(zone)
+            except OSError:
+                return False
+    sock_address = (bare, 0, 0, scope_id) if family == socket.AF_INET6 else (bare, 0)
+    sock = socket.socket(family, socket.SOCK_DGRAM)
+    try:
+        sock.bind(sock_address)
+    except OSError:
+        return False
+    else:
+        return True
+    finally:
+        sock.close()
 
 
 def error_response(status: int, message: str) -> web.Response:
