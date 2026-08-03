@@ -4,7 +4,7 @@
  * hooks `web/eps_image.js` calls; `attach` no-ops for every node type other
  * than `EPSDistributor`.
  *
- * The roadmap frames this node as "EPS Switcher pointed backwards": one
+ * The roadmap frames this node as "EPS Image Switcher pointed backwards": one
  * `image` input fans out to fixed `out_1`..`out_16` (MAX_OUTPUTS) IMAGE
  * outputs, each independently gated by a hidden `toggles` JSON widget the
  * backend reads (`{"out_3": false}` = off; absent key = on). All three
@@ -142,7 +142,7 @@
  *    originally reported as a bug.
  * 3. **Growing outputs** -- `wireOutputGrowth`/`growVisibleCount` below
  *    (owner ask 2026-07-29: "EPS Distributor should have more than three
- *    outputs. Just like EPS Switcher the number of nodes needs to be able to
+ *    outputs. Just like EPS Image Switcher the number of nodes needs to be able to
  *    grow"). Wiring the last visible output reveals the next one, so there is
  *    always exactly one spare socket below the highest wired one -- the same
  *    feel as switcher.js's `convergeImageInputs`, and a structural port of its
@@ -373,7 +373,7 @@ export function clampOutputsCount(value) {
  * below the highest wired one, so wiring the last visible output reveals
  * the next — EPSSwitcher's growing-inputs feel, applied to outputs (owner
  * ask 2026-07-29: "EPS Distributor should have more than three outputs.
- * Just like EPS Switcher the number of nodes needs to be able to grow").
+ * Just like EPS Image Switcher the number of nodes needs to be able to grow").
  *
  * Grows only, never shrinks: a socket the user has already seen (or set via
  * the `Outputs` property) stays put, exactly as Switcher never renumbers a

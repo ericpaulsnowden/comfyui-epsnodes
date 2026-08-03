@@ -20,7 +20,7 @@ section further down; this is the map.
 | [**EPS Apply LoRA Set**](#eps-apply-lora-set-shipped) | Pick a saved lora configuration ("state") from a dropdown and apply it — which loras, order, on/off, strengths. Standalone: MODEL/CLIP in → out, plus a `LORA_STACK` and trigger words. | Your LoRA files + a saved set (via the Controller, the API, or by hand). |
 | [**EPS Lora Loader State Controller**](#eps-lora-loader-state-controller-shipped-requires-rgthree-comfy) | Captures and applies those states directly on an [rgthree Power Lora Loader](https://github.com/rgthree/rgthree-comfy) — rgthree stays the loader, this moves whole configurations in and out of it. | **rgthree-comfy**'s Power Lora Loader — third-party, self-disables without it. |
 | [**EPS LoRA Iterator**](#eps-lora-iterator-shipped) | Auditions any `LORA_STACK` by strength: set min/max/increment and one queue runs your workflow once per step (per lora, or all together). | A `LORA_STACK` source (usually Apply LoRA Set) + a model. |
-| [**EPS Switcher**](#eps-switcher-shipped) | Any number of image inputs, each independently on/off; the enabled ones fan out (N enabled → N runs). Disabled branches never execute. | Nothing — drag-and-drop with core nodes. |
+| [**EPS Image Switcher**](#eps-image-switcher-shipped) | Any number of image inputs, each independently on/off; the enabled ones fan out (N enabled → N runs). Disabled branches never execute. | Nothing — drag-and-drop with core nodes. |
 | [**EPS Model / CLIP / VAE Switcher**](#eps-model--clip--vae-switcher-shipped) | The image Switcher's exact mechanism for models, CLIPs, and VAEs: any number of inputs, each on/off, enabled ones fan out (N enabled → N runs), disabled branches — including their checkpoint loads — never execute. | Nothing — drag-and-drop with core nodes. |
 | [**EPS Distributor**](#eps-distributor-shipped) | The mirror of the Switcher: one image in, up to sixteen branches out, each independently on/off. New outputs appear as you wire them up. Toggle a branch off and only that branch is skipped — everything happens in one run. | Nothing — drag-and-drop with core nodes. |
 | [**EPS Checkpoint Switcher**](#eps-checkpoint-switcher-shipped) | Tick several checkpoint files in a list; one queue runs the workflow once per ticked checkpoint, with each run's model, CLIP, and VAE kept together and a label for save paths. | Your checkpoint files — drag-and-drop with core nodes. |
@@ -271,9 +271,14 @@ the rest of your workflow runs at every step.
 - `min`/`max` go from −10 to 10 and are **not clamped** to the usual 0–1
   range, for deliberately testing over- or under-strength.
 
-## EPS Switcher (shipped)
+## EPS Image Switcher (shipped)
 
-`EPSNodes → EPS Switcher`: wire in **any number of images**, flip each one
+*Renamed from "EPS Switcher" in v0.49.2 — every other switcher says what it
+switches (Model, CLIP, VAE, Checkpoint), so the original now does too.
+Display name only: saved workflows keep working, and nodes already placed
+keep showing the name they were saved with.*
+
+`EPSNodes → EPS Image Switcher`: wire in **any number of images**, flip each one
 on or off, and the enabled ones flow out as a list — so the rest of the
 workflow **runs once per enabled image**. Four images in with one turned
 off means three runs.
@@ -284,7 +289,7 @@ off means three runs.
   on / all off / a dash for mixed, with a live `enabled/total` count) — the
   same one-click-everything control as rgthree's Power Lora Loader.
 - **Fan-out, not pick-one:** unlike a normal switch that forwards a single
-  chosen input, EPS Switcher forwards *all* the enabled ones and lets
+  chosen input, EPS Image Switcher forwards *all* the enabled ones and lets
   ComfyUI iterate. (A scalar wired downstream — e.g. a seed — repeats
   identically across the runs; use a per-image list for per-image
   variation.)
@@ -310,7 +315,7 @@ off means three runs.
 ## EPS Model / CLIP / VAE Switcher (shipped)
 
 `EPSNodes → EPS Model Switcher / EPS CLIP Switcher / EPS VAE Switcher`: the
-[EPS Switcher](#eps-switcher-shipped), one per data type. Wire in any number
+[EPS Image Switcher](#eps-image-switcher-shipped), one per data type. Wire in any number
 of models (or CLIPs, or VAEs), tick them on and off, and the enabled ones
 fan out in slot order — three enabled models means the rest of the workflow
 runs three times, once per model. Built for "try the same prompt across
@@ -335,7 +340,7 @@ several models/VAEs in one queue".
 
 ## EPS Distributor (shipped)
 
-`EPSNodes → EPS Distributor`: the **mirror of EPS Switcher**. Where the
+`EPSNodes → EPS Distributor`: the **mirror of EPS Image Switcher**. Where the
 Switcher gathers many toggleable inputs into one flow, the Distributor takes
 **one image and fans it out to up to sixteen outputs, each independently on or
 off**. Wire the same picture into an upscale branch, a restyle branch and a
@@ -362,7 +367,7 @@ rewiring, no dragging bypass boxes around groups.
   its row — and give it a real name like `upscale branch`. It's display-only,
   so wires and toggles are unaffected, and clearing the field resets it to
   `out_N`.
-- **The outputs grow as you use them,** the same way EPS Switcher's inputs do:
+- **The outputs grow as you use them,** the same way EPS Image Switcher's inputs do:
   the node starts with three, and wiring the last one reveals another, so
   there is always one spare socket waiting. Sixteen is the ceiling (a
   ComfyUI limit, not a preference — see below).

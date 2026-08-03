@@ -258,7 +258,7 @@ class EPSCheckpointSwitcher:
     DESCRIPTION = (
         "Tick any number of checkpoint files; each one is loaded and the "
         "rest of the workflow runs once per ticked checkpoint (a list-"
-        "producing fan-out, like EPS Switcher) -- the same prompt, tried "
+        "producing fan-out, like EPS Image Switcher) -- the same prompt, tried "
         "across N models in one queue. model/clip/vae/label are index-"
         "aligned: element i of every output came from the same checkpoint. "
         "Ticking nothing, or ticking only checkpoints that have since been "

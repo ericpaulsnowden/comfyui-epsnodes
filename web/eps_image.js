@@ -1,5 +1,5 @@
 /**
- * @file Entry point for the EPSNodes image-utility frontend (EPS Switcher §6.4,
+ * @file Entry point for the EPSNodes image-utility frontend (EPS Image Switcher §6.4,
  * EPS Resolution §6.5, EPS Image Grid §6.6, EPS Frame Saver §6.7, EPS
  * Distributor §6.11). ComfyUI auto-imports every
  * top-level `.js` under `WEB_DIRECTORY` (`./web`); this is a SECOND
@@ -43,7 +43,7 @@ const REPO_URL = 'https://github.com/ericpaulsnowden/comfyui-epsnodes'
  * Vue-nodes mode. The four switcher classes are read from
  * `switcher.SWITCHER_CLASSES` rather than listed by hand: EPS Model / CLIP /
  * VAE Switcher go through the SAME `switcher.js` `onDrawForeground` toggle
- * drawing as EPS Switcher, so a hardcoded list silently missed them (they
+ * drawing as EPS Image Switcher, so a hardcoded list silently missed them (they
  * were added after this warning was written) and their users got the silent
  * missing-toggles failure this toast exists to prevent. Adding a fifth
  * switcher class to that registry now covers it here for free.
@@ -69,7 +69,7 @@ function warnIfVueNodesMode(node) {
   if (!enabled) return
   vueModeWarned = true
   const detail =
-    'EPS Switcher (image, model, CLIP, VAE), EPS Distributor and EPS ' +
+    'The EPS Switchers (Image, Model, CLIP, VAE), EPS Distributor and EPS ' +
     'Resolution draw their controls (per-row toggles, size readouts, ' +
     'double-click rename) directly on the node, and ' +
     "ComfyUI's New node design (beta) does not run that drawing yet. " +

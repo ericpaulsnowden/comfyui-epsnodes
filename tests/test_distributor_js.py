@@ -397,7 +397,7 @@ def test_clamp_visible_count_never_hides_a_wired_slot(distributor_api: dict) -> 
 def test_grow_visible_count_keeps_one_spare_socket(distributor_api: dict) -> None:
     """The growing-outputs rule (v0.40.0): wiring the last visible output
     reveals the next, so there is always one spare socket below the highest
-    wired one -- EPS Switcher's feel, applied to outputs. Grow-only (never
+    wired one -- EPS Image Switcher's feel, applied to outputs. Grow-only (never
     shrinks a socket the user has already seen) and capped at MAX_OUTPUTS,
     where the last socket is itself wirable rather than a permanent spare."""
     pairs = zip(GROW_VISIBLE_CASES, distributor_api["growVisible"], strict=True)

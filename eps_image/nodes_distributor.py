@@ -126,7 +126,7 @@ logger = logging.getLogger("eps_image")
 #: both DERIVED from it, never hand-typed, so they can never drift in length.
 #:
 #: Raised 8 -> 16 on 2026-07-29 (owner: "EPS Distributor should have more
-#: than three outputs. Just like EPS Switcher the number of nodes needs to be
+#: than three outputs. Just like EPS Image Switcher the number of nodes needs to be
 #: able to grow"). Growth is now automatic in the frontend -- wiring the last
 #: visible socket reveals the next one, the same feel as EPSSwitcher's
 #: growing inputs -- but the CEILING is real and lives here, for a reason
@@ -225,7 +225,7 @@ class EPSDistributor:
         "that socket is skipped; the rest still see the image and run "
         "normally, all in a single pass. Turning every output off is a "
         "valid state: the queue still succeeds, and nothing downstream of "
-        "this node runs. Unlike EPS Switcher, this node never re-runs the "
+        "this node runs. Unlike EPS Image Switcher, this node never re-runs the "
         "workflow multiple times -- every enabled branch runs once, "
         "together."
     )

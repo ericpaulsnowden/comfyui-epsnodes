@@ -109,7 +109,7 @@ _NODE_SPECS = [
     ("lora_library.nodes_notebook", "LoraLibraryNotebook", "EPS Prompt Notebook"),
     ("lora_library.nodes_sets", "LoraLibraryApplySet", "EPS Apply LoRA Set"),
     ("lora_library.nodes_sweep", "LoraLibrarySweep", "EPS LoRA Iterator"),
-    ("eps_image.nodes_switcher", "EPSSwitcher", "EPS Switcher"),
+    ("eps_image.nodes_switcher", "EPSSwitcher", "EPS Image Switcher"),
     ("eps_image.nodes_switcher", "EPSModelSwitcher", "EPS Model Switcher"),
     ("eps_image.nodes_switcher", "EPSClipSwitcher", "EPS CLIP Switcher"),
     ("eps_image.nodes_switcher", "EPSVaeSwitcher", "EPS VAE Switcher"),

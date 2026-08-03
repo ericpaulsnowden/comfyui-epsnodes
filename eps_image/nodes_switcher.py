@@ -1,4 +1,4 @@
-"""``EPSSwitcher`` (FORMAT.md §6.4, display: "EPS Switcher") — image toggle +
+"""``EPSSwitcher`` (FORMAT.md §6.4, display: "EPS Image Switcher") — image toggle +
 fan-out node.
 
 Growing ``image_N`` optional sockets (unbounded, like the sibling pack's
@@ -182,7 +182,7 @@ def _unwrap_toggles(toggles: Any) -> Any:
 
 
 def _parse_toggles(
-    toggles: str, *, log_prefix: str = "EPS Switcher", noun: str = "image"
+    toggles: str, *, log_prefix: str = "EPS Image Switcher", noun: str = "image"
 ) -> dict[str, Any]:
     """Best-effort JSON object parse of the ``toggles`` widget value.
 
@@ -191,7 +191,7 @@ def _parse_toggles(
     every slot enabled -- rather than crashing the node, logging a warning
     so the cause is visible without being fatal. *log_prefix*/*noun* name
     the calling switcher class and its slot noun in that warning and default
-    to EPSSwitcher's own original "EPS Switcher"/"image" wording, so every
+    to EPSSwitcher's own original "EPS Image Switcher"/"image" wording, so every
     pre-existing call site (which never passed them) logs byte-identical
     text to before this function was shared across all four switcher
     classes.
@@ -711,7 +711,7 @@ EPSSwitcher = _make_switcher_ns(
     pattern=_IMAGE_INPUT_PATTERN,
     io_type="IMAGE",
     output_name="images",
-    log_prefix="EPS Switcher",
+    log_prefix="EPS Image Switcher",
     noun="image",
     input_tooltip=_IMAGE_INPUT_TOOLTIP,
     output_tooltip=(

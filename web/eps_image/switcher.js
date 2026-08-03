@@ -1,5 +1,5 @@
 /**
- * @file EPS Switcher frontend (FORMAT.md §6.4). Exports the `init()`/
+ * @file EPS Image Switcher frontend (FORMAT.md §6.4). Exports the `init()`/
  * `attach(node)` hooks `web/eps_image.js` calls; `attach` no-ops for any
  * node class not listed in the `SWITCHER_CLASSES` registry below.
  *

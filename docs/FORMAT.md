@@ -617,7 +617,12 @@ queue. It drives a **genuine, untouched `Power Lora Loader (rgthree)`**:
   ComfyUI-only floor is §6.2; the controller is the upgrade for rgthree
   users).
 
-## §6.4 `EPSSwitcher` (display: "EPS Switcher") — image toggle + fan-out
+## §6.4 `EPSSwitcher` (display: "EPS Image Switcher") — image toggle + fan-out
+
+Display name renamed from "EPS Switcher" in v0.49.2 (owner ask 2026-08-03:
+every sibling switcher carries a qualifier). Display-only — class id
+frozen (§8), saved workflows untouched, old saved nodes keep their saved
+titles (§6.8's identical caveat).
 
 Roadmap: `research/roadmap-eps-switcher.md` (M1 = this section). NON-lora node;
 lives in the sibling `eps_image/` module, category "EPSNodes". Class id
@@ -1083,7 +1088,7 @@ add; single batch-aware IMAGE input; disk-backed, survive-restart, NO cap.
   all-off). Verified live 2026-07-20.
 - **Execution model:** `OUTPUT_NODE = True` (so it runs even with nothing
   wired downstream — collect phase; NOTE this also means the node executes
-  every queue even when a downstream lazy consumer like EPS Switcher has
+  every queue even when a downstream lazy consumer like EPS Image Switcher has
   its branch toggled off) + `IS_CHANGED` returning `float("nan")` → exactly
   one execution (= at most one append of the batch) per queued prompt;
   `Emit` simply skips the append. **2026-07-22:** `ui.images` now reports
@@ -1734,7 +1739,7 @@ hand-bypassing groups. Roadmap: `research/roadmap-eps-distributor.md`.
   existing wire indices never shift).
 - **The outputs GROW as you wire, and the ceiling is real** (owner ask
   2026-07-29: "EPS Distributor should have more than three outputs. Just like
-  EPS Switcher the number of nodes needs to be able to grow"). Wiring the last
+  EPS Image Switcher the number of nodes needs to be able to grow"). Wiring the last
   visible output reveals the next one, so there is always exactly one spare
   socket below the highest wired one — §6.4's `convergeImageInputs` feel, and a
   structural port of its `wireImageInputGrowth` hook pair. Two differences,

@@ -728,7 +728,7 @@ class TestRegistration:
 
     def test_eps_switcher_registration_unchanged(self) -> None:
         source = self._init_source()
-        assert '("eps_image.nodes_switcher", "EPSSwitcher", "EPS Switcher")' in source
+        assert '("eps_image.nodes_switcher", "EPSSwitcher", "EPS Image Switcher")' in source
 
 
 # --------------------------------------------------------------- no ComfyUI import

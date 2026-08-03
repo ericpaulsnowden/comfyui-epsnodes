@@ -1,4 +1,4 @@
-"""Frontend tests for EPS Switcher's generalization across four sibling
+"""Frontend tests for EPS Image Switcher's generalization across four sibling
 classes (FORMAT.md section 6.4's `EPSSwitcher`, plus `EPSModelSwitcher`,
 `EPSClipSwitcher`, `EPSVaeSwitcher` -- backend classes landing in a parallel
 change, out of scope here).

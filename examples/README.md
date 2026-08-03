@@ -167,7 +167,7 @@ files.
 **Needs:** [`eps-cross-test-prompts.md`](eps-cross-test-prompts.md) copied into
 your library folder. No checkpoint.
 
-Proves **2 images × 4 prompts = 8**: two Load Image nodes → EPS Switcher →
+Proves **2 images × 4 prompts = 8**: two Load Image nodes → EPS Image Switcher →
 EPS Cross Product → Save Image, with the crossed `name` output driving
 `filename_prefix` so the filenames themselves show the pairing.
 
@@ -230,7 +230,7 @@ own demos.
 The graph, stage by stage (numbered groups + notes on the canvas):
 
 1. **Sources & Switcher** — two Load Image nodes + an EPS Frame Saver (video
-   frame) feed an EPS Switcher: toggle rows to pick which sources flow;
+   frame) feed an EPS Image Switcher: toggle rows to pick which sources flow;
    toggled-off branches never execute.
 2. **Normalize & Collect** — EPS Resolution fits everything to 1024, then an
    EPS Image Grid records the stream (Collect) across runs; flip it to Emit
