@@ -725,7 +725,7 @@ import * as api from './api.js'
 
 const NODE_TYPE = 'LoraLibrarySetController'
 const NODE_TITLE = 'EPS Lora Loader State Controller'
-const NODE_CATEGORY = 'EPSNodes'
+const NODE_CATEGORY = 'EPSNodes/LoRA'
 
 /** Exact rgthree type/title/comfyClass string — constants.js addRgthree("Power Lora Loader"). */
 const POWER_LORA_LOADER_TYPE = 'Power Lora Loader (rgthree)'

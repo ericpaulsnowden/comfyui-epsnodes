@@ -650,7 +650,7 @@ def _make_switcher_ns(
     namespace: dict[str, Any] = {
         "__module__": __name__,
         "__doc__": class_doc,
-        "CATEGORY": "EPSNodes",
+        "CATEGORY": "EPSNodes/Switchers",
         "RETURN_TYPES": (io_type,),
         "RETURN_NAMES": (output_name,),
         "INPUT_IS_LIST": True,

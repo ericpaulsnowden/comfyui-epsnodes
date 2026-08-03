@@ -306,7 +306,7 @@ class LoraLibrarySweep:
     as "only the newly-added steps re-run".
     """
 
-    CATEGORY = "EPSNodes"
+    CATEGORY = "EPSNodes/LoRA"
     RETURN_TYPES = ("MODEL", "CLIP", "STRING")
     RETURN_NAMES = ("model", "clip", "label")
     OUTPUT_IS_LIST = (True, True, True)

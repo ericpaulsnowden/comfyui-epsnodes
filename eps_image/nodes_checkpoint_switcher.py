@@ -243,7 +243,7 @@ class EPSCheckpointSwitcher:
     and everything wired downstream is silently skipped.
     """
 
-    CATEGORY = "EPSNodes"
+    CATEGORY = "EPSNodes/Switchers"
     RETURN_TYPES = ("MODEL", "CLIP", "VAE", "STRING")
     RETURN_NAMES = ("model", "clip", "vae", "label")
     OUTPUT_IS_LIST = (True, True, True, True)

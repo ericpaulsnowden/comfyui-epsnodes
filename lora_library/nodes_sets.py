@@ -109,7 +109,7 @@ class LoraLibraryApplySet:
     the same loras_text" report).
     """
 
-    CATEGORY = "EPSNodes"
+    CATEGORY = "EPSNodes/LoRA"
     RETURN_TYPES = ("MODEL", "CLIP", "LORA_STACK", "STRING", "STRING")
     RETURN_NAMES = ("model", "clip", "lora_stack", "trigger_words", "loras_text")
     OUTPUT_TOOLTIPS = (

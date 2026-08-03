@@ -613,7 +613,7 @@ class TestEmptySiblingSkipAcrossClassTypes:
 @pytest.mark.parametrize(("cls", "prefix", "io_type", "output_name"), _SWITCHER_TYPES)
 class TestClassShape:
     def test_category(self, cls, prefix, io_type, output_name) -> None:
-        assert cls.CATEGORY == "EPSNodes"
+        assert cls.CATEGORY == "EPSNodes/Switchers"
 
     def test_return_types_and_names(self, cls, prefix, io_type, output_name) -> None:
         assert (io_type,) == cls.RETURN_TYPES

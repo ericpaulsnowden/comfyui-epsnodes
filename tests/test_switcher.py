@@ -531,7 +531,7 @@ class TestCheckLazyStatus:
 
 class TestClassShapeMatchesFormatMdSection6_4:
     def test_category(self) -> None:
-        assert EPSSwitcher.CATEGORY == "EPSNodes"
+        assert EPSSwitcher.CATEGORY == "EPSNodes/Switchers"
 
     def test_return_types_is_a_single_image_output(self) -> None:
         assert EPSSwitcher.RETURN_TYPES == ("IMAGE",)

@@ -324,6 +324,18 @@ Route paths are FROZEN once shipped (§8).
 
 ## §6 Nodes
 
+**Node-browser grouping (v0.50.1, owner's picks 2026-08-03):** a node's
+`CATEGORY` is a browse-menu path and NOTHING else — saved workflows,
+search, and class ids are untouched by it, so category moves are always
+display-safe. Current layout: `EPSNodes/LoRA` (Apply LoRA Set, the
+Lora Loader State Controller via `controller.js`'s `NODE_CATEGORY`, LoRA
+Iterator), `EPSNodes/Switchers` (Image/Model/CLIP/VAE via the
+`nodes_switcher.py` factory, plus Checkpoint), everything else flat at
+`EPSNodes` (Prompt Notebook, Distributor, Resolution, Image Grid, Run
+Multiplier, Frame Saver — the owner explicitly kept the Distributor out
+of Switchers). Per-section "category" mentions below are the pre-split
+wording; this note is authoritative.
+
 Class ids are FROZEN once shipped. Both nodes re-read their files at every
 execution — **the file is the truth; the UI is a view.**
 

@@ -354,7 +354,7 @@ def test_build_sweep_plan_never_mutates_its_lora_stack_argument() -> None:
 
 class TestClassShapeMatchesFormatMdSection6_8:
     def test_category(self) -> None:
-        assert LoraLibrarySweep.CATEGORY == "EPSNodes"
+        assert LoraLibrarySweep.CATEGORY == "EPSNodes/LoRA"
 
     def test_return_types_and_names(self) -> None:
         assert LoraLibrarySweep.RETURN_TYPES == ("MODEL", "CLIP", "STRING")

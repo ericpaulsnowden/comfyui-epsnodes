@@ -406,7 +406,7 @@ class TestValidateInputs:
 
 class TestClassShape:
     def test_category(self) -> None:
-        assert EPSCheckpointSwitcher.CATEGORY == "EPSNodes"
+        assert EPSCheckpointSwitcher.CATEGORY == "EPSNodes/Switchers"
 
     def test_return_types_and_names(self) -> None:
         assert EPSCheckpointSwitcher.RETURN_TYPES == ("MODEL", "CLIP", "VAE", "STRING")
