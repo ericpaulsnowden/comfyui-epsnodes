@@ -398,3 +398,43 @@ class TestPartialSweepGroup:
         assert all(isinstance(m, fake_execution_blocker) for m in models)
         assert clips == ["c0", "c0", "c1", "c1"]
         assert labels == ["lora_0.0", "lora_0.0", "lora_0.5", "lora_0.5"]
+
+
+class TestConsumedButUnwiredGuard:
+    """v0.51.0 (owner report 2026-08-03): consuming an output whose backing
+    input is unwired used to silently skip everything downstream ("completes
+    immediately, nothing generated"). With the prompt visible, it errors."""
+
+    @staticmethod
+    def _prompt_consuming(slot, uid="7"):
+        return {
+            "9": {"class_type": "SaveImage", "inputs": {"images": [uid, slot]}},
+            uid: {"class_type": "EPSCrossSweep", "inputs": {}},
+        }
+
+    def test_image_output_consumed_in_text_only_mode_errors_with_guidance(self) -> None:
+        with pytest.raises(ValueError) as excinfo:
+            run(image=None, prompt=[self._prompt_consuming(2)], unique_id=["7"])
+        message = str(excinfo.value)
+        assert "image" in message and "Empty Latent" in message
+
+    def test_vae_output_consumed_while_unwired_errors(self) -> None:
+        with pytest.raises(ValueError) as excinfo:
+            run(prompt=[self._prompt_consuming(6)], unique_id=["7"])
+        assert "vae" in str(excinfo.value)
+
+    def test_consumed_and_wired_is_fine(self) -> None:
+        models, *_ = run(
+            vae=["v0"], prompt=[self._prompt_consuming(6)], unique_id=["7"]
+        )
+        assert len(models) == 4
+
+    def test_unwired_but_unconsumed_keeps_blocker_behavior(self, fake_execution_blocker) -> None:
+        # vae unwired, only the IMAGE output (slot 2, which IS wired via the
+        # image input) is consumed -> no error, vae emits blockers as before.
+        *_, vaes = run(prompt=[self._prompt_consuming(2)], unique_id=["7"])
+        assert all(isinstance(v, fake_execution_blocker) for v in vaes)
+
+    def test_no_prompt_available_stays_out_of_the_way(self, fake_execution_blocker) -> None:
+        *_, vaes = run()  # direct call, no prompt/unique_id -- exactly the old behavior
+        assert all(isinstance(v, fake_execution_blocker) for v in vaes)

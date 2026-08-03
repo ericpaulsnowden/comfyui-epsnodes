@@ -1670,6 +1670,16 @@ label, so two chained Cross Products cannot express it.
   miswire, never something to clamp. Pair-side mismatches (paired mode)
   still warn and use the min. Either side empty → the §6.4
   `[ExecutionBlocker(None)]` pattern on all seven outputs.
+- **Consumed-but-unwired outputs FAIL the queue (v0.51.0, owner report
+  2026-08-03: a txt2img graph consuming the `image` output with no image
+  input wired "completes immediately, nothing generated").** The node
+  takes the `prompt`/`unique_id` hidden pair (§6.4's exact idiom) and
+  scans the prompt for consumers of its own slots; any consumed output
+  whose backing input is unwired (model/clip/image/label/vae) raises ONE
+  error naming each such output with per-output guidance (image's names
+  the Empty-Latent txt2img path). Unwired AND unconsumed outputs keep the
+  silent per-run blockers — they poison nobody. Direct callers/tests that
+  pass no prompt get the pre-v0.51.0 behavior unchanged.
 - **Outputs (all `OUTPUT_IS_LIST`, length steps×pairs):** `model`, `clip`,
   `image`, `text`, `save_prefix`, `label` — **STRENGTH-MAJOR** (owner
   decision 2026-07-23b: outer loop = sweep step, so each strength's

@@ -128,6 +128,45 @@ def _safe_base(value: str) -> list[str]:
     return [c for c in (_safe_component(part) for part in value.split("/")) if c]
 
 
+def _unwrap_hidden(value: Any) -> Any:
+    """Undo ``INPUT_IS_LIST``'s wrapping of a hidden input -- verbatim
+    ``nodes_switcher._unwrap_hidden`` (see its docstring for the core
+    ``get_input_data`` shapes this mirrors)."""
+    if isinstance(value, (list, tuple)):
+        return value[0] if value else None
+    return value
+
+
+def _consumed_output_slots(prompt: Any, unique_id: Any) -> set[int]:
+    """Which of THIS node's output slots some other node in *prompt*
+    consumes -- the same PROMPT-scan technique ``nodes_switcher``'s
+    ``_slots_fed_by_an_empty_switcher`` uses, pointed the other way
+    (consumers of us, rather than our upstreams). A link reference in a
+    prompt is a two-element ``[origin_id, origin_slot]`` list; origin ids
+    compare as strings (API prompts key nodes by string). Malformed or
+    missing *prompt*/*unique_id* (direct callers, tests, old servers)
+    degrades to "nothing known consumed" -- the v0.51.0 guard built on
+    this then simply stays out of the way.
+    """
+    if not isinstance(prompt, dict) or unique_id is None:
+        return set()
+    uid = str(unique_id)
+    consumed: set[int] = set()
+    for node in prompt.values():
+        inputs = node.get("inputs") if isinstance(node, dict) else None
+        if not isinstance(inputs, dict):
+            continue
+        for value in inputs.values():
+            if (
+                isinstance(value, (list, tuple))
+                and len(value) == 2
+                and str(value[0]) == uid
+                and isinstance(value[1], int)
+            ):
+                consumed.add(value[1])
+    return consumed
+
+
 class EPSCrossSweep:
     """Sweep group x pair group, strength-major, with per-run save paths."""
 
@@ -329,6 +368,9 @@ class EPSCrossSweep:
                     },
                 ),
             },
+            # v0.51.0: lets run() see its own consumers (the guard below).
+            # Same hidden pair as nodes_switcher/nodes_distributor.
+            "hidden": {"prompt": "PROMPT", "unique_id": "UNIQUE_ID"},
         }
 
     def run(
@@ -342,6 +384,8 @@ class EPSCrossSweep:
         base_folder: Any = "",
         vae: Any = None,
         pair_mode: Any = PAIR_MODE_PAIRED,
+        prompt: Any = None,
+        unique_id: Any = None,
     ) -> tuple[list[Any], ...]:
         models = _as_clean_list(model)
         clips = _as_clean_list(clip)
@@ -365,6 +409,36 @@ class EPSCrossSweep:
         vae_wired = vae is not None
         text_only = image is None
         sweep_wired = model_wired or clip_wired or label_wired or vae_wired
+
+        # v0.51.0 guard (owner report 2026-08-03: a txt2img graph consuming
+        # the image OUTPUT with no image INPUT wired "completes immediately,
+        # nothing generated" -- every downstream of that wire was silently
+        # skipped by the per-run blockers). An output whose backing input is
+        # unwired LOOKS wireable but poisons its consumers; if the prompt
+        # shows something actually consuming it, that is always a miswire --
+        # fail the queue naming both ends instead of silently skipping.
+        consumed = _consumed_output_slots(_unwrap_hidden(prompt), _unwrap_hidden(unique_id))
+        dead_outputs = []
+        if 0 in consumed and not model_wired:
+            dead_outputs.append("model (wire a model source into the model input)")
+        if 1 in consumed and not clip_wired:
+            dead_outputs.append("clip (wire a CLIP source into the clip input)")
+        if 2 in consumed and text_only:
+            dead_outputs.append(
+                "image (wire images into the image input -- or, for text-to-image, "
+                "don't consume the image output: drive an Empty Latent Image instead)"
+            )
+        if 5 in consumed and not label_wired:
+            dead_outputs.append("label (wire a label source into the label input)")
+        if 6 in consumed and not vae_wired:
+            dead_outputs.append("vae (wire a VAE source into the vae input)")
+        if dead_outputs:
+            raise ValueError(
+                "EPS Run Multiplier: these outputs are wired downstream but their "
+                "matching inputs are not wired, so every run on those wires would "
+                "be silently skipped and the workflow would finish without "
+                "generating anything: " + "; ".join(dead_outputs)
+            )
 
         wired_sweep = {
             input_name: length
