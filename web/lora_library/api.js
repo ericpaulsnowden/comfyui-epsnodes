@@ -48,16 +48,27 @@ export async function postJson(path, body) {
 
 async function unwrap(response) {
   let data = null
+  let parsed = true
   try {
     data = await response.json()
   } catch {
     // Non-JSON body (proxy error page etc.) — fall through to status check.
+    parsed = false
   }
   if (!response.ok) {
     const message = data && data.error ? data.error : `HTTP ${response.status}`
     const error = new Error(message)
     error.status = response.status
     error.data = data
+    throw error
+  }
+  // A 200 whose body isn't JSON is a FAILURE, not an empty payload (review
+  // 2026-08-09): returning null here made the picker read a truncated/proxy-
+  // mangled response as a successfully-empty lora library — the "failed" and
+  // "empty install" states must never collapse into each other.
+  if (!parsed) {
+    const error = new Error('server returned a response that is not JSON')
+    error.status = response.status
     throw error
   }
   return data

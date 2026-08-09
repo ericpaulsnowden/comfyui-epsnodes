@@ -408,3 +408,21 @@ class TestAtomicWrites:
         # and no stray temp file should be left behind either.
         assert (library_dir / store.PRESETS_FILENAME).read_text(encoding="utf-8") == original_text
         assert list(library_dir.glob("*.tmp")) == []
+
+
+class TestNonUtf8PresetsFile:
+    def test_utf16_presets_file_degrades_to_empty_with_a_warning(
+        self, context: LibraryContext, library_dir: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        # Review 2026-08-09 (found via the picker store mirrored from this
+        # module): UnicodeDecodeError is a ValueError, not an OSError, so a
+        # non-UTF-8 presets file used to 500 the routes instead of degrading.
+        payload = json.dumps({"format": 1, "presets": {"HD": VALUES}})
+        (library_dir / store.PRESETS_FILENAME).write_bytes(payload.encode("utf-16"))
+        with caplog.at_level("WARNING"):
+            presets, mtime = store.load_presets(context)
+        assert presets == {}
+        # The decode failure takes the could-not-READ branch, which returns
+        # before the stat -- so no mtime, same as an unreadable file.
+        assert mtime is None
+        assert any("could not read" in r.message for r in caplog.records)

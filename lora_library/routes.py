@@ -1096,7 +1096,7 @@ def _register_all(context: LibraryContext, routes: web.RouteTableDef) -> None:
     optional (same defensive posture as ``__init__.py``): a missing/broken
     one logs and is skipped."""
     register_core(context, routes)
-    for module_name in ("routes_notebook", "routes_sets"):
+    for module_name in ("routes_notebook", "routes_sets", "routes_lora_picker"):
         try:
             module = __import__(f"{__package__}.{module_name}", fromlist=["register"])
             module.register(context, routes)

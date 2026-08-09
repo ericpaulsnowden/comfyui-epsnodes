@@ -5,7 +5,7 @@ live in **plain files you own**. Everything appears under **EPSNodes** in
 the node browser and Settings. It started as a LoRA family and has grown
 beyond it — image-flow utilities now live here too.
 
-## The fourteen nodes
+## The fifteen nodes
 
 No third-party packs required — every node here runs on ComfyUI alone,
 except the Lora Loader State Controller, which is built to extend
@@ -17,6 +17,7 @@ section further down; this is the map.
 | Node | What it does | Works with |
 | --- | --- | --- |
 | [**EPS Prompt Notebook**](#eps-prompt-notebook-shipped) | Your prompt library as a node — a scrolling list of named prompts with an editor beside it, backed by a plain Markdown file you own (local or on a NAS). Select several and the workflow runs once per prompt. | Nothing — its own Markdown file (auto-created). |
+| [**EPS LoRA Picker**](#eps-lora-picker-shipped) | Browse your loras by folder instead of one flat list — drill down, star favorites, see recents, pin a per-workflow folder scope — and build a selection with per-lora strengths. Outputs a `LORA_STACK`, patched model/clip, trigger words, and a filename token. | Your LoRA files; nothing else — favorites/recents live in the shared library folder. |
 | [**EPS Apply LoRA Set**](#eps-apply-lora-set-shipped) | Pick a saved lora configuration ("state") from a dropdown and apply it — which loras, order, on/off, strengths. Standalone: MODEL/CLIP in → out, plus a `LORA_STACK` and trigger words. | Your LoRA files + a saved set (via the Controller, the API, or by hand). |
 | [**EPS Lora Loader State Controller**](#eps-lora-loader-state-controller-shipped-requires-rgthree-comfy) | Captures and applies those states directly on an [rgthree Power Lora Loader](https://github.com/rgthree/rgthree-comfy) — rgthree stays the loader, this moves whole configurations in and out of it. | **rgthree-comfy**'s Power Lora Loader — third-party, self-disables without it. |
 | [**EPS LoRA Iterator**](#eps-lora-iterator-shipped) | Auditions any `LORA_STACK` by strength: set min/max/increment and one queue runs your workflow once per step (per lora, or all together). | A `LORA_STACK` source (usually Apply LoRA Set) + a model. |
@@ -32,7 +33,8 @@ section further down; this is the map.
 > **Status: pre-release.** Contracts live in
 > [docs/FORMAT.md](docs/FORMAT.md). Want to see the nodes working? Every
 > workflow in [examples/](examples/) is annotated on the canvas and ready
-> to load — nine example files between them cover all fourteen nodes, some
+> to load — nine example files between them cover fourteen of the fifteen
+> nodes (the new LoRA Picker's example is still to come), some
 > sharing a graph. Most just want a Run; the LoRA trio (Apply LoRA Set,
 > LoRA Iterator, and the rgthree-dependent Lora Loader State Controller) only
 > shows up in `eps-test-cross-sweep.json` and `eps-full-pipeline.json`,
@@ -190,6 +192,46 @@ whole configurations ("states") in and out of it:
   needs no dependencies.
 - Every `EPS Apply LoRA Set` dropdown refreshes automatically after any state
   change — no page reload.
+
+## EPS LoRA Picker (shipped)
+
+`EPSNodes → LoRA → EPS LoRA Picker`: browse your lora collection **by
+folder**, right on the node, and build a selection to apply. It fixes
+three everyday pains at once: the flat everything-in-one-dropdown lora
+list, no way to scope a workflow to one folder and its subfolders, and no
+favorites or recently-used anywhere in the ecosystem.
+
+- **The panel, top to bottom:** a **scope chip** (`Whole library`, or the
+  pinned folder with ✕ to clear); the **Selected** rows — on/off toggle,
+  name, strength, ✕ remove per row; then the **browser** — a breadcrumb
+  you drill down through, `★ Favorites` and `🕘 Recent` pseudo-folders at
+  the top, every folder with a lora count and a **Scope** pin, every lora
+  with a ★ star and `＋ Add`. A selected or starred lora that isn't
+  installed on this machine shows a dimmed ⚠ row — visible, never
+  silently dropped.
+- **Scope is per-workflow.** Pin a folder and the browser shows only it
+  and its subfolders — the pin saves **into the workflow file**, so the
+  character workflow opens scoped to `characters/`, the style workflow to
+  `styles/`. It's pure view state: re-scoping never re-runs the graph.
+- **Favorites and recents follow you across machines:** one file,
+  `lora_picker.json`, in the same shared library folder as your notebooks
+  and sets — point the library at a NAS and every machine sees the same
+  stars. `＋ Add` is what stamps a lora recent.
+- **Outputs — Apply LoRA Set's exact five, so it drops in anywhere that
+  node does:** `lora_stack` wires straight into the [EPS LoRA
+  Iterator](#eps-lora-iterator-shipped) or any stack-consuming node;
+  `model`/`clip` pass through patched — the same loader path [EPS Apply
+  LoRA Set](#eps-apply-lora-set-shipped) uses, and chaining through an
+  Apply node combines your picked loras with a saved set;
+  `trigger_words` is read from the sidecar `.txt` next to each lora file
+  (the ecosystem's activation-text convention), ready to concatenate into
+  a prompt; `loras_text` names what was applied, for a Save Image
+  `filename_prefix`. An empty or all-off selection just passes through —
+  never an error. A selection saved on Windows resolves on macOS/Linux
+  (same separator-insensitive matching as saved sets).
+- **Coming next** (roadmapped, **not shipped yet**): send-to-rgthree —
+  writing the selection into a Power Lora Loader (M2) — and search +
+  preview thumbnails (M3).
 
 ## EPS Apply LoRA Set (shipped)
 

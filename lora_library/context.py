@@ -66,7 +66,12 @@ class LibraryContext:
                 data = json.load(fh)
         except FileNotFoundError:
             return {}
-        except (OSError, json.JSONDecodeError) as exc:
+        # ValueError, not just JSONDecodeError (review 2026-08-09): a
+        # config.json saved as UTF-16 raises UnicodeDecodeError — a plain
+        # ValueError — which used to escape this guard and propagate out of
+        # library_dir() into every store and route that resolves it.
+        # JSONDecodeError is itself a ValueError subclass, so nothing is lost.
+        except (OSError, ValueError) as exc:
             logger.warning(
                 "EPSNodes: unreadable %s (%s); using defaults", self._config_path, exc
             )

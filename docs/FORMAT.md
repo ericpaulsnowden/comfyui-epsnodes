@@ -319,6 +319,10 @@ message>"}` with a 4xx status. `mtime` values are float POSIX seconds.
 | `GET /lora_library/set?slug=` | the full §4 JSON + `"slug"` |
 | `POST /lora_library/set` `{"slug"?, "set": {…}}` | save (slug derived from `set.name` when absent); `{"ok","slug","sets"}` |
 | `POST /lora_library/set/delete` `{"slug"}` | `{"ok","sets"}` |
+| `GET /lora_library/picker` | §6.13 panel feed: `{"loras": [installed spellings, `get_filename_list("loras")` order], "favorites": [forward-slash names, store order], "recents": [{"file","ts"} newest first], "mtime": float\|null}`. NO loopback gate — the picker file lives inside `library_dir`, which §2 already grants remote read+write (the presets-routes rationale verbatim; the lora LIST is the same one `/object_info` exposes to every viewer) |
+| `POST /lora_library/picker/favorite` `{"file","on"}` | star/unstar one lora (name normalized to forward slashes in the store). `file` non-empty string, `on` bool, else 400. NOT required to be installed — unstarring a favorite that only exists on the other machine must work. → `{"ok","favorites","mtime"}` |
+| `POST /lora_library/picker/recent` `{"files": [..]}` | record used loras: each moves to the FRONT of `recents` (dedup by file, fresh server-stamped `ts`), list capped at 30. Empty list = no-op 200. Non-list / non-string entry ⇒ 400. → `{"ok","recents","mtime"}` |
+| `POST /lora_library/picker/clear_recents` `{}` | empty the recents list (favorites untouched). → `{"ok","recents": [],"mtime"}` |
 
 Route paths are FROZEN once shipped (§8).
 
@@ -1996,6 +2000,113 @@ model/CLIP/VAE from one checkpoint must never drift out of alignment.
   consumer (blocker path); queue-time rejection naming an unknown file.
   Real model loading needs real checkpoints — checklist item for the owner's
   machines.
+
+## §6.13 `EPSLoraPicker` (display: "EPS LoRA Picker") — folder-scoped browse, favorites, recents → stack
+
+The answer to the owner's three LoRA-navigation pains (research round
+2026-08-09, roadmap `docs/ROADMAP-lora-picker.md`): the flat lora list,
+no per-workflow "one folder + its subfolders" scope, and no favorites or
+recently-used anywhere in the ecosystem. Category `EPSNodes/LoRA`. Module
+`lora_library/nodes_picker.py`; panel `web/lora_library/picker.js`; store
+`lora_library/lora_picker_store.py`; routes
+`lora_library/routes_lora_picker.py` (§5 table). Deliberately NOT a
+loader rebuild: it emits the same outputs §6.2 does and reuses §6.2's own
+apply/text helpers, so it drops in anywhere Apply LoRA Set does.
+
+- **State is one `selection` STRING widget** (optional, default `""`,
+  Vue-hidden per §7.5 — the §6.12 restore-proof single-JSON-widget
+  pattern, same rationale verbatim): `{"scope": "<folder path, forward
+  slashes, \"\" = whole library>", "loras": [{"file", "on", "strength",
+  "strength_clip"?}]}`, `loras` order = stack order, unique by `file`.
+  `scope` is the PER-WORKFLOW folder restriction — it serializes with the
+  workflow and is pure view state: execution ignores it, and it is
+  EXCLUDED from `IS_CHANGED` (re-scoping a browse must not re-run the
+  graph). Unparseable/wrong-shaped `selection` ⇒ logged warning + treated
+  as empty — never fail the queue on view state.
+- **The favorites/recents store** is ONE JSON file `lora_picker.json`
+  directly inside `library_dir` (the §6.5-presets placement rationale:
+  exactly one file, shared cross-machine like the notebook/sets/presets):
+  `{"format": 1, "favorites": [names], "recents": [{"file","ts"}]}` —
+  names stored forward-slash normalized (a set written on Windows must
+  match on POSIX, the §4 separator rule), favorites in insertion order,
+  recents newest-first capped at 30, dedup-by-file on both. Mirrors
+  `resolution_presets_store.py`'s error family + degrade posture
+  verbatim: reads degrade (missing/malformed/unreachable ⇒ warned empty),
+  writes raise `PickerStoreError` ⇒ 400 naming the unreachable folder;
+  §3.5 `ConflictError` supported via optional `base_mtime` — but the
+  favorite/recent ROUTES deliberately never send one: a star click or a
+  recents stamp must not 409; the read-modify-write race between two
+  machines inside the same second is accepted and self-heals on the next
+  write.
+- **Node execution**: parse `selection`; for each `on` row resolve the
+  file via `sets_store.resolve_lora` (the §4 separator-insensitive,
+  rgthree-lenient match — a selection saved on the PC must resolve on the
+  Linux box); unresolvable ⇒ warn + skip, never fail the run (§6.2's
+  missing-lora posture). Outputs `(model, clip, lora_stack,
+  trigger_words, loras_text)` — §6.2's exact shape: `model`/`clip`
+  optional passthrough patched via `LoraLibraryApplySet._apply_stack`
+  (reused, not copied); `lora_stack` = `[(resolved, strength,
+  strength_clip)]` with `strength_clip` defaulting to `strength`;
+  `loras_text` via §6.2's `_loras_text`. `trigger_words` = each enabled,
+  resolved row's SIDECAR text file (`<lora path with extension replaced
+  by .txt>` — the ecosystem's activation-text convention), read UTF-8
+  best-effort, stripped, capped 4096 chars/file, non-empty ones joined
+  `", "` — no sidecar anywhere ⇒ `""`. Empty/all-off selection ⇒
+  passthrough + empty stack + empty strings — NOT a blocker: the picker
+  is a source, not a gate (§6.4's all-off convention is for gates).
+  `IS_CHANGED` = canonical dump of the parsed rows PLUS each row's
+  sidecar-txt mtime (edited trigger words re-run; `scope` excluded);
+  `VALIDATE_INPUTS` ⇒ True (§6.2's dynamic-combo rationale).
+- **Panel** (`web/lora_library/picker.js`, §6.12's panel conventions:
+  `addDOMWidget`, hidden `selection`, restore-safe via the §7.2
+  `wireConfigureReload` shared-reload pattern, keydown
+  `stopPropagation`, no window-level listeners, ~360px width floor).
+  Top→bottom: **scope chip** (`Whole library`, or `📁 <scope>` + ✕
+  clear); **Selected (N)** rows — on-toggle, basename (full path in
+  `title`), strength number input (−10..10, step 0.05), ✕ remove —
+  rendered FROM THE WIDGET ALONE so a failed server fetch can never blank
+  the user's saved selection (the v0.52.1 lesson as a design rule;
+  rows the server list can't confirm show ⚠, §6.12's convention);
+  **browser** — breadcrumb (scope root ⇒ current folder), then at the
+  root listing only: `★ Favorites (n)` / `🕘 Recent (n)` pseudo-folders
+  (always ALL favorites/recents, unfiltered by scope), then folders
+  (name, lora count, a `Scope` pin that sets `selection.scope`), then
+  loras (★/☆ star toggle → `POST picker/favorite`, optimistic +
+  revert-on-failure; `＋ Add`); **status line** with §7.2-style error
+  state + Retry. The folder TREE is derived client-side from the §5
+  `GET picker` list (forward-slash split — no tree route; matches how
+  rgthree's own chooser gets nested paths). Drill-down position is
+  transient; only `scope` persists. Add appends `{file, on: true,
+  strength: 1}` (duplicate Add scrolls to the existing row instead) and
+  fires `POST picker/recent` — recents record at SELECTION time, the
+  roadmap's decided M1 recording point. A favorite naming a lora NOT
+  installed on this machine renders dimmed `⚠ not installed here`,
+  star-only — visible, never silently dropped (§6.12's ⚠ rule).
+- **M2 (same section, shipped separately)**: a "Send to loader" row —
+  target combo of every `Power Lora Loader (rgthree)` in the graph
+  (ascending id, §6.3's exact type string) + Send button writing the
+  selection's rows (`on` preserved, `strengthTwo` only in the target's
+  dual mode) through `web/lora_library/pll_bridge.js` — a minimal,
+  self-contained copy of §6.3's probe-first + grow/shrink/assign
+  technique (`addNewLoraWidget`/`removeWidget`/whole-object `.value`
+  assignment). `controller.js` is deliberately NOT touched or imported:
+  it is owner-validated code, and the duplication is the cheaper risk.
+  Probe failures disable Send with §6.3's own message vocabulary.
+  Client-side only — the research round proved PLL cannot be fed
+  through the graph.
+- **M3 (same section, shipped separately)**: search field above the
+  browser (§7.2 search semantics: AND of whitespace words, view-only,
+  Escape clears, matches against full relative path); sidecar preview
+  thumbnails on lora rows (`GET /lora_library/picker/preview?file=` —
+  resolves the NAME through `folder_paths` then serves a sibling
+  `<stem>.png/.jpg/.jpeg/.webp` or `<stem>.preview.<ext>`; 404 when
+  none; no client paths ⇒ remote-safe, no loopback gate); trigger-word
+  copy action on rows that have a sidecar (`GET
+  /lora_library/picker/info?file=` on demand); Clear-recents button in
+  the Recent view (`POST picker/clear_recents`); favorites drag-reorder
+  (`POST /lora_library/picker/favorites_order {"files"}` — full-list
+  replace, unknown names ignored, missing-from-list favorites appended
+  at the end so two machines' concurrent edits can't drop stars).
 
 ## §7 Frontend surfaces
 

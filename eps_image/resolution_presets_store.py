@@ -278,7 +278,11 @@ def load_presets(context: LibraryContext) -> tuple[dict[str, dict], float | None
             raw_text = fh.read()
     except FileNotFoundError:
         return {}, None
-    except OSError as exc:
+    # UnicodeDecodeError included (review 2026-08-09, found via the picker
+    # store this module was mirrored into): it is a ValueError, not an
+    # OSError, so a non-UTF-8 presets file used to 500 the routes instead
+    # of taking this warned degrade branch.
+    except (OSError, UnicodeDecodeError) as exc:
         logger.warning("EPSNodes: could not read %s (%s); using empty presets", path, exc)
         return {}, None
 
