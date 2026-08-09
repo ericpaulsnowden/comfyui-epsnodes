@@ -27,13 +27,29 @@ logger = logging.getLogger("lora_library")
 
 
 def _resolve_path(
-    context: LibraryContext, file_value: object
+    context: LibraryContext, file_value: object, *, writing: bool = False
 ) -> tuple[Path | None, web.Response | None]:
     """``(path, None)`` on success, or ``(None, error_response)`` for a
     non-string *file_value* or one Path can't make sense of (e.g. an
-    embedded NUL) — kept out of every handler below."""
+    embedded NUL) — kept out of every handler below.
+
+    ``writing=True`` (every mutating route since v0.52.1, owner report
+    2026-08-03) additionally REFUSES an empty/absent *file_value* with a
+    400: ``resolve_notebook_file`` resolves ``""`` to the DEFAULT notebook,
+    which is fine for reads (a fresh node listing the default library
+    file) but was the silent finalizer of the frontend's "reset to
+    defaults" bug — a panel whose load had failed posted ``file: null``
+    and the write landed in the default notebook instead of erroring.
+    A well-behaved client always names the file it means to write.
+    """
     if file_value is not None and not isinstance(file_value, str):
         return None, error_response(400, "'file' must be a string")
+    if writing and not (isinstance(file_value, str) and file_value.strip()):
+        return None, error_response(
+            400,
+            "'file' is required for writes -- refusing to fall back to the "
+            "default notebook",
+        )
     try:
         return context.resolve_notebook_file(file_value or ""), None
     except (OSError, ValueError) as exc:
@@ -120,7 +136,7 @@ def register(context: LibraryContext, routes: web.RouteTableDef) -> None:
         if not isinstance(body, dict):
             return error_response(400, "body must be a JSON object")
 
-        path, err = _resolve_path(context, body.get("file"))
+        path, err = _resolve_path(context, body.get("file"), writing=True)
         if err is not None:
             return err
         guard = notebook_path_error(
@@ -206,7 +222,7 @@ def register(context: LibraryContext, routes: web.RouteTableDef) -> None:
         if not isinstance(body, dict):
             return error_response(400, "body must be a JSON object")
 
-        path, err = _resolve_path(context, body.get("file"))
+        path, err = _resolve_path(context, body.get("file"), writing=True)
         if err is not None:
             return err
         guard = notebook_path_error(
@@ -276,7 +292,7 @@ def register(context: LibraryContext, routes: web.RouteTableDef) -> None:
         if not isinstance(body, dict):
             return error_response(400, "body must be a JSON object")
 
-        path, err = _resolve_path(context, body.get("file"))
+        path, err = _resolve_path(context, body.get("file"), writing=True)
         if err is not None:
             return err
         guard = notebook_path_error(
@@ -318,7 +334,7 @@ def register(context: LibraryContext, routes: web.RouteTableDef) -> None:
         if not isinstance(body, dict):
             return error_response(400, "body must be a JSON object")
 
-        path, err = _resolve_path(context, body.get("file"))
+        path, err = _resolve_path(context, body.get("file"), writing=True)
         if err is not None:
             return err
         guard = notebook_path_error(
@@ -373,7 +389,7 @@ def register(context: LibraryContext, routes: web.RouteTableDef) -> None:
         if not isinstance(body, dict):
             return error_response(400, "body must be a JSON object")
 
-        path, err = _resolve_path(context, body.get("file"))
+        path, err = _resolve_path(context, body.get("file"), writing=True)
         if err is not None:
             return err
         guard = notebook_path_error(
@@ -433,7 +449,7 @@ def register(context: LibraryContext, routes: web.RouteTableDef) -> None:
         if not isinstance(body, dict):
             return error_response(400, "body must be a JSON object")
 
-        path, err = _resolve_path(context, body.get("file"))
+        path, err = _resolve_path(context, body.get("file"), writing=True)
         if err is not None:
             return err
 

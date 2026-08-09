@@ -1999,6 +1999,35 @@ model/CLIP/VAE from one checkpoint must never drift out of alignment.
 
 ## §7 Frontend surfaces
 
+**§7.2 amendment — load-failure is an explicit, value-preserving ERROR
+STATE (v0.52.1, owner report 2026-08-03: "the notebook node will reset to
+default values ... It should never reset unless the user resets it").**
+A failed `GET /notebook` (403 for an unshared/unmounted path from a
+remote browser, or any network/server failure) used to abandon the panel
+in its EMPTY pre-load state — blank path bar, empty list, the saved path
+visible nowhere (the `file` widget is hidden in both renderers) — which
+presents exactly as "reset to defaults"; worse, `state.file` stayed
+`null`, so every later write posted `file: null`, which the server
+resolved to the DEFAULT notebook (writes landed in the wrong file,
+`setSelection` overwrote the saved entry selection, and a workflow save
+persisted the loss). Now: the catch sets `state.loadError = {file,
+message}` and `state.file` = the ATTEMPTED path; the file panel keeps
+showing that path; the list shows a could-not-load message; the status
+line carries a **Retry** button; and every MUTATING action (`+ New`,
+Save, Delete, rename, move — entry and category alike) refuses through
+one `writesBlocked()` gate while the error stands. Widgets are never
+touched, so saved values survive by construction. Backend
+belt-and-suspenders: every mutating `/notebook*` route 400s on an
+empty/absent `file` instead of inheriting `resolve_notebook_file("")`'s
+default substitution (reads keep it — a fresh node listing the default
+library file is legitimate). Retry paths: the Retry button, reconfigure
+(`onConfigure` reloads when `loadError` is set even if the widget value
+didn't change), and re-picking the same file. Defense-in-depth: the §7.2
+remote read-only revert now EXEMPTS a value arriving via a live link on
+the `file` widget-input (workflow-authored host state, fired through
+`applyToGraph` at queue time — reverting it swapped in the stale
+baseline), while raw remote hand edits still revert.
+
 - **§7.1 Extension entry** `web/lora_library.js`: exactly one
   `app.registerExtension` call named `lora_library.LoraLibrary`; every
   sub-feature module is wrapped so one failure never blocks the others

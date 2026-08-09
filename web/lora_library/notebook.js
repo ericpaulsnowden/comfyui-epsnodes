@@ -934,6 +934,15 @@ function createState(node, fileWidget, entryWidget) {
     fileWidget,
     entryWidget,
     file: null,
+    // §7.2 "never reset unless the user resets" (owner report 2026-08-03):
+    // non-null after a FAILED notebook load -- {file, message}. While set,
+    // the panel is an explicit error state: the attempted path stays
+    // visible in the file panel, every mutating action refuses (see
+    // writesBlocked), and the status line carries a Retry button. Cleared
+    // by the next successful load. The widgets are NEVER touched by any of
+    // this, so the workflow's saved file/entry values survive a broken
+    // connection by construction.
+    loadError: null,
     exists: true,
     entries: [],
     // Categories in the UI (FORMAT.md §7.2 amendment) — the §5 `categories`
@@ -1233,7 +1242,15 @@ function wireFileWidget(state) {
   const original = widget.callback
   state.lastKnownFileValue = widget.value
   widget.callback = function (value, ...rest) {
-    if (state.isLocal === false && value !== state.lastKnownFileValue) {
+    // 2026-08-03 defense-in-depth: a value arriving via a LIVE LINK on the
+    // file widget-input (a Primitive/String node the workflow's author
+    // wired on the HOST) is workflow-authored host state, not a remote
+    // hand-edit -- reverting it would silently swap in the stale baseline
+    // at queue time (graphToPrompt fires applyToGraph -> widget.callback).
+    // The revert below is for hand edits only.
+    const fileInput = state.node.inputs?.find?.((inp) => inp?.widget?.name === 'file')
+    const linkDriven = !!fileInput && fileInput.link != null
+    if (state.isLocal === false && value !== state.lastKnownFileValue && !linkDriven) {
       widget.value = state.lastKnownFileValue
       // 2026-07-27 (owner: "I can browse to the file now but selecting it
       // does nothing. It continues to show the local .md file no matter what
@@ -1318,7 +1335,9 @@ function wireConfigureReload(state) {
     try {
       const restored = state.fileWidget.value ?? ''
       state.lastKnownFileValue = restored
-      if (restored !== state.file) {
+      // `|| state.loadError`: a failed load must be re-attempted on the
+      // next configure even when the widget value didn't change (2026-08-03).
+      if (restored !== state.file || state.loadError) {
         reloadNow(state).catch((error) =>
           api.warn('notebook reload after configure failed', error)
         )
@@ -1647,7 +1666,10 @@ const FILEPANEL_PATH_AVG_CHAR_PX = 6.4
  */
 function updateFilePanelPath(state) {
   if (!state.filePanelPathEl) return
-  const path = state.resolvedFile || ''
+  // During a load error there is no server-resolved path; show the
+  // ATTEMPTED widget value so the saved path never vanishes from view
+  // (the "reset to defaults" illusion the 2026-08-03 report described).
+  const path = state.resolvedFile || (state.loadError ? state.loadError.file : '') || ''
   const pathEl = state.filePanelPathEl
   pathEl.title = path
   pathEl.textContent = path
@@ -1875,7 +1897,7 @@ function setFileWidgetValue(state, value) {
     // only by recreating the node so the values differed again.
     // `state.file` is the file the panel is actually displaying, so a
     // mismatch means "reload", not "no-op".
-    if (state.file !== value) {
+    if (state.file !== value || state.loadError) {
       reloadNow(state).catch((error) =>
         api.warn('notebook reload after same-value reselect failed', error)
       )
@@ -1913,22 +1935,40 @@ async function reloadNow(state) {
   } catch (error) {
     if (token !== state.loadToken) return
     api.warn('failed to load notebook list', error)
-    setStatus(state, `Could not load notebook: ${error.message}`)
-    // 2026-07-27: also toast, and NAME THE PATH. This is the other way a
-    // file change can look like "nothing happened" -- the widget takes the
-    // new path, the server can't read it (a share the ComfyUI process can't
-    // see, a permission wall), the panel keeps showing the previous file's
-    // entries, and the only clue was a console warning. See toast()'s note.
+    // Owner report 2026-08-03 ("something is making it feel brittle. It
+    // should never reset unless the user resets it"): this branch used to
+    // bare-return, abandoning the panel in its EMPTY pre-load state --
+    // blank path bar, no list, the saved path visible NOWHERE (the file
+    // widget is hidden in both renderers) -- which reads exactly like
+    // "the node reset to defaults". Worse, `state.file` stayed null, and
+    // every later write posted file:null, which the server resolves to the
+    // DEFAULT notebook: interacting with the broken panel could genuinely
+    // move data into the wrong file and overwrite the saved selection.
+    // Now failure is an explicit, recoverable ERROR STATE that preserves
+    // everything: the ATTEMPTED path becomes state.file (a write can never
+    // again fall back to the default), the file panel keeps showing that
+    // path, mutating actions refuse while the error stands (writesBlocked),
+    // and the status line carries a Retry button.
+    state.loadError = { file, message: error.message }
+    state.file = file
+    state.resolvedFile = null
+    updateFilePanelPath(state)
+    renderList(state)
+    updateDeleteButtonEnabled(state)
+    showLoadError(state)
     toast(
       'error',
-      'Could not open that notebook file',
+      'Could not open this notebook file',
       `${file} -- ${error.message}. The machine running ComfyUI has to be ` +
-        'able to read this path; the previous file is still loaded.'
+        'able to read this path. Nothing was changed: the saved path and ' +
+        'selection are intact. Fix the connection (or share the folder on ' +
+        'the host) and hit Retry.'
     )
     return
   }
   if (token !== state.loadToken) return
 
+  state.loadError = null
   state.file = file
   state.entries = Array.isArray(data.entries) ? data.entries : []
   // FORMAT.md §5/§7.2: named categories in file order, incl. empty ones —
@@ -2415,7 +2455,11 @@ function renderList(state) {
     state.listEl.append(
       el('div', {
         className: 'llnb-empty',
-        text: state.exists ? 'No entries yet.' : 'File not found yet.'
+        text: state.loadError
+          ? 'Could not load this notebook -- the saved file and selection are untouched. Fix the connection and hit Retry (status bar below).'
+          : state.exists
+            ? 'No entries yet.'
+            : 'File not found yet.'
       })
     )
     return
@@ -2921,6 +2965,10 @@ function isNoopMove(state, draggedName, target) {
  * in-memory ordering).
  */
 async function performMove(state, name, target, { force = false } = {}) {
+  if (writesBlocked(state)) {
+    showLoadError(state)
+    return
+  }
   if (state.busy) return
   state.busy = true
   updateSaveButtonEnabled(state)
@@ -2985,6 +3033,10 @@ async function performMove(state, name, target, { force = false } = {}) {
  * the failed index with that one request's `base_mtime` check skipped.
  */
 async function performMoveRun(state, names, target, startIndex, { force = false } = {}) {
+  if (writesBlocked(state)) {
+    showLoadError(state)
+    return
+  }
   state.busy = true
   updateSaveButtonEnabled(state)
   updateDeleteButtonEnabled(state)
@@ -3042,6 +3094,10 @@ async function performMoveRun(state, names, target, startIndex, { force = false 
  * need reconciling — names are untouched by a move, only their position.
  */
 async function performMoveCategory(state, category, target, { force = false } = {}) {
+  if (writesBlocked(state)) {
+    showLoadError(state)
+    return
+  }
   if (state.busy) return
   state.busy = true
   updateSaveButtonEnabled(state)
@@ -3330,6 +3386,12 @@ function cancelInlineRename(state) {
  * by what the user asked to be a rename.
  */
 async function commitInlineRename(state) {
+  if (writesBlocked(state)) {
+    state.inlineRename = null
+    renderList(state)
+    showLoadError(state)
+    return
+  }
   const active = state.inlineRename
   if (!active) return
   if (state.busy) {
@@ -3544,8 +3606,21 @@ function renderFooter(state) {
       text: '🗑 Delete',
       attrs: { title: 'Delete the selected entry from the file. Click twice to confirm.' }
     })
-    newBtn.addEventListener('click', () => openNewEntryRow(state))
-    deleteBtn.addEventListener('click', () => onDeleteClick(state))
+    newBtn.addEventListener('click', () => {
+      if (writesBlocked(state)) {
+        setStatus(state, 'Fix the notebook connection first (Retry above) -- nothing can be added while the file cannot be loaded.')
+        showLoadError(state)
+        return
+      }
+      openNewEntryRow(state)
+    })
+    deleteBtn.addEventListener('click', () => {
+      if (writesBlocked(state)) {
+        showLoadError(state)
+        return
+      }
+      onDeleteClick(state)
+    })
 
     state.footerEl.append(newBtn, deleteBtn)
     state.deleteBtn = deleteBtn
@@ -3578,6 +3653,10 @@ function categoryNameFromInput(rawName) {
 }
 
 async function confirmNewEntry(state, rawName) {
+  if (writesBlocked(state)) {
+    showLoadError(state)
+    return
+  }
   if (isCategoryNameInput(rawName)) {
     await confirmNewCategory(state, categoryNameFromInput(rawName))
     return
@@ -3825,6 +3904,13 @@ async function performSave(state, { force = false } = {}) {
   // may still name an entry underneath — see the file header). This is the
   // ONE branch point between the two; everything else about category-mode
   // saving lives in performSaveCategory() below.
+  if (writesBlocked(state)) {
+    // §7.2 error-state gate: a save during a broken connection would post
+    // against a file the server cannot read (or, pre-2026-08-03, against
+    // file:null = the DEFAULT notebook). Refuse loudly instead.
+    showLoadError(state)
+    return
+  }
   if (state.activeCategory != null) {
     await performSaveCategory(state, { force })
     return
@@ -4080,6 +4166,32 @@ function updateDeleteButtonEnabled(state) {
 // ---------------------------------------------------------------------------
 // Status line + conflict UI (FORMAT.md §3.5)
 // ---------------------------------------------------------------------------
+
+/**
+ * §7.2 error-state gate (2026-08-03): true while the panel must refuse
+ * MUTATING actions -- after a failed load (loadError set), or if state.file
+ * somehow isn't a usable string (a null/empty file would be resolved to the
+ * DEFAULT notebook server-side, silently writing into the wrong file).
+ * Read paths (list rendering, selection clicks that only load text) are
+ * not gated -- only writes are dangerous.
+ */
+function writesBlocked(state) {
+  return !!state.loadError || typeof state.file !== 'string' || state.file === ''
+}
+
+/** Status line for the load-error state: the message + a Retry button
+ * (mirrors showConflict's action-button idiom). */
+function showLoadError(state) {
+  const err = state.loadError
+  if (!err) return
+  state.statusTextEl.textContent = `Could not load ${err.file}: ${err.message}`
+  const retryBtn = el('button', { className: 'llnb-btn llnb-btn-small', text: 'Retry' })
+  retryBtn.addEventListener('click', () => {
+    retryBtn.disabled = true
+    reloadNow(state).catch((error) => api.warn('retry load failed', error))
+  })
+  state.statusActionsEl.replaceChildren(retryBtn)
+}
 
 function setStatus(state, text) {
   state.statusTextEl.textContent = text || ''

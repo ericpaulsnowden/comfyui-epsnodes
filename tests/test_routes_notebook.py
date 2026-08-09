@@ -1915,3 +1915,30 @@ def test_machine_owns_address_bind_test() -> None:
     assert _machine_owns_address(own_ip) is True
     assert _machine_owns_address("::ffff:127.0.0.1") is True
     assert _machine_owns_address("192.0.2.1") is False  # TEST-NET-1: never ours
+
+
+async def test_write_routes_refuse_empty_or_missing_file(
+    context: LibraryContext, aiohttp_client
+) -> None:
+    """v0.52.1 (owner's 'reset to defaults' report, 2026-08-03): an
+    empty/absent 'file' used to resolve to the DEFAULT notebook, silently
+    landing writes from a broken panel in the wrong file. Writes now 400;
+    READS keep the default-resolution behavior (fresh nodes list it)."""
+    client = await aiohttp_client(make_app(context))
+    for route, body in [
+        ("/lora_library/notebook/entry", {"name": "X", "text": "t"}),
+        ("/lora_library/notebook/delete", {"name": "X"}),
+        ("/lora_library/notebook/category", {"name": "C"}),
+        ("/lora_library/notebook/move", {"name": "X", "category": ""}),
+    ]:
+        for file_value in (None, "", "   "):
+            payload = dict(body)
+            if file_value is not None:
+                payload["file"] = file_value
+            resp = await client.post(route, json=payload)
+            assert resp.status == 400, (route, file_value, resp.status)
+            assert "required for writes" in (await resp.json())["error"]
+
+    # The read route still resolves "" to the default notebook (fresh node).
+    resp = await client.get("/lora_library/notebook", params={"file": ""})
+    assert resp.status == 200
