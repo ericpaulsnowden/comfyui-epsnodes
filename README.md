@@ -138,7 +138,7 @@ captions).
 
 ## EPS Lora Loader State Controller (shipped; requires rgthree-comfy)
 
-`EPSNodes → EPS Lora Loader State Controller`: a small panel node that
+`EPSNodes → LoRA → EPS Lora Loader State Controller`: a small panel node that
 drives a genuine, untouched
 [Power Lora Loader (rgthree)](https://github.com/rgthree/rgthree-comfy)
 elsewhere in your graph — rgthree stays the loader; this node just moves
@@ -187,7 +187,7 @@ whole configurations ("states") in and out of it:
 
 ## EPS Apply LoRA Set (shipped)
 
-`EPSNodes → EPS Apply LoRA Set`: pick a saved state from the dropdown and every
+`EPSNodes → LoRA → EPS Apply LoRA Set`: pick a saved state from the dropdown and every
 enabled lora in it is applied **in order** to the `model`/`clip` you wire
 through — it *is* a loader, no Power Lora Loader involved. (For WAN-style
 dual-model workflows: two Apply nodes, one in the HIGH branch, one in the
@@ -230,13 +230,13 @@ and skips cleanly where those are absent.
 workflows keep working unchanged, and nodes already placed in an old
 workflow keep showing the name they were saved with).*
 
-`EPSNodes → EPS LoRA Iterator`: audition a lora (or several) by strength —
+`EPSNodes → LoRA → EPS LoRA Iterator`: audition a lora (or several) by strength —
 wire in a `LORA_STACK`, set `min` / `max` / `increment`, queue once, and
 the rest of your workflow runs at every step.
 
 - **Wire `EPS Apply LoRA Set`'s `lora_stack` output straight in**, alongside
   the `model` (and `clip`) you'd normally pass through the loader — EPS LoRA
-  Sweep does its own applying internally, so no separate "apply the stack"
+  Iterator does its own applying internally, so no separate "apply the stack"
   node sits between them. Any other `LORA_STACK` producer works too.
 - **`clip` is optional.** Models without a text encoder (or any workflow
   where you only want to patch the model) can leave `clip` unwired — the
@@ -277,7 +277,7 @@ switches (Model, CLIP, VAE, Checkpoint), so the original now does too.
 Display name only: saved workflows keep working, and nodes already placed
 keep showing the name they were saved with.*
 
-`EPSNodes → EPS Image Switcher`: wire in **any number of images**, flip each one
+`EPSNodes → Switchers → EPS Image Switcher`: wire in **any number of images**, flip each one
 on or off, and the enabled ones flow out as a list — so the rest of the
 workflow **runs once per enabled image**. Four images in with one turned
 off means three runs.
@@ -302,7 +302,9 @@ off means three runs.
   queue, not just gets dropped from the output afterward. (One quirk to
   know: an *enabled* slot fed by an *empty* grid with nothing wired into
   the grid skips the whole switcher branch for that queue — toggle the
-  empty grid off, or put something in it.)
+  empty grid off, or put something in it. Since v0.52.0 a Collect-mode grid
+  in that state raises a warning toast naming those fixes, so the skip is
+  no longer silent.)
 - **All off is allowed:** toggle everything off (or wire nothing) and the
   queue still succeeds — the image branch simply doesn't run that time. No
   error, no downstream crash.
@@ -313,7 +315,7 @@ off means three runs.
 
 ## EPS Model / CLIP / VAE Switcher (shipped)
 
-`EPSNodes → EPS Model Switcher / EPS CLIP Switcher / EPS VAE Switcher`: the
+`EPSNodes → Switchers → EPS Model Switcher / EPS CLIP Switcher / EPS VAE Switcher`: the
 [EPS Image Switcher](#eps-image-switcher-shipped), one per data type. Wire in any number
 of models (or CLIPs, or VAEs), tick them on and off, and the enabled ones
 fan out in slot order — three enabled models means the rest of the workflow
@@ -329,8 +331,7 @@ several models/VAEs in one queue".
 - **One switcher = one axis.** ComfyUI pairs two fanned lists index-by-index
   (it does NOT multiply them): a 3-model switcher plus a 2-VAE switcher into
   the same sampler gives **3 runs** — (m1,v1), (m2,v2), (m3,v2) — not 6. To
-  actually multiply axes, run them through [EPS Cross
-  Product](#eps-cross-product-shipped) / [EPS Run
+  actually multiply axes, run them through [EPS Run
   Multiplier](#eps-run-multiplier-shipped), or use the [EPS Checkpoint
   Switcher](#eps-checkpoint-switcher-shipped) which keeps model+CLIP+VAE
   aligned as one axis by construction.
@@ -390,7 +391,7 @@ rewiring, no dragging bypass boxes around groups.
 
 ## EPS Checkpoint Switcher (shipped)
 
-`EPSNodes → EPS Checkpoint Switcher`: a checkbox list of every checkpoint
+`EPSNodes → Switchers → EPS Checkpoint Switcher`: a checkbox list of every checkpoint
 ComfyUI can see. Tick the ones you want, wire `model`/`clip`/`vae` where a
 Load Checkpoint's outputs would go, and one queue runs the rest of the
 workflow **once per ticked checkpoint** — each run using that checkpoint's
@@ -490,7 +491,10 @@ times to gather images, then send the whole set through a workflow at once.
   plus once more for anything currently wired (10 images → 10 runs, e.g. to
   put a logo on 10 models' shirts). Nothing to send (Collect with nothing
   wired, or Emit with an empty buffer and nothing wired) is skipped cleanly,
-  never a crash. Runs no longer re-list the whole buffer in the generated
+  never a crash — and since v0.52.0, when something downstream actually
+  consumes a Collect grid in that state you also get a warning toast naming
+  the two real fixes (wire an image in, or switch to Emit to send the
+  buffer). Runs no longer re-list the whole buffer in the generated
   output panel — only newly collected images show up there.
 - **Survives restarts:** the buffer lives on disk (under ComfyUI's output
   folder, keyed to that node), so it's still there after you close and reopen
@@ -556,8 +560,12 @@ into this node's sweep side, and **a multi-select Prompt Notebook's
 `pair_mode: multiply`)
 on the other — every ticked checkpoint runs against every prompt, each run
 with its checkpoint's own VAE, saving into a folder named by checkpoint.
-The `vae` output only means something when the sweep side supplies VAEs;
-unwired, anything connected to it is skipped.
+The `vae` output only means something when the sweep side supplies VAEs:
+leaving the `vae` input unwired is fine as long as nothing downstream
+consumes the `vae` output, but wiring that output somewhere without a VAE
+source feeding the input **fails the Run with an error naming the miswire**
+(since v0.51.0 — a dead wire that would silently skip part of the graph is
+always a mistake; the same rule covers `model`/`clip`/`image`/`label`).
 
 
 - **Why you need it:** ComfyUI's own list pairing ZIPS index-by-index —

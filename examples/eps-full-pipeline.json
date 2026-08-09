@@ -900,6 +900,11 @@
           "shape": 6,
           "type": "STRING",
           "links": null
+        },
+        {
+          "name": "vae",
+          "type": "VAE",
+          "links": null
         }
       ],
       "properties": {
@@ -1351,7 +1356,7 @@
       "outputs": [],
       "properties": {},
       "widgets_values": [
-        "# EPS full pipeline sample\n\nEleven of the fifteen nodes stitched into one graph - the tour, not the\nstarting point. If you just want to see one node do its thing, the small\n`eps-test-*.json` files next to this one are quicker; the four switcher\nnodes (Checkpoint / Model / CLIP / VAE) only appear over there.\n\n**Before running:**\n\n1. Pick a checkpoint (red node), your two images, and a video path on the Frame Saver.\n2. In the Prompt Notebook, ctrl/cmd+click to select 2+ prompts.\n3. In Apply LoRA Set, pick a saved state (make one with the Controller corner below).\n4. Run a few times in **Collect** to fill the grid, then flip the grid to **Emit** for the big run.\n\n**Run count = loras x 3 strengths (0.0/0.5/1.0) x grid images x prompts.** Start small; raise the sweep increment later. Output lands in `output/eps_demo/<lora>_<strength>/<PromptName>_00001_.png`."
+        "# EPS full pipeline sample\n\nTen of the fourteen nodes stitched into one graph - the tour, not the\nstarting point. If you just want to see one node do its thing, the small\n`eps-test-*.json` files next to this one are quicker; the four switcher\nnodes (Checkpoint / Model / CLIP / VAE) only appear over there.\n\n**Before running:**\n\n1. Pick a checkpoint (red node), your two images, and a video path on the Frame Saver.\n2. In the Prompt Notebook, ctrl/cmd+click to select 2+ prompts.\n3. In Apply LoRA Set, pick a saved state (make one with the Controller corner below).\n4. Run a few times in **Collect** to fill the grid, then flip the grid to **Emit** for the big run.\n\n**Run count = loras x 3 strengths (0.0/0.5/1.0) x grid images x prompts.** Start small; raise the sweep increment later. Output lands in `output/eps_demo/<lora>_<strength>/<PromptName>_00001_.png`."
       ],
       "color": "#432",
       "bgcolor": "#653"
@@ -1443,7 +1448,7 @@
       "outputs": [],
       "properties": {},
       "widgets_values": [
-        "## 4. Lora path\n\nApply LoRA Set reads a saved state (shared library folder). LoRA Sweep fans it out per strength step. The Controller corner captures states from the Power Lora Loader; Save renames in place, New State creates."
+        "## 4. Lora path\n\nApply LoRA Set reads a saved state (shared library folder). LoRA Iterator fans it out per strength step. The Controller corner captures states from the Power Lora Loader; Save renames in place, New State creates."
       ],
       "color": "#432",
       "bgcolor": "#653"
@@ -1889,7 +1894,7 @@
     },
     {
       "id": 5,
-      "title": "5 - Cross Sweep & Generate",
+      "title": "5 - Multiply & Generate",
       "bounding": [
         380,
         260,

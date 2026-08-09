@@ -148,8 +148,32 @@ class ConflictError(PresetStoreError):
 
 def presets_path(context: LibraryContext) -> Path:
     """``<library_dir>/resolution_presets.json`` -- the single source of
-    truth (module docstring)."""
+    truth (module docstring).
+
+    ``context.library_dir()`` creates the folder on demand, so this raises
+    ``OSError`` when the configured library folder is unreachable (an
+    unmounted NAS -- the exact failure ``lora_library/routes.py``'s
+    ``get_config``/``notebook_path_error`` guard against, owner audit
+    2026-08-08). Callers that must never crash use the guarded wrappers
+    below instead of calling this raw.
+    """
     return context.library_dir() / PRESETS_FILENAME
+
+
+def _require_presets_path(context: LibraryContext) -> Path:
+    """:func:`presets_path`, with an unreachable library folder surfaced as
+    :class:`PresetStoreError` -- which the routes already turn into a 400
+    ``{"error": ...}`` -- instead of a raw ``OSError`` that would 500 the
+    whole route (audit 2026-08-08; the OSError's own text names the folder
+    that could not be created/reached)."""
+    try:
+        return presets_path(context)
+    except OSError as exc:
+        raise PresetStoreError(
+            f"the library folder is unreachable ({exc}); resolution presets "
+            "live inside it -- fix or remount the configured library folder "
+            "and retry"
+        ) from exc
 
 
 def normalize_name(name: object) -> str:
@@ -226,7 +250,9 @@ def load_presets(context: LibraryContext) -> tuple[dict[str, dict], float | None
     A missing file is silent (a brand-new install/library folder); a
     present-but-unreadable or malformed one logs a WARNING and degrades to
     empty presets rather than raising -- never crash on a hand-edited or
-    corrupted file. An individual malformed preset entry inside an
+    corrupted file. An UNREACHABLE library folder (``presets_path``'s own
+    OSError case) degrades the same warned way -- reads never raise here.
+    An individual malformed preset entry inside an
     otherwise-good file is dropped (logged) without discarding its
     siblings -- the same per-entry tolerance ``sets_store.list_sets``/
     ``nodes_checkpoint_switcher._parse_selection`` already apply to their
@@ -235,7 +261,18 @@ def load_presets(context: LibraryContext) -> tuple[dict[str, dict], float | None
     turned out to be malformed -- "the file is the truth" applies to
     conflict detection even for a currently-unreadable file.
     """
-    path = presets_path(context)
+    # GUARDED (audit 2026-08-08): presets_path() resolves through
+    # context.library_dir(), whose on-demand mkdir raises before the try
+    # below ever runs -- an unreachable configured folder (unmounted NAS)
+    # must degrade exactly like the present-but-unreadable branch, never
+    # take the GET route down with it.
+    try:
+        path = presets_path(context)
+    except OSError as exc:
+        logger.warning(
+            "EPSNodes: library folder is unreachable (%s); using empty presets", exc
+        )
+        return {}, None
     try:
         with open(path, encoding="utf-8") as fh:
             raw_text = fh.read()
@@ -281,8 +318,12 @@ def load_presets(context: LibraryContext) -> tuple[dict[str, dict], float | None
 
 
 def _write(context: LibraryContext, presets: dict[str, dict]) -> float:
-    """Atomically write *presets* (already-normalized) and return the new mtime."""
-    path = presets_path(context)
+    """Atomically write *presets* (already-normalized) and return the new
+    mtime. An unreachable library folder raises :class:`PresetStoreError`
+    (via :func:`_require_presets_path`); a mid-write failure (e.g. a failed
+    atomic replace) still raises its raw ``OSError`` -- that is a genuinely
+    exceptional disk fault, not the known unmounted-folder condition."""
+    path = _require_presets_path(context)
     payload = {"format": CURRENT_FORMAT, "presets": presets}
     text = json.dumps(payload, indent=2, ensure_ascii=False) + "\n"
     _atomic_write_text(path, text)
@@ -321,11 +362,19 @@ def save_preset(
     for a structurally bad *name*/*values* (checked BEFORE touching the
     file at all -- range/enum validation against ``nodes_resolution``'s own
     constants is the ROUTE layer's job, see :class:`InvalidPresetValuesError`),
-    or :class:`ConflictError` if *base_mtime* is given and stale. Returns
-    ``(fresh presets dict, new mtime)``.
+    a plain :class:`PresetStoreError` when the library folder itself is
+    unreachable (:func:`_require_presets_path`), or :class:`ConflictError`
+    if *base_mtime* is given and stale. Returns ``(fresh presets dict, new
+    mtime)``.
     """
     clean_name = normalize_name(name)
     clean_values = _normalize_values(values)
+
+    # Surfaced BEFORE the load: load_presets deliberately degrades an
+    # unreachable library folder to empty presets (fine for a read), but a
+    # WRITE against that state must fail loudly with the folder named --
+    # not silently target a file that cannot be written (audit 2026-08-08).
+    _require_presets_path(context)
 
     presets, current_mtime = load_presets(context)
     check_conflict(base_mtime, current_mtime)
@@ -344,12 +393,20 @@ def delete_preset(
     """Delete *name*.
 
     Raises :class:`InvalidPresetNameError` for a structurally bad *name*,
-    :class:`ConflictError` if *base_mtime* is given and stale (checked
-    BEFORE existence, same order ``markdown_store``'s delete route uses),
-    or :class:`PresetNotFoundError` if no such preset exists. Returns
-    ``(fresh presets dict, new mtime)``.
+    a plain :class:`PresetStoreError` when the library folder itself is
+    unreachable (checked before everything file-shaped -- see the comment
+    below), :class:`ConflictError` if *base_mtime* is given and stale
+    (checked BEFORE existence, same order ``markdown_store``'s delete route
+    uses), or :class:`PresetNotFoundError` if no such preset exists.
+    Returns ``(fresh presets dict, new mtime)``.
     """
     clean_name = normalize_name(name)
+
+    # Same pre-load guard as save_preset -- and it must run before the
+    # existence check: against an unreachable folder load_presets degrades
+    # to empty presets, which would misreport the failure as a 404 "no such
+    # preset" instead of naming the real problem (audit 2026-08-08).
+    _require_presets_path(context)
 
     presets, current_mtime = load_presets(context)
     check_conflict(base_mtime, current_mtime)

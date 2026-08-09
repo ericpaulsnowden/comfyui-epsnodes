@@ -12,6 +12,9 @@ whether ``routes_notebook.py`` exists yet.
 
 from __future__ import annotations
 
+from pathlib import Path
+
+import pytest
 from aiohttp import web
 
 from lora_library import sets_store
@@ -348,3 +351,62 @@ async def test_post_set_delete_missing_slug_is_400(
     client = await aiohttp_client(make_app(context))
     resp = await client.post("/lora_library/set/delete", json={})
     assert resp.status == 400
+
+
+# -------------------------------------------------- unreachable library dir
+
+
+@pytest.fixture
+def unreachable_context(context: LibraryContext, tmp_path: Path) -> LibraryContext:
+    """*context* reconfigured so ``sets_dir()``'s on-demand mkdir raises
+    OSError (configured library path's parent is a plain FILE) — the audit
+    2026-08-08 unmounted-NAS condition. Every set route must answer with
+    real HTTP semantics (200-empty listing, 400 elsewhere), never a raw
+    500."""
+    blocker = tmp_path / "blocker"
+    blocker.write_text("not a directory", encoding="utf-8")
+    context.save_config({"library_dir": str(blocker / "library")})
+    return context
+
+
+async def test_get_sets_unreachable_library_folder_degrades_to_empty(
+    unreachable_context: LibraryContext, aiohttp_client
+) -> None:
+    client = await aiohttp_client(make_app(unreachable_context))
+    resp = await client.get("/lora_library/sets")
+    assert resp.status == 200
+    assert await resp.json() == {"sets": []}
+
+
+async def test_get_set_unreachable_library_folder_is_400(
+    unreachable_context: LibraryContext, aiohttp_client
+) -> None:
+    client = await aiohttp_client(make_app(unreachable_context))
+    resp = await client.get("/lora_library/set", params={"slug": "foo"})
+    assert resp.status == 400
+    body = await resp.json()
+    assert "library folder" in body["error"]
+
+
+async def test_post_set_unreachable_library_folder_is_400_naming_the_folder(
+    unreachable_context: LibraryContext, aiohttp_client
+) -> None:
+    client = await aiohttp_client(make_app(unreachable_context))
+    resp = await client.post(
+        "/lora_library/set", json={"set": {"name": "Foo", "loras": []}}
+    )
+    assert resp.status == 400
+    body = await resp.json()
+    assert "library folder" in body["error"]
+
+
+async def test_post_set_delete_unreachable_library_folder_is_400_not_404(
+    unreachable_context: LibraryContext, aiohttp_client
+) -> None:
+    # Without the store guard this would read as 404 "no such set" — or
+    # 500 on the raw OSError (the original audit finding).
+    client = await aiohttp_client(make_app(unreachable_context))
+    resp = await client.post("/lora_library/set/delete", json={"slug": "foo"})
+    assert resp.status == 400
+    body = await resp.json()
+    assert "library folder" in body["error"]

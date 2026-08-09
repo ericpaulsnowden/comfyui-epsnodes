@@ -833,6 +833,13 @@ function createState(node, pathWidget, frameWidget) {
     // picker lives on document.body, not inside this widget's own DOM).
     pickerKeydownHandler: null,
     pickerPathInputEl: null,
+    // Bumped on every picker navigation; a fs/list response issued under an
+    // older value is dropped -- same guard shape as probeToken above.
+    // Without it a slow listing landing after a fast typed-path navigation
+    // both re-renders the stale directory AND overwrites the path the user
+    // just typed (renderPickerDialog rewrites pickerPathInputEl from
+    // data.dir). 2026-08-08 audit.
+    pickerNavToken: 0,
     // The per-instance document-level `paste` listener for this node's
     // whole lifetime (paste-a-path, file header) -- registered by
     // installPastePathHandler, removed by wireNodeCleanup's onRemoved wrap.
@@ -1506,7 +1513,9 @@ function fullResync(state) {
 function closePicker(state) {
   document.getElementById(PICKER_OVERLAY_ID)?.remove()
   if (state.pickerKeydownHandler) {
-    window.removeEventListener('keydown', state.pickerKeydownHandler)
+    // Same capture flag as the registration in openPicker(), or this
+    // silently fails to detach (same rule as the paste listener below).
+    window.removeEventListener('keydown', state.pickerKeydownHandler, { capture: true })
     state.pickerKeydownHandler = null
   }
   state.pickerPathInputEl = null
@@ -1565,7 +1574,13 @@ function openPicker(state) {
       closePicker(state)
     }
   }
-  window.addEventListener('keydown', state.pickerKeydownHandler)
+  // CAPTURE-phase, deliberately (FORMAT.md §7.5's window-level-listener
+  // rule; same reasoning as installPastePathHandler below): the picker
+  // path bar's own keydown handler stopPropagation()s every key, so a
+  // bubble-phase listener never sees Escape while the input has focus --
+  // the state the user is in right after typing a path. closePicker() must
+  // remove with the same flag.
+  window.addEventListener('keydown', state.pickerKeydownHandler, { capture: true })
 
   // The navigable area is its own child so the path bar built next (which
   // sits above it, for the picker's whole lifetime) is never wiped out by
@@ -1611,6 +1626,11 @@ function buildPickerPathBar(state, content) {
 }
 
 async function loadPickerDir(state, content, dir) {
+  // A lapped response -- success OR failure -- must not render: the
+  // navigation that superseded this one owns the dialog (and the path
+  // input renderPickerDialog rewrites). See pickerNavToken's state
+  // comment; same guard shape as startProbe's probeToken.
+  const navToken = ++state.pickerNavToken
   content.replaceChildren(el('div', { className: 'epsfs-picker-status', text: 'Loading…' }))
   const params = { ext: VIDEO_EXT_PARAM }
   if (dir) params.dir = dir
@@ -1618,6 +1638,7 @@ async function loadPickerDir(state, content, dir) {
   try {
     data = await getJson('/lora_library/fs/list', params)
   } catch (error) {
+    if (navToken !== state.pickerNavToken) return // superseded by a later navigation
     content.replaceChildren(
       el('div', {
         className: 'epsfs-picker-header',
@@ -1632,6 +1653,7 @@ async function loadPickerDir(state, content, dir) {
     )
     return
   }
+  if (navToken !== state.pickerNavToken) return // superseded by a later navigation
   renderPickerDialog(state, content, data)
 }
 

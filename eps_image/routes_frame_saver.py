@@ -11,11 +11,15 @@ internals; ``eps_image/routes_image_grid.py`` makes the identical choice to
 stay self-contained. Self-containment cuts both ways: this copy MISSED the
 canonical guard's 2026-07-30 same-machine-via-LAN fix until 2026-08-02, so
 when the canonical ``request_is_loopback``/``_machine_owns_address`` pair
-changes, change this one too. Unlike ``/lora_library/fs/list``'s "still fine inside
-the library folder" carve-out for remote callers, there is no such
-carve-out here: a video's path is arbitrary filesystem, never confined to
-one shared folder, so FORMAT.md §6.7 is unconditionally loopback-only for
-BOTH routes -- NOT VHS's permissive default.
+changes, change this one too. Unlike the NOTEBOOK routes'
+``notebook_path_error`` carve-out (``lora_library/routes.py``: a remote
+caller may still touch paths inside ``library_dir``/``remote_dirs``),
+there is no carve-out here: a video's path is arbitrary filesystem, never
+confined to one shared folder, so FORMAT.md §6.7 is unconditionally
+loopback-only for BOTH routes -- NOT VHS's permissive default. (Do not
+"restore" one when porting guard changes: ``/lora_library/fs/list`` itself
+has no carve-out either -- it is unconditionally loopback-gated via
+``FS_LIST_LOCAL_ONLY``.)
 
 Registered directly onto ``PromptServer.instance.routes`` -- never raw
 ``app.add_routes`` (invisible to the frontend; the same finding

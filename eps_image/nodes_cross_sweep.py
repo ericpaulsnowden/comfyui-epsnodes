@@ -203,11 +203,11 @@ class EPSCrossSweep:
         "Switcher's model/clip/label, plus vae from the latter) and a pair "
         "side (images and texts), and every sweep step runs every pair -- "
         "11 steps across 8 pairs means 88 runs, grouped step by step. The "
-        "pair side runs index-aligned as wired (pair_mode: paired, e.g. "
-        "from an EPS Cross Product), or set pair_mode to multiply and "
-        "every image is crossed with every text right here -- an Image "
-        "Grid and a multi-select Prompt Notebook wired straight in, no "
-        "Cross Product needed. The sweep side is optional: wire none of "
+        "pair side runs index-aligned as wired (pair_mode: paired, when "
+        "image and text are already index-aligned), or set pair_mode to "
+        "multiply and every image is crossed with every text right here "
+        "-- an Image Grid and a multi-select Prompt Notebook wired "
+        "straight in. The sweep side is optional: wire none of "
         "it and this node is a pure image x text multiplier. Wire "
         "save_prefix into Save Image's filename_prefix and runs land in "
         "folders named by step and pair, so big batches stay organized on "
@@ -356,13 +356,11 @@ class EPSCrossSweep:
                         "tooltip": (
                             "How image and text combine. paired: they "
                             "arrive already index-aligned (one image per "
-                            "text -- e.g. from an EPS Cross Product) and "
-                            "run as-is. multiply: EVERY image is crossed "
-                            "with EVERY text right here (image-major, "
-                            "exactly what EPS Cross Product does), so you "
-                            "can wire an Image Grid and a multi-select "
-                            "Prompt Notebook straight in with no Cross "
-                            "Product node. Workflows saved before this "
+                            "text) and run as-is. multiply: EVERY image "
+                            "is crossed with EVERY text right here "
+                            "(image-major), so you can wire an Image "
+                            "Grid and a multi-select Prompt Notebook "
+                            "straight in. Workflows saved before this "
                             "widget existed behave as paired."
                         ),
                     },
@@ -506,9 +504,9 @@ class EPSCrossSweep:
             if len(images) != len(texts):
                 logger.warning(
                     "EPS Run Multiplier: pair-side lists disagree (image=%d, text=%d) "
-                    "-- using the first %d pair(s). Wire both from the SAME "
-                    "EPS Cross Product node, or set pair_mode to multiply to "
-                    "cross them here instead.",
+                    "-- using the first %d pair(s). Wire image and text from "
+                    "sources that emit index-aligned lists, or set pair_mode "
+                    "to multiply to cross them here instead.",
                     len(images), len(texts), pairs,
                 )
             pair_rows = [

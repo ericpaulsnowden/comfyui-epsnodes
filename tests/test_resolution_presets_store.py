@@ -319,6 +319,61 @@ class TestCheckConflict:
         assert excinfo.value.current_mtime == 200.0
 
 
+# -------------------------------------------------- unreachable library dir
+
+
+@pytest.fixture
+def unreachable_context(context: LibraryContext, tmp_path: Path) -> LibraryContext:
+    """*context* reconfigured so ``library_dir()``'s on-demand mkdir raises
+    OSError: the configured path's parent is a plain FILE — the portable
+    test stand-in for an unmounted/unwritable NAS library folder (the audit
+    2026-08-08 failure the store's guards exist for)."""
+    blocker = tmp_path / "blocker"
+    blocker.write_text("not a directory", encoding="utf-8")
+    context.save_config({"library_dir": str(blocker / "library")})
+    return context
+
+
+class TestUnreachableLibraryFolder:
+    """presets_path() resolves through context.library_dir(), whose mkdir
+    raises when the configured folder is unreachable. Reads must degrade
+    (warned, like the unreadable-file branch); writes must raise
+    PresetStoreError so the routes answer 400, never 500."""
+
+    def test_load_presets_degrades_to_empty_with_a_warning(
+        self, unreachable_context: LibraryContext, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        with caplog.at_level("WARNING"):
+            presets, mtime = store.load_presets(unreachable_context)
+        assert presets == {}
+        assert mtime is None
+        assert any("unreachable" in r.message for r in caplog.records)
+
+    def test_save_preset_raises_preset_store_error_naming_the_folder(
+        self, unreachable_context: LibraryContext
+    ) -> None:
+        with pytest.raises(store.PresetStoreError, match="library folder"):
+            store.save_preset(unreachable_context, "Portrait", VALUES)
+
+    def test_delete_preset_raises_preset_store_error_not_not_found(
+        self, unreachable_context: LibraryContext
+    ) -> None:
+        # Against an unreachable folder load_presets degrades to empty, so
+        # without the pre-load guard delete would misreport this as a 404
+        # "no such preset" instead of naming the real problem.
+        with pytest.raises(store.PresetStoreError) as excinfo:
+            store.delete_preset(unreachable_context, "Portrait")
+        assert not isinstance(excinfo.value, store.PresetNotFoundError)
+
+    def test_save_preset_still_validates_name_first(
+        self, unreachable_context: LibraryContext
+    ) -> None:
+        # A structurally bad name is the caller's bug regardless of disk
+        # state — it must keep winning over the folder diagnosis.
+        with pytest.raises(store.InvalidPresetNameError):
+            store.save_preset(unreachable_context, "   ", VALUES)
+
+
 # ------------------------------------------------------------- atomic writes
 
 

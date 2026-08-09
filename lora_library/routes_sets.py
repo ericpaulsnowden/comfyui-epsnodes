@@ -94,6 +94,12 @@ def register(context: LibraryContext, routes: web.RouteTableDef) -> None:
         slug = body.get("slug")
         if not isinstance(slug, str) or not SLUG_RE.match(slug):
             return error_response(400, _bad_set_id(slug))
-        if not sets_store.delete_set(context, slug):
+        try:
+            deleted = sets_store.delete_set(context, slug)
+        except sets_store.SetValidationError as exc:
+            # An unreachable library folder (sets_store._require_sets_dir,
+            # audit 2026-08-08) -- a 400 naming the folder, never a raw 500.
+            return error_response(400, str(exc))
+        if not deleted:
             return error_response(404, f"no such set {slug!r}")
         return web.json_response({"ok": True, "sets": sets_store.list_sets(context)})

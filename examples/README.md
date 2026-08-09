@@ -29,7 +29,7 @@ Two files here are **not** workflows — don't drag them onto the canvas:
 | [`eps-test-model-clip-vae-switchers.json`](eps-test-model-clip-vae-switchers.json) | Model / CLIP / VAE switchers as three independent axes | checkpoint | no — the two loaders ship with nothing chosen |
 | [`eps-test-run-multiplier.json`](eps-test-run-multiplier.json) | 2 images × 4 prompts = 8 runs | none | yes — copy `eps-cross-test-prompts.md` into your library first |
 | [`eps-test-cross-sweep.json`](eps-test-cross-sweep.json) | 3 lora strengths × 8 image/prompt pairs = 24 runs, foldered by strength | checkpoint, LoRA | no — pick a checkpoint and a saved lora state |
-| [`eps-full-pipeline.json`](eps-full-pipeline.json) | Eleven of the fourteen nodes stitched into one graph — the full tour | checkpoint, LoRA, rgthree | no — pick a checkpoint, images, a video path, prompts, and a lora state |
+| [`eps-full-pipeline.json`](eps-full-pipeline.json) | Ten of the fourteen nodes stitched into one graph — the full tour | checkpoint, LoRA, rgthree | no — pick a checkpoint, images, a video path, prompts, and a lora state |
 
 ---
 
@@ -178,10 +178,10 @@ Neon City_00001_.png   Golden Hour_00001_.png   Ink Sketch_00001_.png   Pastel S
 Neon City_00002_.png   Golden Hour_00002_.png   Ink Sketch_00002_.png   Pastel Studio_00002_.png
 ```
 
-`_00001_` = the first image, `_00002_` = the second. Without EPS Cross
-Product ComfyUI would zip the two lists and give you 4 files, three of them
-reusing the last picture. No checkpoint, lora, or sampling involved — it
-just moves images around, so it runs anywhere in seconds.
+`_00001_` = the first image, `_00002_` = the second. Without EPS Run
+Multiplier ComfyUI would zip the two lists and give you 4 files, three of
+them reusing the last picture. No checkpoint, lora, or sampling involved —
+it just moves images around, so it runs anywhere in seconds.
 
 ## eps-test-cross-sweep.json — *a real 24-image generation run*
 
@@ -221,7 +221,7 @@ lora state are the only things standing between this file and a real run.
 lora state, and [rgthree-comfy](https://github.com/rgthree/rgthree-comfy) for
 the state-controller corner.
 
-Eleven of the fourteen nodes stitched into one complex workflow. This is the
+Ten of the fourteen nodes stitched into one complex workflow. This is the
 tour, not the starting point — if you want to understand one node, the small
 `eps-test-*.json` files above are far quicker. The four switcher nodes
 (Checkpoint / Model / CLIP / VAE) don't appear here at all; they have their

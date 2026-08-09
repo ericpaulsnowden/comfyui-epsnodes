@@ -74,8 +74,33 @@ def slugify(name: str) -> str:
 
 
 def set_path(context: LibraryContext, slug: str) -> Path:
-    """``<sets_dir>/<slug>.json`` — the single source of truth for the name."""
+    """``<sets_dir>/<slug>.json`` — the single source of truth for the name.
+
+    ``context.sets_dir()`` creates the folder on demand, so this raises
+    ``OSError`` when the configured library folder is unreachable (an
+    unmounted NAS — the same failure ``routes.py``'s ``get_config``/
+    ``notebook_path_error`` guard against). Store entry points that feed
+    HTTP routes call :func:`_require_sets_dir` first so that condition
+    surfaces as a 4xx-able :class:`SetValidationError`; ``nodes_sets.py``'s
+    ``_set_file_token`` deliberately keeps catching the raw ``OSError``.
+    """
     return context.sets_dir() / f"{slug}.json"
+
+
+def _require_sets_dir(context: LibraryContext) -> Path:
+    """``context.sets_dir()``, with an unreachable library folder surfaced
+    as :class:`SetValidationError` — which the set routes turn into a 400
+    ``{"error": ...}`` — instead of a raw ``OSError`` that would 500 the
+    whole route (audit 2026-08-08; the OSError's own text names the folder
+    that could not be created/reached)."""
+    try:
+        return context.sets_dir()
+    except OSError as exc:
+        raise SetValidationError(
+            f"the library folder is unreachable ({exc}); LoRA sets live "
+            "inside it -- fix or remount the configured library folder and "
+            "retry"
+        ) from exc
 
 
 def _unique_slug(context: LibraryContext, base: str) -> str:
@@ -271,8 +296,12 @@ def load_set(context: LibraryContext, slug: str) -> dict | None:
     A file that exists but fails to parse/validate raises
     :class:`SetValidationError` rather than being treated as missing — a
     corrupt/too-new file is a different situation from "not created yet"
-    and callers (routes, nodes) are expected to tell them apart.
+    and callers (routes, nodes) are expected to tell them apart. An
+    unreachable library folder raises the same class (via
+    :func:`_require_sets_dir`) — every caller already handles it: the
+    routes 400, ``nodes_sets`` warns and passes through.
     """
+    _require_sets_dir(context)
     path = set_path(context, slug)
     try:
         with open(path, encoding="utf-8") as fh:
@@ -295,8 +324,14 @@ def save_set(context: LibraryContext, set_data: dict, slug: str | None = None) -
     A caller-supplied *slug* (updating a known set) is used as-is — renaming
     a set's display name must not move its file out from under saved
     workflows/routes that reference it by slug. Returns ``(slug, normalized)``.
+
+    Raises :class:`SetValidationError` for a payload that fails §4
+    validation AND for an unreachable library folder (checked up front, so
+    the route 400s naming the folder instead of 500ing on the raw OSError
+    — audit 2026-08-08).
     """
     normalized = normalize_set(set_data)
+    _require_sets_dir(context)
     if slug is None:
         slug = _unique_slug(context, slugify(normalized["name"]))
     text = json.dumps(normalized, indent=2, ensure_ascii=False) + "\n"
@@ -305,7 +340,12 @@ def save_set(context: LibraryContext, set_data: dict, slug: str | None = None) -
 
 
 def delete_set(context: LibraryContext, slug: str) -> bool:
-    """Delete the set at *slug*. ``True`` if a file was removed, else ``False``."""
+    """Delete the set at *slug*. ``True`` if a file was removed, else
+    ``False``. An unreachable library folder raises
+    :class:`SetValidationError` (via :func:`_require_sets_dir`) rather than
+    reading as a plain "nothing to delete" ``False`` — the route turns it
+    into a 400 naming the folder instead of a misleading 404."""
+    _require_sets_dir(context)
     try:
         set_path(context, slug).unlink()
         return True
@@ -322,10 +362,21 @@ def list_sets(context: LibraryContext) -> list[dict]:
     already use for feature modules/nodes. That includes a hand-created file
     whose stem isn't a valid slug (e.g. ``My Set.json``): listing it would
     advertise a slug every other route then 400s on, so it is skipped with
-    a rename hint instead.
+    a rename hint instead. The same never-crash posture covers the
+    DIRECTORY itself: an unreachable library folder (``sets_dir()``'s
+    on-demand mkdir raising OSError — an unmounted NAS) degrades to an
+    empty listing with a logged warning rather than 500ing every route
+    that tails a fresh listing onto its response (audit 2026-08-08).
     """
     summaries = []
-    for path in context.sets_dir().glob("*.json"):
+    try:
+        sets_dir = context.sets_dir()
+    except OSError as exc:
+        logger.warning(
+            "EPSNodes: library sets folder is unreachable (%s); listing no sets", exc
+        )
+        return summaries
+    for path in sets_dir.glob("*.json"):
         slug = path.stem
         if not _VALID_SLUG_RE.match(slug):
             logger.warning(

@@ -16,6 +16,9 @@ the positive case for the notebook's own allow-listed folders.
 
 from __future__ import annotations
 
+from pathlib import Path
+
+import pytest
 from aiohttp import web
 
 from eps_image import nodes_resolution
@@ -433,3 +436,51 @@ async def test_post_delete_remote_caller_succeeds(
     assert resp.status == 200
     body = await resp.json()
     assert body["presets"] == {}
+
+
+# -------------------------------------------------- unreachable library dir
+
+
+@pytest.fixture
+def unreachable_context(context: LibraryContext, tmp_path: Path) -> LibraryContext:
+    """*context* reconfigured so ``library_dir()``'s on-demand mkdir raises
+    OSError (configured path's parent is a plain FILE) — the audit
+    2026-08-08 unmounted-NAS condition. All three routes must answer with
+    real HTTP semantics (200-empty GET, 400 writes), never a raw 500."""
+    blocker = tmp_path / "blocker"
+    blocker.write_text("not a directory", encoding="utf-8")
+    context.save_config({"library_dir": str(blocker / "library")})
+    return context
+
+
+async def test_get_presets_unreachable_library_folder_degrades_to_empty(
+    unreachable_context: LibraryContext, aiohttp_client
+) -> None:
+    client = await aiohttp_client(make_app(unreachable_context))
+    resp = await client.get("/eps_resolution/presets")
+    assert resp.status == 200
+    assert await resp.json() == {"presets": {}, "mtime": None}
+
+
+async def test_post_save_unreachable_library_folder_is_400_naming_the_folder(
+    unreachable_context: LibraryContext, aiohttp_client
+) -> None:
+    client = await aiohttp_client(make_app(unreachable_context))
+    resp = await client.post(
+        "/eps_resolution/presets/save", json={"name": "A", "values": VALUES}
+    )
+    assert resp.status == 400
+    body = await resp.json()
+    assert "library folder" in body["error"]
+
+
+async def test_post_delete_unreachable_library_folder_is_400_not_404(
+    unreachable_context: LibraryContext, aiohttp_client
+) -> None:
+    # Without the store's pre-load guard this would read as 404 "no such
+    # preset" (load degrades to empty) — or 500 on the raw OSError.
+    client = await aiohttp_client(make_app(unreachable_context))
+    resp = await client.post("/eps_resolution/presets/delete", json={"name": "A"})
+    assert resp.status == 400
+    body = await resp.json()
+    assert "library folder" in body["error"]

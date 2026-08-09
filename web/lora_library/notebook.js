@@ -1016,6 +1016,14 @@ function createState(node, fileWidget, entryWidget) {
     // picker lives on document.body, not inside this widget's own DOM — see
     // openBrowsePicker()).
     pickerKeydownHandler: null,
+    // Guards the picker's in-flight fs/list fetch (loadPickerDir()): the
+    // path bar stays live while a listing is in flight, so a second
+    // navigation can lap the first (a slow NAS initial load vs. a typed
+    // local path — 600ms LAN latency is a first-class condition for this
+    // pack), and without a token the LAST response to land wins the
+    // dialog, stale or not. Same idiom as loadToken/selectToken above
+    // (2026-08-08 audit).
+    pickerNavToken: 0,
     // DOM refs, filled in by buildUi() — only elements later functions need
     // to reach back into are tracked here (e.g. `newBtn` isn't, since
     // nothing but renderFooter() itself ever touches it).
@@ -1721,7 +1729,9 @@ const PICKER_OVERLAY_ID = 'llnb-picker-overlay'
 function closeBrowsePicker(state) {
   document.getElementById(PICKER_OVERLAY_ID)?.remove()
   if (state.pickerKeydownHandler) {
-    window.removeEventListener('keydown', state.pickerKeydownHandler)
+    // Same capture flag as the registration in openBrowsePicker(), or this
+    // silently fails to detach (see the drag listeners' identical note).
+    window.removeEventListener('keydown', state.pickerKeydownHandler, { capture: true })
     state.pickerKeydownHandler = null
   }
 }
@@ -1756,7 +1766,14 @@ function openBrowsePicker(state) {
       closeBrowsePicker(state)
     }
   }
-  window.addEventListener('keydown', state.pickerKeydownHandler)
+  // CAPTURE-phase, deliberately (the FORMAT.md §7.5 rule every other
+  // window-level listener in this file already follows): the picker's own
+  // path input below — and this panel's name field/textarea — call
+  // stopPropagation() on every keydown, so a bubble-phase listener never
+  // sees Escape while any of them has focus, exactly the state the user is
+  // in right after typing a path. closeBrowsePicker() must remove with the
+  // same flag.
+  window.addEventListener('keydown', state.pickerKeydownHandler, { capture: true })
 
   // Type-or-paste-a-path input (FORMAT.md §5/§7.2, owner's NAS fix) — a
   // PERSISTENT row above the listing (unlike `contentEl` below, which every
@@ -1802,12 +1819,18 @@ function openBrowsePicker(state) {
  * input itself untouched so the user can just fix it and retry.
  */
 async function loadPickerDir(state, dialog, contentEl, pathErrorEl, dir) {
+  // A lapped response — success OR failure — must neither render nor touch
+  // the error slot: the navigation that superseded this one owns the
+  // dialog now (see pickerNavToken's state comment; mirrors
+  // loadEntryText()'s loadToken guard).
+  const navToken = ++state.pickerNavToken
   pathErrorEl.textContent = ''
   contentEl.replaceChildren(el('div', { className: 'llnb-picker-status', text: 'Loading…' }))
   let data
   try {
     data = await api.getJson('/lora_library/fs/list', dir ? { dir } : undefined)
   } catch (error) {
+    if (navToken !== state.pickerNavToken) return // superseded by a later navigation
     api.warn('fs/list failed', error)
     pathErrorEl.textContent = error.message || 'Could not list that path.'
     contentEl.replaceChildren(
@@ -1816,6 +1839,7 @@ async function loadPickerDir(state, dialog, contentEl, pathErrorEl, dir) {
     )
     return
   }
+  if (navToken !== state.pickerNavToken) return // superseded by a later navigation
   renderPickerDialog(state, dialog, contentEl, pathErrorEl, data)
 }
 

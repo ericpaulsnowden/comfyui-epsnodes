@@ -639,3 +639,63 @@ class TestResolveLoraCrossOS:
             result = sets_store.resolve_lora(context, "dup.safetensors")
         assert result is None
         assert any("multiple" in r.message.lower() for r in caplog.records)
+
+
+# -------------------------------------------------- unreachable library dir
+
+
+@pytest.fixture
+def unreachable_context(context: LibraryContext, tmp_path: Path) -> LibraryContext:
+    """*context* reconfigured so ``sets_dir()``'s on-demand mkdir raises
+    OSError: the configured library path's parent is a plain FILE — the
+    portable stand-in for an unmounted/unwritable NAS library folder (the
+    audit 2026-08-08 failure the store's guards exist for)."""
+    blocker = tmp_path / "blocker"
+    blocker.write_text("not a directory", encoding="utf-8")
+    context.save_config({"library_dir": str(blocker / "library")})
+    return context
+
+
+class TestUnreachableLibraryFolder:
+    """sets_dir() creates the folder on demand, so an unreachable
+    configured library raises OSError at directory RESOLUTION — before any
+    per-file tolerance runs. Listing must degrade (warned, per its
+    one-bad-thing-must-not-take-down-the-rest posture); save/delete/load
+    must surface SetValidationError so the routes answer 4xx, never 500."""
+
+    def test_list_sets_degrades_to_empty_with_a_warning(
+        self, unreachable_context: LibraryContext, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        with caplog.at_level(logging.WARNING, logger="lora_library"):
+            assert sets_store.list_sets(unreachable_context) == []
+        assert any("unreachable" in r.message for r in caplog.records)
+
+    def test_save_set_raises_set_validation_error_naming_the_folder(
+        self, unreachable_context: LibraryContext
+    ) -> None:
+        with pytest.raises(sets_store.SetValidationError, match="library folder"):
+            sets_store.save_set(unreachable_context, {"name": "Foo", "loras": []})
+
+    def test_delete_set_raises_rather_than_reporting_nothing_to_delete(
+        self, unreachable_context: LibraryContext
+    ) -> None:
+        # A plain False would read as 404 "no such set" at the route —
+        # misdiagnosing an unreachable folder as a missing set.
+        with pytest.raises(sets_store.SetValidationError, match="library folder"):
+            sets_store.delete_set(unreachable_context, "foo")
+
+    def test_load_set_raises_set_validation_error(
+        self, unreachable_context: LibraryContext
+    ) -> None:
+        # Same class every caller already handles: the routes 400, and
+        # nodes_sets warns + passes through instead of failing the prompt.
+        with pytest.raises(sets_store.SetValidationError, match="library folder"):
+            sets_store.load_set(unreachable_context, "foo")
+
+    def test_save_set_still_validates_payload_first(
+        self, unreachable_context: LibraryContext
+    ) -> None:
+        # A malformed payload is the caller's bug regardless of disk state
+        # — its §4 message must keep winning over the folder diagnosis.
+        with pytest.raises(sets_store.SetValidationError, match="loras"):
+            sets_store.save_set(unreachable_context, {"name": "x", "loras": "nope"})

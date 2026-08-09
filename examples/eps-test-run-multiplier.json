@@ -397,7 +397,7 @@
       "outputs": [],
       "properties": {},
       "widgets_values": [
-        "# TEST: EPS Run Multiplier - 2 images x 4 prompts = 8\n\n**Setup (one time):** copy `eps-cross-test-prompts.md` (ships beside this file) into your EPSNodes library folder - the one in Settings -> EPSNodes. That is the only prep.\n\n**Then just press Run.** No checkpoint, no lora, no GPU needed - it only moves images around.\n\n## What should happen\n\n**8 images** appear in your output folder, named by prompt:\n\n```\nNeon City_00001_.png      <- Image A\nGolden Hour_00001_.png    <- Image A\nInk Sketch_00001_.png     <- Image A\nPastel Studio_00001_.png  <- Image A\nNeon City_00002_.png      <- Image B\nGolden Hour_00002_.png    <- Image B\nInk Sketch_00002_.png     <- Image B\nPastel Studio_00002_.png  <- Image B\n```\n\nEach prompt name appears exactly **twice** (once per image). That is the fix: without EPS Run Multiplier you would get 4 images, three of them reusing the last picture.\n\n**Try it your way too:** swap the two Load Image nodes for your own, or replace the switcher with an **EPS Image Grid** set to *Emit* (wire its `image` output into Cross Product's `images`) - the count follows whatever is in the grid."
+        "# TEST: EPS Run Multiplier - 2 images x 4 prompts = 8\n\n**Setup (one time):** copy `eps-cross-test-prompts.md` (ships beside this file) into your EPSNodes library folder - the one in Settings -> EPSNodes. That is the only prep.\n\n**Then just press Run.** No checkpoint, no lora, no GPU needed - it only moves images around.\n\n## What should happen\n\n**8 images** appear in your output folder, named by prompt:\n\n```\nNeon City_00001_.png      <- Image A\nGolden Hour_00001_.png    <- Image A\nInk Sketch_00001_.png     <- Image A\nPastel Studio_00001_.png  <- Image A\nNeon City_00002_.png      <- Image B\nGolden Hour_00002_.png    <- Image B\nInk Sketch_00002_.png     <- Image B\nPastel Studio_00002_.png  <- Image B\n```\n\nEach prompt name appears exactly **twice** (once per image). That is the fix: without EPS Run Multiplier you would get 4 images, three of them reusing the last picture.\n\n**Try it your way too:** swap the two Load Image nodes for your own, or replace the switcher with an **EPS Image Grid** set to *Emit* (wire its `image` output into the Run Multiplier's `image` input) - the count follows whatever is in the grid."
       ],
       "color": "#432",
       "bgcolor": "#653"
@@ -545,7 +545,7 @@
     },
     {
       "id": 2,
-      "title": "Cross Product",
+      "title": "Run Multiplier",
       "bounding": [
         -290,
         60,

@@ -761,6 +761,11 @@
           "shape": 6,
           "type": "STRING",
           "links": null
+        },
+        {
+          "name": "vae",
+          "type": "VAE",
+          "links": null
         }
       ],
       "title": "EPS Run Multiplier",
@@ -1203,7 +1208,7 @@
       "outputs": [],
       "properties": {},
       "widgets_values": [
-        "## Model side\n\nCheckpoint -> Apply LoRA Set (your saved state) -> LoRA Sweep. The sweep hands out one patched model/clip per strength step; Run Multiplier pairs each of those with every image/prompt pair."
+        "## Model side\n\nCheckpoint -> Apply LoRA Set (your saved state) -> LoRA Iterator. The iterator hands out one patched model/clip per strength step; Run Multiplier pairs each of those with every image/prompt pair."
       ],
       "color": "#432",
       "bgcolor": "#653"
@@ -1442,7 +1447,7 @@
     },
     {
       "id": 2,
-      "title": "2 - Checkpoint + lora sweep",
+      "title": "2 - Checkpoint + LoRA Iterator",
       "bounding": [
         -1550,
         1060,
@@ -1454,7 +1459,7 @@
     },
     {
       "id": 3,
-      "title": "3 - Cross Sweep",
+      "title": "3 - Run Multiplier",
       "bounding": [
         -350,
         940,
