@@ -86,12 +86,30 @@ def register(context: LibraryContext, routes: web.RouteTableDef) -> None:
             return error_response(403, guard)
 
         parsed, mtime, _line_ending = markdown_store.load_notebook(path)
+        entries = markdown_store.list_entries(parsed)
+        # §5 amendment (v0.53.0, owner ask 2026-08-08: a search field over
+        # titles AND bodies): `include_text=1` adds each entry's body text
+        # to its row, so the panel can filter client-side -- instant on the
+        # owner's LAN, no per-keystroke round trips, and the corpus rides
+        # the panel's own reload cycle so it can never go stale relative to
+        # what the list shows. Opt-in so every existing caller's payload is
+        # byte-identical.
+        if request.query.get("include_text") == "1":
+            entries = [
+                {
+                    **entry,
+                    "text": (markdown_store.get_entry(parsed, entry["name"]) or {}).get(
+                        "text", ""
+                    ),
+                }
+                for entry in entries
+            ]
         return web.json_response(
             {
                 "file": str(path),
                 "exists": mtime is not None,
                 "mtime": mtime,
-                "entries": markdown_store.list_entries(parsed),
+                "entries": entries,
                 # FORMAT.md §5: names in file order, INCLUDING empty
                 # categories — the one thing `entries` alone can't reveal. A
                 # missing file parses to zero blocks-with-headings, so this

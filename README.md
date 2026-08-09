@@ -64,6 +64,12 @@ list on the left (grouped by `# Category` headings, with `＋ New` /
 `text` and `name` (the entry's heading — handy for filename prefixes and
 captions).
 
+- **Search everything:** the box at the top of the list filters as you
+  type, matching every word you enter against prompt **titles and bodies**
+  (so "portrait rim" finds a prompt titled "Studio A" whose text mentions
+  rim light). Esc clears it. Filtering never changes your selection — a
+  selected prompt that's filtered out of view stays selected — and
+  drag-reorder pauses while a filter is active.
 - **Select several prompts, get one run per prompt:** ctrl/cmd+click
   toggles entries into the selection, shift+click selects a range. Queue
   once and the workflow executes once per selected prompt, in selection

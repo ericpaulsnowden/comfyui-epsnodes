@@ -1942,3 +1942,32 @@ async def test_write_routes_refuse_empty_or_missing_file(
     # The read route still resolves "" to the default notebook (fresh node).
     resp = await client.get("/lora_library/notebook", params={"file": ""})
     assert resp.status == 200
+
+
+async def test_get_notebook_include_text_adds_bodies_opt_in(
+    context: LibraryContext, aiohttp_client
+) -> None:
+    """v0.53.0 (the notebook search field): `include_text=1` adds each
+    entry's body text to its list row; without it the payload keeps its
+    original shape byte-for-byte."""
+    client = await aiohttp_client(make_app(context))
+    await client.post(
+        "/lora_library/notebook/entry",
+        json={"file": "loras.md", "name": "Alpha", "text": "cinematic light"},
+    )
+    await client.post(
+        "/lora_library/notebook/entry",
+        json={"file": "loras.md", "name": "Beta", "text": "studio portrait"},
+    )
+
+    plain = await (await client.get("/lora_library/notebook", params={"file": "loras.md"})).json()
+    assert all("text" not in e for e in plain["entries"])
+
+    rich = await (
+        await client.get(
+            "/lora_library/notebook", params={"file": "loras.md", "include_text": "1"}
+        )
+    ).json()
+    by_name = {e["name"]: e for e in rich["entries"]}
+    assert by_name["Alpha"]["text"] == "cinematic light"
+    assert by_name["Beta"]["text"] == "studio portrait"

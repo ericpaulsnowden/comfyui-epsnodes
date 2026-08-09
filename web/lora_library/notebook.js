@@ -479,6 +479,21 @@ const CSS_TEXT = `
   opacity: 0.6;
 }
 .llnb-splitter:hover { opacity: 1; }
+.llnb-search {
+  flex: 0 0 auto;
+  margin: 0 0 6px;
+  padding: 5px 8px;
+  border: 1px solid var(--border-color, #444);
+  border-radius: 4px;
+  background: var(--comfy-input-bg, #1c1c1c);
+  color: var(--input-text, #ddd);
+  font-size: 12px;
+  outline: none;
+  min-width: 0;
+}
+.llnb-search:focus { border-color: rgb(66, 133, 244); }
+.llnb-search::placeholder { color: var(--descrip-text, #808080); }
+
 .llnb-list {
   flex: 1 1 auto;
   min-height: 0;
@@ -943,6 +958,14 @@ function createState(node, fileWidget, entryWidget) {
     // this, so the workflow's saved file/entry values survive a broken
     // connection by construction.
     loadError: null,
+    // §7.2 search (owner ask 2026-08-08): the live filter string and the
+    // per-entry body text the `include_text=1` list payload delivers --
+    // refreshed by every reload, so the search corpus can never lag what
+    // the list itself shows. Filtering is a VIEW: it never touches
+    // selection, widgets, or the file.
+    searchQuery: '',
+    entryTextByName: {},
+    searchInputEl: null,
     exists: true,
     entries: [],
     // Categories in the UI (FORMAT.md §7.2 amendment) — the §5 `categories`
@@ -1057,9 +1080,34 @@ function createState(node, fileWidget, entryWidget) {
 function buildUi(state) {
   injectStyles()
 
+  // §7.2 search field (owner ask 2026-08-08) -- top of the left column.
+  // Every keystroke stops propagation (the canvas has global hotkeys;
+  // same rule as the name field below); Escape CLEARS the query in place.
+  state.searchInputEl = el('input', {
+    className: 'llnb-search',
+    attrs: { type: 'text', placeholder: 'Search title + text\u2026', spellcheck: 'false' }
+  })
+  state.searchInputEl.addEventListener('input', () => {
+    state.searchQuery = state.searchInputEl.value
+    renderList(state)
+  })
+  state.searchInputEl.addEventListener('keydown', (event) => {
+    event.stopPropagation()
+    if (event.key === 'Escape') {
+      event.preventDefault()
+      state.searchInputEl.value = ''
+      state.searchQuery = ''
+      renderList(state)
+    }
+  })
+
   state.listEl = el('div', { className: 'llnb-list' })
   state.footerEl = el('div', { className: 'llnb-footer' })
-  state.leftPane = el('div', { className: 'llnb-pane llnb-pane-left' }, [state.listEl, state.footerEl])
+  state.leftPane = el('div', { className: 'llnb-pane llnb-pane-left' }, [
+    state.searchInputEl,
+    state.listEl,
+    state.footerEl
+  ])
 
   const splitter = el('div', { className: 'llnb-splitter', attrs: { title: 'Drag to resize' } })
 
@@ -1955,7 +2003,7 @@ async function reloadNow(state) {
   const file = state.fileWidget.value ?? ''
   let data
   try {
-    data = await api.getJson('/lora_library/notebook', { file })
+    data = await api.getJson('/lora_library/notebook', { file, include_text: '1' })
   } catch (error) {
     if (token !== state.loadToken) return
     api.warn('failed to load notebook list', error)
@@ -1995,6 +2043,12 @@ async function reloadNow(state) {
   state.loadError = null
   state.file = file
   state.entries = Array.isArray(data.entries) ? data.entries : []
+  // §7.2 search corpus: body text per entry (include_text=1 above). Built
+  // fresh on every successful load, so search always reflects disk truth
+  // as of the panel's own last refresh.
+  state.entryTextByName = Object.fromEntries(
+    state.entries.map((entry) => [entry.name, typeof entry.text === 'string' ? entry.text : ''])
+  )
   // FORMAT.md §5/§7.2: named categories in file order, incl. empty ones —
   // see renderList()'s merge of this against `entries`.
   state.categories = Array.isArray(data.categories) ? data.categories : []
@@ -2459,6 +2513,22 @@ function updateModeHint(state) {
  * repeated category name as two separate headers rather than one merged
  * group (see list_categories()'s doc comment on the Python side).
  */
+/**
+ * §7.2 search predicate (owner ask 2026-08-08: "matches search words with
+ * words either in the title or body"): case-insensitive, every
+ * whitespace-separated query word must appear somewhere in the entry's
+ * NAME or BODY. Multi-word queries therefore narrow (AND), matching how
+ * the Checkpoint Switcher's filter box already behaves.
+ */
+function entryMatchesSearch(name, text, query) {
+  const haystack = `${name}\n${text || ''}`.toLowerCase()
+  return query
+    .toLowerCase()
+    .split(/\s+/)
+    .filter(Boolean)
+    .every((word) => haystack.includes(word))
+}
+
 function renderList(state) {
   // 2026-07-24 (owner report: "the left column should not scroll to the
   // top of the list"): `replaceChildren()` resets the list's scrollTop to
@@ -2472,8 +2542,31 @@ function renderList(state) {
   state.listEl.replaceChildren()
   state.dragRows = []
 
-  const categories = Array.isArray(state.categories) ? state.categories : []
-  const entries = state.entries
+  // §7.2 search: with a query active, render a FILTERED VIEW -- matching
+  // entries only, categories that retain at least one match, collapse
+  // state ignored (a match hidden inside a collapsed category would read
+  // as "search is broken"). Rows are NOT pushed to dragRows while
+  // filtering (see the pushes below), so drag-reorder is inert -- dropping
+  // "after" a row with unseen entries between them would reorder the file
+  // in ways the view can't show. Clicks, selection, and double-click
+  // rename all live on the rows themselves and keep working.
+  const searchQuery = (state.searchQuery || '').trim()
+  const filtering = searchQuery.length > 0
+  let categories = Array.isArray(state.categories) ? state.categories : []
+  let entries = state.entries
+  if (filtering) {
+    entries = entries.filter((entry) =>
+      entryMatchesSearch(entry.name, state.entryTextByName[entry.name], searchQuery)
+    )
+    const categoriesWithMatches = new Set(entries.map((entry) => entry.category || ''))
+    categories = categories.filter((category) => categoriesWithMatches.has(category))
+    if (!entries.length) {
+      state.listEl.append(
+        el('div', { className: 'llnb-empty', text: `No prompts match "${searchQuery}".` })
+      )
+      return
+    }
+  }
 
   if (!entries.length && !categories.length) {
     state.listEl.append(
@@ -2493,7 +2586,9 @@ function renderList(state) {
   const appendEntry = (entry) => {
     const row = buildEntryRow(state, entry)
     state.listEl.append(row)
-    state.dragRows.push({ el: row, kind: 'entry', name: entry.name, category: entry.category || '' })
+    if (!filtering) {
+      state.dragRows.push({ el: row, kind: 'entry', name: entry.name, category: entry.category || '' })
+    }
     entryIndex += 1
   }
 
@@ -2507,14 +2602,14 @@ function renderList(state) {
   for (const category of categories) {
     const headerEl = buildCategoryHeaderRow(state, category)
     state.listEl.append(headerEl)
-    state.dragRows.push({ el: headerEl, kind: 'header', category })
+    if (!filtering) state.dragRows.push({ el: headerEl, kind: 'header', category })
 
     // Single-tap collapse (FORMAT.md §7.2 amendment): a collapsed
     // category's entries are skipped entirely — not rendered, not added to
     // `dragRows` — so they're visually gone AND inert (no click, no drag
     // source) until expanded again; the header row itself still renders
     // and stays a valid drop target either way.
-    const collapsed = state.collapsedCategories.has(category)
+    const collapsed = !filtering && state.collapsedCategories.has(category)
     while (entryIndex < entries.length && (entries[entryIndex].category || '') === category) {
       if (collapsed) entryIndex += 1
       else appendEntry(entries[entryIndex])

@@ -307,7 +307,7 @@ message>"}` with a 4xx status. `mtime` values are float POSIX seconds.
 | `POST /lora_library/notebook/open_folder` `{"file"}` | **loopback-only** (403 remote): reveals the resolved notebook file's folder in the OS file manager ON THE SERVER MACHINE (Explorer/Finder). Missing folder ⇒ 404; `{"ok": true}` |
 | `POST /lora_library/config` `{"library_dir"}` | validates (absolute, creatable, writable), persists; `{"ok", "library_dir"}` |
 | `GET /lora_library/loras` | `{"loras": [".."]}` — installed loras for pickers |
-| `GET /lora_library/notebook?file=` | `{"file": <resolved abs>, "exists": bool, "mtime", "entries": [{"name","category"}], "categories": [names in file order — includes EMPTY categories, which `entries` alone can't reveal], "problems": [".."]}` (missing file ⇒ `exists:false`, empty lists — NOT an error) |
+| `GET /lora_library/notebook?file=` | `{"file": <resolved abs>, "exists": bool, "mtime", "entries": [{"name","category"}], "categories": [names in file order — includes EMPTY categories, which `entries` alone can't reveal], "problems": [".."]}` (missing file ⇒ `exists:false`, empty lists — NOT an error). `include_text=1` (v0.53.0, the §7.2 search field) adds each entry's body `text` to its row — opt-in, so every pre-existing caller's payload is byte-identical |
 | `GET /lora_library/notebook/category?file=&name=` | `{"name","description","mtime"}`; 404 if no such category |
 | `POST /lora_library/notebook/category` `{"file","name","description"?,"after"?,"rename_to"?,"base_mtime"?}` | §3.4 create-or-describe: unknown `name` ⇒ CREATE the category (default end-of-file; `after` = insert the new `# heading` right after that entry/category — used by New-below when the active item is a category) with the given description; known `name` ⇒ replace its description and, when `rename_to` is present, rename the heading (unique among categories). §3.5 ⇒ 409; un-representable description lines ⇒ 400. → `{"ok","mtime","entries","categories"}` |
 | `GET /lora_library/notebook/entry?file=&name=` | `{"name","category","text","mtime"}`; 404 if absent |
@@ -2027,6 +2027,23 @@ remote read-only revert now EXEMPTS a value arriving via a live link on
 the `file` widget-input (workflow-authored host state, fired through
 `applyToGraph` at queue time — reverting it swapped in the stale
 baseline), while raw remote hand edits still revert.
+
+**§7.2 amendment — the search field (v0.53.0, owner ask 2026-08-08:
+"a search field at the top of the left row that matches search words with
+words either in the title or body of the prompt").** A text input above
+the entry list filters as you type: case-insensitive, every
+whitespace-separated word must appear somewhere in the entry's NAME or
+BODY (AND across words — the Checkpoint Switcher filter's semantics).
+The corpus is the `include_text=1` list payload, refreshed by the panel's
+own reload cycle, so search can never lag the list (unsaved editor typing
+is searchable after Save, by design). Filtering is a pure VIEW: selection,
+widgets, and the file are untouched; a selected-but-filtered-out entry
+stays selected. While a query is active, collapse state is ignored (a
+match hidden inside a collapsed category reads as "search is broken") and
+rows are NOT registered as drag sources/targets — drag-reorder against a
+partial view would reorder the file in ways the view can't show. Escape
+clears the query in place; every keystroke stops propagation (canvas
+hotkeys). Zero matches renders a "No prompts match" row.
 
 - **§7.1 Extension entry** `web/lora_library.js`: exactly one
   `app.registerExtension` call named `lora_library.LoraLibrary`; every
