@@ -1070,16 +1070,25 @@ is the functional core WITHOUT the grid.
 
 ## §6.6 `EPSImageGrid` (display: "EPS Image Grid") — accumulate + fan out
 
-**Collect-mode dead-wire guard (v0.51.1, owner report 2026-08-03 — a grid
-left in Collect with nothing wired but a FULL buffer fed a
-switcher→multiplier chain, and the blocker silently skipped the whole
-flow):** when Collect has no image wired AND the prompt shows a consumer
-of this node (the `prompt`/`unique_id` hidden pair, §6.4's idiom held in
-lockstep via `nodes_cross_sweep`'s canonical `_consumed_output_slots`),
-the queue FAILS naming the fix — "buffer holds N; switch mode to Emit"
-or "wire an image in". Collect-with-input (the tee), unconsumed
+**Collect-mode dead-wire warning (v0.51.1 shipped this as a HARD queue
+error; v0.52.0 demoted it to NON-BLOCKING at the owner's direction — a
+Collect grid with nothing wired is often parked behind a deliberately
+toggled-off switcher row, and failing the queue broke those workflows):**
+when Collect has no image wired AND the prompt shows a consumer of this
+node (the `prompt`/`unique_id` hidden pair, §6.4's idiom held in lockstep
+via `nodes_cross_sweep`'s canonical `_consumed_output_slots`), the
+documented silent blockers still go out — downstream of THIS node skips,
+the rest of the workflow runs — and the browser gets a warn toast via the
+`eps-image-grid-collect-skip` websocket event (`PromptServer.send_sync`;
+`image_grid.js` listens in `init()`), naming the fix: "buffer holds N;
+switch mode to Emit" or "wire an image in". Fires only when the grid
+actually EXECUTES into a consumer, so a branch disabled by a switcher's
+laziness stays fully silent. Collect-with-input (the tee), unconsumed
 blockers, Emit's empty-buffer skip (a normal transient state), and
-promptless direct callers are all byte-identical to before.
+promptless direct callers are all byte-identical to before. NOTE the
+multiplier's §6.10 consumed-but-unwired guard REMAINS a hard error —
+there the dead wire is the node's own configuration, never a parked
+branch.
 
 Roadmap/research: `research/roadmap-eps-image-grid.md`, `research-eps-image-grid.md`.
 NON-lora node in `eps_image/`, category "EPSNodes". Class id `EPSImageGrid`

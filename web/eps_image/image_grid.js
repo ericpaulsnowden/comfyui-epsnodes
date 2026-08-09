@@ -3111,6 +3111,21 @@ function installExecutedMerge(node) {
  * exactly once per extension load. */
 export function init() {
   installExecutionRefreshListener()
+  // v0.52.0 (owner direction 2026-08-03): the backend's Collect-with-
+  // nothing-wired dead-wire detection is a NON-BLOCKING warning now, not a
+  // queue error -- a Collect grid parked behind a toggled-off switcher row
+  // is legitimate, so the run continues (downstream of the grid skips) and
+  // this toast says why. Fires only when the grid actually executed into a
+  // consumer, so a disabled branch stays silent.
+  api.addEventListener('eps-image-grid-collect-skip', (event) => {
+    const detail = event?.detail?.detail
+    app.extensionManager?.toast?.add?.({
+      severity: 'warn',
+      summary: `${NODE_TITLE}: Collect mode has nothing to pass through`,
+      detail: typeof detail === 'string' && detail ? detail : undefined,
+      life: 12000
+    })
+  })
   // 2026-07-30 (remote-regression audit): on an insecure origin (plain http
   // to another machine -- the owner's primary mode) CORE's selection-toolbox
   // "Copy Image"/"Paste Image" items silently no-op: its

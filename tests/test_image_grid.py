@@ -224,21 +224,63 @@ class TestCollectMode:
             uid: {"class_type": "EPSImageGrid", "inputs": {}},
         }
 
-    def test_collect_unwired_with_consumer_errors_naming_emit(
-        self, fake_folder_paths: Path
+    @staticmethod
+    def _fake_prompt_server(monkeypatch):
+        """A fake `server.PromptServer` capturing send_sync calls -- the
+        v0.52.0 warning path imports it lazily inside run()."""
+        import types
+
+        sent = []
+
+        class FakeInstance:
+            def send_sync(self, event, payload):
+                sent.append((event, payload))
+
+        server_mod = types.ModuleType("server")
+
+        class PromptServer:
+            instance = FakeInstance()
+
+        server_mod.PromptServer = PromptServer
+        monkeypatch.setitem(sys.modules, "server", server_mod)
+        return sent
+
+    def test_collect_unwired_with_consumer_warns_and_skips_nonblocking(
+        self, fake_folder_paths: Path, fake_execution_blocker: type,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """v0.51.1 (owner report 2026-08-03): Collect + nothing wired + a
-        FULL buffer + a downstream consumer used to silently skip the whole
-        chain -- now it fails naming the Emit fix."""
+        """v0.52.0 (owner direction 2026-08-03, demoting v0.51.1's hard
+        error): a Collect grid may be parked behind a toggled-off switcher
+        row, so the queue must NOT fail -- blockers still go out (downstream
+        of the grid skips) and a warning event tells the browser why."""
+        sent = self._fake_prompt_server(monkeypatch)
         node = _node()
         node.run(mode="Collect", image=_make_batch(2), grid_uuid=VALID_UUID)
-        with pytest.raises(ValueError) as excinfo:
-            node.run(
-                mode="Collect", image=None, grid_uuid=VALID_UUID,
-                prompt=self._prompt_consuming_me(), unique_id="3",
-            )
-        message = str(excinfo.value)
-        assert "Collect" in message and "Emit" in message and "2 image(s)" in message
+        result = node.run(
+            mode="Collect", image=None, grid_uuid=VALID_UUID,
+            prompt=self._prompt_consuming_me(), unique_id="3",
+        )
+        for lst in result["result"]:
+            assert isinstance(lst[0], fake_execution_blocker)
+        assert len(sent) == 1
+        event, payload = sent[0]
+        assert event == "eps-image-grid-collect-skip"
+        assert payload["node"] == "3"
+        assert "Emit" in payload["detail"] and "2 image(s)" in payload["detail"]
+
+    def test_collect_unwired_without_consumer_sends_no_event(
+        self, fake_folder_paths: Path, fake_execution_blocker: type,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        sent = self._fake_prompt_server(monkeypatch)
+        node = _node()
+        result = node.run(
+            mode="Collect", image=None, grid_uuid=VALID_UUID,
+            prompt={"5": {"class_type": "X", "inputs": {}}}, unique_id="3",
+        )
+        for lst in result["result"]:
+            assert isinstance(lst[0], fake_execution_blocker)
+        assert sent == []
 
     def test_collect_unwired_without_consumer_keeps_silent_blocker(
         self, fake_folder_paths: Path, fake_execution_blocker: type

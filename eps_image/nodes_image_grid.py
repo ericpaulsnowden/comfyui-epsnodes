@@ -88,6 +88,7 @@ list to break.
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from . import image_grid_store as store
@@ -96,6 +97,8 @@ from . import image_grid_store as store
 # THIS node found by scanning the API prompt. Same-package import on purpose:
 # one canonical implementation, held in lockstep with the multiplier's guard.
 from .nodes_cross_sweep import _consumed_output_slots, _unwrap_hidden
+
+logger = logging.getLogger("eps_image")
 
 CATEGORY_NAME = "EPSNodes"
 
@@ -281,35 +284,46 @@ class EPSImageGrid:
             # makes `result_frames` non-empty too in Collect mode; Emit mode
             # never populates `new_refs` at all) -- so this path never needs
             # a `"ui"` key, matching point 1 for both modes uniformly.
-            # v0.51.1 (owner report 2026-08-03, the day's THIRD silent-skip
-            # sting): a grid left in Collect mode with nothing wired -- but a
-            # FULL buffer -- fed a switcher fed the Run Multiplier, and the
-            # blocker emitted here silently skipped that whole chain ("is it
-            # possible that killed the entire flow?" -- yes, exactly this).
-            # When something downstream actually consumes this node and
-            # Collect has nothing to pass through, that is always a dead
-            # graph: fail the queue naming the two real fixes. Emit mode's
-            # empty-buffer skip stays silent -- an empty buffer is a normal
-            # transient state, not a miswire.
+            # v0.51.1 made this a HARD error; v0.52.0 demotes it to a
+            # NON-BLOCKING warning at the owner's direction (2026-08-03):
+            # a Collect grid with nothing wired is often parked behind a
+            # deliberately toggled-off switcher row, and failing the whole
+            # queue for it broke those workflows. So: the documented silent
+            # blocker still goes out (downstream of THIS node skips, the
+            # rest of the workflow runs), and when something downstream
+            # actually consumes this node the browser gets a warning toast
+            # (websocket event, image_grid.js listens) naming the two real
+            # fixes. Emit mode's empty-buffer skip stays fully silent -- an
+            # empty buffer is a normal transient state, not a miswire.
             if mode == MODE_COLLECT and not live:
                 consumed = _consumed_output_slots(
                     _unwrap_hidden(prompt), _unwrap_hidden(unique_id)
                 )
                 if consumed:
                     buffered = len(store.list_refs(grid_uuid))
-                    raise ValueError(
-                        "EPS Image Grid: this grid is in Collect mode with no image "
-                        "wired in, so it has nothing to pass through and everything "
-                        "downstream of it would be silently skipped"
+                    detail = (
+                        "This grid is in Collect mode with no image wired in, so "
+                        "everything downstream of it is being skipped this run"
                         + (
-                            f" -- the buffer holds {buffered} image(s); switch mode "
-                            "to Emit to send them downstream"
+                            f" -- the buffer holds {buffered} image(s); switch "
+                            "mode to Emit to send them downstream."
                             if buffered
-                            else " -- wire an image in to collect, or switch mode "
-                            "to Emit once the buffer has images"
+                            else " -- wire an image in to collect, or switch "
+                            "mode to Emit once the buffer has images."
                         )
-                        + "."
                     )
+                    logger.warning("EPSNodes: EPS Image Grid: %s", detail)
+                    try:
+                        from server import PromptServer  # ComfyUI-only; absent in tests
+
+                        PromptServer.instance.send_sync(
+                            "eps-image-grid-collect-skip",
+                            {"node": str(_unwrap_hidden(unique_id)), "detail": detail},
+                        )
+                    except Exception:
+                        # No live server (tests/direct callers) -- the log
+                        # line above already carries the warning.
+                        pass
             from comfy_execution.graph import ExecutionBlocker
 
             blocked = [ExecutionBlocker(None)]
