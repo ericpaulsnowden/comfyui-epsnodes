@@ -40,6 +40,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 PICKER_JS = REPO_ROOT / "web" / "lora_library" / "picker.js"
 API_JS = REPO_ROOT / "web" / "lora_library" / "api.js"
 VERSION_JS = REPO_ROOT / "web" / "lora_library" / "version.js"
+BRIDGE_JS = REPO_ROOT / "web" / "lora_library" / "pll_bridge.js"
 ENTRY_JS = REPO_ROOT / "web" / "lora_library.js"
 
 NODE = shutil.which("node")
@@ -213,6 +214,9 @@ def picker_api(tmp_path_factory: pytest.TempPathFactory) -> dict:
     # ComfyUI scripts exactly as test_checkpoint_switcher_js.py stubs them.
     shutil.copyfile(API_JS, module_dir / "api.js")
     shutil.copyfile(VERSION_JS, module_dir / "version.js")
+    # ...and, since M2, `./pll_bridge.js` (tested in its own right by
+    # tests/test_pll_bridge_js.py -- here it only has to resolve).
+    shutil.copyfile(BRIDGE_JS, module_dir / "pll_bridge.js")
 
     scripts = layout / "scripts"
     scripts.mkdir(parents=True, exist_ok=True)
@@ -605,3 +609,123 @@ class TestReviewFixes20260809:
         assert api_source.index("HTTP ${response.status}") < api_source.index(
             "server returned a response that is not JSON"
         )
+
+
+# ------------------------------------------------- §6.13 M2: Send to loader
+
+
+class TestSendToLoaderM2:
+    """Source pins for the M2 Send-to-loader row (§6.13): render-time probe
+    gating, the id-keyed transient target, the re-probe on click, and the
+    §6.3-vocabulary surfaces -- all closure-bound against a live graph, so
+    source-pinned like the rest of this file. pll_bridge.js itself (the
+    probe/grow/shrink/assign technique and the vocabulary contract against
+    controller.js) is covered by tests/test_pll_bridge_js.py."""
+
+    def test_send_row_renders_between_selected_and_browser(self, source: str) -> None:
+        assert "state.sendRowEl = el('div', { className: 'eps-lp-send' })" in source
+        build = _function_body(source, "buildUi(state)")
+        selected = build.index("state.selectedListEl,")
+        send = build.index("state.sendRowEl,")
+        browser = build.index("browser,")
+        assert selected < send < browser, "root order must be Selected -> Send -> browser"
+
+    def test_send_row_rebuilt_on_render_and_on_every_selection_write(self, source: str) -> None:
+        """The full render rebuilds it; granular mutations (Add, remove)
+        skip the full render, so the one widget-write funnel also
+        refreshes the empty-selection gate."""
+        assert "renderSend(state)" in _function_body(source, "render(state)")
+        assert "renderSend(state)" in _function_body(source, "writeSelectionWidget(state)")
+
+    def test_select_class_option_labels_and_id_values(self, source: str) -> None:
+        body = _function_body(source, "renderSend(state)")
+        assert "className: 'eps-lp-pll-select'" in body
+        assert "`${node.title || node.type} #${node.id}`" in body
+        assert "value: String(node.id)" in body
+
+    def test_previous_target_reselected_by_id_when_still_present(self, source: str) -> None:
+        body = _function_body(source, "renderSend(state)")
+        assert "fresh.some((node) => String(node.id) === state.pllTargetId)" in body
+        assert "select.value = state.pllTargetId" in body
+
+    def test_vanished_target_stays_on_placeholder_never_first_option(self, source: str) -> None:
+        # Review 2026-08-09: a deleted target must NOT silently retarget to
+        # the first PLL -- Send would destructively overwrite a loader the
+        # user never chose. The placeholder option makes "no choice"
+        # representable; the never-guess branch keeps it selected.
+        body = _function_body(source, "renderSend(state)")
+        assert "'Pick a loader…'" in body
+        assert "select.value = ''" in body
+        assert "never guess" in body.lower() or "NEVER fall through" in body
+
+    def test_single_candidate_auto_adopt_gated_on_no_choice(self, source: str) -> None:
+        body = _function_body(source, "renderSend(state)")
+        assert "state.pllTargetId == null && fresh.length === 1" in body
+
+    def test_options_rebuilt_on_mousedown_and_change_reprobes(self, source: str) -> None:
+        # Review 2026-08-09: candidates recompute on open (controller.js's
+        # values-function pattern) and a target switch re-probes.
+        body = _function_body(source, "renderSend(state)")
+        assert "select.addEventListener('mousedown', buildOptions)" in body
+        change = body[body.index("select.addEventListener('change'"):]
+        assert "renderSend(state)" in change
+
+    def test_probe_failure_blocks_but_does_not_disable_send(self, source: str) -> None:
+        # Review 2026-08-09: a DISABLED button can never run the click-time
+        # re-probe, so a graph fixed after render would have no recovery
+        # path. Probe failure marks the button blocked (styled, message in
+        # title + status span) while the click stays live and re-checks.
+        body = _function_body(source, "renderSend(state)")
+        assert "const probe = pll.probePll(resolvePllTarget(state))" in body
+        gated = body[body.index("if (!probe.ok)"):]
+        assert "sendBtn.classList.add('eps-lp-btn-blocked')" in gated
+        assert "sendBtn.disabled = true" not in gated[:gated.index("} else if")]
+        assert "sendBtn.title = probe.message" in gated
+        assert "statusEl.textContent = probe.message" in gated
+
+    def test_send_click_refuses_an_empty_selection_instead_of_truncating(self, source: str) -> None:
+        # Reachable via the blocked-not-disabled button: an empty send would
+        # SHRINK the target loader to zero rows.
+        body = _function_body(source, "sendToPll(state)")
+        assert "rows.length === 0" in body
+        assert "never truncate" in body
+
+    def test_send_click_adopts_a_lone_late_added_pll(self, source: str) -> None:
+        body = _function_body(source, "sendToPll(state)")
+        assert "candidates.length === 1" in body
+        assert "state.pllTargetId = String(candidates[0].id)" in body
+
+    def test_empty_selection_disables_send_with_its_own_title(self, source: str) -> None:
+        body = _function_body(source, "renderSend(state)")
+        assert "state.selection.loras.length === 0" in body
+        assert "sendBtn.title = 'Nothing selected'" in body
+
+    def test_click_reprobes_then_sends_all_rows(self, source: str) -> None:
+        """The target may have been deleted since render -- the click
+        re-resolves by id, re-probes, and toasts the failure; success
+        writes ALL rows (`on` preserved, §6.13) through pll_bridge.js."""
+        body = _function_body(source, "sendToPll(state)")
+        assert "const node = resolvePllTarget(state)" in body
+        assert "const probe = pll.probePll(node)" in body
+        assert "toast('error', 'EPS LoRA Picker', probe.message)" in body
+        assert "const rows = state.selection.loras" in body
+        assert "pll.writeRowsToPll(node, rows)" in body
+
+    def test_send_success_toast_names_count_and_target(self, source: str) -> None:
+        expected = "`Sent ${rows.length} lora(s) to ${node.title || node.type} #${node.id}`"
+        assert expected in _function_body(source, "sendToPll(state)")
+
+    def test_select_keydown_stops_propagation(self, source: str) -> None:
+        body = _function_body(source, "renderSend(state)")
+        assert "select.addEventListener('keydown', (event) => event.stopPropagation())" in body
+
+    def test_target_choice_is_transient_and_never_serialized(self, source: str) -> None:
+        """§6.13 M2 adds no widget: the target id lives in panel state only,
+        and the Send row never touches the selection JSON."""
+        assert "pllTargetId: null" in _function_body(source, "createState(node, widget)")
+        assert "pllTargetId" not in _function_body(source, "serializeSelection(selection)")
+        assert "writeSelectionWidget" not in _function_body(source, "renderSend(state)")
+        assert "writeSelectionWidget" not in _function_body(source, "sendToPll(state)")
+
+    def test_still_no_window_listeners(self, source: str) -> None:
+        assert "window.addEventListener" not in source

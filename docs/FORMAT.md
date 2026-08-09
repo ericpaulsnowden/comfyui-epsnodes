@@ -2082,7 +2082,7 @@ apply/text helpers, so it drops in anywhere Apply LoRA Set does.
   roadmap's decided M1 recording point. A favorite naming a lora NOT
   installed on this machine renders dimmed `⚠ not installed here`,
   star-only — visible, never silently dropped (§6.12's ⚠ rule).
-- **M2 (same section, shipped separately)**: a "Send to loader" row —
+- **M2 — SHIPPED v0.55.0 (2026-08-09)**: a "Send to loader" row —
   target combo of every `Power Lora Loader (rgthree)` in the graph
   (ascending id, §6.3's exact type string) + Send button writing the
   selection's rows (`on` preserved, `strengthTwo` only in the target's
@@ -2091,7 +2091,20 @@ apply/text helpers, so it drops in anywhere Apply LoRA Set does.
   technique (`addNewLoraWidget`/`removeWidget`/whole-object `.value`
   assignment). `controller.js` is deliberately NOT touched or imported:
   it is owner-validated code, and the duplication is the cheaper risk.
-  Probe failures disable Send with §6.3's own message vocabulary.
+  Probe failures BLOCK Send (styled, message in title + status span,
+  §6.3's own message vocabulary) but leave the click live — a disabled
+  button could never run the click-time re-probe, so a graph fixed after
+  render would have no recovery path; the click re-checks fresh and
+  either proceeds or toasts that same message. Target rules (review
+  2026-08-09): the combo carries a "Pick a loader…" placeholder so "no
+  choice" is representable; a chosen loader that has been DELETED keeps
+  the placeholder selected — never a silent fall-through to the first
+  loader, which Send would then destructively overwrite (§6.3 "never
+  guess"); a lone candidate is auto-adopted only when NO choice was ever
+  made (render and click alike, so a PLL added after the last render
+  still makes a plain Send work); options rebuild in place on every
+  combo open; switching targets re-probes; an empty selection is refused
+  at click time (an empty send would shrink the target to zero rows).
   Client-side only — the research round proved PLL cannot be fed
   through the graph.
 - **M3 (same section, shipped separately)**: search field above the

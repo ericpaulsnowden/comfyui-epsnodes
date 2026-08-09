@@ -229,9 +229,15 @@ favorites or recently-used anywhere in the ecosystem.
   `filename_prefix`. An empty or all-off selection just passes through —
   never an error. A selection saved on Windows resolves on macOS/Linux
   (same separator-insensitive matching as saved sets).
-- **Coming next** (roadmapped, **not shipped yet**): send-to-rgthree —
-  writing the selection into a Power Lora Loader (M2) — and search +
-  preview thumbnails (M3).
+- **Send to loader** (needs [rgthree-comfy](https://github.com/rgthree/rgthree-comfy),
+  optional): a row under the Selected list targets any Power Lora Loader
+  in the graph and writes your picked loras straight into its rows —
+  on/off and strengths included — the same widget-level technique the
+  Lora Loader State Controller already uses. Without rgthree the row
+  just says so; nothing else needs it. It never guesses a target: delete
+  the loader you'd picked and Send refuses until you pick again.
+- **Coming next** (roadmapped, **not shipped yet**): search within the
+  browser + preview thumbnails + trigger-word copy (M3).
 
 ## EPS Apply LoRA Set (shipped)
 

@@ -129,8 +129,9 @@ Scope of M1:
 Effort: **M–L** (one DOM panel + store + routes + node). Highest-value single
 release; delivers all three of Eric's needs at the graph level.
 
-### M2 — Drive the rgthree Power Lora Loader (the loader-augment seam)
-*(Eric's "both" — augment the loader he already uses)*
+### M2 — Drive the rgthree Power Lora Loader (the loader-augment seam) — SHIPPED v0.55.0 (2026-08-09)
+*(Eric's "both" — augment the loader he already uses; pll_bridge.js, controller.js
+untouched; rig-verified incl. the never-guess deleted-target rule and shrink)*
 
 Add a mode/companion so the picker's selection writes into a **real rgthree
 Power Lora Loader**, exactly as `EPS Lora Loader State Controller` already

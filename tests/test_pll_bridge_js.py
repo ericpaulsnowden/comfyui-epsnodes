@@ -1,0 +1,428 @@
+"""Frontend tests for the EPS LoRA Picker's Power Lora Loader bridge
+(``web/lora_library/pll_bridge.js`` -- FORMAT.md §6.13, M2).
+
+The bridge is a minimal, deliberately DUPLICATED adaptation of
+controller.js's §6.3 technique (probe-first feature detection,
+addNewLoraWidget grow / tail removeWidget shrink / whole-object ``.value``
+assignment). FORMAT.md §6.13 M2: controller.js is owner-validated code and
+must be neither modified nor imported, so the duplication is kept honest
+HERE instead -- the §6.3 MESSAGE VOCABULARY and the PROP_*/type constants
+are pinned byte-identical against BOTH files, and the no-import rule is a
+source assertion.
+
+Unlike controller.js, the bridge's whole surface is drivable under Node in
+a served-layout tmp dir (``test_picker_js.py``'s fixture convention, itself
+from ``test_checkpoint_switcher_js.py``): ``app`` is the stubbed served
+module the bridge imports, ``LiteGraph`` is a bare global the probe defines
+itself mid-run (which also exercises the no-rgthree gate first), and
+``writeRowsToPll`` needs only a widgets array plus the four LGraphNode
+methods ``probePll`` feature-detects -- so grow/shrink/assign runs against
+a fake PLL for real rather than being source-pinned.
+
+Skips cleanly when Node isn't installed; real-rgthree behavior (an actual
+Power Lora Loader receiving a Send) is for the rig, not here.
+"""
+
+from __future__ import annotations
+
+import json
+import re
+import shutil
+import subprocess
+from pathlib import Path
+
+import pytest
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+BRIDGE_JS = REPO_ROOT / "web" / "lora_library" / "pll_bridge.js"
+CONTROLLER_JS = REPO_ROOT / "web" / "lora_library" / "controller.js"
+
+NODE = shutil.which("node")
+
+pytestmark = pytest.mark.skipif(NODE is None, reason="node (JS runtime) not installed")
+
+# ----------------------------------------------------------- shared vocabulary
+
+#: §6.3's message texts, byte-identical in controller.js AND pll_bridge.js
+#: (FORMAT.md §6.13 M2: "Probe failures disable Send with §6.3's own message
+#: vocabulary"). test_vocabulary_strings_byte_identical_in_both_files pins
+#: each against both sources, so drift in either file fails loudly.
+MSG_NO_RGTHREE = "Install rgthree-comfy, or use EPS Apply LoRA Set instead"
+MSG_SHAPE_DRIFT = "Power Lora Loader internals changed — controller disabled (v-check)"
+MSG_NO_TARGET_IN_GRAPH = (
+    "No Power Lora Loader (rgthree) node in this graph yet — add one, then pick it above."
+)
+MSG_NO_TARGET_SELECTED = "Pick a target Power Lora Loader node above."
+
+PLL_TYPE = "Power Lora Loader (rgthree)"
+
+#: The exact constant declarations both files must carry -- the type string
+#: and the dual-strength-mode node property controller.js reads.
+SHARED_CONSTANT_LINES = [
+    "const POWER_LORA_LOADER_TYPE = 'Power Lora Loader (rgthree)'",
+    "const PROP_SHOW_STRENGTHS = 'Show Strengths'",
+    "const PROP_SHOW_STRENGTHS_DUAL = 'Separate Model & Clip'",
+]
+
+PROBE_JS = """
+import * as m from './extensions/comfyui-epsnodes/lora_library/pll_bridge.js'
+import { app } from './scripts/app.js'
+
+const PLL = m.POWER_LORA_LOADER_TYPE
+const isRow = (w) => /^lora_\\d+$/.test(w.name)
+
+function fakePll(id, properties = {}) {
+  let counter = 0
+  return {
+    id,
+    type: PLL,
+    title: `Loader ${id}`,
+    properties,
+    widgets: [],
+    size: [200, 100],
+    dirtyCalls: 0,
+    addNewLoraWidget() {
+      this.widgets.push({
+        name: `lora_${counter++}`,
+        value: { on: true, lora: null, strength: 1, strengthTwo: null }
+      })
+    },
+    removeWidget(widget) {
+      const idx = this.widgets.indexOf(widget)
+      if (idx !== -1) this.widgets.splice(idx, 1)
+    },
+    computeSize() {
+      return [250, 150]
+    },
+    setDirtyCanvas() {
+      this.dirtyCalls++
+    }
+  }
+}
+
+const out = {
+  exports: {
+    hasFindPllNodes: typeof m.findPllNodes === 'function',
+    hasProbePll: typeof m.probePll === 'function',
+    hasWriteRowsToPll: typeof m.writeRowsToPll === 'function',
+    hasRowsForPll: typeof m.rowsForPll === 'function'
+  },
+  pllType: PLL
+}
+
+// BEFORE LiteGraph exists: the no-rgthree gate must fire first.
+out.probeNoRgthree = m.probePll(null)
+
+globalThis.LiteGraph = { registered_node_types: { [PLL]: function () {} } }
+
+app.graph = { _nodes: [] }
+out.probeNullNoCandidates = m.probePll(null)
+
+const high = fakePll(7)
+const low = fakePll(3)
+app.graph = { _nodes: [high, low, { id: 5, type: 'SomeOtherNode' }] }
+out.findPllOrder = m.findPllNodes().map((node) => node.id)
+out.probeNullWithCandidates = m.probePll(null)
+out.probeOk = m.probePll(low)
+out.probeMissingApi = m.probePll({ id: 9, type: PLL, widgets: [] })
+
+const drifted = fakePll(14)
+drifted.addNewLoraWidget()
+drifted.widgets[0].value = 'not-an-object'
+out.probeRowDrift = m.probePll(drifted)
+
+out.rowsForPll = {
+  dualWithClip:
+    m.rowsForPll([{ file: 'a.st', on: true, strength: 0.5, strength_clip: 0.25 }], true),
+  dualClipNull:
+    m.rowsForPll([{ file: 'a.st', on: true, strength: 0.5, strength_clip: null }], true),
+  dualClipAbsent: m.rowsForPll([{ file: 'a.st', strength: 0.5 }], true),
+  singleIgnoresClip:
+    m.rowsForPll([{ file: 'a.st', on: false, strength: 0.5, strength_clip: 0.25 }], false),
+  onDefaultsTrue: m.rowsForPll([{ file: 'a.st' }], false)
+}
+
+const single = fakePll(11)
+m.writeRowsToPll(single, [
+  { file: 'a/x.st', on: false, strength: 0.5, strength_clip: 0.25 },
+  { file: 'y.st', on: true, strength: 1 }
+])
+out.writeSingle = {
+  values: single.widgets.filter(isRow).map((w) => w.value),
+  dirtyCalls: single.dirtyCalls,
+  size: single.size
+}
+
+const dual = fakePll(12, { 'Show Strengths': 'Separate Model & Clip' })
+m.writeRowsToPll(dual, [
+  { file: 'a.st', on: true, strength: 0.1, strength_clip: 0.9 },
+  { file: 'b.st', on: true, strength: 0.2 },
+  { file: 'c.st', on: false, strength: 0.3, strength_clip: null }
+])
+out.writeDualGrow = dual.widgets.filter(isRow).map((w) => w.value)
+m.writeRowsToPll(dual, [{ file: 'only.st', on: true, strength: 0.8, strength_clip: null }])
+out.writeDualShrink = dual.widgets.filter(isRow).map((w) => w.value)
+
+const stubborn = fakePll(13)
+stubborn.removeWidget = () => {
+  throw new Error('nope')
+}
+m.writeRowsToPll(stubborn, [
+  { file: 'a.st', on: true, strength: 1 },
+  { file: 'b.st', on: true, strength: 1 }
+])
+m.writeRowsToPll(stubborn, [{ file: 'b.st', on: true, strength: 1 }])
+out.writeSpliceFallback = stubborn.widgets.filter(isRow).map((w) => w.value)
+
+process.stdout.write(JSON.stringify(out))
+"""
+
+
+@pytest.fixture(scope="module")
+def bridge_api(tmp_path_factory: pytest.TempPathFactory) -> dict:
+    """Runs the probe against the REAL pll_bridge.js in a served-layout tmp
+    dir (see module docstring) and returns its JSON output."""
+    layout = tmp_path_factory.mktemp("web_root")
+
+    module_dir = layout / "extensions" / "comfyui-epsnodes" / "lora_library"
+    module_dir.mkdir(parents=True)
+    shutil.copyfile(BRIDGE_JS, module_dir / "pll_bridge.js")
+    # pll_bridge.js imports only `../../../scripts/app.js` -- stub it exactly
+    # as test_picker_js.py does; the probe mutates `app.graph` per scenario.
+    scripts = layout / "scripts"
+    scripts.mkdir(parents=True, exist_ok=True)
+    (scripts / "app.js").write_text("export const app = {}\n", encoding="utf-8")
+
+    probe = layout / "probe.mjs"
+    probe.write_text(PROBE_JS, encoding="utf-8")
+
+    result = subprocess.run(
+        [NODE, str(probe)], capture_output=True, text=True, timeout=60, cwd=layout
+    )
+    assert result.returncode == 0, f"probe failed:\n{result.stderr}"
+    return json.loads(result.stdout)
+
+
+@pytest.fixture(scope="module")
+def source() -> str:
+    """Raw text of pll_bridge.js -- for the attribution/no-import/technique
+    pins the Node probe can't express."""
+    return BRIDGE_JS.read_text(encoding="utf-8")
+
+
+@pytest.fixture(scope="module")
+def controller_source() -> str:
+    """Raw text of controller.js -- READ ONLY, never imported or modified
+    (FORMAT.md §6.13 M2) -- the other half of every vocabulary pin."""
+    return CONTROLLER_JS.read_text(encoding="utf-8")
+
+
+def _function_body(source_text: str, signature: str) -> str:
+    """The body of a top-level ``function <signature> {`` declaration (an
+    `export`/`async` prefix, if any, is not part of *signature* and does not
+    need to match), up to its closing brace at column 0 --
+    test_checkpoint_switcher_js.py's identical helper."""
+    start_match = re.search(re.escape(f"function {signature} {{") + r"\n", source_text)
+    assert start_match, f"function {signature} {{ not found"
+    start = start_match.end()
+    end_match = re.search(r"\n\}\n", source_text[start:])
+    assert end_match, f"function {signature}'s closing brace not found"
+    return source_text[start : start + end_match.start()]
+
+
+# ------------------------------------------------------------- parses / exports
+
+
+def test_pll_bridge_js_parses() -> None:
+    """`node --check` -- the file must at minimum be valid ES module syntax."""
+    result = subprocess.run(
+        [NODE, "--check", str(BRIDGE_JS)], capture_output=True, text=True, timeout=60
+    )
+    assert result.returncode == 0, result.stderr
+
+
+def test_module_exports_the_bridge_surface(bridge_api: dict) -> None:
+    """picker.js's Send row consumes exactly these four plus the type
+    constant -- nothing else is public."""
+    assert bridge_api["exports"] == {
+        "hasFindPllNodes": True,
+        "hasProbePll": True,
+        "hasWriteRowsToPll": True,
+        "hasRowsForPll": True,
+    }
+
+
+def test_pll_type_string_is_the_exact_rgthree_spelling(bridge_api: dict) -> None:
+    assert bridge_api["pllType"] == PLL_TYPE
+
+
+# ------------------------------------------------------------------ probePll
+
+
+def test_probe_without_rgthree_installed(bridge_api: dict) -> None:
+    assert bridge_api["probeNoRgthree"] == {
+        "ok": False,
+        "code": "no-rgthree",
+        "message": MSG_NO_RGTHREE,
+    }
+
+
+def test_probe_null_node_distinguishes_empty_graph_from_no_selection(bridge_api: dict) -> None:
+    """The same two codes/messages controller.js's probeTarget() yields for
+    a null node: no candidates at all vs candidates present but unpicked."""
+    assert bridge_api["probeNullNoCandidates"] == {
+        "ok": False,
+        "code": "no-target-in-graph",
+        "message": MSG_NO_TARGET_IN_GRAPH,
+    }
+    assert bridge_api["probeNullWithCandidates"] == {
+        "ok": False,
+        "code": "no-target-selected",
+        "message": MSG_NO_TARGET_SELECTED,
+    }
+
+
+def test_probe_ok_reports_row_count(bridge_api: dict) -> None:
+    assert bridge_api["probeOk"] == {
+        "ok": True,
+        "code": "ok",
+        "message": "Ready — target has 0 rows.",
+        "rowCount": 0,
+    }
+
+
+def test_probe_shape_drift_on_missing_api_and_on_drifted_row_values(bridge_api: dict) -> None:
+    """Both drift flavors: a PLL-typed node missing addNewLoraWidget/etc.,
+    and a row-shaped widget name whose value isn't rgthree's row object."""
+    for key in ("probeMissingApi", "probeRowDrift"):
+        assert bridge_api[key] == {
+            "ok": False,
+            "code": "shape-drift",
+            "message": MSG_SHAPE_DRIFT,
+        }, key
+
+
+def test_find_pll_nodes_sorted_ascending_and_type_filtered(bridge_api: dict) -> None:
+    """Graph order was [7, 3, non-PLL]; the combo order is ascending id with
+    the non-PLL dropped (§6.13 M2)."""
+    assert bridge_api["findPllOrder"] == [3, 7]
+
+
+# ----------------------------------------------------------------- rowsForPll
+
+
+def test_rows_for_pll_dual_mode_strength_two(bridge_api: dict) -> None:
+    """Dual mode: strengthTwo carries strength_clip, falling back to
+    strength when strength_clip is null (the picker's shape) or absent."""
+    rows = bridge_api["rowsForPll"]
+    expected = [{"on": True, "lora": "a.st", "strength": 0.5, "strengthTwo": 0.25}]
+    assert rows["dualWithClip"] == expected
+    follows = [{"on": True, "lora": "a.st", "strength": 0.5, "strengthTwo": 0.5}]
+    assert rows["dualClipNull"] == follows
+    assert rows["dualClipAbsent"] == follows
+
+
+def test_rows_for_pll_single_mode_nulls_strength_two(bridge_api: dict) -> None:
+    """Single mode: strengthTwo is null even when the row carries a
+    strength_clip -- exactly applySetToTarget()'s assignment."""
+    assert bridge_api["rowsForPll"]["singleIgnoresClip"] == [
+        {"on": False, "lora": "a.st", "strength": 0.5, "strengthTwo": None}
+    ]
+
+
+def test_rows_for_pll_preserves_on_and_defaults_it_true(bridge_api: dict) -> None:
+    """`on` preserved (§6.13: an off row is sent off, not dropped or
+    forced on); absent defaults true, absent strength defaults 1."""
+    assert bridge_api["rowsForPll"]["singleIgnoresClip"][0]["on"] is False
+    assert bridge_api["rowsForPll"]["dualWithClip"][0]["on"] is True
+    assert bridge_api["rowsForPll"]["onDefaultsTrue"] == [
+        {"on": True, "lora": "a.st", "strength": 1, "strengthTwo": None}
+    ]
+
+
+# ------------------------------------------------------------- writeRowsToPll
+
+
+def test_write_rows_grows_assigns_and_resizes_in_single_mode(bridge_api: dict) -> None:
+    """An empty fake PLL without the dual property: two rows grown via
+    addNewLoraWidget(), whole-object values with strengthTwo null, then the
+    computeSize/setDirtyCanvas finish."""
+    got = bridge_api["writeSingle"]
+    assert got["values"] == [
+        {"on": False, "lora": "a/x.st", "strength": 0.5, "strengthTwo": None},
+        {"on": True, "lora": "y.st", "strength": 1, "strengthTwo": None},
+    ]
+    assert got["dirtyCalls"] >= 1
+    assert got["size"] == [250, 150]  # grew to computeSize(), never shrank
+
+
+def test_write_rows_dual_mode_then_shrinks_from_the_tail(bridge_api: dict) -> None:
+    """The dual-property fake: strengthTwo populated per row (clip, absent,
+    null all covered), then a second write shrinks 3 rows to 1."""
+    assert bridge_api["writeDualGrow"] == [
+        {"on": True, "lora": "a.st", "strength": 0.1, "strengthTwo": 0.9},
+        {"on": True, "lora": "b.st", "strength": 0.2, "strengthTwo": 0.2},
+        {"on": False, "lora": "c.st", "strength": 0.3, "strengthTwo": 0.3},
+    ]
+    assert bridge_api["writeDualShrink"] == [
+        {"on": True, "lora": "only.st", "strength": 0.8, "strengthTwo": 0.8}
+    ]
+
+
+def test_write_rows_splices_when_remove_widget_throws(bridge_api: dict) -> None:
+    """The try/splice fallback: a removeWidget() that throws still shrinks
+    the widgets array (controller.js's applySetToTarget() fallback)."""
+    assert bridge_api["writeSpliceFallback"] == [
+        {"on": True, "lora": "b.st", "strength": 1, "strengthTwo": None}
+    ]
+
+
+# --------------------------------------------- §6.3 vocabulary / provenance pins
+
+
+def test_vocabulary_strings_byte_identical_in_both_files(
+    source: str, controller_source: str
+) -> None:
+    """THE §6.13 M2 vocabulary contract: every §6.3 message text appears
+    verbatim in controller.js AND pll_bridge.js, so an edit to either side
+    alone fails here instead of quietly forking the vocabulary."""
+    messages = (MSG_NO_RGTHREE, MSG_SHAPE_DRIFT, MSG_NO_TARGET_IN_GRAPH, MSG_NO_TARGET_SELECTED)
+    for message in messages:
+        assert f"'{message}'" in source, f"bridge lost: {message!r}"
+        assert f"'{message}'" in controller_source, f"controller lost: {message!r}"
+
+
+def test_shared_constants_byte_identical_in_both_files(
+    source: str, controller_source: str
+) -> None:
+    """The exact type string and the dual-mode PROP_* names/values -- the
+    bridge must read the SAME node property controller.js reads."""
+    for line in SHARED_CONSTANT_LINES:
+        assert line in source, f"bridge lost: {line!r}"
+        assert line in controller_source, f"controller lost: {line!r}"
+
+
+def test_write_technique_matches_controller(source: str) -> None:
+    """The §6.3 grow/shrink/assign technique, structurally: rgthree's own
+    row-add method, the tail removeWidget with the splice fallback, the
+    runaway-loop cap, and the resize/redraw finish."""
+    assert "node.addNewLoraWidget()" in source
+    assert "MAX_ROW_ADJUST_STEPS = 500" in source
+    body = _function_body(source, "writeRowsToPll(node, rows)")
+    assert body.count("MAX_ROW_ADJUST_STEPS") == 2  # both the grow and shrink loops
+    assert "node.removeWidget(widget)" in body
+    assert "node.widgets.splice(idx, 1)" in body.split("node.removeWidget(widget)", 1)[1]
+    assert "const computed = node.computeSize()" in body
+    assert "node.setDirtyCanvas(true, true)" in body
+
+
+def test_attribution_comment_and_no_controller_import(source: str) -> None:
+    """The provenance header names controller.js; the module NEVER imports
+    it (FORMAT.md §6.13 M2: owner-validated code, duplication is the
+    cheaper risk)."""
+    assert "controller.js" in source
+    assert "deliberately duplicated, not imported" in source
+    assert "from './controller.js'" not in source
+    assert re.findall(r"^import .*$", source, flags=re.MULTILINE) == [
+        "import { app } from '../../../scripts/app.js'"
+    ]

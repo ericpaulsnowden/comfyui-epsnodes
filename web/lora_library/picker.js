@@ -1,5 +1,6 @@
 /**
- * @file EPS LoRA Picker frontend panel (FORMAT.md §6.13, M1 scope). Exports
+ * @file EPS LoRA Picker frontend panel (FORMAT.md §6.13, M1 + the M2
+ * Send-to-loader row). Exports
  * `attachPickerPanel(node)`, called from `web/lora_library.js`'s
  * `nodeCreated`; no-ops for every node type other than `EPSLoraPicker`.
  *
@@ -45,6 +46,7 @@
 
 import { app } from '../../../scripts/app.js'
 import * as api from './api.js'
+import * as pll from './pll_bridge.js'
 
 /** Frozen once shipped -- mirrors the Python node's class id (§6.13). */
 export const CLASS_ID = 'EPSLoraPicker'
@@ -285,6 +287,9 @@ const CSS_TEXT = `
 .eps-lp-icon-btn:hover { color: var(--input-text, #ccc); }
 .eps-lp-section-header { flex: 0 0 auto; padding: 4px 6px 2px; font-size: 9.5px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; color: var(--descrip-text, #999); }
 .eps-lp-selected-list { flex: 0 1 auto; max-height: 132px; overflow-y: auto; overflow-x: hidden; padding: 0 3px 4px; border-bottom: 1px solid var(--border-color, #444); }
+.eps-lp-send { flex: 0 0 auto; display: flex; align-items: center; gap: 6px; padding: 4px 6px; border-bottom: 1px solid var(--border-color, #444); }
+.eps-lp-pll-select { flex: 1 1 auto; min-width: 0; background: var(--comfy-menu-bg, #262626); border: 1px solid var(--border-color, #444); color: var(--input-text, #ccc); border-radius: 3px; padding: 1px 3px; font-size: 11px; font-family: inherit; }
+.eps-lp-send-status { flex: 0 1 auto; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: var(--descrip-text, #999); font-style: italic; }
 .eps-lp-row { display: flex; align-items: center; gap: 6px; padding: 2px 6px; border-radius: 3px; user-select: none; }
 .eps-lp-row:hover { background: var(--content-hover-bg, #2a2a2a); }
 .eps-lp-row input[type="checkbox"] { flex: 0 0 auto; margin: 0; cursor: pointer; }
@@ -301,6 +306,7 @@ const CSS_TEXT = `
 .eps-lp-folder-row { cursor: pointer; }
 .eps-lp-count { flex: 0 0 auto; color: var(--descrip-text, #999); font-size: 10px; }
 .eps-lp-btn { flex: 0 0 auto; background: var(--comfy-menu-bg, #262626); border: 1px solid var(--border-color, #444); color: var(--input-text, #ccc); border-radius: 3px; padding: 1px 6px; font-size: 10px; font-family: inherit; cursor: pointer; white-space: nowrap; }
+.eps-lp-btn-blocked { opacity: 0.55; cursor: help; }
 .eps-lp-btn:hover { background: var(--content-hover-bg, #2a2a2a); }
 .eps-lp-star { flex: 0 0 auto; background: none; border: none; cursor: pointer; font-size: 12px; line-height: 1; padding: 0 2px; color: var(--descrip-text, #999); font-family: inherit; }
 .eps-lp-star-on { color: #f0c420; }
@@ -365,6 +371,7 @@ function createState(node, widget) {
     error: null,
     view: 'browse', // 'browse' | 'favorites' | 'recent' -- transient, never serialized
     path: [], // drill-down segments below the scope root -- transient (§6.13)
+    pllTargetId: null, // Send-to-loader target node id -- transient, M2 adds no widget (§6.13)
     loadToken: 0, // guards a stale/superseded fetch from clobbering fresher state
     favoriteToken: 0, // same guard for the optimistic favorite round-trips
     recentToken: 0, // and for the fire-and-forget recents stamps
@@ -372,6 +379,7 @@ function createState(node, widget) {
     scopeRowEl: null,
     selectedHeaderEl: null,
     selectedListEl: null,
+    sendRowEl: null,
     crumbsEl: null,
     listEl: null,
     statusTextEl: null,
@@ -401,6 +409,7 @@ function buildUi(state) {
   state.scopeRowEl = el('div', { className: 'eps-lp-scope' })
   state.selectedHeaderEl = el('div', { className: 'eps-lp-section-header' })
   state.selectedListEl = el('div', { className: 'eps-lp-selected-list' })
+  state.sendRowEl = el('div', { className: 'eps-lp-send' })
   state.crumbsEl = el('div', { className: 'eps-lp-crumbs' })
   state.listEl = el('div', { className: 'eps-lp-list' })
   state.statusTextEl = el('div', { className: 'eps-lp-status-text' })
@@ -411,6 +420,7 @@ function buildUi(state) {
     state.scopeRowEl,
     state.selectedHeaderEl,
     state.selectedListEl,
+    state.sendRowEl,
     browser,
     status
   ])
@@ -461,6 +471,9 @@ function writeSelectionWidget(state) {
   state.widget.value = json
   state.widget.callback?.(json)
   state.node.graph?.setDirtyCanvas(true, true)
+  // Granular repaints (Add, remove) skip the full render, so the Send row's
+  // empty-selection gate refreshes here, at the one funnel every mutation hits.
+  renderSend(state)
 }
 
 async function loadPicker(state) {
@@ -637,6 +650,7 @@ function render(state) {
   commitActiveStrengthEdit(state)
   renderScope(state)
   renderSelected(state)
+  renderSend(state)
   renderBrowser(state)
   renderStatus(state)
 }
@@ -918,6 +932,138 @@ function renderStatus(state) {
   }
   state.statusTextEl.classList.remove('eps-lp-status-error')
   state.statusTextEl.textContent = state.loaded ? `${state.loras.length} loras on this machine` : 'Loading…'
+}
+
+// --- Send to loader (§6.13 M2) -- pll_bridge.js owns the rgthree
+// technique; this file only owns the row. ---
+
+/** The live PLL the select currently names, or null -- resolved BY ID at
+ * use time, since the node may have been deleted since the last render. */
+function resolvePllTarget(state) {
+  if (state.pllTargetId == null) return null
+  return pll.findPllNodes().find((node) => String(node.id) === state.pllTargetId) || null
+}
+
+/**
+ * The Send-to-loader row (§6.13 M2): a target combo of every PLL in the
+ * graph (ascending id, pll_bridge.js's order) + Send. Rebuilt on every
+ * render; the previously chosen target is re-selected by id when still
+ * present -- transient state only, M2 adds no widget. A failed probe (no
+ * rgthree, no PLL in the graph, shape drift) disables Send and shows
+ * §6.3's own message vocabulary in both the button title and the muted
+ * status span; an empty selection disables it with its own title.
+ */
+function renderSend(state) {
+  state.sendRowEl.replaceChildren()
+
+  const select = el('select', {
+    className: 'eps-lp-pll-select',
+    attrs: { title: 'Target Power Lora Loader (rgthree)' }
+  })
+  // Options are rebuilt IN PLACE on every open (mousedown), not just per
+  // render -- controller.js's values-function pattern: a PLL added after the
+  // last render must be pickable without any other mutation first (review
+  // 2026-08-09).
+  const buildOptions = () => {
+    const fresh = pll.findPllNodes()
+    select.replaceChildren(
+      el('option', {
+        text: fresh.length ? 'Pick a loader…' : 'No loader in graph',
+        attrs: { value: '' }
+      }),
+      ...fresh.map((node) =>
+        el('option', { text: `${node.title || node.type} #${node.id}`, attrs: { value: String(node.id) } })
+      )
+    )
+    if (state.pllTargetId != null && fresh.some((node) => String(node.id) === state.pllTargetId)) {
+      select.value = state.pllTargetId
+    } else if (state.pllTargetId == null && fresh.length === 1) {
+      // No explicit choice + exactly one candidate: adopt it (controller.js's
+      // "picked automatically when there is exactly one" behavior).
+      state.pllTargetId = String(fresh[0].id)
+      select.value = state.pllTargetId
+    } else {
+      // The chosen target is GONE (deleted since it was picked): stay on the
+      // placeholder and keep remembering the id (an undo brings it back) --
+      // NEVER fall through to the first option; adopting a loader the user
+      // didn't choose makes Send destructively overwrite it (§6.3 "never
+      // guess"; review 2026-08-09).
+      select.value = ''
+    }
+  }
+  buildOptions()
+  select.addEventListener('mousedown', buildOptions)
+  select.addEventListener('change', () => {
+    state.pllTargetId = select.value || null
+    // Re-probe with the fresh choice -- storing the id alone left the button
+    // frozen in the previous target's probe verdict (review 2026-08-09).
+    renderSend(state)
+  })
+  // Canvas hotkeys must not intercept the combo -- the strength input's rule.
+  select.addEventListener('keydown', (event) => event.stopPropagation())
+
+  const statusEl = el('span', { className: 'eps-lp-send-status' })
+  const sendBtn = el('button', { className: 'eps-lp-btn', text: 'Send' })
+  const probe = pll.probePll(resolvePllTarget(state))
+  if (!probe.ok) {
+    // Marked blocked but NOT disabled: a disabled button could never run the
+    // click-time re-probe, so a graph fixed after this render (a PLL added,
+    // rgthree finished loading) would have no recovery path (review
+    // 2026-08-09). The click either proceeds against the healed graph or
+    // toasts this same message.
+    sendBtn.classList.add('eps-lp-btn-blocked')
+    sendBtn.title = probe.message
+    statusEl.textContent = probe.message
+    statusEl.title = probe.message
+  } else if (state.selection.loras.length === 0) {
+    sendBtn.disabled = true
+    sendBtn.title = 'Nothing selected'
+  } else {
+    sendBtn.title = `Write the selection's ${state.selection.loras.length} row(s) into the target loader`
+  }
+  sendBtn.addEventListener('click', () => sendToPll(state))
+
+  state.sendRowEl.append(select, sendBtn, statusEl)
+}
+
+/**
+ * Send click: re-resolve and RE-PROBE by id -- the render-time probe can
+ * be stale (the target may have been deleted since), so failure here is a
+ * toast, not a silent no-op. Writes ALL selection rows (`on` preserved --
+ * §6.13) through pll_bridge.js.
+ */
+function sendToPll(state) {
+  // Same single-candidate adoption the render path applies -- a PLL added
+  // AFTER the last render must make a plain Send click work without first
+  // touching the combo (review 2026-08-09). Never adopts among several.
+  if (state.pllTargetId == null) {
+    const candidates = pll.findPllNodes()
+    if (candidates.length === 1) state.pllTargetId = String(candidates[0].id)
+  }
+  const node = resolvePllTarget(state)
+  const probe = pll.probePll(node)
+  if (!probe.ok) {
+    toast('error', 'EPS LoRA Picker', probe.message)
+    renderSend(state)
+    return
+  }
+  const rows = state.selection.loras
+  if (rows.length === 0) {
+    // Reachable via the blocked-not-disabled button: an empty send would
+    // SHRINK the target loader to zero rows -- refuse, never truncate.
+    toast('warn', 'EPS LoRA Picker', 'Nothing selected — Add loras before sending.')
+    renderSend(state)
+    return
+  }
+  try {
+    pll.writeRowsToPll(node, rows)
+  } catch (error) {
+    api.warn('send to Power Lora Loader failed', error)
+    toast('error', 'EPS LoRA Picker', `Send failed: ${error?.message || error}`)
+    return
+  }
+  toast('success', 'EPS LoRA Picker', `Sent ${rows.length} lora(s) to ${node.title || node.type} #${node.id}`)
+  renderSend(state)
 }
 
 // --- Public entry point (called from web/lora_library.js's nodeCreated) ---
