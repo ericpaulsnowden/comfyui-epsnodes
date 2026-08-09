@@ -25,6 +25,7 @@ from pathlib import Path
 import pytest
 from aiohttp import web
 
+from lora_library import nodes_picker
 from lora_library.context import LibraryContext
 from lora_library.routes_lora_picker import build_routes
 
@@ -423,6 +424,331 @@ async def test_post_clear_recents_remote_caller_succeeds(
     assert resp.status == 200
 
 
+# --------------------------------------------------------- GET /picker/preview
+# --------------------------------------------------------- GET /picker/info
+
+
+@pytest.fixture
+def _resolved_context(context: LibraryContext, tmp_path: Path) -> Path:
+    """Points ``resolve_lora_path`` at real files under *tmp_path* for
+    every ``FAKE_LORAS`` entry -- ``test_nodes_picker.py``'s own
+    ``_sidecar_context`` technique, copied here so the preview/info route
+    tests can write real sibling image/sidecar files and exercise real
+    filesystem behavior end to end, not a fake in-memory stand-in."""
+    lora_dir = tmp_path / "loras"
+    lora_dir.mkdir()
+
+    def resolve(name: str) -> str | None:
+        mapping = {
+            "detailer.safetensors": str(lora_dir / "detailer.safetensors"),
+            "styles/film_grain.safetensors": str(lora_dir / "styles" / "film_grain.safetensors"),
+            "styles/cinematic.safetensors": str(lora_dir / "styles" / "cinematic.safetensors"),
+        }
+        return mapping.get(name)
+
+    context.resolve_lora_path = resolve
+    return lora_dir
+
+
+async def test_preview_sibling_png_found(
+    context: LibraryContext, _resolved_context: Path, aiohttp_client
+) -> None:
+    png_bytes = b"\x89PNG\r\n\x1a\nfake-png-bytes"
+    (_resolved_context / "detailer.png").write_bytes(png_bytes)
+    client = await aiohttp_client(make_app(context))
+    resp = await client.get(
+        "/lora_library/picker/preview", params={"file": "detailer.safetensors"}
+    )
+    assert resp.status == 200
+    assert await resp.read() == png_bytes
+
+
+async def test_preview_dot_preview_jpg_found_when_plain_missing(
+    context: LibraryContext, _resolved_context: Path, aiohttp_client
+) -> None:
+    jpg_bytes = b"\xff\xd8\xff\xe0fake-jpg-bytes"
+    (_resolved_context / "detailer.preview.jpg").write_bytes(jpg_bytes)
+    client = await aiohttp_client(make_app(context))
+    resp = await client.get(
+        "/lora_library/picker/preview", params={"file": "detailer.safetensors"}
+    )
+    assert resp.status == 200
+    assert await resp.read() == jpg_bytes
+
+
+async def test_preview_extension_priority_png_beats_jpg(
+    context: LibraryContext, _resolved_context: Path, aiohttp_client
+) -> None:
+    png_bytes = b"this-is-the-png"
+    jpg_bytes = b"this-is-the-jpg"
+    (_resolved_context / "detailer.png").write_bytes(png_bytes)
+    (_resolved_context / "detailer.jpg").write_bytes(jpg_bytes)
+    client = await aiohttp_client(make_app(context))
+    resp = await client.get(
+        "/lora_library/picker/preview", params={"file": "detailer.safetensors"}
+    )
+    assert await resp.read() == png_bytes
+
+
+async def test_preview_404_when_no_sibling_image(
+    context: LibraryContext, _resolved_context: Path, aiohttp_client
+) -> None:
+    client = await aiohttp_client(make_app(context))
+    resp = await client.get(
+        "/lora_library/picker/preview", params={"file": "detailer.safetensors"}
+    )
+    assert resp.status == 404
+    assert "error" in await resp.json()
+
+
+async def test_preview_404_unresolvable_name(
+    context: LibraryContext, _resolved_context: Path, aiohttp_client
+) -> None:
+    client = await aiohttp_client(make_app(context))
+    resp = await client.get(
+        "/lora_library/picker/preview", params={"file": "ghost.safetensors"}
+    )
+    assert resp.status == 404
+
+
+async def test_preview_400_blank_file(context: LibraryContext, aiohttp_client) -> None:
+    client = await aiohttp_client(make_app(context))
+    resp = await client.get("/lora_library/picker/preview", params={"file": "   "})
+    assert resp.status == 400
+    assert "error" in await resp.json()
+
+
+async def test_preview_400_missing_file(context: LibraryContext, aiohttp_client) -> None:
+    client = await aiohttp_client(make_app(context))
+    resp = await client.get("/lora_library/picker/preview")
+    assert resp.status == 400
+
+
+async def test_preview_backslash_spelling_resolves(
+    context: LibraryContext, _resolved_context: Path, aiohttp_client
+) -> None:
+    png_bytes = b"film-grain-preview"
+    style_dir = _resolved_context / "styles"
+    style_dir.mkdir()
+    (style_dir / "film_grain.png").write_bytes(png_bytes)
+    client = await aiohttp_client(make_app(context))
+    resp = await client.get(
+        "/lora_library/picker/preview",
+        params={"file": "styles\\film_grain.safetensors"},
+    )
+    assert resp.status == 200
+    assert await resp.read() == png_bytes
+
+
+async def test_preview_remote_caller_succeeds(
+    context: LibraryContext, _resolved_context: Path, aiohttp_client
+) -> None:
+    (_resolved_context / "detailer.png").write_bytes(b"x")
+    client = await aiohttp_client(make_app(context))
+    resp = await client.get(
+        "/lora_library/picker/preview",
+        params={"file": "detailer.safetensors"},
+        headers=REMOTE,
+    )
+    assert resp.status == 200
+
+
+async def test_info_sidecar_text_round_trip(
+    context: LibraryContext, _resolved_context: Path, aiohttp_client
+) -> None:
+    (_resolved_context / "detailer.txt").write_text("  detail, sharp  ", encoding="utf-8")
+    client = await aiohttp_client(make_app(context))
+    resp = await client.get("/lora_library/picker/info", params={"file": "detailer.safetensors"})
+    assert resp.status == 200
+    body = await resp.json()
+    assert body == {
+        "trigger_words": nodes_picker._sidecar_trigger_text(context, "detailer.safetensors")
+    }
+    assert body["trigger_words"] == "detail, sharp"
+
+
+async def test_info_sidecar_text_capped_pinned_to_sidecar_trigger_text(
+    context: LibraryContext, _resolved_context: Path, aiohttp_client
+) -> None:
+    (_resolved_context / "detailer.txt").write_text("x" * 5000, encoding="utf-8")
+    client = await aiohttp_client(make_app(context))
+    resp = await client.get("/lora_library/picker/info", params={"file": "detailer.safetensors"})
+    body = await resp.json()
+    assert body["trigger_words"] == nodes_picker._sidecar_trigger_text(
+        context, "detailer.safetensors"
+    )
+    assert len(body["trigger_words"]) == 4096
+
+
+async def test_info_no_sidecar_is_empty_string(
+    context: LibraryContext, _resolved_context: Path, aiohttp_client
+) -> None:
+    client = await aiohttp_client(make_app(context))
+    resp = await client.get("/lora_library/picker/info", params={"file": "detailer.safetensors"})
+    assert resp.status == 200
+    body = await resp.json()
+    assert body == {"trigger_words": ""}
+
+
+async def test_info_404_unresolvable_name(
+    context: LibraryContext, _resolved_context: Path, aiohttp_client
+) -> None:
+    client = await aiohttp_client(make_app(context))
+    resp = await client.get("/lora_library/picker/info", params={"file": "ghost.safetensors"})
+    assert resp.status == 404
+    assert "error" in await resp.json()
+
+
+async def test_info_400_blank_file(context: LibraryContext, aiohttp_client) -> None:
+    client = await aiohttp_client(make_app(context))
+    resp = await client.get("/lora_library/picker/info", params={"file": ""})
+    assert resp.status == 400
+
+
+async def test_info_remote_caller_succeeds(
+    context: LibraryContext, _resolved_context: Path, aiohttp_client
+) -> None:
+    client = await aiohttp_client(make_app(context))
+    resp = await client.get(
+        "/lora_library/picker/info",
+        params={"file": "detailer.safetensors"},
+        headers=REMOTE,
+    )
+    assert resp.status == 200
+
+
+# --------------------------------------------------- POST /picker/favorites_order
+
+
+async def test_post_favorites_order_round_trip(
+    context: LibraryContext, aiohttp_client
+) -> None:
+    client = await aiohttp_client(make_app(context))
+    await client.post(
+        "/lora_library/picker/favorite", json={"file": "a.safetensors", "on": True}
+    )
+    await client.post(
+        "/lora_library/picker/favorite", json={"file": "b.safetensors", "on": True}
+    )
+    await client.post(
+        "/lora_library/picker/favorite", json={"file": "c.safetensors", "on": True}
+    )
+
+    resp = await client.post(
+        "/lora_library/picker/favorites_order",
+        json={"files": ["c.safetensors", "a.safetensors", "b.safetensors"]},
+    )
+    assert resp.status == 200
+    body = await resp.json()
+    assert body["ok"] is True
+    assert body["favorites"] == ["c.safetensors", "a.safetensors", "b.safetensors"]
+    assert isinstance(body["mtime"], float)
+
+    fetched = await (await client.get("/lora_library/picker")).json()
+    assert fetched["favorites"] == ["c.safetensors", "a.safetensors", "b.safetensors"]
+
+
+async def test_post_favorites_order_unknown_names_dropped(
+    context: LibraryContext, aiohttp_client
+) -> None:
+    client = await aiohttp_client(make_app(context))
+    await client.post(
+        "/lora_library/picker/favorite", json={"file": "a.safetensors", "on": True}
+    )
+    resp = await client.post(
+        "/lora_library/picker/favorites_order",
+        json={"files": ["ghost.safetensors", "a.safetensors"]},
+    )
+    body = await resp.json()
+    assert body["favorites"] == ["a.safetensors"]
+
+
+async def test_post_favorites_order_missing_favorite_appended_at_end(
+    context: LibraryContext, aiohttp_client
+) -> None:
+    client = await aiohttp_client(make_app(context))
+    await client.post(
+        "/lora_library/picker/favorite", json={"file": "a.safetensors", "on": True}
+    )
+    await client.post(
+        "/lora_library/picker/favorite", json={"file": "b.safetensors", "on": True}
+    )
+    resp = await client.post(
+        "/lora_library/picker/favorites_order", json={"files": ["b.safetensors"]}
+    )
+    body = await resp.json()
+    assert body["favorites"] == ["b.safetensors", "a.safetensors"]
+
+
+async def test_post_favorites_order_remote_caller_succeeds(
+    context: LibraryContext, aiohttp_client
+) -> None:
+    client = await aiohttp_client(make_app(context))
+    resp = await client.post(
+        "/lora_library/picker/favorites_order", json={"files": []}, headers=REMOTE
+    )
+    assert resp.status == 200
+
+
+async def test_post_favorites_order_non_list_files_is_400(
+    context: LibraryContext, aiohttp_client
+) -> None:
+    client = await aiohttp_client(make_app(context))
+    resp = await client.post(
+        "/lora_library/picker/favorites_order", json={"files": "a.safetensors"}
+    )
+    assert resp.status == 400
+    assert "error" in await resp.json()
+
+
+async def test_post_favorites_order_missing_files_is_400(
+    context: LibraryContext, aiohttp_client
+) -> None:
+    client = await aiohttp_client(make_app(context))
+    resp = await client.post("/lora_library/picker/favorites_order", json={})
+    assert resp.status == 400
+
+
+async def test_post_favorites_order_non_string_entry_is_400(
+    context: LibraryContext, aiohttp_client
+) -> None:
+    client = await aiohttp_client(make_app(context))
+    resp = await client.post(
+        "/lora_library/picker/favorites_order", json={"files": ["a.safetensors", 42]}
+    )
+    assert resp.status == 400
+
+
+async def test_post_favorites_order_blank_entry_is_400(
+    context: LibraryContext, aiohttp_client
+) -> None:
+    client = await aiohttp_client(make_app(context))
+    resp = await client.post("/lora_library/picker/favorites_order", json={"files": ["  "]})
+    assert resp.status == 400
+
+
+async def test_post_favorites_order_malformed_json_body_is_400(
+    context: LibraryContext, aiohttp_client
+) -> None:
+    client = await aiohttp_client(make_app(context))
+    resp = await client.post(
+        "/lora_library/picker/favorites_order",
+        data="not json",
+        headers={"Content-Type": "application/json"},
+    )
+    assert resp.status == 400
+
+
+async def test_post_favorites_order_non_object_body_is_400(
+    context: LibraryContext, aiohttp_client
+) -> None:
+    client = await aiohttp_client(make_app(context))
+    resp = await client.post(
+        "/lora_library/picker/favorites_order", json=["not", "an", "object"]
+    )
+    assert resp.status == 400
+
+
 # -------------------------------------------------- unreachable library dir
 
 
@@ -483,6 +809,18 @@ async def test_post_clear_recents_unreachable_library_folder_is_400_naming_the_f
 ) -> None:
     client = await aiohttp_client(make_app(unreachable_context))
     resp = await client.post("/lora_library/picker/clear_recents", json={})
+    assert resp.status == 400
+    body = await resp.json()
+    assert "library folder" in body["error"]
+
+
+async def test_post_favorites_order_unreachable_library_folder_is_400_naming_the_folder(
+    unreachable_context: LibraryContext, aiohttp_client
+) -> None:
+    client = await aiohttp_client(make_app(unreachable_context))
+    resp = await client.post(
+        "/lora_library/picker/favorites_order", json={"files": ["detailer.safetensors"]}
+    )
     assert resp.status == 400
     body = await resp.json()
     assert "library folder" in body["error"]

@@ -236,8 +236,14 @@ favorites or recently-used anywhere in the ecosystem.
   Lora Loader State Controller already uses. Without rgthree the row
   just says so; nothing else needs it. It never guesses a target: delete
   the loader you'd picked and Send refuses until you pick again.
-- **Coming next** (roadmapped, **not shipped yet**): search within the
-  browser + preview thumbnails + trigger-word copy (M3).
+- **Search, thumbnails, trigger words, ordering:** a search field above
+  the browser filters as you type (every word must match somewhere in the
+  path, scoped to your current folder; Escape clears); loras with a
+  sidecar image (`mylora.png` / `mylora.preview.png` next to the file)
+  show a small thumbnail; the 📋 button copies a lora's sidecar trigger
+  words to the clipboard; the Recent view has a two-click **Clear
+  recents**; and the Favorites view supports drag-reordering by the ≡
+  handle — the order is shared across machines like the stars themselves.
 
 ## EPS Apply LoRA Set (shipped)
 

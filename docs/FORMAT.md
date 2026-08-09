@@ -323,6 +323,9 @@ message>"}` with a 4xx status. `mtime` values are float POSIX seconds.
 | `POST /lora_library/picker/favorite` `{"file","on"}` | star/unstar one lora (name normalized to forward slashes in the store). `file` non-empty string, `on` bool, else 400. NOT required to be installed — unstarring a favorite that only exists on the other machine must work. → `{"ok","favorites","mtime"}` |
 | `POST /lora_library/picker/recent` `{"files": [..]}` | record used loras: each moves to the FRONT of `recents` (dedup by file, fresh server-stamped `ts`), list capped at 30. Empty list = no-op 200. Non-list / non-string entry ⇒ 400. → `{"ok","recents","mtime"}` |
 | `POST /lora_library/picker/clear_recents` `{}` | empty the recents list (favorites untouched). → `{"ok","recents": [],"mtime"}` |
+| `GET /lora_library/picker/preview?file=` | §6.13 M3 thumbnails: resolves the lora NAME (§4-lenient, then `resolve_lora_path`) and serves a sibling image — `<stem>.png/.jpg/.jpeg/.webp` or `<stem>.preview.<ext>`, that priority order — via `FileResponse`. 404 unresolvable name / no sibling; 400 blank `file`. NO loopback gate: the value never becomes a path directly — it resolves only through `folder_paths`' allow-listed lora dirs (traversal-probed in review), and LAN browsers must load thumbnails |
+| `GET /lora_library/picker/info?file=` | `{"trigger_words": "<sidecar .txt text or empty>"}` — same resolution + reuses the node's own sidecar reader. 404/400 as preview |
+| `POST /lora_library/picker/favorites_order` `{"files": [..]}` | §6.13 M3 drag-reorder: full-list replace — unknown names ignored (never invents a favorite), current favorites missing from the list appended at the end in their existing relative order (two machines' concurrent edits can't drop stars). → `{"ok","favorites","mtime"}` |
 
 Route paths are FROZEN once shipped (§8).
 
@@ -2107,7 +2110,7 @@ apply/text helpers, so it drops in anywhere Apply LoRA Set does.
   at click time (an empty send would shrink the target to zero rows).
   Client-side only — the research round proved PLL cannot be fed
   through the graph.
-- **M3 (same section, shipped separately)**: search field above the
+- **M3 — SHIPPED v0.56.0 (2026-08-09)**: search field above the
   browser (§7.2 search semantics: AND of whitespace words, view-only,
   Escape clears, matches against full relative path); sidecar preview
   thumbnails on lora rows (`GET /lora_library/picker/preview?file=` —

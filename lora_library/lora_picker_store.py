@@ -428,3 +428,81 @@ def clear_recents(
     new_state = {"favorites": state["favorites"], "recents": []}
     new_mtime = _write(context, new_state)
     return new_state, new_mtime
+
+
+# --------------------------------------------------- favorites reorder (M3)
+
+
+def _require_reorder_files(files: object) -> list[str]:
+    """:func:`reorder_favorites`'s own validation: *files* must be a list,
+    each entry a usable name per :func:`_clean_file_name` -- a
+    structurally bad entry raises :class:`PickerStoreError` NAMING THE
+    INDEX (unlike :func:`_require_file_name`'s single-name message, a
+    drag-reorder payload is a whole list, so pointing at *which* entry is
+    bad is worth the extra context). Same "caller's bug, not a
+    hand-edited file to tolerate" posture every other write-side validator
+    here uses -- checked before anything touches disk.
+    """
+    if not isinstance(files, list):
+        raise PickerStoreError("files must be a list")
+    cleaned: list[str] = []
+    for index, entry in enumerate(files):
+        name = _clean_file_name(entry)
+        if name is None:
+            raise PickerStoreError(f"files[{index}] must be a non-empty string")
+        cleaned.append(name)
+    return cleaned
+
+
+def reorder_favorites(
+    context: LibraryContext,
+    files: object,
+    *,
+    base_mtime: float | None = None,
+) -> tuple[dict, float]:
+    """Full-list replace of ``favorites``' order (FORMAT.md §6.13 M3
+    favorites drag-reorder).
+
+    The new favorites order is *files* -- cleaned via
+    :func:`_require_reorder_files` (forward-slash normalized, every entry
+    a non-empty string) and deduped to each name's FIRST occurrence, same
+    as :func:`_parse_favorites`'s own on-disk dedup rule -- filtered down
+    to names that are CURRENT favorites: an UNKNOWN name (not already a
+    favorite) is IGNORED, dropped rather than added, since reorder must
+    never invent a favorite. Any CURRENT favorite missing from *files* is
+    APPENDED at the end, in its EXISTING relative order -- FORMAT.md
+    §6.13's own rationale: "so two machines' concurrent edits can't drop
+    stars" (a star added on the other machine, mid-drag on this one, must
+    survive the reorder rather than being silently dropped). ``recents``
+    is untouched.
+
+    *files* is validated BEFORE anything else touches disk, same ordering
+    :func:`toggle_favorite`/:func:`record_recents` use for their own
+    write-side validation.
+
+    Raises :class:`PickerStoreError` for a structurally bad *files* (or
+    entry), or when the library folder itself is unreachable
+    (:func:`_require_picker_path`); :class:`ConflictError` if *base_mtime*
+    is given and stale (FORMAT.md §6.13: the routes themselves never send
+    one). Returns ``(fresh state, new mtime)``.
+    """
+    clean_files = _require_reorder_files(files)
+
+    _require_picker_path(context)
+    state, current_mtime = load_state(context)
+    check_conflict(base_mtime, current_mtime)
+
+    current_favorites = state["favorites"]
+    current_set = set(current_favorites)
+
+    new_favorites: list[str] = []
+    for name in clean_files:
+        if name in current_set and name not in new_favorites:
+            new_favorites.append(name)
+    for name in current_favorites:
+        if name not in new_favorites:
+            new_favorites.append(name)
+
+    new_state = {"favorites": new_favorites, "recents": state["recents"]}
+    new_mtime = _write(context, new_state)
+    return new_state, new_mtime

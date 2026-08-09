@@ -310,12 +310,19 @@ def test_route_strings_appear_verbatim_in_the_source(source: str) -> None:
     assert "'/lora_library/picker/clear_recents'" in source
 
 
-def test_only_the_m1_routes_are_called(source: str) -> None:
-    """CLEAR_RECENTS is declared for §6.13-M3 but must not be wired to
-    anything in the M1 panel."""
+def test_every_family_route_is_wired(source: str) -> None:
+    """Supersedes M1's test_only_the_m1_routes_are_called: CLEAR_RECENTS
+    graduated from declared-but-unused to wired (the M3 Clear-recents
+    button), and the three M3 routes each have their one calling site --
+    PREVIEW as an <img src> (the one GET that never goes through
+    api.getJson), INFO via getJson, FAVORITES_ORDER/CLEAR_RECENTS via
+    postJson."""
     assert "postJson(ROUTE_RECENT" in source
-    assert "postJson(ROUTE_FAVORITE" in source
-    assert "ROUTE_CLEAR_RECENTS" not in source.split("export const ROUTE_CLEAR_RECENTS", 1)[1]
+    assert "postJson(ROUTE_FAVORITE," in source  # the comma excludes FAVORITES_ORDER
+    assert "postJson(ROUTE_CLEAR_RECENTS" in source
+    assert "postJson(ROUTE_FAVORITES_ORDER" in source
+    assert "getJson(ROUTE_INFO" in source
+    assert "${ROUTE_PREVIEW}?file=${encodeURIComponent(file)}" in source
 
 
 # --------------------------------------------------- selectionFromWidgetValue
@@ -729,3 +736,316 @@ class TestSendToLoaderM2:
 
     def test_still_no_window_listeners(self, source: str) -> None:
         assert "window.addEventListener" not in source
+
+
+# ------------------------------------------- §6.13 M3: search / thumbs / copy /
+# clear-recents / favorites drag-reorder
+
+#: (relPath, query, expected) -- loraMatchesSearch's §7.2 semantics: AND of
+#: whitespace-separated words, case-insensitive, matched against the path
+#: RELATIVE to the current scope (the caller strips the scope prefix).
+M3_SEARCH_CASES = [
+    ("subdir/MyLora.safetensors", "mylora", True),  # case-insensitive
+    ("subdir/MyLora.safetensors", "MYLORA", True),
+    ("subdir/MyLora.safetensors", "sub lora", True),  # AND: both words present
+    ("subdir/MyLora.safetensors", "lora sub", True),  # ...order-independent
+    ("subdir/MyLora.safetensors", "sub missing", False),  # AND: one word absent
+    ("subdir/MyLora.safetensors", "dir/my", True),  # a word may span a / boundary
+    ("subdir/MyLora.safetensors", "", True),  # empty query matches (the UI gates it)
+    ("subdir/MyLora.safetensors", "   ", True),  # whitespace-only likewise
+    # Scope-relativity is the CALLER's job: the matcher sees ONLY the
+    # relative path, so once "alpha/" is stripped as the scope prefix the
+    # scope folder's own name must NOT match a lora inside it.
+    ("deep.safetensors", "alpha", False),
+]
+
+M3_PROBE_JS = """
+import * as m from './extensions/comfyui-epsnodes/lora_library/picker.js'
+
+const out = {
+  hasLoraMatchesSearch: typeof m.loraMatchesSearch === 'function',
+  routePreview: m.ROUTE_PREVIEW,
+  routeInfo: m.ROUTE_INFO,
+  routeFavoritesOrder: m.ROUTE_FAVORITES_ORDER,
+  search: %(search_inputs)s.map(([rel, query]) => m.loraMatchesSearch(rel, query))
+}
+
+process.stdout.write(JSON.stringify(out))
+"""
+
+
+@pytest.fixture(scope="module")
+def m3_api(tmp_path_factory: pytest.TempPathFactory) -> dict:
+    """The M3 probe against the REAL picker.js in its own served-layout copy
+    (the picker_api fixture's exact recipe) -- separate because that probe
+    predates M3 and stays untouched. Module-scope like its sibling (a
+    class-scoped instance-method fixture is a PytestRemovedIn10Warning)."""
+    layout = tmp_path_factory.mktemp("web_root_m3")
+    module_dir = layout / "extensions" / "comfyui-epsnodes" / "lora_library"
+    module_dir.mkdir(parents=True)
+    shutil.copyfile(PICKER_JS, module_dir / "picker.js")
+    shutil.copyfile(API_JS, module_dir / "api.js")
+    shutil.copyfile(VERSION_JS, module_dir / "version.js")
+    shutil.copyfile(BRIDGE_JS, module_dir / "pll_bridge.js")
+
+    scripts = layout / "scripts"
+    scripts.mkdir(parents=True, exist_ok=True)
+    (scripts / "api.js").write_text("export const api = { fetchApi: () => {} }\n", encoding="utf-8")
+    (scripts / "app.js").write_text("export const app = {}\n", encoding="utf-8")
+
+    probe = layout / "probe.mjs"
+    probe.write_text(
+        M3_PROBE_JS
+        % {"search_inputs": json.dumps([[rel, query] for rel, query, _ in M3_SEARCH_CASES])},
+        encoding="utf-8",
+    )
+    result = subprocess.run(
+        [NODE, str(probe)], capture_output=True, text=True, timeout=60, cwd=layout
+    )
+    assert result.returncode == 0, f"M3 probe failed:\n{result.stderr}"
+    return json.loads(result.stdout)
+
+
+class TestM3:
+    """§6.13 M3 pins: the search field (§7.2 semantics), sidecar preview
+    thumbnails, trigger-word copy, the armed Clear-recents button, and the
+    favorites drag-reorder. Pure logic (loraMatchesSearch + the new route
+    constants) is Node-driven via the m3_api probe above; everything
+    closure-bound is source-pinned, the file's standing convention."""
+
+    # ------------------------------------------------------------ routes
+
+    def test_m3_route_constants(self, m3_api: dict) -> None:
+        """The three M3 rows of routes_lora_picker.py, spelled exactly."""
+        assert m3_api["routePreview"] == "/lora_library/picker/preview"
+        assert m3_api["routeInfo"] == "/lora_library/picker/info"
+        assert m3_api["routeFavoritesOrder"] == "/lora_library/picker/favorites_order"
+
+    # ------------------------------------------------------------ search
+
+    def test_lora_matches_search_truth_table(self, m3_api: dict) -> None:
+        assert m3_api["hasLoraMatchesSearch"] is True
+        pairs = zip(M3_SEARCH_CASES, m3_api["search"], strict=True)
+        for (rel, query, expected), got in pairs:
+            msg = f"loraMatchesSearch({rel!r}, {query!r}) -> {got!r}, wanted {expected!r}"
+            assert got is expected, msg
+
+    def test_search_input_sits_above_the_browser_list(self, source: str) -> None:
+        body = _function_body(source, "buildUi(state)")
+        assert "placeholder: 'Search loras…'" in body
+        assert "[\n    state.searchInputEl,\n    state.crumbsEl,\n    state.listEl\n  ]" in body
+
+    def test_search_keydown_stops_propagation_and_escape_clears_in_place(
+        self, source: str
+    ) -> None:
+        """§7.5's keydown rule on the new input, and §7.2's Escape-clears --
+        both inside the search input's own keydown listener."""
+        body = _function_body(source, "buildUi(state)")
+        keydown = body[body.index("state.searchInputEl.addEventListener('keydown'") :]
+        keydown = keydown[: keydown.index("})")]
+        assert "event.stopPropagation()" in keydown
+        assert "'Escape'" in keydown
+        assert "clearSearch(state)" in keydown
+
+    def test_active_search_hides_folders_and_pseudo_rows(self, source: str) -> None:
+        """The search short-circuit returns BEFORE the ★/🕘 pseudo-folder
+        appends and the folder listing, and the flat results view builds
+        lora rows only."""
+        body = _function_body(source, "renderBrowser(state)")
+        short_circuit = body.index("renderSearchResults(state, query)")
+        assert short_circuit < body.index("state.view === 'favorites'")
+        assert short_circuit < body.index("buildPseudoFolderRowEl")
+        assert short_circuit < body.index("buildFolderRowEl")
+        results = _function_body(source, "renderSearchResults(state, query)")
+        assert "buildFolderRowEl" not in results
+        assert "buildPseudoFolderRowEl" not in results
+        assert "buildLoraRowEl(state, match.file, match.label)" in results
+
+    def test_search_matches_and_labels_are_scope_relative(self, source: str) -> None:
+        results = _function_body(source, "renderSearchResults(state, query)")
+        assert "const prefix = scope ? `${scope}/` : ''" in results
+        assert "name.slice(prefix.length)" in results
+        assert "loraMatchesSearch(rel, query)" in results
+        assert "matches.push({ file: name, label: rel })" in results
+
+    def test_zero_matches_renders_the_no_loras_match_row(self, source: str) -> None:
+        assert "No loras match" in _function_body(source, "renderSearchResults(state, query)")
+
+    def test_navigation_clears_the_search_the_pinned_choice(self, source: str) -> None:
+        """§6.13 M3 allowed either behavior; PINNED: breadcrumb navigation,
+        a scope change, and the restore resync all clear the query."""
+        crumbs = _function_body(source, "renderCrumbs(state)")
+        assert crumbs.count("clearSearch(state)") == 2  # root crumb + tail crumbs
+        assert "clearSearch(state)" in _function_body(source, "setScope(state, scopePath)")
+        assert "clearSearch(state)" in _function_body(source, "reloadFromWidget(state)")
+
+    # -------------------------------------------------------- thumbnails
+
+    def test_thumb_img_lazy_loading_and_error_hide(self, source: str) -> None:
+        """ROUTE_PREVIEW as an <img src> with the encoded file, lazy-loaded;
+        the error listener hides the img because a 404 (no sidecar image)
+        is the NORMAL case."""
+        body = _function_body(source, "buildLoraRowEl(state, file, displayLabel)")
+        assert "className: 'eps-lp-thumb'" in body
+        # Through api.apiUrl, not a hardcoded root-absolute path (review
+        # 2026-08-09) -- see TestM3ReviewFixes for the rationale pin.
+        assert "src: api.apiUrl(`${ROUTE_PREVIEW}?file=${encodeURIComponent(file)}`)" in body
+        assert "loading: 'lazy'" in body
+        error_leg = body[body.index("thumb.addEventListener('error'") :]
+        assert "thumb.style.display = 'none'" in error_leg[:200]
+
+    def test_thumb_is_a_fixed_square_that_never_stretches(self, source: str) -> None:
+        expected = ".eps-lp-thumb { flex: 0 0 auto; width: 26px; height: 26px; object-fit: cover;"
+        assert expected in source
+
+    # -------------------------------------------------- trigger-word copy
+
+    def test_copy_fetches_info_on_demand_and_toasts_the_no_sidecar_case(
+        self, source: str
+    ) -> None:
+        body = _function_body(source, "copyTriggerWords(state, file)")
+        assert "api.getJson(ROUTE_INFO, { file })" in body
+        expected = (
+            "toast('info', 'EPS LoRA Picker', "
+            "`No trigger-word sidecar for ${basename(file)}`)"
+        )
+        assert expected in body
+
+    def test_clipboard_writetext_with_the_image_grid_execcommand_fallback(
+        self, source: str
+    ) -> None:
+        """navigator.clipboard.writeText when available, else the hidden-
+        textarea execCommand('copy') degrade -- image_grid.js's
+        copyTextViaExecCommand technique, and the source must cite it."""
+        body = _function_body(source, "copyTextToClipboard(text)")
+        assert "navigator.clipboard?.writeText" in body
+        assert "document.execCommand('copy')" in body
+        assert "document.createElement('textarea')" in body
+        assert "image_grid.js" in source
+
+    def test_success_toast_names_the_words_and_truncates(self, source: str) -> None:
+        assert "const COPY_TOAST_MAX_CHARS = 120" in source
+        body = _function_body(source, "copyTriggerWords(state, file)")
+        assert "words.length > COPY_TOAST_MAX_CHARS" in body
+        assert "toast('success', 'EPS LoRA Picker', `Copied: ${shown}`)" in body
+
+    # ------------------------------------------------------ clear recents
+
+    def test_clear_recents_is_armed_two_click_with_both_strings(self, source: str) -> None:
+        """controller.js's armed-delete pattern: first click arms ("Really
+        clear?"), auto-disarm on timeout (4s) -- and on any re-render, since
+        the button is rebuilt fresh -- second click POSTs."""
+        body = _function_body(source, "buildClearRecentsRowEl(state)")
+        assert "text: 'Clear recents'" in body
+        assert "button.textContent = 'Really clear?'" in body
+        assert "button._armed = true" in body
+        assert "button._armTimer = setTimeout(" in body
+        assert "const CLEAR_RECENTS_CONFIRM_MS = 4000" in source
+
+    def test_clear_recents_lives_in_the_recent_view_only(self, source: str) -> None:
+        body = _function_body(source, "renderBrowser(state)")
+        recent = body.index("state.view === 'recent'")
+        clear = body.index("buildClearRecentsRowEl(state)")
+        pseudo = body.index("if (state.path.length === 0)")
+        assert recent < clear < pseudo, "the Clear-recents row must sit inside the recent branch"
+        assert body.count("buildClearRecentsRowEl") == 1
+
+    def test_clear_recents_posts_and_resyncs_from_the_response(self, source: str) -> None:
+        body = _function_body(source, "clearRecents(state)")
+        assert "api.postJson(ROUTE_CLEAR_RECENTS, {})" in body
+        assert "state.recents = sanitizeRecents(data?.recents)" in body
+        assert "toast('success'" in body
+        assert "toast('error'" in body
+
+    # ------------------------------------------- favorites drag-reorder
+
+    def test_drag_gate_is_favorites_view_not_searching_not_ghost(self, source: str) -> None:
+        body = _function_body(source, "buildLoraRowEl(state, file, displayLabel)")
+        expected = (
+            "const draggable = "
+            "!ghost && state.view === 'favorites' && activeSearchQuery(state) === ''"
+        )
+        assert expected in body
+        handle_leg = body[body.index("if (draggable) {") :]
+        assert "eps-lp-drag-handle" in handle_leg[:300]
+        assert "wireFavoriteDrag(state, handle, file)" in handle_leg[:400]
+
+    def test_drag_uses_pointer_capture_with_element_level_listeners(self, source: str) -> None:
+        """The §7.5-safe shape: setPointerCapture retargets the gesture at
+        the handle, so its OWN element-level move/up/cancel listeners see
+        the whole drag -- no window involvement anywhere."""
+        body = _function_body(source, "wireFavoriteDrag(state, handle, file)")
+        assert "handle.setPointerCapture(event.pointerId)" in body
+        assert "handle.addEventListener('pointermove', onMove)" in body
+        assert "handle.addEventListener('pointerup', onUp)" in body
+        assert "handle.addEventListener('pointercancel', onCancel)" in body
+        assert "handle.releasePointerCapture(drag.pointerId)" in body
+
+    def test_still_zero_window_listeners_after_m3(self, source: str) -> None:
+        assert "window.addEventListener" not in source
+
+    def test_dragged_element_is_never_reparented_mid_drag(self, source: str) -> None:
+        """Found live on the rig (2026-08-09): `insertBefore` on the dragged
+        row itself is a remove+re-insert, and removing the captured handle's
+        ancestor implicitly RELEASES pointer capture -- the gesture died on
+        the first reorder. The live reorder must move the OTHER rows around
+        the stationary dragged element instead."""
+        body = _function_body(source, "moveDraggedFavorite(state, drag, clientY)")
+        assert "insertBefore(dragged.el" not in body
+        assert "insertBefore(row.el, dragged.el)" in body
+        assert "anchor.after(row.el)" in body
+        assert "IMPLICITLY RELEASES pointer capture" in source
+
+    def test_reorder_posts_the_full_order_and_resyncs_from_the_response(
+        self, source: str
+    ) -> None:
+        """The POST carries the FULL new order, ghosts included (review
+        2026-08-09 -- see TestM3ReviewFixes for the teleport rationale);
+        the response's authoritative full list re-syncs local state;
+        failure reverts + toasts (toggleFavorite's posture)."""
+        body = _function_body(source, "finishFavoriteDrag(state, drag)")
+        assert "api.postJson(ROUTE_FAVORITES_ORDER, { files: reordered })" in body
+        resync = body[body.index("Array.isArray(data?.favorites)") :]
+        assert "state.favorites = data.favorites" in resync[:200]
+        assert "state.favorites = previous" in body
+        assert "toast('error'" in body
+
+    def test_ghosts_stay_in_the_local_order_and_are_never_sent(self, source: str) -> None:
+        """`state.favorites` takes the FULL dragged order (ghosts included,
+        in their dragged slots) -- only the POSTed `files` filters them
+        out, and the response re-sync is what re-homes them."""
+        body = _function_body(source, "finishFavoriteDrag(state, drag)")
+        assert "const reordered = state.favRowEls.map((row) => row.file)" in body
+        assert "state.favorites = reordered" in body
+
+
+class TestM3ReviewFixes:
+    """Pins for the M3 review round's three fixes (2026-08-09)."""
+
+    def test_reorder_posts_the_full_list_ghosts_included(self, source: str) -> None:
+        # Filtering ghosts out made the route's missing-names-append rule
+        # teleport them to the end of the shared order on every reorder.
+        body = _function_body(source, "finishFavoriteDrag(state, drag)")
+        assert "{ files: reordered }" in body
+        assert ".filter((file) => state.loraSet.has(file))" not in body
+
+    def test_thumbnail_src_goes_through_the_api_base(self, source: str) -> None:
+        # A hardcoded root-absolute img src breaks behind a reverse-proxy
+        # prefix while every fetchApi call keeps working (image_grid.js's
+        # own img-src precedent).
+        assert "api.apiUrl(`${ROUTE_PREVIEW}?file=${encodeURIComponent(file)}`)" in source
+        api_source = API_JS.read_text(encoding="utf-8")
+        assert "export function apiUrl(path)" in api_source
+        assert "api.apiURL" in api_source
+
+    def test_every_mutation_success_invalidates_in_flight_loads(self, source: str) -> None:
+        # A GET computed server-side BEFORE a confirmed mutation must not
+        # land afterwards and visibly revert it.
+        assert "function invalidateInFlightLoad(state)" in source
+        for fn in (
+            "recordRecent(state, file)",
+            "toggleFavorite(state, file, on)",
+            "clearRecents(state)",
+            "finishFavoriteDrag(state, drag)",
+        ):
+            assert "invalidateInFlightLoad(state)" in _function_body(source, fn), fn

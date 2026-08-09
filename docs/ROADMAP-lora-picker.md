@@ -149,7 +149,7 @@ favorites + recents now drive his daily loader, not just a stack output.
 
 Effort: **S–M** (mostly JS, on top of M1 + the controller precedent).
 
-### M3 — Depth + polish (each a discrete, optional increment)
+### M3 — Depth + polish — SHIPPED v0.56.0 (2026-08-09; all bullets below except the Iterator hand-off doc, which lives in README/FORMAT composition notes)
 - **Preview thumbnails** in the tree (read a sidecar `<lora>.png`/`.preview`
   if present — the convention Lora-Manager/pysssss use; no CivitAI needed).
 - **Trigger words** surfaced/click-to-copy (Apply LoRA Set already models

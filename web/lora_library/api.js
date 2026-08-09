@@ -20,6 +20,18 @@ export function log(message) {
 }
 
 /**
+ * Absolute URL for a lora_library route -- for element attributes (an
+ * `<img src>`) that bypass fetchApi. `api.apiURL` carries ComfyUI's api
+ * base/path prefix; a hardcoded root-absolute path breaks behind a
+ * reverse-proxy prefix while every fetchApi call keeps working (review
+ * 2026-08-09; image_grid.js's own img-src precedent).
+ * @param {string} path - e.g. `/lora_library/picker/preview?file=x`
+ */
+export function apiUrl(path) {
+  return typeof api.apiURL === 'function' ? api.apiURL(path) : path
+}
+
+/**
  * GET a lora_library route (FORMAT.md §5). Resolves to parsed JSON.
  * Rejects with an Error whose message is the server's `error` field when
  * the response is non-2xx.

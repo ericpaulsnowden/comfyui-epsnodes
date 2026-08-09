@@ -398,6 +398,90 @@ class TestClearRecents:
         assert state["recents"] == []
 
 
+# ----------------------------------------------------- favorites reorder (M3)
+
+
+class TestReorderFavorites:
+    def test_pure_reorder_round_trip(self, context: LibraryContext) -> None:
+        store.toggle_favorite(context, "a.safetensors", True)
+        store.toggle_favorite(context, "b.safetensors", True)
+        store.toggle_favorite(context, "c.safetensors", True)
+        state, _mtime = store.reorder_favorites(
+            context, ["c.safetensors", "a.safetensors", "b.safetensors"]
+        )
+        assert state["favorites"] == ["c.safetensors", "a.safetensors", "b.safetensors"]
+
+    def test_unknown_names_are_dropped_not_added(self, context: LibraryContext) -> None:
+        store.toggle_favorite(context, "a.safetensors", True)
+        state, _mtime = store.reorder_favorites(context, ["ghost.safetensors", "a.safetensors"])
+        assert state["favorites"] == ["a.safetensors"]
+
+    def test_missing_favorites_are_appended_in_stable_order(
+        self, context: LibraryContext
+    ) -> None:
+        store.toggle_favorite(context, "a.safetensors", True)
+        store.toggle_favorite(context, "b.safetensors", True)
+        store.toggle_favorite(context, "c.safetensors", True)
+        # Only "b" is named in the reorder -- "a" and "c" (unmentioned) land
+        # after it, in their EXISTING relative order (a before c).
+        state, _mtime = store.reorder_favorites(context, ["b.safetensors"])
+        assert state["favorites"] == ["b.safetensors", "a.safetensors", "c.safetensors"]
+
+    def test_duplicate_entries_in_files_dedup_to_first_occurrence(
+        self, context: LibraryContext
+    ) -> None:
+        store.toggle_favorite(context, "a.safetensors", True)
+        store.toggle_favorite(context, "b.safetensors", True)
+        state, _mtime = store.reorder_favorites(
+            context, ["b.safetensors", "a.safetensors", "b.safetensors"]
+        )
+        assert state["favorites"] == ["b.safetensors", "a.safetensors"]
+
+    def test_names_normalized_to_forward_slashes(self, context: LibraryContext) -> None:
+        store.toggle_favorite(context, "styles/film_grain.safetensors", True)
+        state, _mtime = store.reorder_favorites(context, ["styles\\film_grain.safetensors"])
+        assert state["favorites"] == ["styles/film_grain.safetensors"]
+
+    def test_recents_untouched(self, context: LibraryContext) -> None:
+        store.toggle_favorite(context, "a.safetensors", True)
+        store.record_recents(context, ["r.safetensors"])
+        state, _mtime = store.reorder_favorites(context, ["a.safetensors"])
+        assert [row["file"] for row in state["recents"]] == ["r.safetensors"]
+
+    def test_non_list_files_raises(self, context: LibraryContext) -> None:
+        with pytest.raises(store.PickerStoreError):
+            store.reorder_favorites(context, "a.safetensors")
+
+    def test_non_string_entry_raises_naming_the_index(self, context: LibraryContext) -> None:
+        with pytest.raises(store.PickerStoreError, match=r"files\[1\]"):
+            store.reorder_favorites(context, ["a.safetensors", 123])
+
+    def test_blank_entry_raises(self, context: LibraryContext) -> None:
+        with pytest.raises(store.PickerStoreError):
+            store.reorder_favorites(context, ["   "])
+
+    def test_stale_base_mtime_raises_conflict_and_leaves_file_untouched(
+        self, context: LibraryContext
+    ) -> None:
+        store.toggle_favorite(context, "a.safetensors", True)
+        _state, real_mtime = store.toggle_favorite(context, "b.safetensors", True)
+        with pytest.raises(store.ConflictError) as excinfo:
+            store.reorder_favorites(
+                context, ["b.safetensors", "a.safetensors"], base_mtime=real_mtime - 100.0
+            )
+        assert excinfo.value.current_mtime == real_mtime
+        state, _mtime = store.load_state(context)
+        assert state["favorites"] == ["a.safetensors", "b.safetensors"]  # untouched
+
+    def test_matching_base_mtime_succeeds(self, context: LibraryContext) -> None:
+        store.toggle_favorite(context, "a.safetensors", True)
+        _state, real_mtime = store.toggle_favorite(context, "b.safetensors", True)
+        state, _mtime = store.reorder_favorites(
+            context, ["b.safetensors", "a.safetensors"], base_mtime=real_mtime
+        )
+        assert state["favorites"] == ["b.safetensors", "a.safetensors"]
+
+
 # ---------------------------------------------------------------- conflicts
 
 
@@ -468,6 +552,12 @@ class TestUnreachableLibraryFolder:
         with pytest.raises(store.PickerStoreError, match="library folder"):
             store.clear_recents(unreachable_context)
 
+    def test_reorder_favorites_raises_picker_store_error_naming_the_folder(
+        self, unreachable_context: LibraryContext
+    ) -> None:
+        with pytest.raises(store.PickerStoreError, match="library folder"):
+            store.reorder_favorites(unreachable_context, ["a.safetensors"])
+
     def test_toggle_favorite_still_validates_name_first(
         self, unreachable_context: LibraryContext
     ) -> None:
@@ -475,6 +565,15 @@ class TestUnreachableLibraryFolder:
         # state -- it must keep winning over the folder diagnosis.
         with pytest.raises(store.PickerStoreError):
             store.toggle_favorite(unreachable_context, "   ", True)
+
+    def test_reorder_favorites_still_validates_files_first(
+        self, unreachable_context: LibraryContext
+    ) -> None:
+        # Same rationale: a structurally bad `files` entry is the caller's
+        # bug regardless of disk state -- it must keep winning over the
+        # folder diagnosis.
+        with pytest.raises(store.PickerStoreError):
+            store.reorder_favorites(unreachable_context, ["   "])
 
 
 # ------------------------------------------------------------- atomic writes

@@ -1,6 +1,7 @@
 /**
  * @file EPS LoRA Picker frontend panel (FORMAT.md §6.13, M1 + the M2
- * Send-to-loader row). Exports
+ * Send-to-loader row + the M3 search/thumbnails/trigger-copy/
+ * clear-recents/favorites-reorder round). Exports
  * `attachPickerPanel(node)`, called from `web/lora_library.js`'s
  * `nodeCreated`; no-ops for every node type other than `EPSLoraPicker`.
  *
@@ -42,6 +43,11 @@
  *
  * No window-level listeners: every interaction is a plain element-level
  * click/change/input, so §7.5's capture-phase requirement never comes up.
+ * The M3 favorites drag included: pointerdown calls `setPointerCapture` on
+ * the row's ≡ handle, which RETARGETS the whole gesture's later
+ * pointermove/pointerup at the handle itself -- so element-level listeners
+ * on the handle see the drag end even when the pointer leaves the node,
+ * and no window listener (capture-phase or otherwise) is ever needed.
  */
 
 import { app } from '../../../scripts/app.js'
@@ -52,13 +58,18 @@ import * as pll from './pll_bridge.js'
 export const CLASS_ID = 'EPSLoraPicker'
 export const SELECTION_WIDGET_NAME = 'selection'
 
-/** §5 route family. CLEAR_RECENTS is §6.13-M3's Clear-recents button --
- * declared with its siblings so the family lives in one block, unused by
- * this M1 panel. */
+/** §5 route family, one block. M1: the GET feed + favorite/recent POSTs.
+ * M3 wired the rest: CLEAR_RECENTS (the Recent view's armed Clear-recents
+ * button -- no longer unused), PREVIEW (row thumbnails, an <img src>, the
+ * one GET here that never goes through api.getJson), INFO (on-demand
+ * trigger-word copy), FAVORITES_ORDER (drag-reorder's full-list replace). */
 export const ROUTE = '/lora_library/picker'
 export const ROUTE_FAVORITE = '/lora_library/picker/favorite'
 export const ROUTE_RECENT = '/lora_library/picker/recent'
 export const ROUTE_CLEAR_RECENTS = '/lora_library/picker/clear_recents'
+export const ROUTE_PREVIEW = '/lora_library/picker/preview'
+export const ROUTE_INFO = '/lora_library/picker/info'
+export const ROUTE_FAVORITES_ORDER = '/lora_library/picker/favorites_order'
 
 const PANEL_WIDGET_NAME = 'eps_lp_panel'
 const PANEL_WIDGET_TYPE = 'eps_lora_picker_panel'
@@ -81,6 +92,17 @@ const STRENGTH_MAX = 10
 /** Client mirror of the store's newest-first cap (§6.13) -- only the
  * optimistic local update uses it; the server list wins when it lands. */
 const RECENTS_CAP = 30
+
+/** §6.13 M3 Clear-recents confirm window (controller.js's armed-delete
+ * `DELETE_CONFIRM_MS` precedent): the armed "Really clear?" state
+ * auto-disarms after this many ms; any re-render disarms it sooner, since
+ * the button is rebuilt fresh (its `_armed`/`_armTimer` die with the old
+ * DOM node). */
+const CLEAR_RECENTS_CONFIRM_MS = 4000
+
+/** §6.13 M3: the copied-trigger-words success toast truncates past this
+ * many chars -- the toast names the words, it doesn't reprint a novel. */
+const COPY_TOAST_MAX_CHARS = 120
 
 /** Nodes we've already attached to -- guards a double `nodeCreated`. */
 const attachedNodes = new WeakSet()
@@ -225,6 +247,26 @@ export function listFolder(loras, folder) {
   return { folders, loras: files }
 }
 
+/**
+ * §6.13 M3 search predicate -- §7.2's search semantics (notebook.js's
+ * `entryMatchesSearch` precedent, the v0.53.0 owner ask): case-insensitive,
+ * every whitespace-separated query word must appear somewhere in *relPath*,
+ * so multi-word queries narrow (AND across words). *relPath* is the lora's
+ * path RELATIVE TO THE CURRENT SCOPE -- the caller strips the scope prefix
+ * BEFORE calling, so a scope folder's own name never matches everything
+ * inside it. An empty/whitespace query matches everything (`every` over an
+ * empty word list), though the UI never calls with one.
+ * @param {string} relPath @param {string} query @returns {boolean}
+ */
+export function loraMatchesSearch(relPath, query) {
+  const haystack = relPath.toLowerCase()
+  return query
+    .toLowerCase()
+    .split(/\s+/)
+    .filter(Boolean)
+    .every((word) => haystack.includes(word))
+}
+
 /** @param {string} name @returns {string} */
 function basename(name) {
   const idx = name.lastIndexOf('/')
@@ -298,6 +340,11 @@ const CSS_TEXT = `
 .eps-lp-row-ghost { opacity: 0.55; }
 .eps-lp-strength { flex: 0 0 auto; width: 56px; box-sizing: border-box; background: var(--comfy-menu-bg, #262626); border: 1px solid var(--border-color, #444); color: var(--input-text, #ccc); border-radius: 3px; padding: 1px 3px; font-size: 11px; font-family: inherit; }
 .eps-lp-browser { flex: 1 1 auto; display: flex; flex-direction: column; min-height: 0; overflow: hidden; }
+.eps-lp-search { flex: 0 0 auto; box-sizing: border-box; width: calc(100% - 12px); margin: 4px 6px 2px; background: var(--comfy-menu-bg, #262626); border: 1px solid var(--border-color, #444); color: var(--input-text, #ccc); border-radius: 3px; padding: 2px 5px; font-size: 11px; font-family: inherit; }
+.eps-lp-thumb { flex: 0 0 auto; width: 26px; height: 26px; object-fit: cover; border-radius: 3px; background: var(--comfy-menu-bg, #262626); }
+.eps-lp-drag-handle { flex: 0 0 auto; cursor: grab; touch-action: none; user-select: none; color: var(--descrip-text, #999); padding: 0 2px; font-size: 12px; line-height: 1; }
+.eps-lp-drag-handle:active { cursor: grabbing; }
+.eps-lp-row-dragging { opacity: 0.6; background: var(--content-hover-bg, #2a2a2a); }
 .eps-lp-crumbs { flex: 0 0 auto; display: flex; align-items: center; flex-wrap: wrap; gap: 2px; padding: 3px 6px; border-bottom: 1px solid var(--border-color, #444); color: var(--descrip-text, #999); }
 .eps-lp-crumb { background: none; border: none; padding: 0 2px; color: var(--input-text, #ccc); cursor: pointer; font-size: 11px; font-family: inherit; }
 .eps-lp-crumb:hover { text-decoration: underline; }
@@ -372,10 +419,14 @@ function createState(node, widget) {
     view: 'browse', // 'browse' | 'favorites' | 'recent' -- transient, never serialized
     path: [], // drill-down segments below the scope root -- transient (§6.13)
     pllTargetId: null, // Send-to-loader target node id -- transient, M2 adds no widget (§6.13)
+    searchQuery: '', // §6.13 M3 view-only filter -- transient, never serialized
+    favDrag: null, // in-flight M3 favorites drag -- element-level, pointer-captured
     loadToken: 0, // guards a stale/superseded fetch from clobbering fresher state
-    favoriteToken: 0, // same guard for the optimistic favorite round-trips
-    recentToken: 0, // and for the fire-and-forget recents stamps
+    favoriteToken: 0, // same guard for favorites round-trips (star toggle + M3 reorder)
+    recentToken: 0, // and for the recents stamps + the M3 Clear-recents POST
     root: null,
+    searchInputEl: null,
+    favRowEls: [], // favorites-view row order (file+el) for the M3 drag -- rebuilt each render
     scopeRowEl: null,
     selectedHeaderEl: null,
     selectedListEl: null,
@@ -414,7 +465,32 @@ function buildUi(state) {
   state.listEl = el('div', { className: 'eps-lp-list' })
   state.statusTextEl = el('div', { className: 'eps-lp-status-text' })
   state.statusActionsEl = el('div', { className: 'eps-lp-status-actions' })
-  const browser = el('div', { className: 'eps-lp-browser' }, [state.crumbsEl, state.listEl])
+
+  // §6.13 M3 search field, above the browser list -- notebook.js's §7.2
+  // search input (v0.53.0), same rules: every keystroke stops propagation
+  // (canvas hotkeys), Escape CLEARS the query in place, pure view filter.
+  state.searchInputEl = el('input', {
+    className: 'eps-lp-search',
+    attrs: { type: 'text', placeholder: 'Search loras…', spellcheck: 'false' }
+  })
+  state.searchInputEl.addEventListener('input', () => {
+    state.searchQuery = state.searchInputEl.value
+    renderBrowser(state)
+  })
+  state.searchInputEl.addEventListener('keydown', (event) => {
+    event.stopPropagation()
+    if (event.key === 'Escape') {
+      event.preventDefault()
+      clearSearch(state)
+      renderBrowser(state)
+    }
+  })
+
+  const browser = el('div', { className: 'eps-lp-browser' }, [
+    state.searchInputEl,
+    state.crumbsEl,
+    state.listEl
+  ])
   const status = el('div', { className: 'eps-lp-status' }, [state.statusTextEl, state.statusActionsEl])
   state.root = el('div', { className: 'eps-lp-root' }, [
     state.scopeRowEl,
@@ -460,6 +536,7 @@ function reloadFromWidget(state) {
   state.selection = selectionFromWidgetValue(state.widget.value)
   state.path = [] // a restored scope invalidates any drill-down into the old one
   state.view = 'browse'
+  clearSearch(state) // ...and any search typed against the old scope (§6.13 M3)
   render(state)
 }
 
@@ -474,6 +551,16 @@ function writeSelectionWidget(state) {
   // Granular repaints (Add, remove) skip the full render, so the Send row's
   // empty-selection gate refreshes here, at the one funnel every mutation hits.
   renderSend(state)
+}
+
+/** Invalidates any in-flight `GET picker` feed. A fetch computed
+ * server-side BEFORE a just-confirmed mutation (star, reorder, recent,
+ * clear) would land AFTER it and visibly revert the confirmed state on
+ * screen -- the load token and the mutation tokens never see each other
+ * otherwise (review 2026-08-09). Called from every mutation success path;
+ * the next explicit load re-syncs everything. */
+function invalidateInFlightLoad(state) {
+  state.loadToken++
 }
 
 async function loadPicker(state) {
@@ -543,12 +630,28 @@ function wireConfigureReload(state) {
 
 // --- Mutations ---
 
+/** The trimmed live M3 query -- `''` means "search inactive". */
+function activeSearchQuery(state) {
+  return (state.searchQuery || '').trim()
+}
+
+/** Clears the M3 query in place -- state and input element together, so
+ * they can never drift. Callers: Escape, breadcrumb navigation, a scope
+ * change, and the restore/reconfigure resync. */
+function clearSearch(state) {
+  state.searchQuery = ''
+  if (state.searchInputEl) state.searchInputEl.value = ''
+}
+
 /** Sets the per-workflow scope (§6.13: pure view state, serialized with
- * the workflow, execution ignores it) and resets the browse position. */
+ * the workflow, execution ignores it) and resets the browse position.
+ * Clears an active search too -- the scope DEFINES the search corpus
+ * (§6.13 M3: matching is scope-relative), so a re-scope restarts it. */
 function setScope(state, scopePath) {
   state.selection = { ...state.selection, scope: scopePath }
   state.path = []
   state.view = 'browse'
+  clearSearch(state)
   writeSelectionWidget(state)
   render(state)
 }
@@ -597,6 +700,7 @@ function recordRecent(state, file) {
     .postJson(ROUTE_RECENT, { files: [file] })
     .then((data) => {
       if (token !== state.recentToken) return
+      invalidateInFlightLoad(state)
       const recents = sanitizeRecents(data?.recents)
       if (recents.length) {
         state.recents = recents
@@ -619,6 +723,7 @@ async function toggleFavorite(state, file, on) {
   try {
     const data = await api.postJson(ROUTE_FAVORITE, { file, on })
     if (token !== state.favoriteToken) return
+    invalidateInFlightLoad(state)
     if (Array.isArray(data?.favorites)) {
       state.favorites = data.favorites.filter((entry) => typeof entry === 'string').map(normalizeLoraName)
       renderBrowser(state)
@@ -767,6 +872,9 @@ function renderCrumbs(state) {
     attrs: { title: scope || 'Whole library' }
   })
   rootBtn.addEventListener('click', () => {
+    // §6.13 M3's pinned choice: navigating via the breadcrumb CLEARS an
+    // active search (the contract allowed either; this one is pinned).
+    clearSearch(state)
     state.path = []
     state.view = 'browse'
     renderBrowser(state)
@@ -779,6 +887,7 @@ function renderCrumbs(state) {
     state.crumbsEl.append(el('span', { className: 'eps-lp-crumb-sep', text: '›' }))
     const crumbBtn = el('button', { className: 'eps-lp-crumb', text: segment })
     crumbBtn.addEventListener('click', () => {
+      clearSearch(state) // same pinned navigate-clears-search choice as rootBtn
       if (state.view === 'browse') state.path = state.path.slice(0, index + 1)
       renderBrowser(state)
     })
@@ -798,6 +907,7 @@ function currentFolder(state) {
 function renderBrowser(state) {
   renderCrumbs(state)
   state.listEl.replaceChildren()
+  state.favRowEls = []
 
   if (state.error) {
     // §7.2 amendment: the error itself lives in the status line (with
@@ -810,13 +920,31 @@ function renderBrowser(state) {
     return
   }
 
+  // §6.13 M3 search: while a query is active the browser is a FLAT list of
+  // matching loras across ALL subfolders of the current scope, labeled by
+  // their scope-relative paths. Folders and the ★/🕘 pseudo-folder rows are
+  // hidden (this return sits above every one of them), and the favorites
+  // drag never engages (the favorites view is never rendered while
+  // searching -- plus buildLoraRowEl's own gate).
+  const query = activeSearchQuery(state)
+  if (query) {
+    renderSearchResults(state, query)
+    return
+  }
+
   if (state.view === 'favorites') {
     if (state.favorites.length === 0) {
       state.listEl.append(el('div', { className: 'eps-lp-empty', text: 'No favorites yet — star a lora to keep it here.' }))
       return
     }
-    // Store order (§6.13) -- deliberately NOT re-sorted.
-    for (const file of state.favorites) state.listEl.append(buildLoraRowEl(state, file, file))
+    // Store order (§6.13) -- deliberately NOT re-sorted. Rows are tracked
+    // in favRowEls for the M3 drag-reorder (installed rows get a ≡ handle;
+    // ghosts render as before and are never draggable).
+    for (const file of state.favorites) {
+      const rowEl = buildLoraRowEl(state, file, file)
+      state.favRowEls.push({ file, el: rowEl })
+      state.listEl.append(rowEl)
+    }
     return
   }
 
@@ -825,6 +953,8 @@ function renderBrowser(state) {
       state.listEl.append(el('div', { className: 'eps-lp-empty', text: 'No recently used loras yet.' }))
       return
     }
+    // §6.13 M3: Clear recents lives in THIS view only, above the rows.
+    state.listEl.append(buildClearRecentsRowEl(state))
     // Newest first (§6.13) -- the served order, preserved.
     for (const entry of state.recents) state.listEl.append(buildLoraRowEl(state, entry.file, entry.file))
     return
@@ -842,6 +972,32 @@ function renderBrowser(state) {
   }
   for (const folder of listing.folders) state.listEl.append(buildFolderRowEl(state, folder))
   for (const lora of listing.loras) state.listEl.append(buildLoraRowEl(state, lora.file, lora.label))
+}
+
+/**
+ * §6.13 M3: the flat search view -- every lora under the current scope
+ * whose SCOPE-RELATIVE path matches the query (loraMatchesSearch), in the
+ * served list's own order, labeled by that same scope-relative path. No
+ * folder rows, no pseudo-folder rows, no drag. The scope prefix is
+ * stripped BEFORE matching, so the scope folder's own name doesn't match
+ * every lora inside it.
+ */
+function renderSearchResults(state, query) {
+  const scope = state.selection.scope
+  const prefix = scope ? `${scope}/` : ''
+  const matches = []
+  for (const name of state.loras) {
+    if (prefix && !name.startsWith(prefix)) continue
+    const rel = name.slice(prefix.length)
+    if (loraMatchesSearch(rel, query)) matches.push({ file: name, label: rel })
+  }
+  if (matches.length === 0) {
+    state.listEl.append(
+      el('div', { className: 'eps-lp-empty', text: `No loras match "${query}".` })
+    )
+    return
+  }
+  for (const match of matches) state.listEl.append(buildLoraRowEl(state, match.file, match.label))
 }
 
 /** `★ Favorites (n)` / `🕘 Recent (n)` -- root-only views over ALL
@@ -881,15 +1037,24 @@ function buildFolderRowEl(state, folder) {
 }
 
 /**
- * One browser lora row: star toggle + display name (relative to the
- * current folder) + `＋ Add`. A GHOST -- a favorite/recent naming a lora
- * NOT on this machine's served list -- renders dimmed, ⚠-marked, and
- * star-only (§6.13: visible, never silently dropped; unstarring it here
- * is how a cross-machine favorite gets cleaned up).
+ * One browser lora row: [≡ handle (M3, favorites view only)] + star toggle
+ * + preview thumbnail (M3) + display name (relative to the current folder,
+ * or scope-relative in search results) + `📋` trigger-word copy (M3) +
+ * `＋ Add`. A GHOST -- a favorite/recent naming a lora NOT on this
+ * machine's served list -- renders dimmed, ⚠-marked, and star-only (§6.13:
+ * visible, never silently dropped; unstarring it here is how a
+ * cross-machine favorite gets cleaned up). Ghosts are also never draggable
+ * (§6.13 M3) -- they keep this dimmed rendering and survive a reorder
+ * server-side (the route appends favorites missing from the posted list).
  */
 function buildLoraRowEl(state, file, displayLabel) {
   const ghost = !state.loraSet.has(file)
   const favorite = state.favorites.includes(file)
+  // §6.13 M3 drag gate: the ★ Favorites view only, never while searching,
+  // never a ghost. The searching leg looks redundant (renderBrowser never
+  // renders the favorites view with a query active) but keeps the rule
+  // local and auditable rather than an emergent property of render order.
+  const draggable = !ghost && state.view === 'favorites' && activeSearchQuery(state) === ''
 
   const starBtn = el('button', {
     className: favorite ? 'eps-lp-star eps-lp-star-on' : 'eps-lp-star',
@@ -900,19 +1065,351 @@ function buildLoraRowEl(state, file, displayLabel) {
     toggleFavorite(state, file, !favorite).catch((error) => api.warn('favorite toggle rejected', error))
   })
 
+  // §6.13 M3 thumbnail: the sidecar preview image, served by ROUTE_PREVIEW.
+  // loading="lazy" keeps a 1000-lora folder from firing 1000 eager fetches;
+  // the error listener hides the img because a 404 (no sidecar image) is
+  // the NORMAL case, not a failure worth any pixels or noise.
+  const thumb = el('img', {
+    className: 'eps-lp-thumb',
+    attrs: {
+      src: api.apiUrl(`${ROUTE_PREVIEW}?file=${encodeURIComponent(file)}`),
+      loading: 'lazy',
+      alt: ''
+    }
+  })
+  thumb.addEventListener('error', () => {
+    thumb.style.display = 'none'
+  })
+
   const label = el('span', {
     className: ghost ? 'eps-lp-row-label eps-lp-row-missing' : 'eps-lp-row-label',
     text: ghost ? `⚠ ${displayLabel}` : displayLabel,
     attrs: { title: ghost ? `${file} — not installed here` : file }
   })
 
-  const children = [starBtn, label]
+  const children = [starBtn, thumb, label]
+  if (draggable) {
+    const handle = el('span', {
+      className: 'eps-lp-drag-handle',
+      text: '≡',
+      attrs: { title: 'Drag to reorder favorites' }
+    })
+    wireFavoriteDrag(state, handle, file)
+    children.unshift(handle)
+  }
   if (!ghost) {
+    const copyBtn = el('button', {
+      className: 'eps-lp-icon-btn',
+      text: '📋',
+      attrs: { title: 'Copy this lora’s trigger words (from its .txt sidecar)' }
+    })
+    copyBtn.addEventListener('click', () => {
+      copyTriggerWords(state, file).catch((error) => api.warn('trigger-word copy rejected', error))
+    })
     const addBtn = el('button', { className: 'eps-lp-btn', text: '＋ Add', attrs: { title: 'Add to the selection' } })
     addBtn.addEventListener('click', () => addLora(state, file))
-    children.push(addBtn)
+    children.push(copyBtn, addBtn)
   }
   return el('div', { className: ghost ? 'eps-lp-row eps-lp-row-ghost' : 'eps-lp-row' }, children)
+}
+
+// --- §6.13 M3: Clear recents (armed two-click) ---
+
+/**
+ * The Recent view's Clear-recents row -- controller.js's ARMED two-click
+ * pattern (`_onDeleteClick`'s shape, the armed-delete precedent): the first
+ * click arms the button ("Really clear?"), which auto-disarms after
+ * CLEAR_RECENTS_CONFIRM_MS -- or sooner, on ANY re-render, because the
+ * button is rebuilt fresh each renderBrowser() and its `_armed`/`_armTimer`
+ * die with the old DOM node (the disarm-on-rerender is free here, where
+ * controller.js has to deliberately NOT rebuild to keep its armed state).
+ * The second click POSTs ROUTE_CLEAR_RECENTS and re-syncs from the
+ * response.
+ */
+function buildClearRecentsRowEl(state) {
+  const button = el('button', {
+    className: 'eps-lp-btn',
+    text: 'Clear recents',
+    attrs: { title: 'Forget the recently-used list — asks once before clearing' }
+  })
+  button.addEventListener('click', () => {
+    if (!button._armed) {
+      button._armed = true
+      button.textContent = 'Really clear?'
+      clearTimeout(button._armTimer)
+      button._armTimer = setTimeout(() => {
+        button._armed = false
+        button.textContent = 'Clear recents'
+      }, CLEAR_RECENTS_CONFIRM_MS)
+      return
+    }
+    clearTimeout(button._armTimer)
+    button._armed = false
+    clearRecents(state).catch((error) => api.warn('clear recents rejected', error))
+  })
+  return el('div', { className: 'eps-lp-row' }, [button])
+}
+
+/** The armed second click (§6.13 M3): POST + re-sync `state.recents` from
+ * the response's authoritative (empty) list. Token-guarded alongside the
+ * recents stamps so a slow in-flight stamp can't resurrect cleared rows. */
+async function clearRecents(state) {
+  const token = ++state.recentToken
+  try {
+    const data = await api.postJson(ROUTE_CLEAR_RECENTS, {})
+    if (token !== state.recentToken) return
+    invalidateInFlightLoad(state)
+    state.recents = sanitizeRecents(data?.recents)
+    renderBrowser(state)
+    toast('success', 'EPS LoRA Picker', 'Recents cleared.')
+  } catch (error) {
+    if (token !== state.recentToken) return
+    api.warn('clear recents failed', error)
+    toast('error', 'EPS LoRA Picker', `Recents not cleared: ${error?.message || error}`)
+  }
+}
+
+// --- §6.13 M3: trigger-word copy ---
+
+/**
+ * The 📋 click: on-demand `GET picker/info` (never prefetched -- a sidecar
+ * read per rendered row would hammer the store for a hover-rare action),
+ * then clipboard + a success toast NAMING the words. No sidecar is an info
+ * toast, not an error -- most loras simply don't have one (§6.13 M3).
+ */
+async function copyTriggerWords(state, file) {
+  let data
+  try {
+    data = await api.getJson(ROUTE_INFO, { file })
+  } catch (error) {
+    api.warn('trigger-word info fetch failed', error)
+    toast('error', 'EPS LoRA Picker', `Could not read trigger words: ${error?.message || error}`)
+    return
+  }
+  const words = typeof data?.trigger_words === 'string' ? data.trigger_words : ''
+  if (!words) {
+    toast('info', 'EPS LoRA Picker', `No trigger-word sidecar for ${basename(file)}`)
+    return
+  }
+  if (!(await copyTextToClipboard(words))) {
+    toast('error', 'EPS LoRA Picker', 'Could not copy to the clipboard.')
+    return
+  }
+  const shown =
+    words.length > COPY_TOAST_MAX_CHARS ? `${words.slice(0, COPY_TOAST_MAX_CHARS)}…` : words
+  toast('success', 'EPS LoRA Picker', `Copied: ${shown}`)
+}
+
+/**
+ * `navigator.clipboard.writeText` when available, else the hidden-textarea
+ * `document.execCommand('copy')` degrade -- web/eps_image/image_grid.js's
+ * `copyTextViaExecCommand` technique, copied here rather than imported
+ * (the house no-cross-module-coupling convention): the whole
+ * `navigator.clipboard` object is [SecureContext], and ComfyUI over LAN
+ * http -- this pack's first-class remote case -- is NOT a secure context,
+ * so the fallback is the working path there, not an edge case. See
+ * image_grid.js's doc comment for the full story (it in turn mirrors
+ * ComfyUI core's own `legacyCopy()`). Returns whether the copy succeeded.
+ * @param {string} text @returns {Promise<boolean>}
+ */
+async function copyTextToClipboard(text) {
+  if (navigator.clipboard?.writeText) {
+    try {
+      await navigator.clipboard.writeText(text)
+      return true
+    } catch (error) {
+      // Present but refused (permission denied etc.) -- fall through to the
+      // legacy path rather than giving up.
+      api.warn('navigator.clipboard.writeText failed; trying the execCommand fallback', error)
+    }
+  }
+  const textarea = document.createElement('textarea')
+  textarea.setAttribute('readonly', '')
+  textarea.value = text
+  textarea.style.position = 'fixed'
+  textarea.style.left = '-9999px'
+  textarea.style.top = '-9999px'
+  document.body.appendChild(textarea)
+  textarea.select()
+  try {
+    return document.execCommand('copy')
+  } catch {
+    return false
+  } finally {
+    textarea.remove()
+  }
+}
+
+// --- §6.13 M3: favorites drag-reorder ---
+
+/**
+ * Wires the ≡ handle of one INSTALLED favorites-view row (buildLoraRowEl's
+ * `draggable` gate). The §7.5-safe shape: pointerdown calls
+ * `setPointerCapture(handle)`, which retargets EVERY later
+ * pointermove/pointerup/pointercancel for that pointer at the handle
+ * itself -- so plain element-level listeners see the whole gesture,
+ * wherever the pointer wanders, and no window-level listener
+ * (capture-phase or otherwise) is ever involved. The Vue-nodes wrapper's
+ * bubble-path stopPropagation (§7.5's gesture-killer) therefore never gets
+ * a say. `lostpointercapture` is the escape hatch: if a mid-drag re-render
+ * detaches the row (implicitly releasing capture), the gesture cancels
+ * cleanly instead of leaving `state.favDrag` stuck forever.
+ */
+function wireFavoriteDrag(state, handle, file) {
+  handle.addEventListener('pointerdown', (event) => {
+    if (event.button > 0) return // primary button / touch / pen only
+    if (state.favDrag) return // one gesture at a time
+    event.preventDefault()
+    event.stopPropagation()
+    try {
+      handle.setPointerCapture(event.pointerId)
+    } catch (error) {
+      // Without capture the element-level move/up listeners would go blind
+      // the moment the pointer left the handle -- no capture, no drag.
+      api.warn('favorites drag: setPointerCapture failed; drag unavailable', error)
+      return
+    }
+    const start = state.favRowEls.find((row) => row.file === file)
+    if (!start) return
+    const drag = { pointerId: event.pointerId, file }
+    state.favDrag = drag
+    start.el.classList.add('eps-lp-row-dragging')
+
+    const onMove = (moveEvent) => {
+      if (moveEvent.pointerId !== drag.pointerId) return
+      moveDraggedFavorite(state, drag, moveEvent.clientY)
+    }
+    const onUp = (upEvent) => {
+      if (upEvent.pointerId !== drag.pointerId) return
+      detach()
+      finishFavoriteDrag(state, drag).catch((error) => api.warn('favorites reorder rejected', error))
+    }
+    const onCancel = (cancelEvent) => {
+      if (cancelEvent.pointerId !== drag.pointerId) return
+      detach()
+      cancelFavoriteDrag(state)
+    }
+    const onLost = () => {
+      // Implicit capture release (row detached by a mid-drag re-render):
+      // treat as cancel. Our own detach() removes this listener BEFORE
+      // releasing, so a normal finish never double-fires.
+      detach()
+      cancelFavoriteDrag(state)
+    }
+    function detach() {
+      handle.removeEventListener('pointermove', onMove)
+      handle.removeEventListener('pointerup', onUp)
+      handle.removeEventListener('pointercancel', onCancel)
+      handle.removeEventListener('lostpointercapture', onLost)
+      try {
+        handle.releasePointerCapture(drag.pointerId)
+      } catch {
+        // Already released, or never captured.
+      }
+    }
+    handle.addEventListener('pointermove', onMove)
+    handle.addEventListener('pointerup', onUp)
+    handle.addEventListener('pointercancel', onCancel)
+    handle.addEventListener('lostpointercapture', onLost)
+  })
+}
+
+/**
+ * Live reorder while the pointer moves: the dragged row slots in wherever
+ * *clientY* sits among the OTHER rows' midpoints -- both the DOM and the
+ * working `state.favRowEls` order move together, so the drop commit just
+ * reads the array. `state.favorites` itself is NOT touched until the drop
+ * (cancelFavoriteDrag restores the view from it). Ghost rows shift aside
+ * visually like any other row; only the POST filters them out.
+ *
+ * THE DRAGGED ELEMENT IS NEVER REPARENTED -- only the other rows move
+ * around it (found live on the rig, 2026-08-09): `insertBefore` on the
+ * dragged row itself is a remove+re-insert, and removing the captured
+ * handle's ancestor from the document IMPLICITLY RELEASES pointer capture
+ * -- `lostpointercapture` fired on the very first reorder and the gesture
+ * died mid-drag. Repositioning the OTHER rows around the stationary
+ * dragged element produces the identical visible order with the capture
+ * intact.
+ */
+function moveDraggedFavorite(state, drag, clientY) {
+  const rows = state.favRowEls
+  const fromIndex = rows.findIndex((row) => row.file === drag.file)
+  if (fromIndex === -1) return // mid-drag re-render replaced the rows
+  const dragged = rows[fromIndex]
+  const others = rows.filter((_, index) => index !== fromIndex)
+  let insertAt = others.length
+  for (let i = 0; i < others.length; i++) {
+    const rect = others[i].el.getBoundingClientRect()
+    if (clientY < rect.top + rect.height / 2) {
+      insertAt = i
+      break
+    }
+  }
+  if (insertAt === fromIndex) return
+  state.favRowEls = [...others.slice(0, insertAt), dragged, ...others.slice(insertAt)]
+  // Rows now ABOVE the dragged one: re-inserted before it, in order...
+  for (const row of others.slice(0, insertAt)) state.listEl.insertBefore(row.el, dragged.el)
+  // ...rows now BELOW it: chained after it, each becoming the next anchor.
+  let anchor = dragged.el
+  for (const row of others.slice(insertAt)) {
+    anchor.after(row.el)
+    anchor = row.el
+  }
+}
+
+/**
+ * Drop commit (§6.13 M3): optimistic local reorder (state.favorites takes
+ * the dragged order the DOM already shows), then POST the full new order
+ * with INSTALLED favorites only -- ghosts are never sent AND never dropped
+ * locally: the route itself appends favorites missing from the posted
+ * list, and the response's `favorites` is the authoritative full list
+ * (ghosts included), which re-syncs local state on success. Failure
+ * reverts to the pre-drag order + toasts (toggleFavorite's exact posture);
+ * token-guarded alongside the star toggles so the two mutation families
+ * can't clobber each other's responses.
+ */
+async function finishFavoriteDrag(state, drag) {
+  state.favDrag = null
+  const previous = state.favorites.slice()
+  const reordered = state.favRowEls.map((row) => row.file)
+  const changed =
+    reordered.length !== previous.length || reordered.some((file, i) => file !== previous[i])
+  state.favorites = reordered
+  renderBrowser(state) // rebuild also drops the eps-lp-row-dragging styling
+  if (!changed) return
+  const token = ++state.favoriteToken
+  try {
+    // The FULL reordered list, ghosts included (review 2026-08-09): a ghost
+    // is a KNOWN favorite (just not installed here), and posting only the
+    // installed subset made the route's missing-names-append rule teleport
+    // every ghost to the end of the shared order on ANY reorder -- losing
+    // the other machine's positions. The route ignores genuinely unknown
+    // names, so sending everything is safe and keeps the optimistic order
+    // identical to the server's.
+    const data = await api.postJson(ROUTE_FAVORITES_ORDER, { files: reordered })
+    if (token !== state.favoriteToken) return
+    invalidateInFlightLoad(state)
+    if (Array.isArray(data?.favorites)) {
+      state.favorites = data.favorites
+        .filter((entry) => typeof entry === 'string')
+        .map(normalizeLoraName)
+      renderBrowser(state)
+    }
+  } catch (error) {
+    if (token !== state.favoriteToken) return
+    state.favorites = previous
+    renderBrowser(state)
+    api.warn('favorites reorder failed', error)
+    toast('error', 'EPS LoRA Picker', `Order not saved: ${error?.message || error}`)
+  }
+}
+
+/** pointercancel / lost capture: abandon the gesture. The visible order is
+ * rebuilt from `state.favorites`, which a drag never touches before its
+ * drop -- so cancel is just a repaint. */
+function cancelFavoriteDrag(state) {
+  state.favDrag = null
+  renderBrowser(state)
 }
 
 /** §7.2-style status line: the load error + Retry live HERE, so the
