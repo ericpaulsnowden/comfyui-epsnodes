@@ -1372,6 +1372,18 @@ function findApplySetNodes() {
 function pushStateToNode(node, slug) {
   const widget = (node.widgets || []).find((w) => w && w.name === APPLY_SET_WIDGET_NAME)
   if (!widget) return false
+  // A combo cannot DISPLAY a value that isn't one of its options, and
+  // ComfyUI's own refreshComboInNodes() replaces sets.js's dynamic values
+  // function with a frozen array (owner report 2026-08-09: "pushing from
+  // the list doesn't update this set if the set isn't already in the
+  // list"). When we hit that frozen-array state, seed the option ourselves
+  // so the push is visible immediately; sets.js re-installs its live
+  // function on the next refresh and the entry is legitimized from the
+  // server. No import from sets.js -- the two files stay decoupled by
+  // design (see either file header).
+  if (widget.options && Array.isArray(widget.options.values) && !widget.options.values.includes(slug)) {
+    widget.options.values = [...widget.options.values, slug]
+  }
   if (typeof widget.setValue === 'function') {
     widget.setValue(slug, { node, canvas: app.canvas })
   } else {

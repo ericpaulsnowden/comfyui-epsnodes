@@ -2482,6 +2482,27 @@ hotkeys). Zero matches renders a "No prompts match" row.
   `LoraLibraryApplySet` node's `set` combo options in place (no page
   reload). Server-side `VALIDATE_INPUTS` already accepts values the combo
   hasn't seen yet.
+  - **`app.refreshComboInNodes()` CLOBBERS a dynamic `values` function**
+    (owner report 2026-08-09, "the sets ... aren't updated when the main
+    list is updated"; root-caused live on the rig). It overwrites
+    `widget.options.values` with a plain frozen ARRAY, so after ANY such
+    refresh — ours or one the frontend fires for its own reasons — the
+    combo could never see a newly created set again, in EITHER renderer.
+    `sets.js` therefore WRAPS that method once and re-installs its values
+    function afterwards; the function is durable state, not one-shot
+    wiring. The CRUD event ALSO calls `refreshComboInNodes()` deliberately:
+    it is the only path that reaches the node DEFINITIONS the Vue renderer
+    builds its selects from (it refetches `/object_info`, and
+    `_slug_options()` re-reads the sets dir per call), which a module-level
+    cache cannot touch.
+  - **A combo can only display a value that is one of its options.** The
+    values function therefore always INCLUDES the widget's current value
+    (`valuesIncluding`), and `controller.js`'s Push seeds the slug into a
+    frozen array before setting it — otherwise pushing a set the list
+    hasn't caught up with (another machine's copy of a shared library, or
+    a just-created state) rendered blank and read as "the push did
+    nothing" (same owner report, second half). Listing it is honest:
+    `VALIDATE_INPUTS` accepts it and it is exactly what will execute.
 
 - **§7.5 Vue nodes ("New node design") compatibility** (owner report
   2026-07-29: "in general i feel like there is an uptick in issues using my

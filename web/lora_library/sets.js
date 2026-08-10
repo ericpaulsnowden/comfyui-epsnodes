@@ -141,6 +141,9 @@ let cachedValues = ['None']
 let lastFetchStarted = 0
 let fetchInFlight = false
 
+/** One-shot guard for `wrapComfyComboRefresh()`. */
+let comboRefreshWrapped = false
+
 async function refreshSetsCache(force = false) {
   const now = Date.now()
   if (fetchInFlight) return
@@ -156,6 +159,51 @@ async function refreshSetsCache(force = false) {
   } finally {
     fetchInFlight = false
   }
+}
+
+/** Every `LoraLibraryApplySet` node currently in the graph. */
+function applySetNodes() {
+  const nodes = app.graph?._nodes || app.graph?.nodes || []
+  return nodes.filter((node) => (node?.comfyClass ?? node?.constructor?.comfyClass) === NODE_CLASS)
+}
+
+/**
+ * Install the dynamic `values` function on one node's `set` combo.
+ *
+ * MUST be re-callable, because ComfyUI's own `app.refreshComboInNodes()`
+ * OVERWRITES `widget.options.values` with a plain frozen ARRAY (owner report
+ * 2026-08-09, root-caused live on the rig: after any such refresh — and the
+ * frontend fires them for its own reasons, e.g. the model-refresh command —
+ * this combo could never see a newly created set again, in EITHER renderer).
+ * `initSetsFreshness()` wraps that method so this runs again after every
+ * refresh; the function is therefore the durable state, not a one-shot.
+ * @param {object} node
+ */
+function installSetValues(node) {
+  const widget = (node?.widgets ?? []).find((w) => w.name === WIDGET_NAME)
+  if (!widget || !widget.options) return
+  widget.options.values = () => {
+    // Fire-and-forget: today's open shows the cache, the refetch it kicks
+    // makes the next open exact (see file header).
+    refreshSetsCache()
+    return valuesIncluding(widget.value)
+  }
+}
+
+/**
+ * The cached list, guaranteed to CONTAIN *current* — a combo cannot display
+ * a value that isn't one of its options, so a set pushed from the Controller
+ * (or picked before our list caught up, or living only on another machine's
+ * copy of a shared library) would otherwise render blank and read as "the
+ * push did nothing" (owner report 2026-08-09, the second half). The server
+ * accepts unknown values already (`VALIDATE_INPUTS` returns True, §6.2), so
+ * showing it is strictly honest: it is exactly what will execute.
+ * @param {unknown} current
+ * @returns {string[]}
+ */
+function valuesIncluding(current) {
+  if (typeof current !== 'string' || !current) return cachedValues
+  return cachedValues.includes(current) ? cachedValues : [...cachedValues, current]
 }
 
 /** Every live PLL node in the graph, labeled "<title> #<id>" — same label shape controller.js's `target` combo uses, so a Push State toast and this tag's on-canvas display both read the same identity string. */
@@ -248,15 +296,7 @@ function applyLoaderSlotVisibility(node) {
 export function attachApplySetBehavior(node) {
   const comfyClass = node?.comfyClass ?? node?.constructor?.comfyClass
   if (comfyClass !== NODE_CLASS) return
-  const widget = (node.widgets ?? []).find((w) => w.name === WIDGET_NAME)
-  if (widget && widget.options) {
-    widget.options.values = () => {
-      // Fire-and-forget: today's open shows the cache, the refetch it kicks
-      // makes the next open exact (see file header).
-      refreshSetsCache()
-      return cachedValues
-    }
-  }
+  installSetValues(node)
   // 2026-07-19c: append the `mirrors loader` tag AFTER the `set` combo wiring
   // above so it always lands after every server widget in `node.widgets`
   // (file header "append LAST" note) — this call only ADDS a widget, it
@@ -300,6 +340,51 @@ export function attachApplySetBehavior(node) {
  * open-time refetch is only the fallback for out-of-band changes (another
  * machine editing the shared library, curl, etc.). */
 export function initSetsFreshness() {
-  window.addEventListener('lora_library:sets-changed', () => refreshSetsCache(true))
+  window.addEventListener('lora_library:sets-changed', async () => {
+    await refreshSetsCache(true)
+    // ComfyUI's own refresh is the AUTHORITATIVE path: it refetches
+    // /object_info (our INPUT_TYPES re-reads the sets dir on every call, so
+    // the list comes back current) and rewrites every combo in every node
+    // AND the node definitions the Vue renderer builds its selects from.
+    // Our module cache alone cannot reach that second half.
+    await refreshCombosEverywhere()
+  })
+  wrapComfyComboRefresh()
   refreshSetsCache(true)
+}
+
+/** `app.refreshComboInNodes()`, guarded — it is async, it can throw on a
+ * flaky /object_info, and it must never take the CRUD path down with it.
+ * Re-installs our values functions afterwards (see `installSetValues`). */
+async function refreshCombosEverywhere() {
+  try {
+    if (typeof app.refreshComboInNodes === 'function') await app.refreshComboInNodes()
+  } catch (error) {
+    api.warn('refreshComboInNodes failed (combo may lag until the next open)', error)
+  }
+  for (const node of applySetNodes()) installSetValues(node)
+}
+
+/**
+ * Wrap `app.refreshComboInNodes` ONCE so our dynamic `values` functions are
+ * re-installed after ANY refresh — ours or the frontend's own (the model
+ * refresh command, an extension, a future core call). Without this the very
+ * first frontend-initiated refresh silently froze this combo for the rest of
+ * the session (owner report 2026-08-09). Wrapped, never replaced, and
+ * idempotent via a module flag so a double `setup()` cannot double-wrap.
+ */
+function wrapComfyComboRefresh() {
+  if (comboRefreshWrapped) return
+  if (typeof app.refreshComboInNodes !== 'function') return
+  comboRefreshWrapped = true
+  const original = app.refreshComboInNodes.bind(app)
+  app.refreshComboInNodes = async function (...args) {
+    const result = await original(...args)
+    try {
+      for (const node of applySetNodes()) installSetValues(node)
+    } catch (error) {
+      api.warn('re-installing set combo values after a refresh failed', error)
+    }
+    return result
+  }
 }
