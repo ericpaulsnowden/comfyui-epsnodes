@@ -609,6 +609,20 @@ step, but two fanned sweep lists of different lengths fail the Run with
 an error naming them — that's always a miswire, usually a leftover wire
 into `label` from something unrelated.
 
+**`sweep_mode` — every model × every VAE (v0.57.0).** By default the
+sweep side is one *aligned* set: step 3 runs model 3 with VAE 3 (what an
+EPS LoRA Iterator or Checkpoint Switcher emits, where they belong
+together). Set **`sweep_mode: multiply`** to treat `vae` as its own axis
+instead: a 4-model Model Switcher × a 2-VAE VAE Switcher = **8 runs**,
+model-major (each model loads once and runs both VAEs before the next
+model), with folders like `modelname_vae01/`, `modelname_vae02/`.
+`model`/`clip`/`label` still travel together as one axis. Guard rail:
+wiring more than one VAE from the *same* node as `model` (one Checkpoint
+Switcher feeding both) while in multiply mode fails the Run with an
+explanation —
+those lists are already matched per checkpoint, and crossing them would
+pair one checkpoint's model with another's VAE.
+
 `EPSNodes → EPS Run Multiplier`: run a **whole lora sweep across a whole set
 of image/prompt pairs** — 11 strengths × 8 pairs = 88 runs, grouped by
 strength, each landing in its own folder.

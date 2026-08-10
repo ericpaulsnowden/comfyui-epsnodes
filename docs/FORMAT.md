@@ -1692,11 +1692,37 @@ label, so two chained Cross Products cannot express it.
   silently clamped a 4-model sweep to 2 steps behind a console-only
   warning): length 1 BROADCASTS across the steps (one constant VAE/label
   for the whole sweep is the legitimate common case), and wired lengths
-  >1 must AGREE EXACTLY or the QUEUE FAILS naming every wired input's
-  length — a disagreement between fanned sweep lists is always a
-  miswire, never something to clamp. Pair-side mismatches (paired mode)
-  still warn and use the min. Either side empty → the §6.4
-  `[ExecutionBlocker(None)]` pattern on all seven outputs.
+  >1 must AGREE EXACTLY or the QUEUE FAILS — the error names ONLY the
+  disagreeing inputs, notes the length-1 ones as broadcasting fine
+  (v0.57.0 polish: `clip=1` listed as a suspect distracted from the real
+  `model=4` vs `vae=2`), and, when vae is a party to the disagreement,
+  points at `sweep_mode: multiply` — a disagreement between fanned sweep
+  lists is always a miswire, never something to clamp. Pair-side
+  mismatches (paired mode) still warn and use the min. Either side empty
+  → the §6.4 `[ExecutionBlocker(None)]` pattern on all seven outputs.
+- **`sweep_mode` (v0.57.0, owner ask 2026-08-09 — "You actually want 4
+  models × 2 VAEs (8 runs); each slot corresponding to the same slot is
+  not what I'm looking for", straight from hitting the v0.49.1 error with
+  a 4-model Model Switcher + 2-VAE VAE Switcher).** A combo appended
+  AFTER `pair_mode` (the tail-append law): `aligned` (DEFAULT —
+  byte-identical to every workflow saved before it existed) keeps the
+  one-axis zip above; `multiply` splits the sweep side into TWO axes —
+  `model`/`clip`/`label` stay one aligned axis (an Iterator's or
+  Checkpoint Switcher's members belong together, their >1 lengths must
+  still agree among THEMSELVES), and `vae` is an independent axis crossed
+  against it. steps = model-axis steps × vaes, MODEL-MAJOR (each model
+  loads once and runs every vae before the next model — cache-friendly).
+  `save_prefix`'s sweep level becomes `<label>_vaeNN` per combination
+  (the vae axis has no label input; it tags by position). A length-1 or
+  unwired vae makes `multiply` behave exactly like `aligned`. GUARD: in
+  multiply mode a >1 vae wired from the SAME node as any model-axis
+  member is a hard error — those lists are index-aligned by construction
+  (one entry per checkpoint), and crossing them would pair step i's
+  model with step j's vae; the check reads the prompt's own link origins
+  and degrades to no-op when the prompt is unreadable, exactly like the
+  v0.51.0 guard. Deliberately NOT auto-detected from mismatched lengths:
+  equal-length independent axes (2 models × 2 vaes) are indistinguishable
+  from an aligned pair, so the semantics are always an explicit choice.
 - **Consumed-but-unwired outputs FAIL the queue (v0.51.0, owner report
   2026-08-03: a txt2img graph consuming the `image` output with no image
   input wired "completes immediately, nothing generated").** The node

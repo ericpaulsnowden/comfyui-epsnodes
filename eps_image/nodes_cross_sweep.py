@@ -59,6 +59,22 @@ we keep the lora sweep separate?").** Two additive, §8-safe changes:
   is the new three-axis capability (sweep x images x texts) that used to
   take both nodes chained.
 
+**v0.57.0 adds ``sweep_mode`` (owner ask 2026-08-09, straight from hitting
+the v0.49.1 mismatch error with a 4-model Model Switcher and a 2-VAE VAE
+Switcher: "You actually want 4 models x 2 VAEs (8 runs) ... each slot
+corresponding to the same slot is not what I'm looking for").**
+``"aligned"`` (the DEFAULT — byte-identical to every workflow saved before
+it existed) keeps the one-axis zip; ``"multiply"`` splits the sweep side
+into TWO axes: ``model``/``clip``/``label`` stay one aligned axis (an
+Iterator's or Checkpoint Switcher's members belong together, so their >1
+lengths must still agree), and ``vae`` is an independent axis crossed
+against it — steps = model-axis steps x vaes, MODEL-MAJOR so each model
+loads once and runs every vae before the next model. ``save_prefix``'s
+sweep level becomes ``<label>_vaeNN`` per combination. A vae wired from
+the SAME node as the model axis in multiply mode is a hard error (those
+lists are aligned by construction; crossing them would mismatch
+checkpoints) — degrade-if-prompt-unreadable, like the v0.51.0 guard.
+
 ``EPSCrossProduct`` was REMOVED outright in v0.50.0 at the owner's
 explicit direction ("Delete the old cross product node. I will remove
 from old workflows -- I would rather replace with the new one") — a
@@ -88,6 +104,13 @@ _HOSTILE = re.compile(r'[\\/:*?"<>|\x00-\x1f]')
 PAIR_MODE_PAIRED = "paired"
 PAIR_MODE_MULTIPLY = "multiply"
 PAIR_MODES = [PAIR_MODE_PAIRED, PAIR_MODE_MULTIPLY]
+
+#: ``sweep_mode`` widget values (v0.57.0, owner ask 2026-08-09: "4 models x
+#: 2 VAEs (8 runs) -- each slot corresponding to the same slot is not what
+#: I'm looking for"). Same stable-identifier rule as PAIR_MODES.
+SWEEP_MODE_ALIGNED = "aligned"
+SWEEP_MODE_MULTIPLY = "multiply"
+SWEEP_MODES = [SWEEP_MODE_ALIGNED, SWEEP_MODE_MULTIPLY]
 
 
 def _as_clean_list(value: Any) -> list[Any]:
@@ -165,6 +188,28 @@ def _consumed_output_slots(prompt: Any, unique_id: Any) -> set[int]:
             ):
                 consumed.add(value[1])
     return consumed
+
+
+def _input_origin(prompt: Any, unique_id: Any, input_name: str) -> str | None:
+    """The node id feeding THIS node's *input_name*, or ``None``.
+
+    Reads the prompt's own ``[origin_id, origin_slot]`` link shape (the
+    same encoding :func:`_consumed_output_slots` scans in the other
+    direction) for this node's entry. Feeds the v0.57.0 same-origin guard;
+    anything malformed or missing degrades to ``None`` -- "origin unknown"
+    -- so the guard built on it simply stays out of the way, exactly like
+    the v0.51.0 consumed-slots guard.
+    """
+    if not isinstance(prompt, dict) or unique_id is None:
+        return None
+    node = prompt.get(str(unique_id))
+    inputs = node.get("inputs") if isinstance(node, dict) else None
+    if not isinstance(inputs, dict):
+        return None
+    link = inputs.get(input_name)
+    if isinstance(link, (list, tuple)) and len(link) == 2:
+        return str(link[0])
+    return None
 
 
 class EPSCrossSweep:
@@ -365,6 +410,29 @@ class EPSCrossSweep:
                         ),
                     },
                 ),
+                # v0.57.0, APPENDED after pair_mode: the same tail-append
+                # law the pair_mode comment above cites -- a widget added
+                # anywhere but the end would positionally swallow saved
+                # workflows' pair_mode/base_folder values.
+                "sweep_mode": (
+                    SWEEP_MODES,
+                    {
+                        "default": SWEEP_MODE_ALIGNED,
+                        "tooltip": (
+                            "How the sweep side combines with vae. "
+                            "aligned: model/clip/label/vae are one "
+                            "index-aligned set (an EPS LoRA Iterator or "
+                            "EPS Checkpoint Switcher, where step 3's "
+                            "model belongs with step 3's vae). multiply: "
+                            "model/clip/label stay one aligned axis, and "
+                            "EVERY step of it runs with EVERY vae -- e.g. "
+                            "a 4-model Model Switcher x a 2-VAE VAE "
+                            "Switcher = 8 runs, model-major so each model "
+                            "loads once. Workflows saved before this "
+                            "widget existed behave as aligned."
+                        ),
+                    },
+                ),
             },
             # v0.51.0: lets run() see its own consumers (the guard below).
             # Same hidden pair as nodes_switcher/nodes_distributor.
@@ -382,6 +450,7 @@ class EPSCrossSweep:
         base_folder: Any = "",
         vae: Any = None,
         pair_mode: Any = PAIR_MODE_PAIRED,
+        sweep_mode: Any = SWEEP_MODE_ALIGNED,
         prompt: Any = None,
         unique_id: Any = None,
     ) -> tuple[list[Any], ...]:
@@ -394,6 +463,9 @@ class EPSCrossSweep:
         vaes = _as_clean_list(vae)
         base_parts = _safe_base(_unwrap_scalar(base_folder, ""))
         multiply = _unwrap_scalar(pair_mode, PAIR_MODE_PAIRED) == PAIR_MODE_MULTIPLY
+        sweep_multiply = (
+            _unwrap_scalar(sweep_mode, SWEEP_MODE_ALIGNED) == SWEEP_MODE_MULTIPLY
+        )
 
         # `x is None` distinguishes UNWIRED (emit blockers on that output;
         # counts unaffected) from wired-but-empty (a real upstream emitted
@@ -455,27 +527,98 @@ class EPSCrossSweep:
         #   - length 1 BROADCASTS: a single constant VAE (or label) across
         #     an N-step sweep is legitimate and repeats for every step;
         #   - lengths >1 must AGREE EXACTLY or the queue FAILS, naming
-        #     every wired input's length -- a disagreement between fanned
+        #     the disagreeing inputs -- a disagreement between fanned
         #     sweep lists is always a miswire, never something to clamp.
-        multi_lengths = {length for length in wired_sweep.values() if length > 1}
+        # v0.57.0 (owner ask 2026-08-09, born from hitting exactly that
+        # error with model=4/vae=2): `sweep_mode: multiply` splits the
+        # sweep side into TWO axes -- model/clip/label stay one aligned
+        # axis (an Iterator's or Checkpoint Switcher's members belong
+        # together), and vae is an independent axis crossed against it,
+        # model-major (each model loads once, then runs every vae).
+        axis1 = {k: v for k, v in wired_sweep.items() if k != "vae"}
+        checked = axis1 if sweep_multiply else wired_sweep
+        multi_lengths = {length for length in checked.values() if length > 1}
         if len(multi_lengths) > 1:
-            listing = ", ".join(f"{k}={v}" for k, v in wired_sweep.items())
+            conflict = ", ".join(f"{k}={v}" for k, v in checked.items() if v > 1)
+            # Review 2026-08-09: length-0 is NOT "fine" -- a wired-but-empty
+            # list doesn't broadcast, it collapses the whole node to the
+            # blocker path, so it gets its own honest clause instead of
+            # being lumped in with the harmless length-1 broadcasts.
+            fine_items = [f"{k}={v}" for k, v in checked.items() if v == 1]
+            empty_items = [f"{k}={v}" for k, v in checked.items() if v == 0]
+            notes = []
+            if fine_items:
+                plural = len(fine_items) > 1
+                notes.append(
+                    f"the length-1 input{'s' if plural else ''} -- "
+                    f"{', '.join(fine_items)} -- broadcast{'' if plural else 's'} "
+                    f"fine and {'are' if plural else 'is'} not the problem"
+                )
+            if empty_items:
+                plural = len(empty_items) > 1
+                notes.append(
+                    f"{', '.join(empty_items)} {'are' if plural else 'is'} wired "
+                    "but EMPTY, which would block the whole node on its own"
+                )
+            fine_note = f" ({'; '.join(notes)})." if notes else "."
+            group = "model/clip/label" if sweep_multiply else "model/clip/label (and vae)"
+            # The multiply hint ONLY when vae is actually a party to the
+            # disagreement (review 2026-08-09: for a model-vs-label conflict
+            # the hint was wrong advice -- multiply mode still checks the
+            # model axis, so flipping the widget re-fails identically).
+            vae_party = not sweep_multiply and checked.get("vae", 0) > 1
+            vae_hint = (
+                " To run EVERY model with EVERY vae instead, set sweep_mode "
+                "to multiply."
+                if vae_party
+                else ""
+            )
             raise ValueError(
                 f"EPS Run Multiplier: the sweep-side inputs disagree about how many "
-                f"steps there are ({listing}). Wire model/clip/label (and vae) from "
+                f"steps there are ({conflict}). Wire {group} from "
                 f"the SAME node (EPS LoRA Iterator or EPS Checkpoint Switcher), and "
-                f"unwire any of them that came from somewhere else -- a length-1 "
-                f"input is fine (it repeats for every step), mismatched lists are "
-                f"not."
+                f"unwire any of them that came from somewhere else"
+                f"{fine_note}{vae_hint}"
             )
+        # In multiply mode a vae wired FROM THE SAME NODE as the model axis
+        # (one Checkpoint Switcher feeding both) is already index-aligned by
+        # construction -- crossing it against itself would pair checkpoint
+        # A's model with checkpoint B's vae. Same degrade posture as the
+        # v0.51.0 guard: an unreadable prompt just skips the check.
+        if sweep_multiply and vae_wired and len(vaes) > 1:
+            vae_origin = _input_origin(
+                _unwrap_hidden(prompt), _unwrap_hidden(unique_id), "vae"
+            )
+            if vae_origin is not None:
+                for axis1_input in ("model", "clip", "label"):
+                    origin = _input_origin(
+                        _unwrap_hidden(prompt), _unwrap_hidden(unique_id), axis1_input
+                    )
+                    if origin is not None and origin == vae_origin:
+                        raise ValueError(
+                            "EPS Run Multiplier: sweep_mode is multiply, but vae "
+                            f"and {axis1_input} are wired from the SAME node -- "
+                            "those lists are already index-aligned (one entry per "
+                            "checkpoint/step), and crossing them would pair one "
+                            "step's model with a DIFFERENT step's vae. Use "
+                            "sweep_mode aligned for that wiring, or wire vae from "
+                            "an independent source (e.g. an EPS VAE Switcher) to "
+                            "multiply against."
+                        )
         # No sweep at all = ONE null step (a pure pair multiplier -- Cross
         # Product's old job); save_prefix then omits the sweep-label level.
         # A wired-but-EMPTY sweep list still collapses steps to 0 (the
-        # whole-node blocker path below), same as before.
+        # whole-node blocker path below), same as before. In multiply mode
+        # steps = model-axis steps x vae steps; an unwired vae (or aligned
+        # mode) leaves the math exactly as it was.
+        vae_axis_len = len(vaes) if (sweep_multiply and vae_wired) else 1
         if not sweep_wired:
             steps = 1
         elif 0 in wired_sweep.values():
             steps = 0
+        elif sweep_multiply:
+            axis1_len = next(iter(multi_lengths), 1)
+            steps = axis1_len * vae_axis_len
         else:
             steps = next(iter(multi_lengths), 1)
 
@@ -540,22 +683,33 @@ class EPSCrossSweep:
 
         out: dict[str, list[Any]] = {k: [] for k in self.RETURN_NAMES}
         for s in range(steps):  # strength-major: sweep step is the OUTER loop
+            # v0.57.0: in multiply mode, s decomposes into (model-axis step,
+            # vae step), model-major -- each model runs all its vaes before
+            # the next model loads. Aligned mode keeps both indices = s.
+            if sweep_multiply and vae_axis_len > 1:
+                a1_idx, v_idx = divmod(s, vae_axis_len)
+            else:
+                a1_idx = v_idx = s
             label_component = (
-                (_safe_component(labels[_sweep_index(len(labels), s)]) if label_wired else "")
-                or f"step_{s + 1:02d}"
+                (_safe_component(labels[_sweep_index(len(labels), a1_idx)]) if label_wired else "")
+                or f"step_{a1_idx + 1:02d}"
             )
+            if sweep_multiply and vae_axis_len > 1:
+                # One sortable folder level per (model, vae) combination --
+                # the vae axis has no label input, so it tags by position.
+                label_component = f"{label_component}_vae{v_idx + 1:02d}"
             for p, (pair_image, pair_text, pair_name) in enumerate(pair_rows):
                 pair_component = _safe_component(pair_name) or f"pair_{p + 1:02d}"
                 out["model"].append(
-                    models[_sweep_index(len(models), s)] if model_wired else run_blocker
+                    models[_sweep_index(len(models), a1_idx)] if model_wired else run_blocker
                 )
                 out["clip"].append(
-                    clips[_sweep_index(len(clips), s)] if clip_wired else run_blocker
+                    clips[_sweep_index(len(clips), a1_idx)] if clip_wired else run_blocker
                 )
                 out["image"].append(run_blocker if text_only else pair_image)
                 out["text"].append(pair_text)
                 out["label"].append(
-                    labels[_sweep_index(len(labels), s)] if label_wired else run_blocker
+                    labels[_sweep_index(len(labels), a1_idx)] if label_wired else run_blocker
                 )
                 # No sweep wired at all -> no sweep-label folder level: the
                 # save path is just <base>/<pair>, exactly what a plain
@@ -567,6 +721,6 @@ class EPSCrossSweep:
                 )
                 out["save_prefix"].append("/".join(prefix_parts))
                 out["vae"].append(
-                    vaes[_sweep_index(len(vaes), s)] if vae_wired else run_blocker
+                    vaes[_sweep_index(len(vaes), v_idx)] if vae_wired else run_blocker
                 )
         return tuple(out[k] for k in self.RETURN_NAMES)

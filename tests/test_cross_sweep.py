@@ -188,15 +188,19 @@ class TestClassShape:
         assert set(spec["required"]) == {"text"}
         assert set(spec["optional"]) == {
             "model", "clip", "label", "name", "base_folder", "image", "vae", "pair_mode",
+            "sweep_mode",
         }
         assert spec["optional"]["label"][1]["forceInput"] is True
         assert spec["required"]["text"][1]["forceInput"] is True
         assert spec["optional"]["name"][1]["forceInput"] is True
-        # pair_mode must stay the LAST widget: base_folder's saved value
-        # restores positionally (see INPUT_TYPES' own comment).
+        # Widget tail order is FROZEN once shipped: widgets_values restores
+        # positionally, so every new widget appends at the END (see
+        # INPUT_TYPES' own comments). v0.49.0 tail was ...base_folder,
+        # pair_mode; v0.57.0 appended sweep_mode after pair_mode.
         optional_keys = list(spec["optional"])
-        assert optional_keys.index("pair_mode") == len(optional_keys) - 1
-        assert optional_keys.index("base_folder") == len(optional_keys) - 2
+        assert optional_keys.index("sweep_mode") == len(optional_keys) - 1
+        assert optional_keys.index("pair_mode") == len(optional_keys) - 2
+        assert optional_keys.index("base_folder") == len(optional_keys) - 3
         assert spec["optional"]["pair_mode"][0] == ["paired", "multiply"]
         assert spec["optional"]["pair_mode"][1]["default"] == "paired"
 
@@ -438,3 +442,154 @@ class TestConsumedButUnwiredGuard:
     def test_no_prompt_available_stays_out_of_the_way(self, fake_execution_blocker) -> None:
         *_, vaes = run()  # direct call, no prompt/unique_id -- exactly the old behavior
         assert all(isinstance(v, fake_execution_blocker) for v in vaes)
+
+
+class TestSweepModeMultiply:
+    """v0.57.0 `sweep_mode` (owner ask 2026-08-09: 4 models x 2 VAEs = 8
+    runs): "multiply" crosses the model/clip/label axis against the vae
+    axis, model-major; "aligned" (the default) is byte-identical to before
+    the widget existed."""
+
+    def test_widget_defaults_to_aligned(self) -> None:
+        spec = EPSCrossSweep.INPUT_TYPES()
+        values, options = spec["optional"]["sweep_mode"]
+        assert values == ["aligned", "multiply"]
+        assert options["default"] == "aligned"
+
+    def test_four_models_times_two_vaes_is_eight_model_major_steps(self) -> None:
+        outputs = run(
+            model=["m0", "m1", "m2", "m3"],
+            clip=["c"],
+            label=["A", "B", "C", "D"],
+            vae=["v0", "v1"],
+            image=["i"],
+            text=["t"],
+            sweep_mode="multiply",
+        )
+        models, clips, _images, _texts, prefixes, labels, vaes = (
+            outputs[0], outputs[1], outputs[2], outputs[3], outputs[4], outputs[5], outputs[6]
+        )
+        assert models == ["m0", "m0", "m1", "m1", "m2", "m2", "m3", "m3"]
+        assert vaes == ["v0", "v1"] * 4
+        assert clips == ["c"] * 8  # length-1 broadcasts across every combination
+        assert labels == ["A", "A", "B", "B", "C", "C", "D", "D"]
+        assert prefixes[:4] == [
+            "A_vae01/pair_01", "A_vae02/pair_01", "B_vae01/pair_01", "B_vae02/pair_01"
+        ]
+
+    def test_vae_length_one_multiplies_to_the_plain_sweep(self) -> None:
+        aligned = run(vae=["v"], sweep_mode="aligned")
+        multiplied = run(vae=["v"], sweep_mode="multiply")
+        assert aligned == multiplied
+        assert len(multiplied[0]) == 4  # 2 steps x 2 pairs, unchanged
+
+    def test_vae_unwired_multiply_matches_aligned(self) -> None:
+        assert run(sweep_mode="multiply")[4] == run(sweep_mode="aligned")[4]
+
+    def test_axis1_disagreement_still_fails_in_multiply(self) -> None:
+        with pytest.raises(ValueError) as excinfo:
+            run(
+                model=["m0", "m1", "m2", "m3"],
+                label=["A", "B"],
+                vae=["v0", "v1"],
+                sweep_mode="multiply",
+            )
+        message = str(excinfo.value)
+        assert "model=4" in message and "label=2" in message
+        assert "vae=2" not in message  # the vae axis is legitimately independent here
+
+    def test_aligned_error_names_only_conflicts_and_hints_multiply(self) -> None:
+        # The owner's exact 2026-08-09 report shape: model=4, clip=1, vae=2.
+        with pytest.raises(ValueError) as excinfo:
+            run(
+                model=["m0", "m1", "m2", "m3"],
+                clip=["c"],
+                label=None,
+                vae=["v0", "v1"],
+            )
+        message = str(excinfo.value)
+        assert "model=4, vae=2" in message  # the actual disagreement, alone
+        assert "clip=1" not in message.split("--")[0]  # not listed as a suspect
+        assert "broadcasts fine" in message and "clip=1" in message
+        assert "sweep_mode" in message and "multiply" in message  # the discovery hint
+
+    def test_same_origin_vae_is_refused_in_multiply(self) -> None:
+        prompt = {
+            "5": {
+                "class_type": "EPSCrossSweep",
+                "inputs": {"model": ["2", 0], "clip": ["2", 1], "vae": ["2", 2]},
+            },
+        }
+        with pytest.raises(ValueError) as excinfo:
+            run(vae=["v0", "v1"], sweep_mode="multiply", prompt=[prompt], unique_id=["5"])
+        assert "SAME node" in str(excinfo.value)
+
+    def test_independent_origin_vae_passes_the_guard(self) -> None:
+        prompt = {
+            "5": {
+                "class_type": "EPSCrossSweep",
+                "inputs": {"model": ["2", 0], "clip": ["2", 1], "vae": ["3", 0]},
+            },
+        }
+        outputs = run(vae=["v0", "v1"], sweep_mode="multiply", prompt=[prompt], unique_id=["5"])
+        assert len(outputs[0]) == 8  # 2 models x 2 vaes x 2 pairs
+
+    def test_guard_degrades_without_a_prompt(self) -> None:
+        outputs = run(vae=["v0", "v1"], sweep_mode="multiply")
+        assert len(outputs[0]) == 8
+
+    def test_wired_empty_vae_still_blocks_the_whole_node(
+        self, fake_execution_blocker: type
+    ) -> None:
+        outputs = run(vae=[], sweep_mode="multiply")
+        for out in outputs:
+            assert len(out) == 1
+            assert isinstance(out[0], fake_execution_blocker)
+
+    def test_only_vae_wired_multiply_steps_per_vae(self) -> None:
+        outputs = run(
+            model=None, clip=None, label=None,
+            vae=["v0", "v1", "v2"],
+            image=["i"], text=["t"],
+            sweep_mode="multiply",
+        )
+        assert outputs[6] == ["v0", "v1", "v2"]
+        assert outputs[4] == [
+            "step_01_vae01/pair_01", "step_01_vae02/pair_01", "step_01_vae03/pair_01"
+        ]
+
+    def test_input_is_list_wrapped_widget_form(self) -> None:
+        # Real /prompt execution wraps EVERY input in a list (INPUT_IS_LIST)
+        # -- the widget arrives as ["multiply"], not "multiply".
+        outputs = run(
+            model=["m0", "m1"], clip=["c"], label=["A", "B"],
+            vae=["v0", "v1"], image=["i"], text=["t"],
+            sweep_mode=["multiply"],
+        )
+        assert len(outputs[0]) == 4  # 2 models x 2 vaes x 1 pair
+        assert outputs[0] == ["m0", "m0", "m1", "m1"]
+
+    def test_hint_only_when_vae_is_a_party(self) -> None:
+        # Review 2026-08-09: for a model-vs-label conflict the multiply hint
+        # was wrong advice (multiply still checks the model axis).
+        with pytest.raises(ValueError) as excinfo:
+            run(model=["m"] * 4, label=["A", "B"], vae=None)
+        assert "sweep_mode" not in str(excinfo.value)
+        with pytest.raises(ValueError) as excinfo:
+            run(model=["m"] * 4, clip=["c"], label=None, vae=["v0", "v1"])
+        assert "set sweep_mode" in str(excinfo.value)
+
+    def test_wired_empty_input_is_not_called_fine(self) -> None:
+        # Review 2026-08-09: vae=[] landed in the "broadcast fine" bucket --
+        # but a wired-empty list blocks the whole node, the opposite of fine.
+        with pytest.raises(ValueError) as excinfo:
+            run(model=["m"] * 4, clip=["c0", "c1"], label=None, vae=[])
+        message = str(excinfo.value)
+        assert "vae=0" in message
+        assert "wired but EMPTY" in message
+        assert "vae=0 -- broadcast" not in message
+
+    def test_fine_note_grammar_singular(self) -> None:
+        with pytest.raises(ValueError) as excinfo:
+            run(model=["m"] * 4, clip=["c"], label=None, vae=["v0", "v1"])
+        assert "broadcasts fine and is not the problem" in str(excinfo.value)
