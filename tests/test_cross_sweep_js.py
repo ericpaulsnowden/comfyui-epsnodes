@@ -1434,3 +1434,19 @@ def test_entry_file_wires_init_and_attach(source: str) -> None:
     assert "import * as crossSweep from './eps_image/cross_sweep.js'" in entry
     assert "safely('crossSweep.init', () => crossSweep.init?.())" in entry
     assert "safely('crossSweep.attach', () => crossSweep.attach?.(node))" in entry
+
+
+def test_readout_sizes_itself_the_compact_standalone_way(source: str) -> None:
+    """Owner report 2026-08-09 ("cropped ... about 1/3 the space it needs
+    so it's not legible"): a COMPACT STANDALONE addDOMWidget is not sized
+    by getMinHeight/getMaxHeight alone -- the row collapses to ~7px and
+    clips the text. The cprb v0.5.0 root-cause and its exact fix: size
+    through computeSize + computedHeight + an explicit element height.
+    (The picker/notebook panels never hit this because they are FILL
+    widgets riding the node's spare height.)"""
+    body = _function_body(source, "attach(node)")
+    assert "root.style.height = `${READOUT_HEIGHT}px`" in body
+    assert "domWidget.computeSize = (width) => [width, READOUT_HEIGHT]" in body
+    assert "domWidget.computedHeight = READOUT_HEIGHT" in body
+    # The belt-and-braces hints stay for renderers that DO honor them.
+    assert "getMinHeight: () => READOUT_HEIGHT" in body

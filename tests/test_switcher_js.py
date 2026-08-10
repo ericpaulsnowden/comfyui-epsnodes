@@ -394,3 +394,27 @@ def test_switcher_js_has_no_window_level_listeners_to_convert(switcher_source: s
     being reviewed for capture-phase (`{ capture: true }` + matching
     removeEventListener flag)."""
     assert "window.addEventListener(" not in switcher_source
+
+
+def test_row_toggles_share_one_aligned_column(switcher_source: str) -> None:
+    """Owner ask 2026-08-09 ("keep the checkboxes aligned with each other
+    ... aligned with the checkbox furthest to the right, not randomly
+    spaced based on the string length"): drawRowToggles used to compute
+    boxX PER ROW from that row's own displayed-text width, so mixed-length
+    socket names staggered. It now takes the MAX required x across the
+    drawn rows and draws every box there -- the same one-aligned-column fix
+    distributor.js already carries for its output side (its own
+    test_mixed_length_labels_share_one_aligned_column). Source-text pin:
+    drawRowToggles is canvas-bound, so there is no harness to drive it.
+
+    Taking the max is SAFE, not a compromise: each row's requiredX exists
+    only to clear litegraph's own input hit-region for THAT row, and the
+    max is >= every row's own requirement."""
+    body = _function_body(switcher_source, "drawRowToggles(node, ctx)")
+    assert "requiredX" in body
+    assert "if (row.requiredX > boxX) boxX = row.requiredX" in body
+    # ONE boxX resolved before the draw loop, then reused for every row.
+    draw_call = body.index("drawToggleBox(ctx, boxX, boxY, ROW_BOX")
+    assert body.index("if (row.requiredX > boxX)") < draw_call
+    # The per-row recompute inside the draw loop is what regressed here.
+    assert "const boxX = Math.max(inputHitWidth" not in body

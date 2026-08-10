@@ -1137,12 +1137,24 @@ export function attach(node) {
     // Display-only: nothing enters the API prompt OR the workflow file --
     // picker.js attachDomWidget's exact two-flag block (§8-safe: a widget
     // value here would positionally shift widgets_values on downgrade).
+    // A COMPACT STANDALONE DOM widget must size itself through computeSize
+    // + computedHeight + an explicit element height -- getMinHeight/
+    // getMaxHeight ALONE are ignored for this shape and the row collapses
+    // to ~7px with the text clipped (owner report 2026-08-09: "cropped ...
+    // about 1/3 the space it needs"). This is the exact cprb v0.5.0
+    // root-cause: the notebook/picker panels never hit it because they are
+    // FILL widgets riding the node's spare height. getMinHeight/
+    // getMaxHeight stay as the belt-and-braces for renderers that DO honor
+    // them.
+    root.style.height = `${READOUT_HEIGHT}px`
     const domWidget = node.addDOMWidget(READOUT_WIDGET_NAME, READOUT_WIDGET_TYPE, root, {
       hideOnZoom: true,
       serialize: false, // excludes from the API prompt (utils/executionUtil.ts)
       getMinHeight: () => READOUT_HEIGHT,
       getMaxHeight: () => READOUT_HEIGHT
     })
+    domWidget.computeSize = (width) => [width, READOUT_HEIGHT]
+    domWidget.computedHeight = READOUT_HEIGHT
     // Excludes from the workflow JSON -- a DIFFERENT flag from
     // options.serialize above (notebook.js's attachDomWidget() header
     // explains why both exist).

@@ -667,7 +667,16 @@ per-input toggle + toggle-all header + N-enabled→N-runs fan-out.
   backend kwargs/serialization contract, and `toggles` keys stay names).
   Labels persist with the workflow (the serialized inputs array carries
   `label`; verify `configure()` restores it). The per-row toggle box measures
-  the DISPLAYED label so a long label never collides with its hit-region.
+  the DISPLAYED label so a long label never collides with its hit-region —
+  but every drawn box then uses the **LONGEST row's** required x, so the
+  boxes form ONE ALIGNED COLUMN instead of a per-row stagger (owner ask
+  2026-08-09: "keep the checkboxes aligned with each other … aligned with
+  the checkbox furthest to the right, not randomly spaced based on the
+  string length"; §6.11's Distributor already did this on its output side
+  from the same ask on 2026-07-27). Aligning is safe rather than a
+  compromise: the max is ≥ every row's own clearance requirement. The
+  `Toggle All` header box is a full-width WIDGET row, deliberately
+  left-anchored and never string-dependent, so it is outside this column.
   Renaming to an empty string resets the label back to the socket name.
 - **Output:** single `IMAGE` declared `OUTPUT_IS_LIST` — emits the ENABLED
   images in slot order; downstream runs once per enabled image (N enabled →
@@ -1729,7 +1738,14 @@ label, so two chained Cross Products cannot express it.
   - **On-node readout (`web/eps_image/cross_sweep.js`, pre-queue
     ESTIMATE):** a display-only DOM line (no widget, `serialize: false` —
     nothing enters the workflow file, §8-safe) showing `Runs: N — S sweep
-    step(s) × P pair(s)` with the breakdown, recomputed from the GRAPH:
+    step(s) × P pair(s)`. **A COMPACT STANDALONE `addDOMWidget` must size
+    itself through `computeSize` + `computedHeight` + an explicit
+    `element.style.height`** — `getMinHeight`/`getMaxHeight` alone are
+    ignored for this shape and the row collapses to ~7px with the text
+    clipped (owner report 2026-08-09: "cropped … about 1/3 the space it
+    needs"; the same cprb v0.5.0 root cause. The §7.2 notebook/picker
+    panels never hit it because they are FILL widgets riding the node's
+    spare height). Recomputed from the GRAPH:
     the multiplier's own `pair_mode`/`sweep_mode` widgets plus an
     upstream traversal that knows this pack's fan-out nodes by
     `comfyClass` — the four §6.4/§6.4b switchers (enabled-and-wired

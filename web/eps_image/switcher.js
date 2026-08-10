@@ -692,7 +692,22 @@ function drawRowToggles(node, ctx) {
   if (node.flags?.collapsed) return
   if (typeof node.getConnectionPos !== 'function') return
 
-  const rects = []
+  // ONE ALIGNED COLUMN (owner ask 2026-08-09: "keep the checkboxes aligned
+  // with each other ... aligned with the checkbox furthest to the right,
+  // not randomly spaced based on the string length") -- the same fix
+  // distributor.js's drawRowToggles already carries for its output side
+  // (owner's 2026-07-27 ask there; see its comment). Pass 1 takes the
+  // LONGEST drawn row's required x, pass 2 draws every box at it, so mixed
+  // -length socket names give a straight edge instead of a ragged stagger.
+  //
+  // Per-row x is what has to clear litegraph's own input hit-region:
+  // getNodeInputOnPos sizes that region off the row's DISPLAYED text
+  // (`label ?? localized_name ?? name` -- FORMAT.md §6.4 "Renamable
+  // rows"), so a renamed row with a long label reserves more width. Taking
+  // the MAX satisfies every row's clearance at once (it is only ever
+  // larger than each row's own requirement), which is why aligning is safe
+  // here rather than a compromise.
+  const drawn = []
   for (const entry of imageInputEntries(node)) {
     if (!entry.connected) continue
     let pos
@@ -702,18 +717,24 @@ function drawRowToggles(node, ctx) {
       console.warn(PREFIX, 'getConnectionPos failed for', entry.name, error)
       continue
     }
-    const localY = pos[1] - node.pos[1]
-    // getNodeInputOnPos's reserved width for THIS row's own DISPLAYED text
-    // (FORMAT.md §6.4 "Renamable rows"): litegraph draws `label || name` and
-    // measureSlots.ts's getNodeInputOnPos sizes ITS OWN hit-region off the
-    // same `label ?? localized_name ?? name` precedence, so a renamed row
-    // with a long label needs the same width bump here, or the toggle box
-    // would start drawing on top of litegraph's now-wider input hit-zone.
     const inputHitWidth = 20 + displayText(entry.input).length * 7
-    const boxX = Math.max(inputHitWidth + ROW_LABEL_PAD, ROW_MIN_X)
-    const boxY = localY - ROW_BOX / 2
-    drawToggleBox(ctx, boxX, boxY, ROW_BOX, isRowEnabled(node, entry.name), false)
-    rects.push({ name: entry.name, x: boxX, y: boxY, w: ROW_BOX, h: ROW_BOX })
+    drawn.push({
+      entry,
+      localY: pos[1] - node.pos[1],
+      requiredX: Math.max(inputHitWidth + ROW_LABEL_PAD, ROW_MIN_X)
+    })
+  }
+
+  let boxX = ROW_MIN_X
+  for (const row of drawn) {
+    if (row.requiredX > boxX) boxX = row.requiredX
+  }
+
+  const rects = []
+  for (const row of drawn) {
+    const boxY = row.localY - ROW_BOX / 2
+    drawToggleBox(ctx, boxX, boxY, ROW_BOX, isRowEnabled(node, row.entry.name), false)
+    rects.push({ name: row.entry.name, x: boxX, y: boxY, w: ROW_BOX, h: ROW_BOX })
   }
   node.__epsSwitcherRowRects = rects
 }
