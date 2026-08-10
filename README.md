@@ -229,13 +229,23 @@ favorites or recently-used anywhere in the ecosystem.
   `filename_prefix`. An empty or all-off selection just passes through —
   never an error. A selection saved on Windows resolves on macOS/Linux
   (same separator-insensitive matching as saved sets).
-- **Send to loader** (needs [rgthree-comfy](https://github.com/rgthree/rgthree-comfy),
-  optional): a row under the Selected list targets any Power Lora Loader
-  in the graph and writes your picked loras straight into its rows —
-  on/off and strengths included — the same widget-level technique the
-  Lora Loader State Controller already uses. Without rgthree the row
-  just says so; nothing else needs it. It never guesses a target: delete
-  the loader you'd picked and Send refuses until you pick again.
+- **Send to loader**: a row under the Selected list targets any
+  [rgthree Power Lora Loader](https://github.com/rgthree/rgthree-comfy)
+  **or [DaSiWa Advanced LoRA
+  Loader](https://github.com/darksidewalker/ComfyUI-DaSiWa-Nodes)** in
+  the graph and writes your picked loras straight in — on/off and
+  strengths included. Neither pack is required; with neither installed
+  the row just says so. It never guesses a target: delete the loader
+  you'd picked and Send refuses until you pick again. DaSiWa specifics,
+  always said out loud, never silent: it stores ONE strength per lora
+  (a row whose clip strength differs sends the model strength, and the
+  toast names it), strengths clamp to its ±5 range (also named), and
+  re-sending preserves the video/audio (`vs`/`as`) multipliers you've
+  tuned in DaSiWa's own UI for loras already in the loader.
+- **Already-works-by-wire:** stackers that take a `LORA_STACK` input —
+  Efficiency's LoRA Stacker, Easy-Use's loraStack, Comfyroll's CR LoRA
+  Stack — need no Send support at all: wire this node's `lora_stack`
+  output straight in.
 - **Search, thumbnails, trigger words, ordering:** a search field above
   the browser filters as you type (every word must match somewhere in the
   path, scoped to your current folder; Escape clears); loras with a

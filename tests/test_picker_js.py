@@ -41,6 +41,7 @@ PICKER_JS = REPO_ROOT / "web" / "lora_library" / "picker.js"
 API_JS = REPO_ROOT / "web" / "lora_library" / "api.js"
 VERSION_JS = REPO_ROOT / "web" / "lora_library" / "version.js"
 BRIDGE_JS = REPO_ROOT / "web" / "lora_library" / "pll_bridge.js"
+DASIWA_JS = REPO_ROOT / "web" / "lora_library" / "dasiwa_bridge.js"
 ENTRY_JS = REPO_ROOT / "web" / "lora_library.js"
 
 NODE = shutil.which("node")
@@ -214,9 +215,12 @@ def picker_api(tmp_path_factory: pytest.TempPathFactory) -> dict:
     # ComfyUI scripts exactly as test_checkpoint_switcher_js.py stubs them.
     shutil.copyfile(API_JS, module_dir / "api.js")
     shutil.copyfile(VERSION_JS, module_dir / "version.js")
-    # ...and, since M2, `./pll_bridge.js` (tested in its own right by
-    # tests/test_pll_bridge_js.py -- here it only has to resolve).
+    # ...and, since M2, `./pll_bridge.js` -- plus, since M4,
+    # `./dasiwa_bridge.js` (each tested in its own right by
+    # tests/test_pll_bridge_js.py / tests/test_dasiwa_bridge_js.py -- here
+    # they only have to resolve).
     shutil.copyfile(BRIDGE_JS, module_dir / "pll_bridge.js")
+    shutil.copyfile(DASIWA_JS, module_dir / "dasiwa_bridge.js")
 
     scripts = layout / "scripts"
     scripts.mkdir(parents=True, exist_ok=True)
@@ -683,7 +687,10 @@ class TestSendToLoaderM2:
         # path. Probe failure marks the button blocked (styled, message in
         # title + status span) while the click stays live and re-checks.
         body = _function_body(source, "renderSend(state)")
-        assert "const probe = pll.probePll(resolvePllTarget(state))" in body
+        # M4: the probe is registry-dispatched (family-agnostic null legs in
+        # probeSendTarget, per-family gates in the bridges) -- same render-
+        # time probe, same blocked-not-disabled posture.
+        assert "const probe = probeSendTarget(resolveSendTarget(state))" in body
         gated = body[body.index("if (!probe.ok)"):]
         assert "sendBtn.classList.add('eps-lp-btn-blocked')" in gated
         assert "sendBtn.disabled = true" not in gated[:gated.index("} else if")]
@@ -710,13 +717,14 @@ class TestSendToLoaderM2:
     def test_click_reprobes_then_sends_all_rows(self, source: str) -> None:
         """The target may have been deleted since render -- the click
         re-resolves by id, re-probes, and toasts the failure; success
-        writes ALL rows (`on` preserved, §6.13) through pll_bridge.js."""
+        writes ALL rows (`on` preserved, §6.13) through the target's own
+        family adapter (M4: registry-dispatched, was pll.writeRowsToPll)."""
         body = _function_body(source, "sendToPll(state)")
-        assert "const node = resolvePllTarget(state)" in body
-        assert "const probe = pll.probePll(node)" in body
+        assert "const node = resolveSendTarget(state)" in body
+        assert "const probe = probeSendTarget(node)" in body
         assert "toast('error', 'EPS LoRA Picker', probe.message)" in body
         assert "const rows = state.selection.loras" in body
-        assert "pll.writeRowsToPll(node, rows)" in body
+        assert "SEND_ADAPTERS[node.type].write(node, rows)" in body
 
     def test_send_success_toast_names_count_and_target(self, source: str) -> None:
         expected = "`Sent ${rows.length} lora(s) to ${node.title || node.type} #${node.id}`"
@@ -787,6 +795,7 @@ def m3_api(tmp_path_factory: pytest.TempPathFactory) -> dict:
     shutil.copyfile(API_JS, module_dir / "api.js")
     shutil.copyfile(VERSION_JS, module_dir / "version.js")
     shutil.copyfile(BRIDGE_JS, module_dir / "pll_bridge.js")
+    shutil.copyfile(DASIWA_JS, module_dir / "dasiwa_bridge.js")
 
     scripts = layout / "scripts"
     scripts.mkdir(parents=True, exist_ok=True)
@@ -1049,3 +1058,110 @@ class TestM3ReviewFixes:
             "finishFavoriteDrag(state, drag)",
         ):
             assert "invalidateInFlightLoad(state)" in _function_body(source, fn), fn
+
+
+# --------------------------------------- §6.13 M4: send-adapter TARGET REGISTRY
+
+
+def _send_adapters_block(source: str) -> str:
+    """The SEND_ADAPTERS object literal, up to its closing brace at column 0."""
+    start = source.index("const SEND_ADAPTERS = {")
+    end = source.index("\n}\n", start)
+    return source[start:end]
+
+
+class TestSendRegistryM4:
+    """§6.13 M4 pins: the Send row's candidates come from a comfyClass-keyed
+    adapter registry (Lora-Manager's NODE_EXTRACTORS pattern) with two
+    entries -- the M2 rgthree adapter (pll_bridge.js, unchanged) and
+    dasiwa_bridge.js -- merged ascending id ACROSS families; the
+    no-target-in-graph message names both loaders; single-candidate
+    auto-adopt spans both families in the render AND click paths; a lossy
+    DaSiWa send appends loud notes to the success toast. Every M2
+    never-guess pin above still passes against the registry-driven code --
+    only its dispatch literals changed. dasiwa_bridge.js itself is covered
+    by tests/test_dasiwa_bridge_js.py."""
+
+    def test_registry_maps_both_loader_types(self, source: str) -> None:
+        """comfyClass-keyed: each bridge's exported type constant is the key,
+        so the registry can never drift from what find() returns."""
+        assert "import * as dasiwa from './dasiwa_bridge.js'" in source
+        registry = _send_adapters_block(source)
+        assert "[pll.POWER_LORA_LOADER_TYPE]: {" in registry
+        assert "[dasiwa.DASIWA_LOADER_TYPE]: {" in registry
+
+    def test_registry_entries_carry_the_full_adapter_surface(self, source: str) -> None:
+        """Both entries: {label, find, probe, write} -- the whole per-family
+        surface the row plumbing dispatches through."""
+        registry = _send_adapters_block(source)
+        for key in ("label:", "find:", "probe:", "write:"):
+            assert registry.count(key) == 2, key
+        assert "find: pll.findPllNodes" in registry
+        assert "write: pll.writeRowsToPll" in registry
+        assert "find: dasiwa.findDasiwaNodes" in registry
+        assert "write: dasiwa.writeRowsToDasiwa" in registry
+
+    def test_candidates_merge_across_families_ascending_id(self, source: str) -> None:
+        body = _function_body(source, "findSendCandidates()")
+        assert "Object.values(SEND_ADAPTERS)" in body
+        assert "adapter.find()" in body
+        assert "sort((a, b) => a.id - b.id)" in body
+
+    def test_no_target_message_is_family_agnostic_naming_both_loaders(self, source: str) -> None:
+        """The M2 message shape, composed from every adapter's label -- so it
+        names 'Power Lora Loader (rgthree)' and 'DaSiWa Advanced LoRA
+        Loader' today and any third family automatically."""
+        registry = _send_adapters_block(source)
+        assert "label: 'Power Lora Loader (rgthree)'" in registry
+        assert "label: 'DaSiWa Advanced LoRA Loader'" in registry
+        assert ".map((adapter) => adapter.label)" in source
+        assert "node in this graph yet — add one, then pick it above.`" in source
+
+    def test_probe_dispatches_by_comfy_class_with_family_agnostic_null_legs(
+        self, source: str
+    ) -> None:
+        """M2's two null-target codes now span both families; a real
+        candidate gets its own family's §6.3-style probe."""
+        body = _function_body(source, "probeSendTarget(node)")
+        assert "SEND_ADAPTERS[node.type]" in body
+        assert "'no-target-selected'" in body
+        assert "'no-target-in-graph'" in body
+        assert "adapter.probe(node)" in body
+
+    def test_target_resolution_spans_both_families(self, source: str) -> None:
+        body = _function_body(source, "resolveSendTarget(state)")
+        assert "findSendCandidates().find((node) => String(node.id) === state.pllTargetId)" in body
+
+    def test_auto_adopt_universe_is_cross_family_in_render_and_click_paths(
+        self, source: str
+    ) -> None:
+        """§6.13 M4: "single-candidate auto-adopt means a single candidate
+        ACROSS both families" -- both the combo rebuild and the click-time
+        late-adopt draw from the merged candidate list."""
+        render = _function_body(source, "renderSend(state)")
+        assert "const fresh = findSendCandidates()" in render
+        send = _function_body(source, "sendToPll(state)")
+        assert "const candidates = findSendCandidates()" in send
+
+    def test_dasiwa_send_toast_appends_the_loud_lossy_notes(self, source: str) -> None:
+        """Success toast unchanged for rgthree (its write returns nothing);
+        a DaSiWa write's {flattened, clamped} basenames append the two owner-
+        decided notes -- lossy edges are loud, never silent."""
+        body = _function_body(source, "sendToPll(state)")
+        flattened_note = (
+            "model strength used for ${result.flattened.length} row(s) "
+            "with a different clip strength: ${result.flattened.join(', ')}"
+        )
+        assert flattened_note in body
+        assert "clamped to ±5: ${result.clamped.join(', ')}" in body
+        assert "notes.length ? `${sent} — ${notes.join('; ')}` : sent" in body
+        assert "`Sent ${rows.length} lora(s) to ${node.title || node.type} #${node.id}`" in body
+
+    def test_registry_never_touches_the_selection_widget(self, source: str) -> None:
+        """M4 adds no persistence: the registry plumbing stays out of the
+        selection JSON exactly as M2's transient-target rule demands."""
+        for fn in ("findSendCandidates()", "probeSendTarget(node)", "resolveSendTarget(state)"):
+            assert "writeSelectionWidget" not in _function_body(source, fn), fn
+
+    def test_still_no_window_listeners_after_m4(self, source: str) -> None:
+        assert "window.addEventListener" not in source

@@ -2136,6 +2136,42 @@ apply/text helpers, so it drops in anywhere Apply LoRA Set does.
   at click time (an empty send would shrink the target to zero rows).
   Client-side only — the research round proved PLL cannot be fed
   through the graph.
+- **M4 — Send-to-loader TARGET REGISTRY (owner ask 2026-08-09: DaSiWa
+  without bloat)**: the Send row's candidates come from a comfyClass-keyed
+  adapter registry — the ecosystem's one proven multi-target pattern
+  (Lora-Manager's NODE_EXTRACTORS dict) — with two entries: the §6.3-style
+  rgthree adapter (`pll_bridge.js`, unchanged) and
+  `web/lora_library/dasiwa_bridge.js` for `DaSiWa_LTX2LoraLoader`
+  ("DaSiWa Advanced LoRA Loader", GPL-3 — driven with DATA only, no code
+  copied; an attribution comment records the schema's provenance). The
+  DaSiWa adapter's write is single-widget JSON, not widget surgery: map
+  picker rows to `{on, lora, str, vs, as}` where `str` = the MODEL
+  strength clamped to DaSiWa's own ±5 range, then set BOTH
+  `node.properties.stack_data` (the node's live source of truth — its
+  canvas UI mirrors properties → widget on every draw) and the
+  `stack_data` widget value to the same JSON string, leave `model_type`
+  untouched, grow `node.size[1]` to fit their row math, redraw. LOSSY
+  EDGES ARE LOUD, NEVER SILENT (owner decisions 2026-08-09): a row whose
+  `strength_clip` differs from `strength` sends the model strength and
+  the success toast names the flattened row(s); a strength outside ±5
+  clamps and is likewise named. Re-sending PRESERVES an existing DaSiWa
+  row's `vs`/`as` multipliers when the same `lora` is already present —
+  matched SEPARATOR-INSENSITIVELY per §4, the written `lora` keeping the
+  picker's spelling (review 2026-08-09 contract fix: DaSiWa's own UI
+  stores `folder_paths`' NATIVE spellings — backslashes on Windows —
+  while picker rows are forward-slash, so the originally-specified
+  raw-string compare silently reset tuning on exactly the machine it
+  mattered most) — tuning done in DaSiWa's own UI must survive a
+  re-send; new rows get 1.0/1.0. Probe: type + `stack_data` widget
+  present + (existing value parses as a JSON array or is empty/absent);
+  drift disables with a shape-drift message in the §6.3 vocabulary
+  style. The no-target-in-graph message becomes family-agnostic (names
+  both supported loaders); single-candidate auto-adopt means a single
+  candidate ACROSS both families; every §6.3/M2 never-guess rule is
+  unchanged. Stack-wire loaders (Efficiency/Easy-Use/Comfyroll) need no
+  adapter — the picker's `lora_stack` output feeds them by plain wire;
+  the README says so rather than the registry growing entries that a
+  wire already serves.
 - **M3 — SHIPPED v0.56.0 (2026-08-09)**: search field above the
   browser (§7.2 search semantics: AND of whitespace words, view-only,
   Escape clears, matches against full relative path); sidecar preview

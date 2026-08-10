@@ -165,6 +165,39 @@ Effort: each **S**, spike-gated, shipped when Eric wants them.
 
 ---
 
+### M4 — Send-to-loader target registry: DaSiWa Advanced LoRA Loader
+*(researched 2026-08-09 via /eric-rearch-ideas — "is it possible to make it
+also work with DaSiWa Advanced LoRA Loader without bloating the code?";
+Eric's answer: BUILD NOW. Decisions locked 2026-08-09: a row whose clip
+strength differs sends the MODEL strength + a toast naming what was
+flattened (DaSiWa stores one strength per lora, clamped ±5); re-sending
+PRESERVES an existing row's vs/as video/audio multipliers on a same-lora
+match, 1.0 only for new rows.)*
+
+Research verdicts (two agents, source-level):
+- `DaSiWa_LTX2LoraLoader` (darksidewalker/ComfyUI-DaSiWa-Nodes, GPL-3,
+  66k registry downloads) keeps its ENTIRE stack in one JSON STRING
+  widget `stack_data` — rows `{on, lora, str, vs, as}` — with
+  `node.properties.stack_data` as the live source of truth (its canvas UI
+  syncs properties → widget on every draw). No LORA_STACK ports, no
+  dynamic widgets. Row schema unchanged since the node's first commit.
+  ⇒ the cheapest adapter shape possible: serialize + set property +
+  mirror widget + redraw (~60-90 lines). GPL is irrelevant to driving it
+  with DATA; no code is copied.
+- Ecosystem survey: the ONLY multi-target dispatch precedent is a dict
+  keyed by node class → small per-class adapter (Lora-Manager's
+  NODE_EXTRACTORS, read side; 20-80 lines each). Nobody else write-drives
+  another pack's loader at all — pll_bridge.js is ahead of the field.
+  Efficiency / Easy-Use / Comfyroll stackers need NO adapter: they take a
+  LORA_STACK input, so the picker's `lora_stack` output already feeds
+  them by plain wire (README documents this).
+Scope: `web/lora_library/dasiwa_bridge.js` (probe + convert + write in
+pll_bridge's exact interface), a comfyClass-keyed adapter registry in the
+Send row (both loader families listed, never-guess rules unchanged),
+family-agnostic no-target messages, pins + Node-driven convert tests,
+FORMAT §6.13 M4 bullet, README. Rig verify needs the DaSiWa pack cloned
+into the rig at a pinned commit.
+
 ## Open decisions for build time (not blockers)
 
 - Tree source: a dedicated tree route vs. build client-side from the flat

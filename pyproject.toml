@@ -1,7 +1,7 @@
 [project]
 name = "comfyui-epsnodes"
 description = "Practical workflow utilities for ComfyUI — 14 nodes: a file-backed prompt notebook, shareable LoRA sets and a LoRA iterator, image/model/CLIP/VAE/checkpoint switchers, resolution presets, an image grid, a video frame saver, a run multiplier for sweep × image × prompt batches, and an image distributor, all backed by plain files you own."
-version = "0.57.0"
+version = "0.58.0"
 license = { file = "LICENSE" }
 readme = "README.md"
 requires-python = ">=3.10"

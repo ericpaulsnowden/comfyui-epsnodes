@@ -53,6 +53,7 @@
 import { app } from '../../../scripts/app.js'
 import * as api from './api.js'
 import * as pll from './pll_bridge.js'
+import * as dasiwa from './dasiwa_bridge.js'
 
 /** Frozen once shipped -- mirrors the Python node's class id (§6.13). */
 export const CLASS_ID = 'EPSLoraPicker'
@@ -1431,38 +1432,103 @@ function renderStatus(state) {
   state.statusTextEl.textContent = state.loaded ? `${state.loras.length} loras on this machine` : 'Loading…'
 }
 
-// --- Send to loader (§6.13 M2) -- pll_bridge.js owns the rgthree
-// technique; this file only owns the row. ---
+// --- Send to loader (§6.13 M2 + the M4 target registry) -- each
+// *_bridge.js owns one loader family's technique; this file only owns the
+// row and the family-agnostic target plumbing. ---
 
-/** The live PLL the select currently names, or null -- resolved BY ID at
+/**
+ * §6.13 M4: the comfyClass-keyed send-adapter registry -- the ecosystem's
+ * one proven multi-target pattern (Lora-Manager's NODE_EXTRACTORS dict).
+ * Each entry owns one loader family: `find()` lists its live graph nodes,
+ * `probe(node)` is its §6.3-style feature-detection gate, `write(node,
+ * rows)` performs the send and may return `{flattened, clamped}` basename
+ * lists for the loud-lossy success toast (the rgthree write is never lossy
+ * and returns nothing), and `label` is the family's human name for the
+ * family-agnostic messages below. Candidate order and the single-candidate
+ * auto-adopt are computed ACROSS families; every per-family rule stays in
+ * its bridge.
+ */
+const SEND_ADAPTERS = {
+  [pll.POWER_LORA_LOADER_TYPE]: {
+    label: 'Power Lora Loader (rgthree)',
+    find: pll.findPllNodes,
+    probe: pll.probePll,
+    write: pll.writeRowsToPll
+  },
+  [dasiwa.DASIWA_LOADER_TYPE]: {
+    label: 'DaSiWa Advanced LoRA Loader',
+    find: dasiwa.findDasiwaNodes,
+    probe: dasiwa.probeDasiwa,
+    write: dasiwa.writeRowsToDasiwa
+  }
+}
+
+/** §6.13 M4: the no-target-in-graph message is FAMILY-AGNOSTIC -- composed
+ * from every adapter's label so it names both supported loaders (and any
+ * future third automatically), in M2's own message shape. */
+const SEND_FAMILY_LABELS = Object.values(SEND_ADAPTERS).map((adapter) => adapter.label)
+const MSG_NO_SEND_TARGET_IN_GRAPH = `No ${SEND_FAMILY_LABELS.join(
+  ' or '
+)} node in this graph yet — add one, then pick it above.`
+const MSG_NO_SEND_TARGET_SELECTED = 'Pick a target loader node above.'
+
+/** Every adapter family's live candidates, merged ascending id ACROSS
+ * families (§6.13 M4) -- the combo's order AND the auto-adopt universe. */
+function findSendCandidates() {
+  const candidates = []
+  for (const adapter of Object.values(SEND_ADAPTERS)) candidates.push(...adapter.find())
+  return candidates.sort((a, b) => a.id - b.id)
+}
+
+/** The live loader the select currently names, or null -- resolved BY ID at
  * use time, since the node may have been deleted since the last render. */
-function resolvePllTarget(state) {
+function resolveSendTarget(state) {
   if (state.pllTargetId == null) return null
-  return pll.findPllNodes().find((node) => String(node.id) === state.pllTargetId) || null
+  return findSendCandidates().find((node) => String(node.id) === state.pllTargetId) || null
 }
 
 /**
- * The Send-to-loader row (§6.13 M2): a target combo of every PLL in the
- * graph (ascending id, pll_bridge.js's order) + Send. Rebuilt on every
- * render; the previously chosen target is re-selected by id when still
- * present -- transient state only, M2 adds no widget. A failed probe (no
- * rgthree, no PLL in the graph, shape drift) disables Send and shows
- * §6.3's own message vocabulary in both the button title and the muted
- * status span; an empty selection disables it with its own title.
+ * The family-agnostic half of the probe: a null/unknown target resolves
+ * here (M2's two null-target codes, now spanning both families -- no
+ * candidates at all vs candidates present but unpicked); a real candidate
+ * dispatches by comfyClass to its own family's §6.3-style probe.
+ */
+function probeSendTarget(node) {
+  const adapter = node ? SEND_ADAPTERS[node.type] : null
+  if (!adapter) {
+    const hasAny = findSendCandidates().length > 0
+    return {
+      ok: false,
+      code: hasAny ? 'no-target-selected' : 'no-target-in-graph',
+      message: hasAny ? MSG_NO_SEND_TARGET_SELECTED : MSG_NO_SEND_TARGET_IN_GRAPH
+    }
+  }
+  return adapter.probe(node)
+}
+
+/**
+ * The Send-to-loader row (§6.13 M2, targets registry-driven since M4): a
+ * target combo of every supported loader in the graph (ascending id ACROSS
+ * adapter families) + Send. Rebuilt on every render; the previously chosen
+ * target is re-selected by id when still present -- transient state only,
+ * M2 adds no widget. A failed probe (no rgthree, no loader in the graph,
+ * shape drift) disables Send and shows the owning family's §6.3-style
+ * message vocabulary in both the button title and the muted status span;
+ * an empty selection disables it with its own title.
  */
 function renderSend(state) {
   state.sendRowEl.replaceChildren()
 
   const select = el('select', {
     className: 'eps-lp-pll-select',
-    attrs: { title: 'Target Power Lora Loader (rgthree)' }
+    attrs: { title: 'Target loader node' }
   })
   // Options are rebuilt IN PLACE on every open (mousedown), not just per
-  // render -- controller.js's values-function pattern: a PLL added after the
-  // last render must be pickable without any other mutation first (review
-  // 2026-08-09).
+  // render -- controller.js's values-function pattern: a loader added after
+  // the last render must be pickable without any other mutation first
+  // (review 2026-08-09).
   const buildOptions = () => {
-    const fresh = pll.findPllNodes()
+    const fresh = findSendCandidates()
     select.replaceChildren(
       el('option', {
         text: fresh.length ? 'Pick a loader…' : 'No loader in graph',
@@ -1475,8 +1541,9 @@ function renderSend(state) {
     if (state.pllTargetId != null && fresh.some((node) => String(node.id) === state.pllTargetId)) {
       select.value = state.pllTargetId
     } else if (state.pllTargetId == null && fresh.length === 1) {
-      // No explicit choice + exactly one candidate: adopt it (controller.js's
-      // "picked automatically when there is exactly one" behavior).
+      // No explicit choice + exactly one candidate ACROSS families (§6.13
+      // M4): adopt it (controller.js's "picked automatically when there is
+      // exactly one" behavior).
       state.pllTargetId = String(fresh[0].id)
       select.value = state.pllTargetId
     } else {
@@ -1501,11 +1568,11 @@ function renderSend(state) {
 
   const statusEl = el('span', { className: 'eps-lp-send-status' })
   const sendBtn = el('button', { className: 'eps-lp-btn', text: 'Send' })
-  const probe = pll.probePll(resolvePllTarget(state))
+  const probe = probeSendTarget(resolveSendTarget(state))
   if (!probe.ok) {
     // Marked blocked but NOT disabled: a disabled button could never run the
-    // click-time re-probe, so a graph fixed after this render (a PLL added,
-    // rgthree finished loading) would have no recovery path (review
+    // click-time re-probe, so a graph fixed after this render (a loader
+    // added, rgthree finished loading) would have no recovery path (review
     // 2026-08-09). The click either proceeds against the healed graph or
     // toasts this same message.
     sendBtn.classList.add('eps-lp-btn-blocked')
@@ -1527,18 +1594,23 @@ function renderSend(state) {
  * Send click: re-resolve and RE-PROBE by id -- the render-time probe can
  * be stale (the target may have been deleted since), so failure here is a
  * toast, not a silent no-op. Writes ALL selection rows (`on` preserved --
- * §6.13) through pll_bridge.js.
+ * §6.13) through the target's own family adapter (§6.13 M4). The success
+ * toast is unchanged for rgthree; a lossy DaSiWa write (dual strengths
+ * flattened to the model strength, strengths clamped to DaSiWa's ±5)
+ * appends LOUD notes naming every affected row -- owner decision
+ * 2026-08-09: lossy edges are loud, never silent.
  */
 function sendToPll(state) {
-  // Same single-candidate adoption the render path applies -- a PLL added
-  // AFTER the last render must make a plain Send click work without first
-  // touching the combo (review 2026-08-09). Never adopts among several.
+  // Same single-candidate adoption the render path applies -- a loader
+  // added AFTER the last render must make a plain Send click work without
+  // first touching the combo (review 2026-08-09). Never adopts among
+  // several; "single candidate" spans BOTH adapter families (§6.13 M4).
   if (state.pllTargetId == null) {
-    const candidates = pll.findPllNodes()
+    const candidates = findSendCandidates()
     if (candidates.length === 1) state.pllTargetId = String(candidates[0].id)
   }
-  const node = resolvePllTarget(state)
-  const probe = pll.probePll(node)
+  const node = resolveSendTarget(state)
+  const probe = probeSendTarget(node)
   if (!probe.ok) {
     toast('error', 'EPS LoRA Picker', probe.message)
     renderSend(state)
@@ -1552,14 +1624,25 @@ function sendToPll(state) {
     renderSend(state)
     return
   }
+  let result
   try {
-    pll.writeRowsToPll(node, rows)
+    result = SEND_ADAPTERS[node.type].write(node, rows)
   } catch (error) {
-    api.warn('send to Power Lora Loader failed', error)
+    api.warn('send to loader failed', error)
     toast('error', 'EPS LoRA Picker', `Send failed: ${error?.message || error}`)
     return
   }
-  toast('success', 'EPS LoRA Picker', `Sent ${rows.length} lora(s) to ${node.title || node.type} #${node.id}`)
+  const sent = `Sent ${rows.length} lora(s) to ${node.title || node.type} #${node.id}`
+  const notes = []
+  if (result?.flattened?.length) {
+    notes.push(
+      `model strength used for ${result.flattened.length} row(s) with a different clip strength: ${result.flattened.join(', ')}`
+    )
+  }
+  if (result?.clamped?.length) {
+    notes.push(`clamped to ±5: ${result.clamped.join(', ')}`)
+  }
+  toast('success', 'EPS LoRA Picker', notes.length ? `${sent} — ${notes.join('; ')}` : sent)
   renderSend(state)
 }
 
