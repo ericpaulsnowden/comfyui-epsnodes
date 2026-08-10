@@ -455,6 +455,36 @@ const GRID_CSS_TEXT = `
   touch-action: none;
   user-select: none;
 }
+.eps-res-prompt-overlay {
+  position: fixed; inset: 0; z-index: 10000;
+  display: flex; align-items: center; justify-content: center;
+  background: rgba(0, 0, 0, 0.45);
+}
+.eps-res-prompt {
+  min-width: 260px; padding: 14px;
+  background: var(--comfy-menu-bg, #262626);
+  border: 1px solid var(--border-color, #444);
+  border-radius: 6px;
+  display: flex; flex-direction: column; gap: 10px;
+  font-family: inherit; font-size: 12px;
+  color: var(--input-text, #ccc);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+}
+.eps-res-prompt-input {
+  width: 100%; box-sizing: border-box; padding: 5px 6px;
+  background: var(--comfy-input-bg, #1e1e1e);
+  border: 1px solid var(--border-color, #444);
+  border-radius: 3px; color: var(--input-text, #ccc);
+  font-family: inherit; font-size: 12px;
+}
+.eps-res-prompt-row { display: flex; gap: 8px; justify-content: flex-end; }
+.eps-res-prompt-row button {
+  padding: 4px 12px; cursor: pointer;
+  background: var(--comfy-input-bg, #1e1e1e);
+  border: 1px solid var(--border-color, #444);
+  border-radius: 3px; color: var(--input-text, #ccc);
+  font-family: inherit; font-size: 12px;
+}
 `
 
 function injectGridStyles() {
@@ -1841,7 +1871,7 @@ async function loadPresets(node) {
  * but `""` on an intentional OK-with-empty-field; either way an
  * empty/whitespace name is refused client-side (the backend would 400 it
  * anyway, but there is nothing useful to POST for an empty name). */
-function promptPresetName(node, prefill, onCommit) {
+function promptPresetName(node, prefill, onCommit, event) {
   const canvas = app?.canvas ?? null
   const commit = (value) => {
     if (value === null || value === undefined) return
@@ -1849,24 +1879,91 @@ function promptPresetName(node, prefill, onCommit) {
     if (!trimmed) return
     onCommit(trimmed)
   }
+  // The EVENT is passed through from the button widget's own callback
+  // (owner report 2026-08-09: "clicking save ... doesn't seem to do
+  // anything"): this file used to hand `canvas.prompt` a null event --
+  // the only such call site in the pack, unlike distributor.js/
+  // switcher.js, which pass theirs. `LGraphCanvas.prompt` reads
+  // `LGraphCanvas.active_canvas` and positions off the event; with
+  // neither it throws, and the window.prompt fallback below USED TO SIT
+  // OUTSIDE this try, so a browser that also refuses window.prompt
+  // (unsupported, or dialogs suppressed after a user checks "prevent
+  // additional dialogs") killed the click with no dialog and no message.
   try {
     if (canvas && typeof canvas.prompt === 'function') {
-      canvas.prompt('Preset name', prefill || '', commit, null)
+      canvas.prompt('Preset name', prefill || '', commit, event ?? null)
       return
     }
   } catch (error) {
     console.warn(PREFIX, 'canvas.prompt failed; falling back', error)
   }
-  commit(window.prompt('Preset name', prefill || ''))
+  try {
+    commit(window.prompt('Preset name', prefill || ''))
+    return
+  } catch (error) {
+    console.warn(PREFIX, 'window.prompt unavailable; using the built-in dialog', error)
+  }
+  // Last resort, owned entirely by this file so Save can NEVER be a silent
+  // no-op: a minimal DOM dialog over the canvas.
+  promptPresetNameFallback(node, prefill, commit)
+}
+
+/** Self-owned name dialog -- no litegraph, no window.prompt. Kept
+ * deliberately plain (one input, OK/Cancel, Enter/Escape) since it only
+ * ever runs when both platform prompts have failed. */
+function promptPresetNameFallback(node, prefill, commit) {
+  try {
+    const overlay = document.createElement('div')
+    overlay.className = 'eps-res-prompt-overlay'
+    const box = document.createElement('div')
+    box.className = 'eps-res-prompt'
+    const label = document.createElement('div')
+    label.className = 'eps-res-prompt-label'
+    label.textContent = 'Preset name'
+    const input = document.createElement('input')
+    input.type = 'text'
+    input.className = 'eps-res-prompt-input'
+    input.value = prefill || ''
+    const row = document.createElement('div')
+    row.className = 'eps-res-prompt-row'
+    const cancel = document.createElement('button')
+    cancel.textContent = 'Cancel'
+    const ok = document.createElement('button')
+    ok.textContent = 'Save'
+    row.append(cancel, ok)
+    box.append(label, input, row)
+    overlay.appendChild(box)
+
+    const close = () => {
+      overlay.remove()
+    }
+    cancel.addEventListener('click', close)
+    ok.addEventListener('click', () => {
+      const value = input.value
+      close()
+      commit(value)
+    })
+    input.addEventListener('keydown', (keyEvent) => {
+      keyEvent.stopPropagation() // canvas hotkeys must not eat the typing
+      if (keyEvent.key === 'Enter') ok.click()
+      else if (keyEvent.key === 'Escape') close()
+    })
+    document.body.appendChild(overlay)
+    input.focus()
+    input.select()
+  } catch (error) {
+    console.warn(PREFIX, 'built-in preset-name dialog failed', error)
+    toast(node, 'error', 'Could not open the preset-name dialog.')
+  }
 }
 
 /** Save's entry point: prefilled with the ACTIVE preset's name (exactly one
  * selected) -- that's "update"; blank otherwise -- "create new" (req. 3). */
-function openSaveDialog(node) {
+function openSaveDialog(node, event) {
   const state = presetsState(node)
   if (!state) return
   const prefill = state.selection.length === 1 ? state.selection[0] : ''
-  promptPresetName(node, prefill, (name) => performSave(node, name))
+  promptPresetName(node, prefill, (name) => performSave(node, name), event)
 }
 
 async function performSave(node, name) {
@@ -2068,7 +2165,15 @@ function createPresetCombo(node, state) {
  * `options.serialize` is a different, API-prompt-only flag; see that
  * file's "Clear button" section and this file's widget-order note above). */
 function createSaveButton(node) {
-  const btn = node.addWidget('button', 'Save', null, () => openSaveDialog(node), {})
+  // litegraph hands a button callback (value, canvas, node, pos, event) --
+  // the event is what canvas.prompt needs (see promptPresetName).
+  const btn = node.addWidget(
+    'button',
+    'Save',
+    null,
+    (_value, _canvas, _node, _pos, event) => openSaveDialog(node, event),
+    {}
+  )
   btn.serialize = false
   btn.tooltip =
     'Save the fields below as a named size preset, stored in your library ' +

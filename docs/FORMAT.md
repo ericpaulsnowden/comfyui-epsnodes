@@ -1060,7 +1060,18 @@ is the functional core WITHOUT the grid.
     (checkpoint_switcher's convention); still-selected names missing from
     the store are KEPT (appended, prior relative order) so the backend can
     fail the queue loudly.
-  - **Save/Delete:** Save prompts via `LGraphCanvas.prompt`, prefilled
+  - **Save/Delete:** Save prompts through a THREE-STEP chain that can
+    never be a silent no-op (owner report 2026-08-09, "clicking save …
+    doesn't seem to do anything", reproduced on the rig):
+    `LGraphCanvas.prompt` **with the event litegraph hands the button
+    callback** `(value, canvas, node, pos, event)` — passing `null` there
+    made it throw, since it reads `LGraphCanvas.active_canvas` and
+    positions off the event, and this file was the pack's only call site
+    doing so (contrast §6.4/§6.11's, which pass theirs) — then a
+    `window.prompt` fallback **inside its own try** (it throws outright
+    where dialogs are unsupported or a user has suppressed them), then a
+    self-owned DOM dialog (`.eps-res-prompt-overlay`, keydown
+    `stopPropagation`, Enter/Escape) as the backstop. It is prefilled
     with the active preset's name when EXACTLY one is selected (that is
     the definition of "active") — i.e. update-in-place — blank otherwise;
     the saved preset becomes the sole selection. Delete is enabled only at

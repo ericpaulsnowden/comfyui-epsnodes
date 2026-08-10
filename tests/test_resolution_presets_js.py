@@ -403,7 +403,7 @@ def test_save_prefills_with_the_active_preset_for_update(source: str) -> None:
     that's 'update'" (task brief, req. 3). Blank prefill (create-new)
     otherwise -- exactly one selected is this file's own definition of
     "active"."""
-    body = _function_body(source, "openSaveDialog(node)")
+    body = _function_body(source, "openSaveDialog(node, event)")
     assert "state.selection.length === 1 ? state.selection[0] : ''" in body
     assert "promptPresetName(node, prefill" in body
 
@@ -683,3 +683,43 @@ def test_apply_preset_values_only_touches_fields_when_selection_is_nonempty(sour
     # The definition's own signature line + this one call site -- no other
     # call sites exist anywhere else in the file.
     assert source.count("applyPresetValues(node,") == 2
+
+
+def test_save_click_can_never_be_a_silent_no_op(source: str) -> None:
+    """Owner report 2026-08-09 ("clicking save on presets ... doesn't seem
+    to do anything", on the FIRST save): this file was the pack's ONLY
+    canvas.prompt call site passing a NULL event (distributor.js and
+    switcher.js both pass theirs). LGraphCanvas.prompt reads
+    LGraphCanvas.active_canvas and positions off the event; with neither it
+    THROWS -- reproduced live on the rig -- and the window.prompt fallback
+    sat OUTSIDE the try, so a browser that also refuses window.prompt left
+    the click dead with no dialog and no message.
+
+    Three pins, one per link in that chain."""
+    body = _function_body(source, "promptPresetName(node, prefill, onCommit, event)")
+    # 1. The real event reaches canvas.prompt.
+    assert "canvas.prompt('Preset name', prefill || '', commit, event ?? null)" in body
+    assert "commit, null)" not in body
+    # 2. window.prompt is GUARDED (it can throw "prompt() is not supported").
+    guarded = body[body.index("window.prompt"):]
+    assert "catch" in guarded
+    # 3. A self-owned dialog backstops both, so Save always opens something.
+    assert "promptPresetNameFallback(node, prefill, commit)" in body
+
+
+def test_save_button_forwards_litegraph_s_event(source: str) -> None:
+    """litegraph hands a button callback (value, canvas, node, pos, event);
+    the event is exactly what canvas.prompt needs, so the Save widget must
+    forward it rather than dropping it."""
+    body = _function_body(source, "createSaveButton(node)")
+    assert "(_value, _canvas, _node, _pos, event) => openSaveDialog(node, event)" in body
+
+
+def test_fallback_dialog_is_self_contained_and_canvas_safe(source: str) -> None:
+    """The last-resort dialog owns its own DOM: keydown must stopPropagation
+    (canvas hotkeys would otherwise eat the typing -- the same rule every
+    text input in this pack follows), and it must clean itself up."""
+    body = _function_body(source, "promptPresetNameFallback(node, prefill, commit)")
+    assert "keyEvent.stopPropagation()" in body
+    assert "overlay.remove()" in body
+    assert "'Enter'" in body and "'Escape'" in body
