@@ -619,6 +619,22 @@ step, but two fanned sweep lists of different lengths fail the Run with
 an error naming them — that's always a miswire, usually a leftover wire
 into `label` from something unrelated.
 
+**Know the run count BEFORE an overnight run (v0.59.0).** The node shows
+a live **`Runs: N — S sweep steps × P pairs`** line computed from your
+graph before you ever queue: switcher ticks, Checkpoint Switcher
+selections, Notebook multi-select, Iterator step math, even chained
+multipliers — all counted the way ComfyUI will actually execute them
+(fanned lists through loaders included). It is honest about limits:
+anything it can't inspect (a third-party batch node, a saved set's file)
+turns the line into **`≥ N`** and names which input is unknowable; a
+wiring that will *fail* the queue (mismatched sweep lengths, an empty
+Notebook) paints red with the reason, and a wiring that will silently run
+*zero* times says "nothing to run" and names the empty input. Then, the
+moment a queue starts, the node announces the **definitive** count as a
+toast ("EPS Run Multiplier: 8 runs") — the multiplier executes in the
+first seconds, long before samplers, so a wrong number is cancellable
+while it's still free.
+
 **`sweep_mode` — every model × every VAE (v0.57.0).** By default the
 sweep side is one *aligned* set: step 3 runs model 3 with VAE 3 (what an
 EPS LoRA Iterator or Checkpoint Switcher emits, where they belong

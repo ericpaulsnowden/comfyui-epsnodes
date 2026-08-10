@@ -165,7 +165,7 @@ Effort: each **S**, spike-gated, shipped when Eric wants them.
 
 ---
 
-### M4 — Send-to-loader target registry: DaSiWa Advanced LoRA Loader
+### M4 — Send-to-loader target registry: DaSiWa Advanced LoRA Loader — SHIPPED v0.58.0 (2026-08-09)
 *(researched 2026-08-09 via /eric-rearch-ideas — "is it possible to make it
 also work with DaSiWa Advanced LoRA Loader without bloating the code?";
 Eric's answer: BUILD NOW. Decisions locked 2026-08-09: a row whose clip

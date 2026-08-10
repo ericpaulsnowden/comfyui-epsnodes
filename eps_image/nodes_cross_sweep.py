@@ -681,6 +681,36 @@ class EPSCrossSweep:
 
             run_blocker = ExecutionBlocker(None)
 
+        # v0.59.0 (owner ask 2026-08-09: "show the number of runs ... before
+        # potentially running something that may go overnight and be
+        # wrong"): announce the DEFINITIVE count the moment this node
+        # executes -- topologically that is the first seconds of a queue,
+        # long before samplers grind, so a wrong number can be cancelled
+        # cheaply. The on-node readout (web/eps_image/cross_sweep.js) is the
+        # pre-queue ESTIMATE; this event is the execution-time truth. Same
+        # degrade posture as the §6.6 grid toast: no live server, no event.
+        total = steps * len(pair_rows)
+        logger.info(
+            "EPS Run Multiplier: %d run(s) -- %d sweep step(s) x %d pair(s)",
+            total, steps, len(pair_rows),
+        )
+        try:
+            from server import PromptServer  # ComfyUI-only; absent in tests
+
+            PromptServer.instance.send_sync(
+                "eps-run-multiplier-count",
+                {
+                    "node": str(_unwrap_hidden(unique_id)),
+                    "steps": steps,
+                    "pairs": len(pair_rows),
+                    "total": total,
+                },
+            )
+        except Exception:
+            # No live server (tests/direct callers) -- the log line above
+            # already carries the count.
+            pass
+
         out: dict[str, list[Any]] = {k: [] for k in self.RETURN_NAMES}
         for s in range(steps):  # strength-major: sweep step is the OUTER loop
             # v0.57.0: in multiply mode, s decomposes into (model-axis step,

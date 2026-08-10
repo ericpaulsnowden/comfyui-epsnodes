@@ -1723,6 +1723,39 @@ label, so two chained Cross Products cannot express it.
   v0.51.0 guard. Deliberately NOT auto-detected from mismatched lengths:
   equal-length independent axes (2 models × 2 vaes) are indistinguishable
   from an aligned pair, so the semantics are always an explicit choice.
+- **Run-count visibility (v0.59.0, owner ask 2026-08-09: "show the number
+  of runs it is going to make ... before potentially running something
+  that may go overnight and be wrong"). Two layers, estimate + truth:**
+  - **On-node readout (`web/eps_image/cross_sweep.js`, pre-queue
+    ESTIMATE):** a display-only DOM line (no widget, `serialize: false` —
+    nothing enters the workflow file, §8-safe) showing `Runs: N — S sweep
+    step(s) × P pair(s)` with the breakdown, recomputed from the GRAPH:
+    the multiplier's own `pair_mode`/`sweep_mode` widgets plus an
+    upstream traversal that knows this pack's fan-out nodes by
+    `comfyClass` — the four §6.4/§6.4b switchers (enabled-and-wired
+    toggle count), §6.12 Checkpoint Switcher (`selection` length), §6.1
+    Notebook (`entry` line count), §6.6 Image Grid (Emit ⇒ its buffer
+    count, Collect ⇒ 0), §6.8 LoRA Iterator (step math from its own
+    widgets; a `per_lora`-style dependence on stack length follows the
+    stack wire — §6.13 Picker selection is countable, a §6.2 set file is
+    not), a chained §6.10 multiplier (recursive, cycle-guarded), and
+    reroutes (followed). A short allow-list of core single-output loaders
+    counts as 1. ANYTHING else is UNKNOWN: it contributes 1 and the
+    readout downgrades to `≥ N`, naming which input is unknowable —
+    never false confidence. An aligned-mode length disagreement or a
+    multiply-mode same-origin vae paints the line as the ERROR it will
+    become at queue time, BEFORE the queue: the owner's v0.57.0 mismatch
+    would have been visible on the node. Refresh follows the §6.3
+    controller idiom (throttled redraw-driven recompute) — no polling
+    timers of its own, no window listeners (§7.5).
+  - **Execution toast (`eps-run-multiplier-count`, the TRUTH):** `run()`
+    logs and `send_sync`s `{node, steps, pairs, total}` the moment it
+    executes — topologically the first seconds of a queue, long before
+    samplers — and the frontend toasts "EPS Run Multiplier: N runs (S
+    sweep step(s) × P pair(s))", so even a `≥`-estimated setup states its
+    real number while cancelling is still cheap. Same degrade posture as
+    §6.6's grid toast (no live server ⇒ log line only); the blocker path
+    (nothing to run) announces nothing — it already has its own log.
 - **Consumed-but-unwired outputs FAIL the queue (v0.51.0, owner report
   2026-08-03: a txt2img graph consuming the `image` output with no image
   input wired "completes immediately, nothing generated").** The node

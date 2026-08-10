@@ -1,7 +1,7 @@
 /**
  * @file Entry point for the EPSNodes image-utility frontend (EPS Image Switcher §6.4,
  * EPS Resolution §6.5, EPS Image Grid §6.6, EPS Frame Saver §6.7, EPS
- * Distributor §6.11). ComfyUI auto-imports every
+ * Run Multiplier run-count §6.10, EPS Distributor §6.11). ComfyUI auto-imports every
  * top-level `.js` under `WEB_DIRECTORY` (`./web`); this is a SECOND
  * extension alongside `lora_library.js`, so the image nodes' frontend is
  * cleanly separated from the lora family. Each sub-feature is wrapped so one
@@ -15,6 +15,7 @@ import * as imageGrid from './eps_image/image_grid.js'
 import * as frameSaver from './eps_image/frame_saver.js'
 import * as distributor from './eps_image/distributor.js'
 import * as checkpointSwitcher from './eps_image/checkpoint_switcher.js'
+import * as crossSweep from './eps_image/cross_sweep.js'
 
 const PREFIX = '[eps_image]'
 const REPO_URL = 'https://github.com/ericpaulsnowden/comfyui-epsnodes'
@@ -111,6 +112,7 @@ app.registerExtension({
     safely('frameSaver.init', () => frameSaver.init?.())
     safely('distributor.init', () => distributor.init?.())
     safely('checkpointSwitcher.init', () => checkpointSwitcher.init?.())
+    safely('crossSweep.init', () => crossSweep.init?.())
   },
 
   /** Fires once per node instance; each attach is a no-op for other types. */
@@ -122,6 +124,7 @@ app.registerExtension({
     safely('frameSaver.attach', () => frameSaver.attach?.(node))
     safely('distributor.attach', () => distributor.attach?.(node))
     safely('checkpointSwitcher.attach', () => checkpointSwitcher.attach?.(node))
+    safely('crossSweep.attach', () => crossSweep.attach?.(node))
   },
 
   /**

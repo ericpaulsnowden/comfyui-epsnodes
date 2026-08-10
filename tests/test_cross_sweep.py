@@ -593,3 +593,47 @@ class TestSweepModeMultiply:
         with pytest.raises(ValueError) as excinfo:
             run(model=["m"] * 4, clip=["c"], label=None, vae=["v0", "v1"])
         assert "broadcasts fine and is not the problem" in str(excinfo.value)
+
+
+class TestRunCountAnnouncement:
+    """v0.58.0: run() announces its definitive count via send_sync the
+    moment it executes -- the overnight-safety half of the owner's
+    "show the number of runs" ask (the on-node readout is the estimate)."""
+
+    @staticmethod
+    def _fake_prompt_server(monkeypatch):
+        import types
+
+        sent = []
+
+        class _Instance:
+            def send_sync(self, event, payload):
+                sent.append((event, payload))
+
+        class PromptServer:
+            instance = _Instance()
+
+        server_mod = types.ModuleType("server")
+        server_mod.PromptServer = PromptServer
+        monkeypatch.setitem(sys.modules, "server", server_mod)
+        return sent
+
+    def test_count_event_carries_steps_pairs_total(self, monkeypatch) -> None:
+        sent = self._fake_prompt_server(monkeypatch)
+        run(
+            model=["m0", "m1", "m2", "m3"], clip=["c"], label=None,
+            vae=["v0", "v1"], image=["i"], text=["t"],
+            sweep_mode="multiply", unique_id=["185"],
+        )
+        events = [payload for event, payload in sent if event == "eps-run-multiplier-count"]
+        assert events == [{"node": "185", "steps": 8, "pairs": 1, "total": 8}]
+
+    def test_no_server_module_degrades_silently(self, monkeypatch) -> None:
+        monkeypatch.setitem(sys.modules, "server", None)
+        outputs = run()  # must not raise despite the unimportable server
+        assert len(outputs[0]) == 4
+
+    def test_blocker_path_does_not_announce(self, monkeypatch) -> None:
+        sent = self._fake_prompt_server(monkeypatch)
+        run(model=[])
+        assert sent == []
