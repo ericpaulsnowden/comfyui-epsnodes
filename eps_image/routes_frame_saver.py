@@ -37,6 +37,7 @@ import ipaddress
 import logging
 import socket
 from pathlib import Path
+from typing import Any
 
 from aiohttp import web
 
@@ -173,22 +174,80 @@ def _validate_video_path(raw: str) -> tuple[Path | None, str | None]:
     return resolved, None
 
 
+#: Test seam for :func:`_resolve_input_ref` -- tests set a fake module here
+#: (`exists_annotated_filepath` + `get_annotated_filepath`) since ComfyUI's
+#: real `folder_paths` is absent under pytest.
+_FOLDER_PATHS_OVERRIDE: Any = None
+
+
+def _resolve_input_ref(ref: str) -> tuple[Path | None, str | None]:
+    """FORMAT.md §6.7 v0.60.0 `input_ref` mode: resolve an ANNOTATED input
+    filename (the exact value core `LoadVideo`'s `file` combo holds) with
+    the exact validation core applies to it -- `exists_annotated_filepath`
+    then `get_annotated_filepath` -- plus this module's own extension
+    allowlist. Returns ``(resolved, None)`` or ``(None, message)``.
+
+    Requires ComfyUI's `folder_paths` (lazy import, injectable for tests via
+    :data:`_FOLDER_PATHS_OVERRIDE`); a non-ComfyUI process gets a clean 400,
+    never a crash.
+    """
+    trimmed = (ref or "").strip()
+    if not trimmed:
+        return None, "missing 'input_ref' query parameter"
+    folder_paths = _FOLDER_PATHS_OVERRIDE
+    if folder_paths is None:
+        try:
+            import folder_paths  # type: ignore[no-redef]  # ComfyUI's own module
+        except ImportError:
+            return None, "input_ref resolution requires a running ComfyUI"
+    try:
+        if not folder_paths.exists_annotated_filepath(trimmed):
+            return None, f"no such input video: {trimmed!r}"
+        resolved = Path(folder_paths.get_annotated_filepath(trimmed)).resolve()
+    except (OSError, ValueError) as exc:
+        return None, f"invalid input_ref ({exc})"
+    if resolved.suffix.lower() not in VIDEO_EXTENSIONS:
+        allowed = ", ".join(VIDEO_EXTENSIONS)
+        return None, f"unsupported video extension {resolved.suffix!r} (allowed: {allowed})"
+    if not resolved.is_file():
+        return None, f"not a file: {resolved}"
+    return resolved, None
+
+
+def _resolve_request_source(request: web.Request) -> tuple[Path | None, str | None, bool]:
+    """Shared param handling for both routes: exactly one of `path` (the
+    original mode) or `input_ref` (v0.60.0). Returns
+    ``(resolved, error, needs_loopback)`` -- `path` mode keeps §6.7's
+    unconditional loopback gate; `input_ref` mode is deliberately ungated
+    (an input-dir file is already exposed to every viewer by core's own
+    `/view`, so §2's arbitrary-file-read rationale does not apply)."""
+    raw_path = request.query.get("path", "")
+    raw_ref = request.query.get("input_ref", "")
+    if raw_path and raw_ref:
+        return None, "pass either 'path' or 'input_ref', not both", False
+    if raw_ref:
+        resolved, error = _resolve_input_ref(raw_ref)
+        return resolved, error, False
+    resolved, error = _validate_video_path(raw_path)
+    if error is None and not resolved.is_file():
+        return None, f"not a file: {resolved}", True
+    return resolved, error, True
+
+
 def register_routes(routes: web.RouteTableDef) -> None:
     """Attach the probe + stream routes to *routes* (FORMAT.md §6.7)."""
 
     @routes.get("/eps_frame_saver/probe")
     async def get_probe(request: web.Request) -> web.Response:
-        if not request_is_loopback(request):
+        resolved, error, needs_loopback = _resolve_request_source(request)
+        if needs_loopback and not request_is_loopback(request):
             return error_response(
                 403,
                 "reading a video file only works in a browser on the machine "
                 "ComfyUI runs on",
             )
-        resolved, error = _validate_video_path(request.query.get("path", ""))
         if error is not None:
             return error_response(400, error)
-        if not resolved.is_file():
-            return error_response(400, f"not a file: {resolved}")
         try:
             info = video.probe(str(resolved))
         except ValueError as exc:
@@ -200,17 +259,15 @@ def register_routes(routes: web.RouteTableDef) -> None:
 
     @routes.get("/eps_frame_saver/stream")
     async def get_stream(request: web.Request) -> web.Response:
-        if not request_is_loopback(request):
+        resolved, error, needs_loopback = _resolve_request_source(request)
+        if needs_loopback and not request_is_loopback(request):
             return error_response(
                 403,
                 "the video preview only works in a browser on the machine "
                 "ComfyUI runs on",
             )
-        resolved, error = _validate_video_path(request.query.get("path", ""))
         if error is not None:
             return error_response(400, error)
-        if not resolved.is_file():
-            return error_response(400, f"not a file: {resolved}")
         # aiohttp's FileResponse handles Range/If-Modified-Since/ETag itself
         # -- this is what gives the frontend's <video> element real 206 seek
         # support for free (FORMAT.md §6.7), no custom byte-range code here.

@@ -161,8 +161,27 @@ def _duration_seconds(container: Any, stream: Any) -> float | None:
     return None
 
 
-def extract_frame(path: str, frame_index: int) -> tuple[torch.Tensor, int, int]:
+def extract_frame(
+    path: Any,
+    frame_index: int,
+    *,
+    trim_start: float = 0.0,
+    trim_duration: float = 0.0,
+    label: str | None = None,
+) -> tuple[torch.Tensor, int, int]:
     """Decode the frame at/after *frame_index* in *path*, as a ComfyUI IMAGE tensor.
+
+    v0.60.0 (FORMAT.md §6.7's optional ``video`` input): *path* may now be a
+    FILE-LIKE object as well as a path string — both are exactly what
+    ``av.open`` accepts, so a wired ``VideoInput.get_stream_source()`` feeds
+    straight in (a ``VideoFromFile`` costs nothing extra; an in-memory video
+    decodes from its buffer). *trim_start*/*trim_duration* mirror
+    ``VideoInput.get_active_trim_window()``: frame N of a trimmed video
+    counts from the trim start (``target = trim_start + N/fps``), and a
+    positive *trim_duration* clamps the target inside the window, so a
+    ``VideoSlice`` output frames as the user sees it. *label* replaces the
+    raw *path* in error messages when the source isn't a string (a BytesIO
+    repr helps nobody).
 
     Converts FORMAT.md §6.7's ``frame_index/fps -> target_seconds``, then
     runs ``cprb/frame_extract.py``'s exact seek+decode-forward recipe:
@@ -197,21 +216,27 @@ def extract_frame(path: str, frame_index: int) -> tuple[torch.Tensor, int, int]:
     import av
     import torch
 
+    describe = label if label is not None else str(path)
     try:
         container = av.open(path)
     except Exception as exc:  # any av/ffmpeg open failure becomes a ValueError.
-        raise ValueError(f"{_ERROR_PREFIX}: could not open video file: {path} ({exc})") from exc
+        raise ValueError(f"{_ERROR_PREFIX}: could not open video file: {describe} ({exc})") from exc
 
     try:
         video_streams = container.streams.video
         if not video_streams:
-            raise ValueError(f"{_ERROR_PREFIX}: no video stream found in: {path}")
+            raise ValueError(f"{_ERROR_PREFIX}: no video stream found in: {describe}")
         stream = video_streams[0]
 
         if not stream.average_rate:
-            raise ValueError(f"{_ERROR_PREFIX}: video has no usable frame rate: {path}")
+            raise ValueError(f"{_ERROR_PREFIX}: video has no usable frame rate: {describe}")
         fps = float(stream.average_rate)
-        target_seconds = max(int(frame_index), 0) / fps
+        target_seconds = max(float(trim_start), 0.0) + max(int(frame_index), 0) / fps
+        if trim_duration and trim_duration > 0:
+            # Clamp INSIDE the trim window: the last representable frame of
+            # a trimmed video starts one frame-duration before its end.
+            window_end = max(float(trim_start), 0.0) + float(trim_duration)
+            target_seconds = min(target_seconds, max(window_end - 1.0 / fps, 0.0))
 
         target_ts = target_seconds / stream.time_base
         with contextlib.suppress(Exception):
@@ -223,7 +248,7 @@ def extract_frame(path: str, frame_index: int) -> tuple[torch.Tensor, int, int]:
             if candidate.pts is not None and candidate.pts >= target_ts:
                 break
         if frame is None:
-            raise ValueError(f"{_ERROR_PREFIX}: could not decode any frame from: {path}")
+            raise ValueError(f"{_ERROR_PREFIX}: could not decode any frame from: {describe}")
 
         array = frame.to_ndarray(format="rgb24")  # HWC, uint8, RGB.
         width = stream.width or frame.width
@@ -231,7 +256,9 @@ def extract_frame(path: str, frame_index: int) -> tuple[torch.Tensor, int, int]:
     except ValueError:
         raise
     except Exception as exc:  # any other av/ffmpeg decode failure becomes a ValueError.
-        raise ValueError(f"{_ERROR_PREFIX}: could not decode video file: {path} ({exc})") from exc
+        raise ValueError(
+            f"{_ERROR_PREFIX}: could not decode video file: {describe} ({exc})"
+        ) from exc
     finally:
         container.close()
 

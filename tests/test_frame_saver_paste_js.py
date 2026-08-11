@@ -596,3 +596,54 @@ def test_no_hardcoded_pixel_width_in_css(frame_saver_source: str) -> None:
     css = css_match.group(1)
     hardcoded = re.findall(r"(?<!min-)(?<!max-)\bwidth:\s*[\d.]+px", css)
     assert hardcoded == [], f"hardcoded pixel width(s) found in CSS: {hardcoded}"
+
+
+class TestWiredVideoInput:
+    """v0.60.0 (FORMAT.md §6.7): the optional wired `video` input's frontend
+    half -- source pins, since everything here runs against a real litegraph
+    node (the same convention as the rest of this file)."""
+
+    def test_wired_state_has_three_shapes(self, frame_saver_source: str) -> None:
+        body = _function_body(frame_saver_source, "resolveWiredVideo(node)")
+        assert "'LoadVideo'" in body
+        assert "{ kind: 'input_ref', ref, title }" in body
+        assert "{ kind: 'opaque', title }" in body
+        # reroutes are followed, with a hop cap (a loop must not hang attach)
+        assert "'Reroute'" in body
+        assert "hops < 32" in body
+
+    def test_full_resync_rederives_the_wire_first(self, frame_saver_source: str) -> None:
+        body = _function_body(frame_saver_source, "fullResync(state)")
+        assert body.index("state.wired = resolveWiredVideo(state.node)") < body.index(
+            "onPathChanged(state, state.pathWidget.value)"
+        )
+
+    def test_input_ref_streams_ungated_and_probes_by_ref(self, frame_saver_source: str) -> None:
+        body = _function_body(frame_saver_source, "refreshVideoSource(state)")
+        assert "input_ref=${encodeURIComponent(state.wired.ref)}" in body
+        assert "startProbe(state, { input_ref: state.wired.ref })" in body
+        # the input_ref branch must come BEFORE the isLocal gate branch --
+        # a remote viewer gets the full scrubber for LoadVideo sources.
+        assert body.index("state.wired?.kind === 'input_ref'") < body.index(
+            "state.isLocal === false"
+        )
+
+    def test_probe_403_adoption_is_path_mode_only(self, frame_saver_source: str) -> None:
+        body = _function_body(frame_saver_source, "startProbe(state, params)")
+        assert "error?.status === 403 && params.path" in body
+
+    def test_opaque_wire_keeps_the_frame_field_live(self, frame_saver_source: str) -> None:
+        controls = _function_body(frame_saver_source, "updateControlsEnabled(state)")
+        assert "Boolean(state.path) || Boolean(state.wired)" in controls
+        overlay = _function_body(frame_saver_source, "currentOverlayMessage(state)")
+        assert "when the workflow runs" in overlay
+        assert "type a frame number" in overlay
+
+    def test_wire_changes_resync_through_the_standard_wrap(self, frame_saver_source: str) -> None:
+        body = _function_body(frame_saver_source, "attach(node)")
+        assert "node.onConnectionsChange = function (...args)" in body
+        assert "fullResync(state)" in body
+
+    def test_path_bar_names_the_wire_not_the_stale_path(self, frame_saver_source: str) -> None:
+        body = _function_body(frame_saver_source, "updatePathBarText(state)")
+        assert "⇐ wired:" in body

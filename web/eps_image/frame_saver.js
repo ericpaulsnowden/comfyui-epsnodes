@@ -795,6 +795,12 @@ function createState(node, pathWidget, frameWidget) {
     pathWidget,
     frameWidget,
     path: '',
+    // §6.7 v0.60.0 wired `video` input, re-derived by every fullResync():
+    // null (unwired) | {kind:'input_ref', ref, title} (upstream LoadVideo,
+    // statically knowable -> full scrubbing via the routes' input_ref mode)
+    // | {kind:'opaque', title} (any other wired source -- arrives at run
+    // time; the frame field stays live, the preview honestly says so).
+    wired: null,
     // GET /eps_frame_saver/probe's last successful result, or null.
     probe: null,
     // Bumped on every path change; a probe response is discarded if this no
@@ -1366,8 +1372,21 @@ function wireVideoEvents(state) {
 // ---------------------------------------------------------------------------
 
 function currentOverlayMessage(state) {
-  if (!state.path) return 'No video selected — Browse for a video file.'
-  if (state.isLocal === false) {
+  if (state.wired?.kind === 'opaque') {
+    // §6.7 v0.60.0's honest degrade: the video only exists once the graph
+    // runs, so the preview cannot show it -- but frame selection still
+    // works by number, and extraction clamps past-the-end as always.
+    return (
+      `Video arrives from "${state.wired.title}" when the workflow runs — ` +
+      'type a frame number below to pick the frame.'
+    )
+  }
+  if (!state.path && !state.wired) {
+    return 'No video selected — Browse for a video file, or wire a video into the video input.'
+  }
+  if (!state.wired && state.isLocal === false) {
+    // input_ref previews work remotely (§6.7 v0.60.0) -- only PATH mode
+    // needs the host machine.
     return 'Preview + probing require the machine running ComfyUI — Run still works.'
   }
   if (state.videoPlayable === false) {
@@ -1390,19 +1409,24 @@ function updateOverlayUi(state) {
 }
 
 function updateControlsEnabled(state) {
-  const hasPath = Boolean(state.path)
-  // Jump/step/number-input stay enabled whenever a path is set, REGARDLESS
-  // of preview playability -- they only need the PROBED fps/frame_count
-  // (decoded server-side, independent of what this browser can render), so
-  // they keep working even when the <video> preview itself has degraded.
-  if (state.frameInputEl) state.frameInputEl.disabled = !hasPath
-  if (state.jumpStartBtn) state.jumpStartBtn.disabled = !hasPath
-  if (state.stepBack5Btn) state.stepBack5Btn.disabled = !hasPath
-  if (state.stepBackBtn) state.stepBackBtn.disabled = !hasPath
-  if (state.stepFwdBtn) state.stepFwdBtn.disabled = !hasPath
-  if (state.stepFwd5Btn) state.stepFwd5Btn.disabled = !hasPath
+  // A wired video counts as a source (§6.7 v0.60.0): with an input_ref
+  // upstream everything works as for a path; with an OPAQUE upstream the
+  // number-driven controls still work (no probe means no upper clamp --
+  // extraction clamps past-the-end server-side regardless).
+  const hasSource = Boolean(state.path) || Boolean(state.wired)
+  // Jump/step/number-input stay enabled whenever a source is set,
+  // REGARDLESS of preview playability -- they only need the PROBED
+  // fps/frame_count (decoded server-side, independent of what this browser
+  // can render), so they keep working even when the <video> preview itself
+  // has degraded.
+  if (state.frameInputEl) state.frameInputEl.disabled = !hasSource
+  if (state.jumpStartBtn) state.jumpStartBtn.disabled = !hasSource
+  if (state.stepBack5Btn) state.stepBack5Btn.disabled = !hasSource
+  if (state.stepBackBtn) state.stepBackBtn.disabled = !hasSource
+  if (state.stepFwdBtn) state.stepFwdBtn.disabled = !hasSource
+  if (state.stepFwd5Btn) state.stepFwd5Btn.disabled = !hasSource
   // Play/pause is the one control that genuinely needs a playable preview.
-  if (state.playPauseBtn) state.playPauseBtn.disabled = !hasPath || state.videoPlayable !== true
+  if (state.playPauseBtn) state.playPauseBtn.disabled = !hasSource || state.videoPlayable !== true
 }
 
 // ---------------------------------------------------------------------------
@@ -1411,6 +1435,17 @@ function updateControlsEnabled(state) {
 
 function updatePathBarText(state) {
   if (!state.pathTextEl) return
+  if (state.wired) {
+    // §6.7 v0.60.0: the wire wins, so the bar names the wire -- showing
+    // the (ignored) browsed path here would misstate what will run.
+    const label =
+      state.wired.kind === 'input_ref'
+        ? `⇐ wired: ${state.wired.ref} (${state.wired.title})`
+        : `⇐ wired: ${state.wired.title}`
+    state.pathTextEl.textContent = frontTruncate(label)
+    state.pathTextEl.title = label
+    return
+  }
   const text = state.path || '(no video selected)'
   state.pathTextEl.textContent = frontTruncate(text)
   state.pathTextEl.title = state.path || ''
@@ -1428,11 +1463,11 @@ function setPathBarStatus(state, message, isError = false) {
  * a slow response from a since-superseded path can never clobber current
  * state (mirrors `notebook.js`'s identical `loadToken` guard).
  */
-async function startProbe(state, path) {
+async function startProbe(state, params) {
   const token = state.probeToken
   setPathBarStatus(state, '')
   try {
-    const data = await getJson('/eps_frame_saver/probe', { path })
+    const data = await getJson('/eps_frame_saver/probe', params)
     if (token !== state.probeToken) return // superseded by a later path change
     state.probe = data
     clampFrameToProbeBounds(state)
@@ -1447,8 +1482,11 @@ async function startProbe(state, path) {
     // 403 itself IS the ground truth that this viewer is remote, so adopt
     // it: flip the gating (which hides Browse, shows the host note, and
     // clears the video via refreshVideoSource's remote branch) and show the
-    // same calm message the properly-gated path uses.
-    if (error?.status === 403) {
+    // same calm message the properly-gated path uses. PATH mode only:
+    // input_ref probes are deliberately ungated (§6.7 v0.60.0), so a 403
+    // there would be something else entirely -- fall through to the
+    // generic error text instead of mis-flipping the gating.
+    if (error?.status === 403 && params.path) {
       state.isLocal = false
       applyGating(state) // also re-runs refreshVideoSource's remote branch
       setPathBarStatus(
@@ -1474,7 +1512,21 @@ function refreshVideoSource(state) {
   state.probe = null
   state.probeToken += 1
 
-  if (!state.path || state.isLocal === false) {
+  if (state.wired?.kind === 'input_ref') {
+    // §6.7 v0.60.0: an upstream LoadVideo's file, streamed via the routes'
+    // input_ref mode -- deliberately NOT gated on isLocal (an input-dir
+    // file is exposed to every viewer by core's own /view already), so the
+    // scrubber works from a remote browser too.
+    const url = api.apiURL(`/eps_frame_saver/stream?input_ref=${encodeURIComponent(state.wired.ref)}`)
+    state.videoEl.src = url
+    state.videoEl.load()
+    startProbe(state, { input_ref: state.wired.ref })
+  } else if (state.wired) {
+    // Opaque wired source: the video only exists at run time. No preview
+    // to try; the overlay says so and the frame FIELD stays live.
+    state.videoEl.removeAttribute('src')
+    state.videoEl.load()
+  } else if (!state.path || state.isLocal === false) {
     // Empty path, or a remote viewer (the stream/probe routes are
     // loopback-only regardless -- FORMAT.md §6.7 -- so don't even try;
     // avoids a confusing generic video `error` event standing in for "this
@@ -1485,7 +1537,7 @@ function refreshVideoSource(state) {
     const url = api.apiURL(`/eps_frame_saver/stream?path=${encodeURIComponent(state.path)}`)
     state.videoEl.src = url
     state.videoEl.load()
-    startProbe(state, state.path)
+    startProbe(state, { path: state.path })
   }
   updateOverlayUi(state)
   refreshFrameUi(state)
@@ -1498,9 +1550,48 @@ function onPathChanged(state, rawPath) {
   refreshVideoSource(state)
 }
 
-/** Re-derives EVERYTHING from the widgets' CURRENT values -- the single
- * entry point all three restore-timing hooks call (see file header). */
+/**
+ * §6.7 v0.60.0: what is wired into the node's `video` input, followed
+ * through reroutes. An upstream core `LoadVideo` is statically knowable
+ * from its `file` widget (the exact annotated value the routes' input_ref
+ * mode resolves); anything else is a run-time video -- opaque here.
+ * @param {object} node
+ * @returns {null | {kind: string, ref?: string, title: string}}
+ */
+function resolveWiredVideo(node) {
+  const slot = (node.inputs || []).findIndex((input) => input && input.name === 'video')
+  if (slot === -1) return null
+  let current = node
+  let currentSlot = slot
+  for (let hops = 0; hops < 32; hops++) {
+    const link_id = current.inputs?.[currentSlot]?.link
+    if (link_id == null) return null
+    const link = current.graph?.links?.[link_id] ?? current.graph?.links?.get?.(link_id)
+    if (!link) return null
+    const upstream = current.graph?.getNodeById?.(link.origin_id)
+    if (!upstream) return null
+    if (upstream.type === 'Reroute' || upstream.type === 'Reroute (rgthree)') {
+      current = upstream
+      currentSlot = 0
+      continue
+    }
+    const upstreamClass = upstream.comfyClass ?? upstream.constructor?.comfyClass ?? upstream.type
+    const title = upstream.title || upstreamClass
+    if (upstreamClass === 'LoadVideo') {
+      const fileWidget = (upstream.widgets || []).find((w) => w && w.name === 'file')
+      const ref = typeof fileWidget?.value === 'string' ? fileWidget.value.trim() : ''
+      if (ref) return { kind: 'input_ref', ref, title }
+    }
+    return { kind: 'opaque', title }
+  }
+  return { kind: 'opaque', title: '(reroute loop)' }
+}
+
+/** Re-derives EVERYTHING from the widgets' CURRENT values AND the wire
+ * state -- the single entry point all restore-timing hooks (and the
+ * v0.60.0 onConnectionsChange wrap) call (see file header). */
 function fullResync(state) {
+  state.wired = resolveWiredVideo(state.node)
   onPathChanged(state, state.pathWidget.value)
 }
 
@@ -2047,6 +2138,27 @@ export function attach(node) {
     hideWidget(node, frameWidget)
     wireNodeCleanup(state)
     wireConfigureResync(state)
+    // §6.7 v0.60.0: (un)wiring the `video` input changes the whole source
+    // story -- re-derive through the same fullResync every restore hook
+    // uses. Chained + guarded, the pack's standard wrap; fires in BOTH
+    // renderers (a node hook, not a canvas one).
+    const originalOnConnectionsChange = node.onConnectionsChange
+    node.onConnectionsChange = function (...args) {
+      let result
+      if (typeof originalOnConnectionsChange === 'function') {
+        try {
+          result = originalOnConnectionsChange.apply(this, args)
+        } catch (error) {
+          warn('original onConnectionsChange threw', error)
+        }
+      }
+      try {
+        fullResync(state)
+      } catch (error) {
+        warn('wire-change resync failed', error)
+      }
+      return result
+    }
     // After wireNodeCleanup on purpose: the removal wrap exists before the
     // document listener does, so there is no window where a torn-down node
     // could leak it.

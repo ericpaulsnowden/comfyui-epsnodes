@@ -28,9 +28,16 @@ every other node in this pack (``eps_image/nodes_resolution.py``,
 
 from __future__ import annotations
 
+import contextlib
+import logging
+import os
 from typing import Any
 
-from . import frame_saver_video as video
+# Plain module name, not the old `as video` alias: run()'s new `video`
+# PARAMETER (the §6.7 v0.60.0 wired input) would shadow it.
+from . import frame_saver_video
+
+logger = logging.getLogger("eps_image")
 
 CATEGORY_NAME = "EPSNodes"
 
@@ -108,15 +115,113 @@ class EPSFrameSaver:
                     },
                 ),
             },
+            "optional": {
+                # v0.60.0 (FORMAT.md §6.7, owner ask 2026-08-09): a video
+                # already IN the workflow, frame-picked without touching
+                # disk paths. Additive + §8-safe exactly like v0.46.0's vae
+                # precedent (inputs resolve by NAME).
+                "video": (
+                    "VIDEO",
+                    {
+                        "tooltip": (
+                            "Optional: a video from elsewhere in the "
+                            "workflow (Load Video, Video Slice, ...). When "
+                            "wired it takes over completely -- the browsed "
+                            "path is ignored. Wire from a Load Video node "
+                            "and the on-node scrubber works exactly as for "
+                            "a browsed file; other video sources arrive at "
+                            "run time, so pick the frame by typing its "
+                            "number."
+                        ),
+                    },
+                ),
+            },
         }
 
-    def run(self, video_path: str, frame: int = 0) -> tuple[Any, int, int]:
+    def run(self, video_path: str, frame: int = 0, video: Any = None) -> tuple[Any, int, int]:
+        # WIRED WINS (FORMAT.md §6.7 v0.60.0): an explicit wire beats a
+        # stale widget, unconditionally.
+        if video is not None:
+            return self._run_from_video_input(video, int(frame))
+
         path = str(video_path or "").strip()
         if not path:
             raise ValueError(
                 "EPS Frame Saver: no video chosen yet -- click Browse on the "
-                "node, or paste a full path onto it (Ctrl/Cmd+V) if you are "
-                "working from another machine."
+                "node, paste a full path onto it (Ctrl/Cmd+V) if you are "
+                "working from another machine, or wire a video into the "
+                "video input."
             )
-        tensor, width, height = video.extract_frame(path, int(frame))
+        tensor, width, height = frame_saver_video.extract_frame(path, int(frame))
         return (tensor, width, height)
+
+    @staticmethod
+    def _run_from_video_input(video_input: Any, frame: int) -> tuple[Any, int, int]:
+        """Extract *frame* from a wired ``VIDEO`` object (FORMAT.md §6.7).
+
+        Duck-typed against ``comfy_api``'s ``VideoInput`` rather than
+        imported (the pack's no-ComfyUI-import-at-module-scope seam, and
+        third-party packs ship their own "VIDEO" objects):
+
+        - ``get_stream_source()`` -> a path or file-like, both exactly what
+          ``av.open`` accepts -- the zero-copy fast path.
+        - ``get_active_trim_window()`` (``VideoFromFile``) -> honored, so a
+          ``VideoSlice`` output frames as the user sees it.
+        - Neither, but ``save_to(path)`` -> encode to a temp file, extract,
+          delete in ``finally`` (logged -- it is the slow path).
+        - None of the above -> a ValueError naming the type.
+        """
+        label = f"wired video ({type(video_input).__name__})"
+
+        trim_start, trim_duration = 0.0, 0.0
+        get_trim = getattr(video_input, "get_active_trim_window", None)
+        if callable(get_trim):
+            try:
+                window = get_trim()
+                if isinstance(window, (tuple, list)) and len(window) == 2:
+                    trim_start, trim_duration = float(window[0]), float(window[1])
+            except Exception:  # a trim probe must never sink the extract
+                logger.exception("EPSNodes: EPS Frame Saver could not read the trim window")
+
+        get_source = getattr(video_input, "get_stream_source", None)
+        if callable(get_source):
+            try:
+                source = get_source()
+            except Exception as exc:
+                raise ValueError(
+                    f"EPS Frame Saver: the {label} could not provide its "
+                    f"stream ({exc})"
+                ) from exc
+            return frame_saver_video.extract_frame(
+                source,
+                frame,
+                trim_start=trim_start,
+                trim_duration=trim_duration,
+                label=label,
+            )
+
+        save_to = getattr(video_input, "save_to", None)
+        if callable(save_to):
+            import tempfile
+
+            logger.info(
+                "EPSNodes: EPS Frame Saver encoding a %s to a temp file "
+                "(no get_stream_source on this object -- the slow path)",
+                type(video_input).__name__,
+            )
+            fd, tmp_name = tempfile.mkstemp(suffix=".mp4", prefix="eps_frame_saver_")
+            os.close(fd)
+            try:
+                save_to(tmp_name)
+                return frame_saver_video.extract_frame(tmp_name, frame, label=label)
+            finally:
+                with contextlib.suppress(OSError):
+                    os.unlink(tmp_name)
+
+        raise ValueError(
+            "EPS Frame Saver: the wired video input is a "
+            f"{type(video_input).__name__}, which offers neither "
+            "get_stream_source() nor save_to() -- this node can only read "
+            "ComfyUI VIDEO objects (Load Video, Video Slice, and "
+            "compatibles)."
+        )

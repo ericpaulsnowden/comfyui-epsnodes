@@ -254,13 +254,14 @@ class TestInputTypes:
         assert spec["default"] == 0
         assert spec["min"] == 0
 
-    def test_no_optional_inputs(self) -> None:
-        # FORMAT.md §6.7: "No IMAGE input."
+    def test_optional_video_input_only(self) -> None:
+        # FORMAT.md §6.7: "No IMAGE input" -- unchanged. v0.60.0 adds the
+        # one optional `video` (VIDEO) input, additive per the v0.46.0 vae
+        # precedent; wired-wins semantics are pinned in TestVideoInput.
         input_types = EPSFrameSaver.INPUT_TYPES()
-        assert input_types.get("optional", {}) == {}
-
-
-# ------------------------------------------------------------- EPSFrameSaver.run()
+        optional = input_types.get("optional", {})
+        assert set(optional) == {"video"}
+        assert optional["video"][0] == "VIDEO"
 
 
 class TestRun:
@@ -593,3 +594,241 @@ class TestNeverFiveHundreds:
     async def test_stream_route(self, client, path: str) -> None:
         response = await client.get("/eps_frame_saver/stream", params={"path": path})
         assert response.status < 500
+
+
+class TestVideoInput:
+    """v0.60.0 (FORMAT.md §6.7): the optional wired `video` input."""
+
+    class _FileBacked:
+        """Duck-typed VideoInput: file-backed stream source, no trim."""
+
+        def __init__(self, source):
+            self._source = source
+
+        def get_stream_source(self):
+            return self._source
+
+    class _Trimmed(_FileBacked):
+        def __init__(self, source, start, duration):
+            super().__init__(source)
+            self._window = (start, duration)
+
+        def get_active_trim_window(self):
+            return self._window
+
+    class _SaveOnly:
+        """Foreign VIDEO object: only save_to, the slow path."""
+
+        def __init__(self, payload=b""):
+            self.saved_to = None
+            self._payload = payload
+
+        def save_to(self, path):
+            self.saved_to = path
+            with open(path, "wb") as fh:
+                fh.write(self._payload)
+
+    class _Opaque:
+        """Neither API -- must fail with a message naming the type."""
+
+    @pytest.fixture
+    def capture_extract(self, monkeypatch):
+        """Replace the real extractor with a recorder returning a sentinel."""
+        calls = []
+
+        def fake_extract(source, frame_index, *, trim_start=0.0, trim_duration=0.0, label=None):
+            calls.append(
+                {
+                    "source": source,
+                    "frame": frame_index,
+                    "trim_start": trim_start,
+                    "trim_duration": trim_duration,
+                    "label": label,
+                }
+            )
+            return ("TENSOR", 640, 480)
+
+        monkeypatch.setattr(frame_saver_video, "extract_frame", fake_extract)
+        return calls
+
+    def test_wired_video_wins_over_path(self, capture_extract) -> None:
+        node = EPSFrameSaver()
+        result = node.run("/some/stale/path.mp4", 7, video=self._FileBacked("/real/clip.mp4"))
+        assert result == ("TENSOR", 640, 480)
+        assert capture_extract == [
+            {
+                "source": "/real/clip.mp4",
+                "frame": 7,
+                "trim_start": 0.0,
+                "trim_duration": 0.0,
+                "label": "wired video (_FileBacked)",
+            }
+        ]
+
+    def test_trim_window_is_honored(self, capture_extract) -> None:
+        EPSFrameSaver().run("", 3, video=self._Trimmed("/clip.mp4", 1.5, 2.0))
+        call = capture_extract[0]
+        assert call["trim_start"] == 1.5
+        assert call["trim_duration"] == 2.0
+
+    def test_broken_trim_probe_degrades_to_no_trim(self, capture_extract) -> None:
+        class BadTrim(self._FileBacked):
+            def get_active_trim_window(self):
+                raise RuntimeError("boom")
+
+        EPSFrameSaver().run("", 0, video=BadTrim("/clip.mp4"))
+        assert capture_extract[0]["trim_start"] == 0.0
+
+    def test_file_like_stream_source_passes_through(self, capture_extract) -> None:
+        import io as _io
+
+        buffer = _io.BytesIO(b"fake")
+        EPSFrameSaver().run("", 0, video=self._FileBacked(buffer))
+        assert capture_extract[0]["source"] is buffer
+
+    def test_save_to_fallback_uses_and_deletes_a_temp_file(self, capture_extract) -> None:
+        import os as _os
+
+        video_obj = self._SaveOnly(b"bytes")
+        EPSFrameSaver().run("", 2, video=video_obj)
+        assert capture_extract[0]["source"] == video_obj.saved_to
+        assert capture_extract[0]["frame"] == 2
+        assert not _os.path.exists(video_obj.saved_to)  # deleted in finally
+
+    def test_save_to_temp_deleted_even_when_extract_raises(self, monkeypatch) -> None:
+        import os as _os
+
+        def exploding_extract(*args, **kwargs):
+            raise ValueError("decode failed")
+
+        monkeypatch.setattr(frame_saver_video, "extract_frame", exploding_extract)
+        video_obj = self._SaveOnly()
+        with pytest.raises(ValueError, match="decode failed"):
+            EPSFrameSaver().run("", 0, video=video_obj)
+        assert not _os.path.exists(video_obj.saved_to)
+
+    def test_opaque_object_fails_naming_its_type(self) -> None:
+        with pytest.raises(ValueError, match="_Opaque"):
+            EPSFrameSaver().run("", 0, video=self._Opaque())
+
+    def test_unwired_video_keeps_the_path_flow(self, capture_extract) -> None:
+        EPSFrameSaver().run("/plain/path.mp4", 4)
+        assert capture_extract[0]["source"] == "/plain/path.mp4"
+        # positional legacy call shape -- the extractor defaults apply
+        assert capture_extract[0]["trim_start"] == 0.0
+
+    def test_no_video_and_no_path_error_mentions_the_new_input(self) -> None:
+        with pytest.raises(ValueError, match="video input"):
+            EPSFrameSaver().run("", 0)
+
+    def test_stream_source_failure_is_a_clean_error(self) -> None:
+        class Exploding:
+            def get_stream_source(self):
+                raise RuntimeError("device gone")
+
+        with pytest.raises(ValueError, match="could not provide its"):
+            EPSFrameSaver().run("", 0, video=Exploding())
+
+
+class TestInputRefMode:
+    """v0.60.0 (FORMAT.md §6.7): the routes' `input_ref` mode -- an annotated
+    input-dir filename resolved the exact way core LoadVideo validates it,
+    deliberately NOT loopback-gated (core's own /view already exposes the
+    same files to every viewer)."""
+
+    @pytest.fixture
+    def fake_folder_paths(self, monkeypatch):
+        """A fake `folder_paths` limited to the two functions the resolver
+        uses, mapping annotated names into the seeded-clips dir."""
+
+        class FakeFolderPaths:
+            @staticmethod
+            def exists_annotated_filepath(name):
+                return (_SEEDED_CLIPS_DIR / name).is_file()
+
+            @staticmethod
+            def get_annotated_filepath(name):
+                return str(_SEEDED_CLIPS_DIR / name)
+
+        monkeypatch.setattr(routes_frame_saver, "_FOLDER_PATHS_OVERRIDE", FakeFolderPaths)
+        return FakeFolderPaths
+
+    async def test_probe_by_input_ref_works_remotely(self, client, fake_folder_paths) -> None:
+        _seeded_clip(CLIP_RED)
+        response = await client.get(
+            "/eps_frame_saver/probe",
+            params={"input_ref": "clip_red.mp4"},
+            headers=REMOTE_HEADERS,  # the decisive difference from path mode
+        )
+        assert response.status == 200
+        data = await response.json()
+        assert data["frame_count"] > 0
+
+    async def test_stream_by_input_ref_works_remotely_with_ranges(
+        self, client, fake_folder_paths
+    ) -> None:
+        path = _seeded_clip(CLIP_RED)
+        response = await client.get(
+            "/eps_frame_saver/stream",
+            params={"input_ref": "clip_red.mp4"},
+            headers={**REMOTE_HEADERS, "Range": "bytes=0-15"},
+        )
+        assert response.status == 206
+        body = await response.read()
+        assert len(body) == 16
+        assert Path(path).stat().st_size > 16
+
+    async def test_path_mode_remote_is_still_403(self, client, fake_folder_paths) -> None:
+        # The new mode must not have loosened the original one.
+        path = _seeded_clip(CLIP_RED)
+        response = await client.get(
+            "/eps_frame_saver/probe", params={"path": path}, headers=REMOTE_HEADERS
+        )
+        assert response.status == 403
+
+    async def test_unknown_input_ref_is_404_shaped_400(self, client, fake_folder_paths) -> None:
+        response = await client.get(
+            "/eps_frame_saver/probe", params={"input_ref": "nope.mp4"}, headers=REMOTE_HEADERS
+        )
+        assert response.status == 400
+        assert "no such input video" in (await response.json())["error"]
+
+    async def test_non_video_extension_rejected(self, client, fake_folder_paths, tmp_path) -> None:
+        (_SEEDED_CLIPS_DIR / "notes.txt").is_file()  # doesn't need to exist for this check
+
+        class TxtFolderPaths:
+            @staticmethod
+            def exists_annotated_filepath(name):
+                return True
+
+            @staticmethod
+            def get_annotated_filepath(name):
+                return str(tmp_path / "notes.txt")
+
+        import pytest as _pytest
+
+        with _pytest.MonkeyPatch.context() as mp:
+            mp.setattr(routes_frame_saver, "_FOLDER_PATHS_OVERRIDE", TxtFolderPaths)
+            response = await client.get(
+                "/eps_frame_saver/probe", params={"input_ref": "notes.txt"}
+            )
+        assert response.status == 400
+        assert "unsupported video extension" in (await response.json())["error"]
+
+    async def test_both_params_at_once_is_400(self, client, fake_folder_paths) -> None:
+        response = await client.get(
+            "/eps_frame_saver/probe",
+            params={"input_ref": "clip_red.mp4", "path": "/x.mp4"},
+        )
+        assert response.status == 400
+        assert "not both" in (await response.json())["error"]
+
+    async def test_no_folder_paths_is_a_clean_400(self, client, monkeypatch) -> None:
+        # Outside ComfyUI (override unset, real module unimportable) the
+        # resolver 400s instead of crashing.
+        monkeypatch.setattr(routes_frame_saver, "_FOLDER_PATHS_OVERRIDE", None)
+        response = await client.get(
+            "/eps_frame_saver/probe", params={"input_ref": "clip_red.mp4"}
+        )
+        assert response.status == 400
+        assert "requires a running ComfyUI" in (await response.json())["error"]

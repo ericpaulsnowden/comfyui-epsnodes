@@ -1444,6 +1444,46 @@ single-frame output (NOT a list); "close-enough preview, EXACT on output".
   frame index, default 0, driven by the player + serialized so it round-trips
   and reaches `execute()`). Host-only Browse (hidden on a remote browser, like
   the notebook/premiere pickers). No IMAGE input.
+- **Optional `video` INPUT (v0.60.0, owner ask 2026-08-09: "if there is
+  already a video in a workflow a user wants to extract a frame from, they
+  can easily").** An optional `VIDEO`-typed input socket — additive and
+  §8-safe exactly like v0.46.0's `vae` (inputs resolve by NAME). WIRED
+  WINS: when connected, `video_path` is ignored entirely (an explicit wire
+  beats a stale widget) and the no-video error names both options.
+  Extraction opens the `VideoInput`'s own `get_stream_source()` — a path
+  or a file-like, both exactly what `av.open` takes, so a file-backed
+  `VideoFromFile` costs nothing extra and an in-memory video decodes from
+  its buffer — honors `get_active_trim_window()` when the object has one
+  (frame N of a trimmed video counts from the trim start and clamps inside
+  the window, so a `VideoSlice` output frames as the user sees it), and
+  falls back to `save_to()` into a temp file for foreign "VIDEO" objects
+  lacking that API (deleted in `finally`; logged); an object with neither
+  method fails with a ValueError naming its type. IMAGE-batch "videos" are
+  deliberately NOT accepted — core's `ImageFromBatch` already picks a
+  frame from a batch; this input is for genuine VIDEO objects, which
+  nothing in core frame-picks interactively.
+- **The player when `video` is wired:** an upstream core `LoadVideo`
+  (followed through reroutes) is statically knowable from its `file`
+  widget, so the scrubber works EXACTLY as for a browsed path via the
+  routes' `input_ref` mode below — including from a REMOTE browser (the
+  file is in ComfyUI's input dir, which core's own `/view` already exposes
+  to every viewer, so §2's arbitrary-file-read rationale does not apply
+  to this mode). Any OTHER wired source (a generated/derived video —
+  unknowable before the graph runs) degrades honestly: the overlay says
+  the video arrives from the wire at run time, the frame FIELD stays live
+  (a typed frame number still selects; extraction clamps past-the-end per
+  the existing rule), and the path bar names the upstream node.
+  Unwiring returns to path mode; both the wire state and gating re-derive
+  through the same `fullResync` every restore hook already uses.
+- **Routes `input_ref` mode (v0.60.0):** `probe`/`stream` both accept
+  `?input_ref=<annotated input filename>` as an alternative to `?path=`,
+  resolved via `folder_paths.get_annotated_filepath` after
+  `exists_annotated_filepath` — the EXACT validation core's `LoadVideo`
+  applies to the same value — with the extension allowlist still
+  enforced. `input_ref` mode is deliberately NOT loopback-gated (the
+  `/view` exposure-equivalence above); `path` mode keeps its
+  unconditional loopback gate, unchanged. Missing `folder_paths` (a
+  non-ComfyUI process) ⇒ 400, not a crash; both params at once ⇒ 400.
 - **Outputs:** `image` (IMAGE, a single `[1,H,W,C]` float32 0..1),
   `width` (INT), `height` (INT). **NO `OUTPUT_IS_LIST`** — plain single
   outputs (matches `PremiereShotFrame`). Multi-frame = a future sibling node.

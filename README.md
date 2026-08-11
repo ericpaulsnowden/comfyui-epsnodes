@@ -28,7 +28,7 @@ section further down; this is the map.
 | [**EPS Resolution**](#eps-resolution-shipped) | Image-first resize + size in one node: target size (with a drag pad), four resize modes, and the original image + both sets of dimensions passed through. Named size presets are shared across your machines — tick several and one Run resizes once per preset. | Nothing — drag-and-drop with core nodes. |
 | [**EPS Image Grid**](#eps-image-grid-shipped) | Collects images across separate Runs into a buffer that survives restarts, shows them as a thumbnail grid, and fans the whole set out on demand. Add whole batches at once — a multiselect picker, a folder importer, or one big drag. | Nothing — drag-and-drop with core nodes. |
 | [**EPS Run Multiplier**](#eps-run-multiplier-shipped) | Multiplies whatever you wire in: a sweep group (LoRA Iterator, or Checkpoint Switcher with its VAEs) × images × texts, in one node — or just images × texts with no sweep at all — with per-run save paths so big runs land in tidy folders. | Any of: EPS LoRA Iterator / EPS Checkpoint Switcher on the sweep side; an Image Grid or Image Switcher plus a multi-select Prompt Notebook on the pair side. |
-| [**EPS Frame Saver**](#eps-frame-saver-shipped) | Loads a video by path, lets you scrub or play to a frame, and outputs that frame as an image. | A video file on the ComfyUI machine. |
+| [**EPS Frame Saver**](#eps-frame-saver-shipped) | Loads a video by path — or takes one from a wire — lets you scrub or play to a frame, and outputs that frame as an image. | A video file on the ComfyUI machine, or any `VIDEO` output in the workflow. |
 
 > **Status: pre-release.** Contracts live in
 > [docs/FORMAT.md](docs/FORMAT.md). Want to see the nodes working? Every
@@ -700,6 +700,15 @@ as an image.
   "Copy as Pathname" / Explorer's "Copy as path"), select the node, and press
   **Ctrl/Cmd+V** — it loads that video. (Quotes and `file://` wrappers are
   handled; pasting into a text field still pastes normally.)
+- **Or wire a video in (v0.60.0):** the optional `video` input takes any
+  `VIDEO` output already in your workflow — and the wire wins over the
+  browsed path. Wire from a **Load Video** node and the scrubber works
+  exactly as for a browsed file (including from another machine's browser —
+  those files live in ComfyUI's input folder, which is already shared).
+  Wire from anything else (Video Slice, a generated video) and the preview
+  honestly says the video arrives when the workflow runs — type the frame
+  number instead; a number past the end clamps to the last frame, and a
+  Video Slice's trim is respected (frame 0 is the slice's first frame).
 - **Scrub to the frame you want:** the node shows the video with a transport
   strip — **jump to start**, **−5**, **−1**, **play/pause**, **+1**, **+5** —
   plus a frame-number box and a live **Frame X / N** counter (total frames
