@@ -901,8 +901,8 @@ class TestM3:
 
     def test_thumb_img_lazy_loading_and_error_hide(self, source: str) -> None:
         """ROUTE_PREVIEW as an <img src> with the encoded file, lazy-loaded;
-        the error listener hides the img because a 404 (no sidecar image)
-        is the NORMAL case."""
+        the error listener (now just the deleted-since-load safety) hides
+        the img."""
         body = _function_body(source, "buildLoraRowEl(state, file, displayLabel)")
         assert "className: 'eps-lp-thumb'" in body
         # Through api.apiUrl, not a hardcoded root-absolute path (review
@@ -911,6 +911,21 @@ class TestM3:
         assert "loading: 'lazy'" in body
         error_leg = body[body.index("thumb.addEventListener('error'") :]
         assert "thumb.style.display = 'none'" in error_leg[:200]
+
+    def test_thumb_built_only_for_loras_the_feed_says_have_previews(self, source: str) -> None:
+        """v0.61.2 (owner jank report 2026-08-14): the black placeholder
+        squares were per-row 404 probes. The img is gated on the feed's
+        server-computed `previews` set -- a no-preview row allocates NO
+        element at all, so nothing appears, hides, or re-lays-out."""
+        body = _function_body(source, "buildLoraRowEl(state, file, displayLabel)")
+        assert "if (state.previewSet.has(file))" in body
+        gate = body.index("if (state.previewSet.has(file))")
+        assert body.index("className: 'eps-lp-thumb'") > gate
+        assert "const children = thumb ? [starBtn, thumb, label] : [starBtn, label]" in body
+        load = _function_body(source, "async function loadPicker(state)".replace("async function ", ""))
+        assert load is not None
+        assert "state.previewSet = new Set(" in source
+        assert "Array.isArray(data?.previews) ? data.previews : []" in source
 
     def test_thumb_is_a_fixed_square_that_never_stretches(self, source: str) -> None:
         expected = ".eps-lp-thumb { flex: 0 0 auto; width: 26px; height: 26px; object-fit: cover;"

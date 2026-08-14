@@ -52,7 +52,13 @@ async def test_get_picker_empty_state(context: LibraryContext, aiohttp_client) -
     resp = await client.get("/lora_library/picker")
     assert resp.status == 200
     body = await resp.json()
-    assert body == {"loras": FAKE_LORAS, "favorites": [], "recents": [], "mtime": None}
+    assert body == {
+        "loras": FAKE_LORAS,
+        "previews": [],  # default context resolves no paths -> nothing can have a sidecar
+        "favorites": [],
+        "recents": [],
+        "mtime": None,
+    }
 
 
 async def test_get_picker_loras_order_is_untouched_list_order(
@@ -824,3 +830,51 @@ async def test_post_favorites_order_unreachable_library_folder_is_400_naming_the
     assert resp.status == 400
     body = await resp.json()
     assert "library folder" in body["error"]
+
+
+# ------------------------------------------------- GET /picker `previews` field
+# (v0.61.2, owner jank report 2026-08-14: the feed says up front which loras
+# have a sidecar preview, so the panel never probes rows with 404-destined
+# <img> elements that painted-then-hid a placeholder square per lora.)
+
+
+async def test_feed_previews_lists_only_loras_with_sidecar_images(
+    context: LibraryContext, _resolved_context: Path, aiohttp_client
+) -> None:
+    """Both §6.13 M3 spellings count (plain and `.preview.`); a lora with
+    no sibling image is absent; feed order is preserved."""
+    (_resolved_context / "detailer.png").write_bytes(b"x")
+    styles = _resolved_context / "styles"
+    styles.mkdir()
+    (styles / "film_grain.preview.jpg").write_bytes(b"x")
+    client = await aiohttp_client(make_app(context))
+    resp = await client.get("/lora_library/picker")
+    assert resp.status == 200
+    body = await resp.json()
+    assert body["previews"] == ["detailer.safetensors", "styles/film_grain.safetensors"]
+
+
+async def test_feed_previews_matches_sidecar_names_case_insensitively(
+    context: LibraryContext, _resolved_context: Path, aiohttp_client
+) -> None:
+    """The stat-based preview route tolerates any casing on the
+    case-insensitive filesystems the packs actually run on -- the feed's
+    listing-based check must agree, not silently drop the thumbnail."""
+    (_resolved_context / "Detailer.PNG").write_bytes(b"x")
+    client = await aiohttp_client(make_app(context))
+    body = await (await client.get("/lora_library/picker")).json()
+    assert body["previews"] == ["detailer.safetensors"]
+
+
+async def test_feed_previews_survives_a_missing_directory(
+    context: LibraryContext, _resolved_context: Path, aiohttp_client
+) -> None:
+    """`styles/` is never created here: the listdir OSError degrades to
+    "no previews in that folder", never a 500 -- the feed must stay up
+    even when a resolved path's folder is gone."""
+    (_resolved_context / "detailer.png").write_bytes(b"x")
+    client = await aiohttp_client(make_app(context))
+    resp = await client.get("/lora_library/picker")
+    assert resp.status == 200
+    body = await resp.json()
+    assert body["previews"] == ["detailer.safetensors"]

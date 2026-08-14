@@ -418,6 +418,7 @@ function createState(node, widget) {
     selection: { scope: '', loras: [] }, // source of truth mirrored from the widget
     loras: [], // served list, normalized -- [] until the first load resolves
     loraSet: new Set(),
+    previewSet: new Set(), // loras with a sidecar preview (feed `previews`, v0.61.2)
     favorites: [], // store order (§6.13)
     recents: [], // newest first (§6.13)
     loaded: false,
@@ -590,6 +591,13 @@ async function loadPicker(state) {
       .filter((entry) => typeof entry === 'string')
       .map(normalizeLoraName)
     state.loraSet = new Set(state.loras)
+    // Which loras have a sidecar preview -- server-computed (v0.61.2), so
+    // rows never have to probe with a 404-destined <img> of their own.
+    state.previewSet = new Set(
+      (Array.isArray(data?.previews) ? data.previews : [])
+        .filter((entry) => typeof entry === 'string')
+        .map(normalizeLoraName)
+    )
     state.favorites = (Array.isArray(data?.favorites) ? data.favorites : [])
       .filter((entry) => typeof entry === 'string')
       .map(normalizeLoraName)
@@ -1106,21 +1114,28 @@ function buildLoraRowEl(state, file, displayLabel) {
     toggleFavorite(state, file, !favorite).catch((error) => api.warn('favorite toggle rejected', error))
   })
 
-  // §6.13 M3 thumbnail: the sidecar preview image, served by ROUTE_PREVIEW.
-  // loading="lazy" keeps a 1000-lora folder from firing 1000 eager fetches;
-  // the error listener hides the img because a 404 (no sidecar image) is
-  // the NORMAL case, not a failure worth any pixels or noise.
-  const thumb = el('img', {
-    className: 'eps-lp-thumb',
-    attrs: {
-      src: api.apiUrl(`${ROUTE_PREVIEW}?file=${encodeURIComponent(file)}`),
-      loading: 'lazy',
-      alt: ''
-    }
-  })
-  thumb.addEventListener('error', () => {
-    thumb.style.display = 'none'
-  })
+  // §6.13 M3 thumbnail: the sidecar preview image, served by ROUTE_PREVIEW
+  // -- built ONLY for loras the feed's `previews` list names (owner report
+  // 2026-08-14: probing every row with an <img> 404 painted a placeholder
+  // square that vanished per-row as each 404 landed, re-laying the list
+  // out each time; the server knows up front, so no-preview rows never
+  // allocate any pixels). loading="lazy" keeps a 1000-lora folder from
+  // firing 1000 eager fetches; the error listener stays as the safety for
+  // a sidecar deleted since the feed loaded (hide, exactly as before).
+  let thumb = null
+  if (state.previewSet.has(file)) {
+    thumb = el('img', {
+      className: 'eps-lp-thumb',
+      attrs: {
+        src: api.apiUrl(`${ROUTE_PREVIEW}?file=${encodeURIComponent(file)}`),
+        loading: 'lazy',
+        alt: ''
+      }
+    })
+    thumb.addEventListener('error', () => {
+      thumb.style.display = 'none'
+    })
+  }
 
   const label = el('span', {
     className: ghost ? 'eps-lp-row-label eps-lp-row-missing' : 'eps-lp-row-label',
@@ -1128,7 +1143,7 @@ function buildLoraRowEl(state, file, displayLabel) {
     attrs: { title: ghost ? `${file} — not installed here` : file }
   })
 
-  const children = [starBtn, thumb, label]
+  const children = thumb ? [starBtn, thumb, label] : [starBtn, label]
   if (draggable) {
     const handle = el('span', {
       className: 'eps-lp-drag-handle',

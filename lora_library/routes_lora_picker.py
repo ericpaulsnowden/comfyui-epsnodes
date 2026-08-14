@@ -39,6 +39,7 @@ handler below, and none of them catch it.
 from __future__ import annotations
 
 import logging
+import os
 from pathlib import Path
 
 from aiohttp import web
@@ -119,6 +120,46 @@ def _find_preview_image(resolved: Path) -> Path | None:
     return None
 
 
+def _loras_with_previews(context: LibraryContext, loras: list[str]) -> list[str]:
+    """The subset of *loras* (served names, feed order) whose sidecar
+    preview image exists on this machine -- the same two spellings per
+    extension :func:`_find_preview_image` checks, but computed with ONE
+    directory listing per unique folder instead of eight stat calls per
+    lora, so a large library stays cheap even on network storage.
+
+    This feeds the panel its thumbnail verdicts UP FRONT (owner report
+    2026-08-14): probing availability client-side with per-lora ``<img>``
+    404s painted a placeholder square on every row that then vanished one
+    by one as each 404 landed -- LAN-staggered, re-laying the list out
+    every time. Names are compared case-insensitively: the stat-based
+    route tolerates any casing on the case-insensitive filesystems the
+    packs actually run on (Windows/macOS), and a Linux false positive
+    merely degrades to the old hide-on-404 path for that one row.
+    """
+    listings: dict[Path, set[str]] = {}
+    out: list[str] = []
+    for name in loras:
+        path_str = context.resolve_lora_path(name)
+        if path_str is None:
+            continue
+        resolved = Path(path_str)
+        parent = resolved.parent
+        entries = listings.get(parent)
+        if entries is None:
+            try:
+                entries = {entry.lower() for entry in os.listdir(parent)}
+            except OSError:
+                entries = set()
+            listings[parent] = entries
+        stem = resolved.stem.lower()
+        if any(
+            f"{stem}{ext}" in entries or f"{stem}.preview{ext}" in entries
+            for ext in _PREVIEW_EXTENSIONS
+        ):
+            out.append(name)
+    return out
+
+
 def register(context: LibraryContext, routes: web.RouteTableDef) -> None:
     """Attach the seven §5 ``/lora_library/picker*`` rows to *routes*."""
 
@@ -129,6 +170,7 @@ def register(context: LibraryContext, routes: web.RouteTableDef) -> None:
         return web.json_response(
             {
                 "loras": loras,
+                "previews": _loras_with_previews(context, loras),
                 "favorites": state["favorites"],
                 "recents": state["recents"],
                 "mtime": mtime,
