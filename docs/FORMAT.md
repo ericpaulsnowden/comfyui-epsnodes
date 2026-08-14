@@ -2254,7 +2254,26 @@ apply/text helpers, so it drops in anywhere Apply LoRA Set does.
   state + Retry. The folder TREE is derived client-side from the §5
   `GET picker` list (forward-slash split — no tree route; matches how
   rgthree's own chooser gets nested paths). Drill-down position is
-  transient; only `scope` persists. Add appends `{file, on: true,
+  transient; only `scope` persists.
+  **Layout round (owner ask 2026-08-14, v0.61.1)** amends the panel:
+  (1) the standalone scope chip row is GONE — the breadcrumb root carries
+  the scope identity + tooltip, and clear-scope is a ✕ at the crumbs
+  row's right edge (scoped only); (2) the search field sits UNDER the
+  breadcrumb, and its corpus is the current browse FOLDER (scope +
+  drill-down; whole library only at the library root) — matching and
+  labels are folder-relative, the placeholder names the folder;
+  (3) the standing lora total left the status line for the
+  `library_loras` node property (right-click → Properties; refreshed on
+  every feed load, per-machine) + the root crumb's tooltip — the status
+  bar COLLAPSES entirely once loaded cleanly (it still appears for
+  Loading/error+Retry); (4) the Selected list never crops or scrolls:
+  it sizes to content and `syncSelectedGrowth` grows/shrinks the NODE by
+  the row-count delta (`SELECTED_ROW_PX`), with `getMinHeight` carrying
+  the same per-row term so a manual resize can't crop it either;
+  (5) the Send row leads with a `Send to` label whose tooltip — and the
+  no-target message — say the row is OPTIONAL, because the picker
+  applies its loras itself via model/clip (the owner's own "no loader in
+  graph" confusion, made unrepeatable). Add appends `{file, on: true,
   strength: 1}` (duplicate Add scrolls to the existing row instead) and
   fires `POST picker/recent` — recents record at SELECTION time, the
   roadmap's decided M1 recording point. A favorite naming a lora NOT

@@ -201,14 +201,18 @@ three everyday pains at once: the flat everything-in-one-dropdown lora
 list, no way to scope a workflow to one folder and its subfolders, and no
 favorites or recently-used anywhere in the ecosystem.
 
-- **The panel, top to bottom:** a **scope chip** (`Whole library`, or the
-  pinned folder with ✕ to clear); the **Selected** rows — on/off toggle,
-  name, strength, ✕ remove per row; then the **browser** — a breadcrumb
-  you drill down through, `★ Favorites` and `🕘 Recent` pseudo-folders at
-  the top, every folder with a lora count and a **Scope** pin, every lora
-  with a ★ star and `＋ Add`. A selected or starred lora that isn't
-  installed on this machine shows a dimmed ⚠ row — visible, never
-  silently dropped.
+- **The panel, top to bottom:** the **Selected** rows — on/off toggle,
+  name, strength, ✕ remove per row (the section grows with your picks so
+  the full list is always visible — the node makes the room, nothing
+  crops or scrolls); the **Send to** row; then the **browser** — a
+  breadcrumb you drill down through (with a ✕ at its right edge to clear
+  a pinned scope), the search box, `★ Favorites` and `🕘 Recent`
+  pseudo-folders at the top, every folder with a lora count and a
+  **Scope** pin, every lora with a ★ star and `＋ Add`. A selected or
+  starred lora that isn't installed on this machine shows a dimmed ⚠ row
+  — visible, never silently dropped. Your library's total lora count
+  lives in right-click → Properties (`library_loras`) and the breadcrumb
+  root's tooltip.
 - **Scope is per-workflow.** Pin a folder and the browser shows only it
   and its subfolders — the pin saves **into the workflow file**, so the
   character workflow opens scoped to `characters/`, the style workflow to
@@ -229,7 +233,11 @@ favorites or recently-used anywhere in the ecosystem.
   `filename_prefix`. An empty or all-off selection just passes through —
   never an error. A selection saved on Windows resolves on macOS/Linux
   (same separator-insensitive matching as saved sets).
-- **Send to loader**: a row under the Selected list targets any
+- **Send to loader — entirely optional:** the picker **applies its loras
+  itself** — wire `model`/`clip` through it (or use `lora_stack`) and
+  you're done; "no loader in graph" on the Send row is not a problem to
+  fix. The row exists only to *copy* your picks into another pack's
+  loader node: it targets any
   [rgthree Power Lora Loader](https://github.com/rgthree/rgthree-comfy)
   **or [DaSiWa Advanced LoRA
   Loader](https://github.com/darksidewalker/ComfyUI-DaSiWa-Nodes)** in
@@ -246,9 +254,11 @@ favorites or recently-used anywhere in the ecosystem.
   Efficiency's LoRA Stacker, Easy-Use's loraStack, Comfyroll's CR LoRA
   Stack — need no Send support at all: wire this node's `lora_stack`
   output straight in.
-- **Search, thumbnails, trigger words, ordering:** a search field above
-  the browser filters as you type (every word must match somewhere in the
-  path, scoped to your current folder; Escape clears); loras with a
+- **Search, thumbnails, trigger words, ordering:** the search field under
+  the breadcrumb filters as you type — it searches **the folder you're
+  in** (and its subfolders; drill into `characters/` and you search just
+  that, back out to the library root and you search everything; every
+  word must match somewhere in the path, Escape clears); loras with a
   sidecar image (`mylora.png` / `mylora.preview.png` next to the file)
   show a small thumbnail; the 📋 button copies a lora's sidecar trigger
   words to the clipboard; the Recent view has a two-click **Clear

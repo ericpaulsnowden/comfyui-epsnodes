@@ -839,10 +839,15 @@ class TestM3:
             msg = f"loraMatchesSearch({rel!r}, {query!r}) -> {got!r}, wanted {expected!r}"
             assert got is expected, msg
 
-    def test_search_input_sits_above_the_browser_list(self, source: str) -> None:
+    def test_search_input_sits_below_the_breadcrumb(self, source: str) -> None:
+        """Owner ask 2026-08-14: the search field moved one section down,
+        under the breadcrumb -- and its placeholder tracks the browse
+        folder (set in renderBrowser), since the folder IS the corpus."""
         body = _function_body(source, "buildUi(state)")
         assert "placeholder: 'Search loras…'" in body
-        assert "[\n    state.searchInputEl,\n    state.crumbsEl,\n    state.listEl\n  ]" in body
+        assert "[\n    state.crumbsEl,\n    state.searchInputEl,\n    state.listEl\n  ]" in body
+        browser = _function_body(source, "renderBrowser(state)")
+        assert "state.searchInputEl.placeholder = folder ? `Search ${basename(folder)}…` : 'Search loras…'" in browser
 
     def test_search_keydown_stops_propagation_and_escape_clears_in_place(
         self, source: str
@@ -870,9 +875,13 @@ class TestM3:
         assert "buildPseudoFolderRowEl" not in results
         assert "buildLoraRowEl(state, match.file, match.label)" in results
 
-    def test_search_matches_and_labels_are_scope_relative(self, source: str) -> None:
+    def test_search_matches_and_labels_are_folder_relative(self, source: str) -> None:
+        """Owner ask 2026-08-14: search covers the current browse FOLDER
+        (scope + drill-down), not the whole scope -- whole library only at
+        the library root."""
         results = _function_body(source, "renderSearchResults(state, query)")
-        assert "const prefix = scope ? `${scope}/` : ''" in results
+        assert "const folder = currentFolder(state)" in results
+        assert "const prefix = folder ? `${folder}/` : ''" in results
         assert "name.slice(prefix.length)" in results
         assert "loraMatchesSearch(rel, query)" in results
         assert "matches.push({ file: name, label: rel })" in results
@@ -1115,7 +1124,8 @@ class TestSendRegistryM4:
         assert "label: 'Power Lora Loader (rgthree)'" in registry
         assert "label: 'DaSiWa Advanced LoRA Loader'" in registry
         assert ".map((adapter) => adapter.label)" in source
-        assert "node in this graph yet — add one, then pick it above.`" in source
+        assert "Optional — the picker applies its loras itself" in source
+        assert "node, then pick it here.`" in source
 
     def test_probe_dispatches_by_comfy_class_with_family_agnostic_null_legs(
         self, source: str
@@ -1165,3 +1175,47 @@ class TestSendRegistryM4:
 
     def test_still_no_window_listeners_after_m4(self, source: str) -> None:
         assert "window.addEventListener" not in source
+
+
+class TestUiRound20260814:
+    """Owner UI round 2026-08-14 (v0.61.1): the standalone scope bar is
+    gone (clear-scope lives in the breadcrumb row), the standing lora
+    total moved to the `library_loras` property + root-crumb tooltip
+    (status bar collapses once loaded), and the Selected list always
+    shows every row -- the NODE grows instead of the list cropping."""
+
+    @pytest.fixture(scope="class")
+    def source(self) -> str:
+        return PICKER_JS.read_text(encoding="utf-8")
+
+    def test_scope_bar_is_gone_and_clear_scope_moved_into_the_crumbs(self, source: str) -> None:
+        assert "renderScope" not in source
+        assert "scopeRowEl" not in source
+        crumbs = _function_body(source, "renderCrumbs(state)")
+        assert "Clear scope — browse the whole library again" in crumbs
+        assert "setScope(state, '')" in crumbs
+
+    def test_status_bar_collapses_once_loaded_and_count_moves_to_property(self, source: str) -> None:
+        status = _function_body(source, "renderStatus(state)")
+        assert "eps-lp-status-hidden" in status
+        assert "loras on this machine" not in status  # the standing total is gone from the bar
+        load = _function_body(source, "async function loadPicker(state)".replace("async function ", ""))
+        assert "state.node.properties.library_loras = state.loras.length" in source
+        assert "node.addProperty('library_loras', 0, 'number')" in source
+        # ...but the total is still discoverable in the root crumb's tooltip
+        assert "loras on this machine" in _function_body(source, "renderCrumbs(state)")
+        assert load is not None
+
+    def test_selected_list_grows_the_node_instead_of_cropping(self, source: str) -> None:
+        assert "max-height: 132px" not in source
+        grow = _function_body(source, "syncSelectedGrowth(state)")
+        assert "(count - previous) * SELECTED_ROW_PX" in grow
+        assert "Math.max(node.size[1] + delta, floor)" in grow
+        assert "syncSelectedGrowth(state)" in _function_body(source, "renderSelected(state)")
+        # the widget floor agrees, so a manual shrink can't crop either
+        assert "MIN_WIDGET_HEIGHT + state.selection.loras.length * SELECTED_ROW_PX" in source
+
+    def test_send_row_says_it_is_optional(self, source: str) -> None:
+        send = _function_body(source, "renderSend(state)")
+        assert "text: 'Send to'" in send
+        assert "The picker itself already applies its loras" in send

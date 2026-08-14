@@ -80,6 +80,11 @@ const PANEL_WIDGET_TYPE = 'eps_lora_picker_panel'
  * checkpoint_switcher.js / notebook.js. */
 const MIN_WIDGET_HEIGHT = 220
 
+/** One Selected row's height (2px padding + ~22px content) -- the unit
+ * both syncSelectedGrowth's node-growth delta and getMinHeight's floor
+ * use, so the two can never disagree about the room the list needs. */
+const SELECTED_ROW_PX = 26
+
 /** ~360px floor (§6.13) -- same Linux-font-overflow rationale as every
  * DOM-widget node in this pack (FORMAT.md §7.2); self-contained
  * installMinWidth copy below, own guard flag. */
@@ -323,14 +328,13 @@ let stylesInjected = false
 
 const CSS_TEXT = `
 .eps-lp-root { display: flex; flex-direction: column; width: 100%; height: 100%; box-sizing: border-box; overflow: hidden; background: var(--comfy-input-bg, #1e1e1e); border: 1px solid var(--border-color, #444); border-radius: 4px; font-family: inherit; font-size: 11px; color: var(--input-text, #ccc); }
-.eps-lp-scope { flex: 0 0 auto; display: flex; align-items: center; gap: 6px; padding: 4px 6px; border-bottom: 1px solid var(--border-color, #444); }
-.eps-lp-scope-chip { flex: 1 1 auto; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: var(--descrip-text, #999); }
-.eps-lp-scope-chip-active { color: var(--input-text, #ccc); }
 .eps-lp-icon-btn { flex: 0 0 auto; background: none; border: none; color: var(--descrip-text, #999); cursor: pointer; padding: 0 3px; font-size: 12px; line-height: 1; font-family: inherit; }
 .eps-lp-icon-btn:hover { color: var(--input-text, #ccc); }
+.eps-lp-crumb-clear { margin-left: auto; }
 .eps-lp-section-header { flex: 0 0 auto; padding: 4px 6px 2px; font-size: 9.5px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; color: var(--descrip-text, #999); }
-.eps-lp-selected-list { flex: 0 1 auto; max-height: 132px; overflow-y: auto; overflow-x: hidden; padding: 0 3px 4px; border-bottom: 1px solid var(--border-color, #444); }
+.eps-lp-selected-list { flex: 0 0 auto; padding: 0 3px 4px; border-bottom: 1px solid var(--border-color, #444); }
 .eps-lp-send { flex: 0 0 auto; display: flex; align-items: center; gap: 6px; padding: 4px 6px; border-bottom: 1px solid var(--border-color, #444); }
+.eps-lp-send-label { flex: 0 0 auto; color: var(--descrip-text, #999); cursor: help; }
 .eps-lp-pll-select { flex: 1 1 auto; min-width: 0; background: var(--comfy-menu-bg, #262626); border: 1px solid var(--border-color, #444); color: var(--input-text, #ccc); border-radius: 3px; padding: 1px 3px; font-size: 11px; font-family: inherit; }
 .eps-lp-send-status { flex: 0 1 auto; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: var(--descrip-text, #999); font-style: italic; }
 .eps-lp-row { display: flex; align-items: center; gap: 6px; padding: 2px 6px; border-radius: 3px; user-select: none; }
@@ -360,6 +364,7 @@ const CSS_TEXT = `
 .eps-lp-star-on { color: #f0c420; }
 .eps-lp-empty { padding: 8px 7px; color: var(--descrip-text, #999); font-style: italic; }
 .eps-lp-status { flex: 0 0 auto; display: flex; align-items: center; gap: 8px; padding: 3px 6px; border-top: 1px solid var(--border-color, #444); min-height: 20px; box-sizing: border-box; }
+.eps-lp-status-hidden { display: none; }
 .eps-lp-status-text { flex: 1 1 auto; min-width: 0; color: var(--descrip-text, #999); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .eps-lp-status-error { color: var(--error-text, #ff4444); }
 .eps-lp-flash { animation: eps-lp-flash 0.9s ease-out; }
@@ -428,12 +433,13 @@ function createState(node, widget) {
     root: null,
     searchInputEl: null,
     favRowEls: [], // favorites-view row order (file+el) for the M3 drag -- rebuilt each render
-    scopeRowEl: null,
+    lastSelectedCount: null, // last painted Selected row count -- drives the node-growth delta
     selectedHeaderEl: null,
     selectedListEl: null,
     sendRowEl: null,
     crumbsEl: null,
     listEl: null,
+    statusRowEl: null,
     statusTextEl: null,
     statusActionsEl: null,
     selectedRowEls: new Map() // file -> row element, for duplicate-Add scroll+flash
@@ -458,7 +464,6 @@ function hideSelectionWidget(state) {
 
 function buildUi(state) {
   injectStyles()
-  state.scopeRowEl = el('div', { className: 'eps-lp-scope' })
   state.selectedHeaderEl = el('div', { className: 'eps-lp-section-header' })
   state.selectedListEl = el('div', { className: 'eps-lp-selected-list' })
   state.sendRowEl = el('div', { className: 'eps-lp-send' })
@@ -467,12 +472,19 @@ function buildUi(state) {
   state.statusTextEl = el('div', { className: 'eps-lp-status-text' })
   state.statusActionsEl = el('div', { className: 'eps-lp-status-actions' })
 
-  // §6.13 M3 search field, above the browser list -- notebook.js's §7.2
-  // search input (v0.53.0), same rules: every keystroke stops propagation
-  // (canvas hotkeys), Escape CLEARS the query in place, pure view filter.
+  // §6.13 M3 search field, under the breadcrumb (owner ask 2026-08-14) --
+  // notebook.js's §7.2 search input (v0.53.0), same rules: every keystroke
+  // stops propagation (canvas hotkeys), Escape CLEARS the query in place,
+  // pure view filter. The placeholder tracks the browse folder (set in
+  // renderBrowser) because the search corpus IS the current folder now.
   state.searchInputEl = el('input', {
     className: 'eps-lp-search',
-    attrs: { type: 'text', placeholder: 'Search loras…', spellcheck: 'false' }
+    attrs: {
+      type: 'text',
+      placeholder: 'Search loras…',
+      spellcheck: 'false',
+      title: 'Searches the folder shown in the breadcrumb, subfolders included.'
+    }
   })
   state.searchInputEl.addEventListener('input', () => {
     state.searchQuery = state.searchInputEl.value
@@ -488,18 +500,17 @@ function buildUi(state) {
   })
 
   const browser = el('div', { className: 'eps-lp-browser' }, [
-    state.searchInputEl,
     state.crumbsEl,
+    state.searchInputEl,
     state.listEl
   ])
-  const status = el('div', { className: 'eps-lp-status' }, [state.statusTextEl, state.statusActionsEl])
+  state.statusRowEl = el('div', { className: 'eps-lp-status' }, [state.statusTextEl, state.statusActionsEl])
   state.root = el('div', { className: 'eps-lp-root' }, [
-    state.scopeRowEl,
     state.selectedHeaderEl,
     state.selectedListEl,
     state.sendRowEl,
     browser,
-    status
+    state.statusRowEl
   ])
   attachDomWidget(state)
   render(state) // initial paint -- "Loading loras…" until the fetch resolves
@@ -515,7 +526,9 @@ function attachDomWidget(state) {
   const domWidget = state.node.addDOMWidget(PANEL_WIDGET_NAME, PANEL_WIDGET_TYPE, state.root, {
     hideOnZoom: true,
     serialize: false, // excludes from the API prompt (utils/executionUtil.ts)
-    getMinHeight: () => MIN_WIDGET_HEIGHT
+    // The floor grows with the Selected list (owner ask 2026-08-14: the
+    // full list must always be visible) -- see syncSelectedGrowth.
+    getMinHeight: () => MIN_WIDGET_HEIGHT + state.selection.loras.length * SELECTED_ROW_PX
   })
   // Excludes from the workflow JSON -- a DIFFERENT flag from options.serialize
   // above (notebook.js's attachDomWidget() header explains why both exist).
@@ -583,6 +596,9 @@ async function loadPicker(state) {
     state.recents = sanitizeRecents(data?.recents)
     state.loaded = true
     state.error = null
+    // The library total lives in the right-click Properties panel now
+    // (owner ask 2026-08-14) -- per-machine info, refreshed on every load.
+    if (state.node.properties) state.node.properties.library_loras = state.loras.length
     reloadFromWidget(state) // race-safe reconcile -- see file header
   } catch (error) {
     if (token !== state.loadToken) return
@@ -754,35 +770,10 @@ function commitActiveStrengthEdit(state) {
  * callers (strength commit, star flip) can repaint just theirs. */
 function render(state) {
   commitActiveStrengthEdit(state)
-  renderScope(state)
   renderSelected(state)
   renderSend(state)
   renderBrowser(state)
   renderStatus(state)
-}
-
-function renderScope(state) {
-  const scope = state.selection.scope
-  state.scopeRowEl.replaceChildren()
-  const chip = el('span', {
-    className: scope ? 'eps-lp-scope-chip eps-lp-scope-chip-active' : 'eps-lp-scope-chip',
-    text: scope ? `📁 ${scope}` : 'Whole library',
-    attrs: {
-      title: scope
-        ? `${scope} — this workflow browses only this folder and its subfolders.`
-        : 'No scope set — this workflow browses the whole lora library.'
-    }
-  })
-  state.scopeRowEl.append(chip)
-  if (scope) {
-    const clearBtn = el('button', {
-      className: 'eps-lp-icon-btn',
-      text: '✕',
-      attrs: { title: 'Clear scope — browse the whole library again' }
-    })
-    clearBtn.addEventListener('click', () => setScope(state, ''))
-    state.scopeRowEl.append(clearBtn)
-  }
 }
 
 function renderSelected(state) {
@@ -794,9 +785,33 @@ function renderSelected(state) {
     state.selectedListEl.append(
       el('div', { className: 'eps-lp-empty', text: 'Nothing selected — Add loras from the browser below.' })
     )
-    return
+  } else {
+    for (const row of rows) state.selectedListEl.append(buildSelectedRowEl(state, row))
   }
-  for (const row of rows) state.selectedListEl.append(buildSelectedRowEl(state, row))
+  syncSelectedGrowth(state)
+}
+
+/**
+ * Owner ask 2026-08-14: the Selected section always shows every row --
+ * no crop, no inner scroll. The list itself sizes to content (CSS `flex:
+ * 0 0 auto`, no max-height); THIS grows the node to make the room, by the
+ * row-count delta, so the browser below keeps its share and a user's own
+ * manual resize (extra height) is preserved. getMinHeight() includes the
+ * same per-row term, so litegraph won't let a manual shrink crop the list
+ * either.
+ */
+function syncSelectedGrowth(state) {
+  const count = state.selection.loras.length
+  const previous = state.lastSelectedCount
+  state.lastSelectedCount = count
+  if (previous === count) return
+  const node = state.node
+  // node.size is a Float32Array in current frontends -- never Array.isArray it.
+  if (!node?.size || typeof node.setSize !== 'function') return
+  const floor = typeof node.computeSize === 'function' ? node.computeSize()[1] : 0
+  const delta = previous == null ? 0 : (count - previous) * SELECTED_ROW_PX
+  node.setSize([node.size[0], Math.max(node.size[1] + delta, floor)])
+  node.graph?.setDirtyCanvas(true, true)
 }
 
 /** One Selected row -- rendered from the widget value alone (file header);
@@ -863,14 +878,22 @@ function buildSelectedRowEl(state, row) {
 }
 
 /** Breadcrumb segments for the current view: scope root (basename, or
- * "Library" unscoped) -> drill-down path, or root -> pseudo-folder. */
+ * "Library" unscoped) -> drill-down path, or root -> pseudo-folder. Since
+ * the standalone scope bar's removal (owner ask 2026-08-14) this row also
+ * carries the clear-scope ✕ (right edge, scoped only) and the library
+ * total lives in the root crumb's tooltip. */
 function renderCrumbs(state) {
   const scope = state.selection.scope
   state.crumbsEl.replaceChildren()
+  const totalNote = state.loaded ? ` — ${state.loras.length} loras on this machine` : ''
   const rootBtn = el('button', {
     className: 'eps-lp-crumb',
     text: scope ? basename(scope) : 'Library',
-    attrs: { title: scope || 'Whole library' }
+    attrs: {
+      title: scope
+        ? `${scope} — this workflow browses only this folder and its subfolders.${totalNote}`
+        : `Whole library${totalNote}`
+    }
   })
   rootBtn.addEventListener('click', () => {
     // §6.13 M3's pinned choice: navigating via the breadcrumb CLEARS an
@@ -894,6 +917,16 @@ function renderCrumbs(state) {
     })
     state.crumbsEl.append(crumbBtn)
   })
+
+  if (scope) {
+    const clearBtn = el('button', {
+      className: 'eps-lp-icon-btn eps-lp-crumb-clear',
+      text: '✕',
+      attrs: { title: 'Clear scope — browse the whole library again' }
+    })
+    clearBtn.addEventListener('click', () => setScope(state, ''))
+    state.crumbsEl.append(clearBtn)
+  }
 }
 
 /** The browse folder the drill-down currently sits in: scope root plus the
@@ -907,6 +940,12 @@ function currentFolder(state) {
 
 function renderBrowser(state) {
   renderCrumbs(state)
+  // The search corpus is the current browse folder, so the placeholder
+  // names it -- at the library root it stays the generic M3 wording.
+  if (state.searchInputEl) {
+    const folder = currentFolder(state)
+    state.searchInputEl.placeholder = folder ? `Search ${basename(folder)}…` : 'Search loras…'
+  }
   state.listEl.replaceChildren()
   state.favRowEls = []
 
@@ -976,16 +1015,17 @@ function renderBrowser(state) {
 }
 
 /**
- * §6.13 M3: the flat search view -- every lora under the current scope
- * whose SCOPE-RELATIVE path matches the query (loraMatchesSearch), in the
- * served list's own order, labeled by that same scope-relative path. No
- * folder rows, no pseudo-folder rows, no drag. The scope prefix is
- * stripped BEFORE matching, so the scope folder's own name doesn't match
- * every lora inside it.
+ * §6.13 M3: the flat search view -- every lora under the current browse
+ * FOLDER (scope + drill-down, owner ask 2026-08-14: "only search the
+ * selected folder... unless library is selected") whose folder-relative
+ * path matches the query (loraMatchesSearch), in the served list's own
+ * order, labeled by that same folder-relative path. No folder rows, no
+ * pseudo-folder rows, no drag. The folder prefix is stripped BEFORE
+ * matching, so the folder's own name doesn't match every lora inside it.
  */
 function renderSearchResults(state, query) {
-  const scope = state.selection.scope
-  const prefix = scope ? `${scope}/` : ''
+  const folder = currentFolder(state)
+  const prefix = folder ? `${folder}/` : ''
   const matches = []
   for (const name of state.loras) {
     if (prefix && !name.startsWith(prefix)) continue
@@ -1415,9 +1455,12 @@ function cancelFavoriteDrag(state) {
 
 /** §7.2-style status line: the load error + Retry live HERE, so the
  * Selected section above never has to make room for (or be blanked by)
- * a fetch failure. */
+ * a fetch failure. Once loaded cleanly the whole bar COLLAPSES (owner ask
+ * 2026-08-14: the standing total wasted real estate) -- the count moved
+ * to the `library_loras` property and the root crumb's tooltip. */
 function renderStatus(state) {
   state.statusActionsEl.replaceChildren()
+  state.statusRowEl?.classList.remove('eps-lp-status-hidden')
   if (state.error) {
     state.statusTextEl.textContent = `Could not load lora list: ${state.error}`
     state.statusTextEl.classList.add('eps-lp-status-error')
@@ -1429,7 +1472,12 @@ function renderStatus(state) {
     return
   }
   state.statusTextEl.classList.remove('eps-lp-status-error')
-  state.statusTextEl.textContent = state.loaded ? `${state.loras.length} loras on this machine` : 'Loading…'
+  if (state.loaded) {
+    state.statusTextEl.textContent = ''
+    state.statusRowEl?.classList.add('eps-lp-status-hidden')
+    return
+  }
+  state.statusTextEl.textContent = 'Loading…'
 }
 
 // --- Send to loader (§6.13 M2 + the M4 target registry) -- each
@@ -1467,9 +1515,9 @@ const SEND_ADAPTERS = {
  * from every adapter's label so it names both supported loaders (and any
  * future third automatically), in M2's own message shape. */
 const SEND_FAMILY_LABELS = Object.values(SEND_ADAPTERS).map((adapter) => adapter.label)
-const MSG_NO_SEND_TARGET_IN_GRAPH = `No ${SEND_FAMILY_LABELS.join(
+const MSG_NO_SEND_TARGET_IN_GRAPH = `Optional — the picker applies its loras itself via its model/clip outputs. To copy the list into a loader node instead, add a ${SEND_FAMILY_LABELS.join(
   ' or '
-)} node in this graph yet — add one, then pick it above.`
+)} node, then pick it here.`
 const MSG_NO_SEND_TARGET_SELECTED = 'Pick a target loader node above.'
 
 /** Every adapter family's live candidates, merged ascending id ACROSS
@@ -1566,6 +1614,16 @@ function renderSend(state) {
   // Canvas hotkeys must not intercept the combo -- the strength input's rule.
   select.addEventListener('keydown', (event) => event.stopPropagation())
 
+  const sendLabel = el('span', {
+    className: 'eps-lp-send-label',
+    text: 'Send to',
+    attrs: {
+      title:
+        'Optional: copy the selection into a Power Lora Loader (rgthree) or ' +
+        'DaSiWa loader node. The picker itself already applies its loras — ' +
+        'wire model/clip through it, or use its lora_stack output.'
+    }
+  })
   const statusEl = el('span', { className: 'eps-lp-send-status' })
   const sendBtn = el('button', { className: 'eps-lp-btn', text: 'Send' })
   const probe = probeSendTarget(resolveSendTarget(state))
@@ -1587,7 +1645,7 @@ function renderSend(state) {
   }
   sendBtn.addEventListener('click', () => sendToPll(state))
 
-  state.sendRowEl.append(select, sendBtn, statusEl)
+  state.sendRowEl.append(sendLabel, select, sendBtn, statusEl)
 }
 
 /**
@@ -1669,6 +1727,11 @@ export function attachPickerPanel(node) {
 
     const state = createState(node, widget)
     state.selection = selectionFromWidgetValue(widget.value)
+    // Read-only info surfaced in right-click -> Properties (owner ask
+    // 2026-08-14, replacing the status bar's standing count); refreshed
+    // from the feed on every load. addProperty every attach is the
+    // resolution.js pattern -- a saved value wins later via configure.
+    if (typeof node.addProperty === 'function') node.addProperty('library_loras', 0, 'number')
     hideSelectionWidget(state)
     buildUi(state)
     wireConfigureReload(state)
