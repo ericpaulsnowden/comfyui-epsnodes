@@ -823,6 +823,55 @@ category "EPSNodes". Class id `EPSResolution` frozen once shipped (§8). Owner
 framing: an elegant, IMAGE-first (not latent) all-in-one resolution node — M1
 is the functional core WITHOUT the grid.
 
+- **HEIGHT-FIRST widgets (v0.61.0, owner ask 2026-08-10: "swap the position
+  of width and height in the list" — his pick from the offered scope:
+  WIDGETS ONLY; output slots stay width-first, §8-frozen, so no existing
+  wire crosses over).** `INPUT_TYPES`' required order is now `height,
+  width, …` — but `widgets_values` restores POSITIONALLY, so an old save's
+  `[width, height, …]` array would land transposed. MIGRATION SHIM
+  (`resolution.js`): every node stamps
+  `properties.eps_res_widget_layout = 2` at attach, and the chained
+  `onConfigure` decides FROM THE INCOMING FILE — `info.properties`
+  missing the stamp ⇒ pre-swap save ⇒ swap the two restored VALUES
+  by widget NAME after the original configure runs. The decision reads
+  the file, never `node.properties` (attach pre-stamps every node,
+  including ones about to be configured — deciding off node state would
+  skip every migration). API prompts are name-resolved and unaffected.
+- **MULTI-IMAGE mode (v0.61.0, owner ask 2026-08-10: "plug in multiple
+  images so you can resize more than one image to the same size at the
+  same time … multiple image inputs and multiple image outputs").**
+  Growing `image_N` optional inputs (N = 2..8; the first input keeps its
+  frozen name `image`), accepted by-name via a LOCAL non-lazy variant of
+  §6.4's flexible-optional dict (Resolution has no `check_lazy_status`,
+  so the switcher factory's `lazy: True` synthesis must NOT be reused),
+  grown by the frontend with §6.4's converge pattern. Outputs gain a
+  TAIL-APPENDED fixed ceiling `resized_2 … resized_8` (7 × IMAGE,
+  `OUTPUT_IS_LIST` like every other output — outputs are positional, so
+  the ceiling is 8 images total, the §6.11 Distributor precedent),
+  frontend-revealed to the highest wired `image_N` (true tail
+  add/remove, link-guarded). Semantics: every wired image is resized
+  with the SAME settings — `resized_image` carries `image`'s result,
+  `resized_k` carries `image_k`'s; an unwired `image_k` whose
+  `resized_k` output exists emits a per-run `[ExecutionBlocker(None)]`
+  (§6.9's alignment pattern). IN MULTI MODE (any `image_N` wired) the
+  single-image-only outputs — `image` passthrough, `original_width`,
+  `original_height` — emit blockers (owner: "disable the original
+  width/height"; with N inputs there is no one original), and a `0`
+  width/height derives from the FIRST wired image's aspect, applied to
+  ALL (same target for everyone — the ask's whole point). Preset
+  fan-out composes: each output stays one list element per selected
+  preset.
+- **`Show original size` is now COSMETIC suppression (v0.61.0), not real
+  removeOutput.** The pair sits at slots 4-5 with the new `resized_N`
+  outputs BEHIND it — removing a non-tail output decrements every later
+  link's `origin_slot`, exactly the §6.5 hazard the file header
+  documents, so the real-removal mechanism became structurally unsafe
+  the moment outputs existed behind the pair. It now uses the
+  passthrough output's draw-suppression mechanism (hidden dot, space not
+  reclaimed — the accepted trade). Old saves that serialized WITHOUT the
+  pair (hidden-by-removal) get it re-APPENDED at its canonical slots
+  4-5 on attach — append-only, never a reorder, so existing links'
+  indices are untouched.
 - **Inputs:** `image` (IMAGE, optional — a single image for M1; list/multi is
   M4), widgets `width` (INT) and `height` (INT) (easy-to-edit target size;
   `0` on an axis = derive it from the other axis + the input image's aspect),

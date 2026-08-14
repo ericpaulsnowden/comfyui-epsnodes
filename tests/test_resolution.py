@@ -67,6 +67,26 @@ def _wire_context(context: LibraryContext):
 
 
 @pytest.fixture(autouse=True)
+def fake_execution_blocker(monkeypatch: pytest.MonkeyPatch):
+    """v0.61.0: every run now emits blockers on the unrevealed resized_N
+    tail outputs (and, in multi mode, on the single-image-only outputs),
+    so the lazy `comfy_execution` import runs on EVERY path -- the same
+    autouse convention tests/test_cross_sweep.py documents."""
+
+    class FakeExecutionBlocker:
+        def __init__(self, message):
+            self.message = message
+
+    graph_mod = types.ModuleType("comfy_execution.graph")
+    graph_mod.ExecutionBlocker = FakeExecutionBlocker
+    pkg_mod = types.ModuleType("comfy_execution")
+    pkg_mod.graph = graph_mod
+    monkeypatch.setitem(sys.modules, "comfy_execution", pkg_mod)
+    monkeypatch.setitem(sys.modules, "comfy_execution.graph", graph_mod)
+    return FakeExecutionBlocker
+
+
+@pytest.fixture(autouse=True)
 def _fake_comfy_utils(monkeypatch: pytest.MonkeyPatch):
     """Fakes ``comfy.utils.common_upscale`` with a real crop + resize.
 
@@ -126,7 +146,12 @@ def _resolve_scalar(node: nodes_resolution.EPSResolution, **kwargs: object):
     Asserting the length-1-ness here, on every call, is itself part of
     that contract's coverage, not just a convenience unwrap.
     """
-    out_image, resized, width, height, orig_w, orig_h = node.resolve(**kwargs)
+    result = node.resolve(**kwargs)
+    # v0.61.0: 13 outputs -- the first six are the historical contract,
+    # the 7 resized_N tail lists carry one blocker per run when no
+    # image_N is wired (asserted in TestMultiImage, tolerated here).
+    assert len(result) == 13
+    out_image, resized, width, height, orig_w, orig_h = result[:6]
     lists = (out_image, resized, width, height, orig_w, orig_h)
     assert all(isinstance(lst, list) and len(lst) == 1 for lst in lists)
     return out_image[0], resized[0], width[0], height[0], orig_w[0], orig_h[0]
@@ -368,7 +393,7 @@ def test_original_size_outputs_report_the_input_images_actual_shape() -> None:
 def test_class_shape_matches_format_md_section_6_5() -> None:
     cls = nodes_resolution.EPSResolution
     assert cls.CATEGORY == "EPSNodes"
-    assert cls.RETURN_TYPES == ("IMAGE", "IMAGE", "INT", "INT", "INT", "INT")
+    assert cls.RETURN_TYPES == ("IMAGE", "IMAGE", "INT", "INT", "INT", "INT") + ("IMAGE",) * 7
     assert cls.RETURN_NAMES == (
         "image",
         "resized_image",
@@ -376,8 +401,27 @@ def test_class_shape_matches_format_md_section_6_5() -> None:
         "height",
         "original_width",
         "original_height",
+        "resized_2",
+        "resized_3",
+        "resized_4",
+        "resized_5",
+        "resized_6",
+        "resized_7",
+        "resized_8",
     )
+    assert cls.OUTPUT_IS_LIST == (True,) * 13
     assert cls.FUNCTION == "resolve"
+
+
+def test_widgets_are_height_first() -> None:
+    """v0.61.0 (owner ask 2026-08-10): height ABOVE width -- widgets only;
+    output slots stay width-first (§8-frozen). The old-save value
+    transposition is handled by resolution.js's migration shim (pinned in
+    tests/test_resolution_grid_js.py)."""
+    required = nodes_resolution.EPSResolution.INPUT_TYPES()["required"]
+    keys = list(required)
+    assert keys.index("height") < keys.index("width")
+    assert keys == ["height", "width", "resize_method", "interpolation", "multiple_of"]
 
 
 def test_input_types_declares_widgets_and_optional_image() -> None:
@@ -424,7 +468,7 @@ class TestPresetsEmptyOrAbsent:
         node = _node()
         out_image, resized, width, height, orig_w, orig_h = node.resolve(
             width=50, height=200, resize_method="stretch", interpolation="bilinear", image=image
-        )
+        )[:6]
         for lst in (out_image, resized, width, height, orig_w, orig_h):
             assert isinstance(lst, list)
             assert len(lst) == 1
@@ -438,7 +482,7 @@ class TestPresetsEmptyOrAbsent:
         # at all must still work -- the function's own default parameter
         # covers it, same as every other optional widget.
         node = _node()
-        _, _, width, height, _, _ = node.resolve(width=10, height=10)
+        _, _, width, height, _, _ = node.resolve(width=10, height=10)[:6]
         assert (width, height) == ([10], [10])
 
     def test_empty_presets_works_even_with_no_context_configured(self) -> None:
@@ -476,7 +520,7 @@ class TestPresetsEmptyOrAbsent:
         with caplog.at_level("WARNING"):
             _, _, width, _height, _, _ = node.resolve(
                 width=1, height=1, presets=json.dumps(["Good", 5, None, "AlsoGood"])
-            )
+            )[:6]
         assert width == [VALUES["width"], 10]
         assert any("not a string" in r.message for r in caplog.records)
 
@@ -488,8 +532,8 @@ class TestPresetsInputDeclaration:
         assert optional["presets"][1]["default"] == "[]"
         assert optional["presets"][1]["hidden"] is True
 
-    def test_output_is_list_declared_for_all_six_outputs(self) -> None:
-        assert nodes_resolution.EPSResolution.OUTPUT_IS_LIST == (True, True, True, True, True, True)
+    def test_output_is_list_declared_for_all_outputs(self) -> None:
+        assert nodes_resolution.EPSResolution.OUTPUT_IS_LIST == (True,) * 13
 
     def test_width_height_multiple_of_bounds_unchanged(self) -> None:
         # The M3 refactor moved these into named constants -- pin the
@@ -531,7 +575,7 @@ class TestPresetsSelected:
             multiple_of=999,
             image=image,
             presets=json.dumps(["Insta Square"]),
-        )
+        )[:6]
         assert (width, height) == ([64], [64])
         assert resized[0].shape == (1, 64, 64, 3)
         assert (orig_w, orig_h) == ([128], [64])
@@ -570,7 +614,7 @@ class TestPresetsSelected:
         # "selection order, not store order".
         _, resized, width, height, orig_w, orig_h = node.resolve(
             width=1, height=1, image=image, presets=json.dumps(["P2", "P1"])
-        )
+        )[:6]
         assert width == [100, 50]
         assert height == [50, 200]
         assert resized[0].shape == (1, 50, 100, 3)  # P2: keep aspect (fit)
@@ -606,7 +650,7 @@ class TestPresetsSelected:
         node = _node()
         out_image, resized, width, height, orig_w, orig_h = node.resolve(
             width=1, height=1, image=None, presets=json.dumps(["Rounded", "Exact"])
-        )
+        )[:6]
         assert out_image == [None, None]
         assert resized == [None, None]
         # 100/64 = 1.5625 -> round 2 -> 128, matching
@@ -675,3 +719,103 @@ class TestIsChanged:
         nodes_resolution.set_context(None)
         token = nodes_resolution.EPSResolution.IS_CHANGED(presets=json.dumps(["A"]))
         assert isinstance(token, str)
+
+
+class TestMultiImage:
+    """v0.61.0 (FORMAT.md §6.5): the multi-image mode -- growing image_N
+    inputs, tail resized_N outputs, blockers on the single-image-only
+    outputs."""
+
+    def test_flexible_optional_accepts_only_2_through_8(self) -> None:
+        optional = nodes_resolution.EPSResolution.INPUT_TYPES()["optional"]
+        for n in range(2, 9):
+            assert f"image_{n}" in optional
+            assert optional[f"image_{n}"][0] == "IMAGE"
+        assert "image_1" not in optional
+        assert "image_9" not in optional
+        assert "image_" not in optional
+        # static entries untouched, and iteration still shows only them
+        assert set(optional) == {"image", "presets"}
+
+    def test_two_images_same_target_both_resized(
+        self, fake_execution_blocker: type
+    ) -> None:
+        a = _make_image(height=64, width=128)
+        b = _make_image(height=32, width=32)
+        node = _node()
+        result = node.resolve(width=100, height=50, image=a, image_2=b)
+        resized_1 = result[1][0]
+        resized_2 = result[6][0]  # resized_2 is output index 6
+        assert tuple(resized_1.shape) == (1, 50, 100, 3)
+        assert tuple(resized_2.shape) == (1, 50, 100, 3)
+        # single-image-only outputs are blocked in multi mode
+        assert isinstance(result[0][0], fake_execution_blocker)   # image passthrough
+        assert isinstance(result[4][0], fake_execution_blocker)   # original_width
+        assert isinstance(result[5][0], fake_execution_blocker)   # original_height
+        # width/height still report the shared target
+        assert result[2][0] == 100 and result[3][0] == 50
+
+    def test_gap_slots_block_only_their_own_output(
+        self, fake_execution_blocker: type
+    ) -> None:
+        a = _make_image(height=64, width=64)
+        c = _make_image(height=48, width=48)
+        node = _node()
+        result = node.resolve(width=32, height=32, image=a, image_4=c)
+        assert tuple(result[1][0].shape) == (1, 32, 32, 3)       # image -> resized_image
+        assert isinstance(result[6][0], fake_execution_blocker)  # resized_2 (unwired)
+        assert isinstance(result[7][0], fake_execution_blocker)  # resized_3 (unwired)
+        assert tuple(result[8][0].shape) == (1, 32, 32, 3)       # image_4 -> resized_4
+        for idx in range(9, 13):
+            assert isinstance(result[idx][0], fake_execution_blocker)
+
+    def test_zero_dim_derives_from_first_wired_image_for_all(self) -> None:
+        # width=0 -> derived from the FIRST wired image's aspect, then the
+        # CONCRETE target applies to everyone (same size for all).
+        a = _make_image(height=100, width=200)  # 2:1 -> width derives to 128
+        b = _make_image(height=77, width=31)    # wild aspect -- must NOT affect target
+        node = _node()
+        result = node.resolve(width=0, height=64, image=a, image_2=b)
+        assert result[2][0] == 128 and result[3][0] == 64
+        assert tuple(result[1][0].shape) == (1, 64, 128, 3)
+        assert tuple(result[6][0].shape) == (1, 64, 128, 3)
+
+    def test_first_slot_unwired_derivation_falls_to_lowest_wired(self) -> None:
+        b = _make_image(height=50, width=100)  # 2:1
+        node = _node()
+        result = node.resolve(width=0, height=32, image_2=b)
+        assert result[2][0] == 64 and result[3][0] == 32
+        assert tuple(result[6][0].shape) == (1, 32, 64, 3)
+
+    def test_first_slot_unwired_blocks_resized_image(
+        self, fake_execution_blocker: type
+    ) -> None:
+        b = _make_image(height=50, width=100)
+        node = _node()
+        result = node.resolve(width=32, height=32, image_2=b)
+        assert isinstance(result[1][0], fake_execution_blocker)
+
+    def test_single_image_mode_is_unchanged_plus_tail_blockers(
+        self, fake_execution_blocker: type
+    ) -> None:
+        a = _make_image(height=64, width=64)
+        node = _node()
+        result = node.resolve(width=32, height=32, image=a)
+        assert tuple(result[1][0].shape) == (1, 32, 32, 3)
+        assert result[4][0] == 64 and result[5][0] == 64  # original size LIVE in single mode
+        for idx in range(6, 13):
+            assert isinstance(result[idx][0], fake_execution_blocker)
+
+    def test_multi_composes_with_preset_fanout(self, context: LibraryContext) -> None:
+        presets_store.save_preset(context, "P1", _other_values(width=40, height=20))
+        presets_store.save_preset(context, "P2", _other_values(width=10, height=30))
+        a = _make_image(height=64, width=64)
+        b = _make_image(height=48, width=48)
+        node = _node()
+        result = node.resolve(
+            width=1, height=1, image=a, image_2=b, presets=json.dumps(["P1", "P2"])
+        )
+        # each output: one element per preset, in selection order
+        assert [tuple(x.shape) for x in result[1]] == [(1, 20, 40, 3), (1, 30, 10, 3)]
+        assert [tuple(x.shape) for x in result[6]] == [(1, 20, 40, 3), (1, 30, 10, 3)]
+        assert result[2] == [40, 10] and result[3] == [20, 30]

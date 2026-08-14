@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from typing import Any
 
 from . import resolution_presets_store as presets_store
@@ -231,6 +232,100 @@ def _pad_to(image: Any, target_w: int, target_h: int, pad_value: float = 0.0) ->
     return canvas
 
 
+#: FORMAT.md §6.5 multi-image (v0.61.0): the extra growing inputs' name
+#: shape. The FIRST input keeps its frozen name `image`; extras are
+#: image_2..image_8 -- 8 total, because the paired resized_N OUTPUTS are
+#: positional and therefore a hard ceiling (§8).
+_EXTRA_IMAGE_PATTERN = re.compile(r"image_([2-8])")
+
+
+def _resolve_run(
+    width: int,
+    height: int,
+    resize_method: str,
+    interpolation: str,
+    multiple_of: int,
+    image: Any,
+    extra_images: dict[int, Any],
+) -> tuple[Any, ...]:
+    """One run's 13-tuple of output values (FORMAT.md §6.5 v0.61.0).
+
+    SINGLE mode (no ``image_N`` wired): exactly the pre-v0.61.0 six values
+    from :func:`_resolve_one`, plus one ``ExecutionBlocker`` per unrevealed
+    ``resized_N`` tail output (§6.9's per-run alignment pattern -- a bare
+    ``None`` would crash a consumer, an empty list breaks ``slice_dict``).
+
+    MULTI mode (any ``image_N`` wired): every wired image resized with the
+    SAME settings. A ``0`` width/height derives from the FIRST wired
+    image's aspect, then that CONCRETE target applies to all -- one target
+    for everyone is the ask's whole point (``keep aspect (fit)`` still
+    fits each image inside it per its own aspect; that is what fit
+    means). The single-image-only outputs -- ``image`` passthrough,
+    ``original_width``, ``original_height`` -- emit blockers (owner
+    decision: with N inputs there is no one "original"); an unwired slot
+    among the wired ones blocks only its own ``resized_N``.
+    """
+    if not extra_images:
+        base = _resolve_one(width, height, resize_method, interpolation, multiple_of, image)
+        blocker = _execution_blocker()
+        return base + (blocker,) * 7
+
+    first = image if image is not None else extra_images[min(extra_images)]
+    _, _, target_w, target_h, _, _ = _resolve_one(
+        width, height, resize_method, interpolation, multiple_of, first
+    )
+
+    def _resized(img: Any) -> Any:
+        if img is None:
+            return _execution_blocker()
+        return _resolve_one(
+            target_w, target_h, resize_method, interpolation, multiple_of, img
+        )[1]
+
+    blocker = _execution_blocker()
+    tail = tuple(_resized(extra_images.get(index)) for index in range(2, 9))
+    return (blocker, _resized(image), target_w, target_h, blocker, blocker) + tail
+
+
+def _execution_blocker() -> Any:
+    """A fresh ``ExecutionBlocker(None)`` -- lazily imported (§6.4's
+    convention; tests install a fake ``comfy_execution``)."""
+    from comfy_execution.graph import ExecutionBlocker
+
+    return ExecutionBlocker(None)
+
+
+class _FlexibleResolutionOptional(dict):
+    """Accept ``image_2``..``image_8`` by NAME -- §6.4's flexible-optional
+    trick, LOCAL and NON-LAZY on purpose: this node defines no
+    ``check_lazy_status``, so the switcher factory's ``lazy: True``
+    synthesis must not be reused here (a lazy input nobody requests is
+    never fetched). Plain iteration still yields only the statically
+    inserted entries, so /object_info (and the default socket render)
+    shows one image socket; the frontend grows the rest (§6.4's converge
+    pattern)."""
+
+    def __contains__(self, key: object) -> bool:
+        if isinstance(key, str) and _EXTRA_IMAGE_PATTERN.fullmatch(key):
+            return True
+        return super().__contains__(key)
+
+    def __getitem__(self, key: str) -> Any:
+        if super().__contains__(key):
+            return super().__getitem__(key)
+        if isinstance(key, str) and _EXTRA_IMAGE_PATTERN.fullmatch(key):
+            return (
+                "IMAGE",
+                {
+                    "tooltip": (
+                        "Another image resized with the same settings -- "
+                        "it comes out of its own resized_N output."
+                    ),
+                },
+            )
+        raise KeyError(key)
+
+
 def _resolve_one(
     width: int,
     height: int,
@@ -349,7 +444,11 @@ class EPSResolution:
     """
 
     CATEGORY = CATEGORY_NAME
-    RETURN_TYPES = ("IMAGE", "IMAGE", "INT", "INT", "INT", "INT")
+    # v0.61.0 (FORMAT.md §6.5 multi-image): resized_2..resized_8 are
+    # TAIL-APPENDED (§8) -- outputs are positional, so 8 images total is
+    # the hard ceiling (the §6.11 Distributor precedent). The frontend
+    # reveals them up to the highest wired image_N.
+    RETURN_TYPES = ("IMAGE", "IMAGE", "INT", "INT", "INT", "INT") + ("IMAGE",) * 7
     RETURN_NAMES = (
         "image",
         "resized_image",
@@ -357,8 +456,8 @@ class EPSResolution:
         "height",
         "original_width",
         "original_height",
-    )
-    OUTPUT_IS_LIST = (True, True, True, True, True, True)
+    ) + tuple(f"resized_{n}" for n in range(2, 9))
+    OUTPUT_IS_LIST = (True,) * 13
     OUTPUT_TOOLTIPS = (
         "The input image, unchanged. None if nothing is wired. With more "
         "than one size preset selected, this is a list, one element per "
@@ -400,21 +499,9 @@ class EPSResolution:
     def INPUT_TYPES(cls) -> dict[str, Any]:
         return {
             "required": {
-                "width": (
-                    "INT",
-                    {
-                        "default": 1024,
-                        "min": WIDTH_MIN,
-                        "max": WIDTH_MAX,
-                        "step": 1,
-                        "tooltip": (
-                            "Target width in pixels. 0 derives it from "
-                            "height and the input image's aspect ratio "
-                            "(needs an image wired); with no image, 0 "
-                            "stays 0."
-                        ),
-                    },
-                ),
+                # v0.61.0 (owner ask 2026-08-10): HEIGHT above width --
+                # widgets only; the migration shim in resolution.js keeps
+                # old saves' positionally-restored values straight.
                 "height": (
                     "INT",
                     {
@@ -425,6 +512,21 @@ class EPSResolution:
                         "tooltip": (
                             "Target height in pixels. 0 derives it from "
                             "width and the input image's aspect ratio "
+                            "(needs an image wired); with no image, 0 "
+                            "stays 0."
+                        ),
+                    },
+                ),
+                "width": (
+                    "INT",
+                    {
+                        "default": 1024,
+                        "min": WIDTH_MIN,
+                        "max": WIDTH_MAX,
+                        "step": 1,
+                        "tooltip": (
+                            "Target width in pixels. 0 derives it from "
+                            "height and the input image's aspect ratio "
                             "(needs an image wired); with no image, 0 "
                             "stays 0."
                         ),
@@ -473,7 +575,7 @@ class EPSResolution:
                     },
                 ),
             },
-            "optional": {
+            "optional": _FlexibleResolutionOptional({
                 "image": (
                     "IMAGE",
                     {
@@ -514,7 +616,7 @@ class EPSResolution:
                         ),
                     },
                 ),
-            },
+            }),
         }
 
     @classmethod
@@ -549,16 +651,27 @@ class EPSResolution:
         multiple_of: int = 0,
         image: Any = None,
         presets: str = DEFAULT_PRESETS,
-    ) -> tuple[list[Any], list[Any], list[int], list[int], list[int], list[int]]:
+        **extra: Any,
+    ) -> tuple[list[Any], ...]:
+        # v0.61.0 (FORMAT.md §6.5 multi-image): collect wired image_N
+        # extras. ComfyUI passes connected inputs as kwargs by name; the
+        # flexible optional dict is what let them be wired at all.
+        extra_images: dict[int, Any] = {}
+        for key, value in extra.items():
+            match = _EXTRA_IMAGE_PATTERN.fullmatch(key)
+            if match and value is not None:
+                extra_images[int(match.group(1))] = value
+
         names = _parse_preset_names(presets)
 
         if not names:
-            # Unchanged M1 behavior, just each of the six values wrapped in
-            # a length-1 list -- OUTPUT_IS_LIST's degenerate one-run case
-            # (class docstring), byte-identical to the pre-M3 scalar
-            # computation.
-            single = _resolve_one(width, height, resize_method, interpolation, multiple_of, image)
-            return tuple([value] for value in single)  # type: ignore[return-value]
+            # Unchanged M1 behavior for the single-image case -- each value
+            # wrapped in a length-1 list, OUTPUT_IS_LIST's degenerate
+            # one-run case (class docstring).
+            run = _resolve_run(
+                width, height, resize_method, interpolation, multiple_of, image, extra_images
+            )
+            return tuple([value] for value in run)  # type: ignore[return-value]
 
         context = _context
         if context is None:
@@ -574,27 +687,19 @@ class EPSResolution:
                 "have been renamed or deleted on another machine"
             )
 
-        images: list[Any] = []
-        resized_images: list[Any] = []
-        widths: list[int] = []
-        heights: list[int] = []
-        orig_widths: list[int] = []
-        orig_heights: list[int] = []
+        columns: list[list[Any]] = [[] for _ in range(len(self.RETURN_NAMES))]
         for name in names:
             preset = stored_presets[name]
-            out_image, resized_image, out_w, out_h, orig_w, orig_h = _resolve_one(
+            run = _resolve_run(
                 preset["width"],
                 preset["height"],
                 preset["resize_method"],
                 preset["interpolation"],
                 preset["multiple_of"],
                 image,
+                extra_images,
             )
-            images.append(out_image)
-            resized_images.append(resized_image)
-            widths.append(out_w)
-            heights.append(out_h)
-            orig_widths.append(orig_w)
-            orig_heights.append(orig_h)
+            for column, value in zip(columns, run, strict=True):
+                column.append(value)
 
-        return (images, resized_images, widths, heights, orig_widths, orig_heights)
+        return tuple(columns)

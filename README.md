@@ -25,7 +25,7 @@ section further down; this is the map.
 | [**EPS Model / CLIP / VAE Switcher**](#eps-model--clip--vae-switcher-shipped) | The image Switcher's exact mechanism for models, CLIPs, and VAEs: any number of inputs, each on/off, enabled ones fan out (N enabled → N runs), disabled branches — including their checkpoint loads — never execute. | Nothing — drag-and-drop with core nodes. |
 | [**EPS Distributor**](#eps-distributor-shipped) | The mirror of the Switcher: one image in, up to sixteen branches out, each independently on/off. New outputs appear as you wire them up. Toggle a branch off and only that branch is skipped — everything happens in one run. | Nothing — drag-and-drop with core nodes. |
 | [**EPS Checkpoint Switcher**](#eps-checkpoint-switcher-shipped) | Tick several checkpoint files in a list; one queue runs the workflow once per ticked checkpoint, with each run's model, CLIP, and VAE kept together and a label for save paths. | Your checkpoint files — drag-and-drop with core nodes. |
-| [**EPS Resolution**](#eps-resolution-shipped) | Image-first resize + size in one node: target size (with a drag pad), four resize modes, and the original image + both sets of dimensions passed through. Named size presets are shared across your machines — tick several and one Run resizes once per preset. | Nothing — drag-and-drop with core nodes. |
+| [**EPS Resolution**](#eps-resolution-shipped) | Image-first resize + size in one node: target size (with a drag pad), four resize modes, and the original image + both sets of dimensions passed through. Named size presets are shared across your machines — tick several and one Run resizes once per preset. Wire in extra images and they all come out at the same target size in one Run. | Nothing — drag-and-drop with core nodes. |
 | [**EPS Image Grid**](#eps-image-grid-shipped) | Collects images across separate Runs into a buffer that survives restarts, shows them as a thumbnail grid, and fans the whole set out on demand. Add whole batches at once — a multiselect picker, a folder importer, or one big drag. | Nothing — drag-and-drop with core nodes. |
 | [**EPS Run Multiplier**](#eps-run-multiplier-shipped) | Multiplies whatever you wire in: a sweep group (LoRA Iterator, or Checkpoint Switcher with its VAEs) × images × texts, in one node — or just images × texts with no sweep at all — with per-run save paths so big runs land in tidy folders. | Any of: EPS LoRA Iterator / EPS Checkpoint Switcher on the sweep side; an Image Grid or Image Switcher plus a multi-select Prompt Notebook on the pair side. |
 | [**EPS Frame Saver**](#eps-frame-saver-shipped) | Loads a video by path — or takes one from a wire — lets you scrub or play to a frame, and outputs that frame as an image. | A video file on the ComfyUI machine, or any `VIDEO` output in the workflow. |
@@ -513,6 +513,22 @@ dimensions. It replaces a resize node + a reroute + a get-image-size node.
   and `pad` (black), with a choice of interpolation. `multiple_of` snaps the
   result to a multiple (e.g. 64) for latent-friendly sizes.
 - **Set one axis to `0`** to derive it from the other and the image's aspect.
+- **`height` sits above `width`** (since v0.61.0) so the fields read in the
+  same H-before-W order most model cards use. Old workflows load with their
+  saved values intact — the values follow the field *names*, not the rows.
+- **Resize several images to one size:** wire your first image and an
+  `image_2` socket appears; wire that and `image_3` appears, up to
+  `image_8`. Every wired image is resized to the same target in one Run,
+  each coming out on its own `resized_2` … `resized_8` output (revealed as
+  you wire the inputs — sockets and outputs both tidy themselves back up
+  when you unplug). In this mode `resized_image` still carries the first
+  image and `width`/`height` report the shared target; the passthrough and
+  original-size outputs are single-image concepts, so anything wired to
+  them is skipped cleanly for that Run. With `width` or
+  `height` at `0`, the missing axis derives from the **first** wired
+  image's aspect and that one target applies to every image. Multi-image
+  composes with multi-preset ticks: 3 images x 2 presets = every image at
+  every size.
 - **Size presets, shared across machines:** the `preset` dropdown (with
   **Save** and **Delete** right under it, above the pad) saves all five
   fields — width, height, mode, interpolation, `multiple_of` — as a named

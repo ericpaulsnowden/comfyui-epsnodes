@@ -385,3 +385,60 @@ def test_connection_changes_and_slow_decodes_both_repaint() -> None:
     assert "onConnectionsChange" in _SOURCE
     assert "scheduleSourceProbe" in _SOURCE
     assert "clearTimeout(node._epsGrid.sourceProbe)" in _SOURCE
+
+
+def _function_body(source_text: str, signature: str) -> str:
+    """Body of a top-level ``function <signature> {`` up to its column-0
+    closing brace -- the sibling JS test files' identical helper."""
+    import re as _re
+
+    start_match = _re.search(_re.escape(f"function {signature} {{") + r"\n", source_text)
+    assert start_match, f"function {signature} {{ not found"
+    start = start_match.end()
+    end_match = _re.search(r"\n\}\n", source_text[start:])
+    assert end_match, f"end of {signature} not found"
+    return source_text[start : start + end_match.start()]
+
+
+class TestV0610MultiImageAndLayout:
+    """v0.61.0 source pins (FORMAT.md §6.5): the height-first widget
+    migration, the cosmetic original-size hide, and the multi-image
+    converge/reveal -- all closure-bound against a real litegraph node, so
+    source-text pins per this file's convention."""
+
+    @pytest.fixture(scope="class")
+    def source(self) -> str:
+        return (REPO_ROOT / "web" / "eps_image" / "resolution.js").read_text(encoding="utf-8")
+
+    def test_migration_decides_from_the_incoming_file(self, source: str) -> None:
+        body = _function_body(source, "attach(node)")
+        # the stamp is set on every node, but the DECISION reads info --
+        # deciding off node.properties would skip every migration, since
+        # attach pre-stamps before configure runs.
+        assert "node.properties[WIDGET_LAYOUT_PROP] = WIDGET_LAYOUT_CURRENT" in body
+        decide = body.index("info?.properties?.[WIDGET_LAYOUT_PROP] !== WIDGET_LAYOUT_CURRENT")
+        run_original = body.index("originalOnConfigureV61?.apply(this, arguments)")
+        assert decide < run_original, "the file must be read BEFORE configure merges properties"
+        assert "widthWidget.value = heightWidget.value" in body
+
+    def test_original_size_hide_is_cosmetic_not_removal(self, source: str) -> None:
+        body = _function_body(source, "applyOriginalSizeVisibility(node)")
+        assert "removeOutput" not in body  # v0.61.0: real removal became unsafe
+        assert "ensureOriginalSizeOutputs(node)" in body
+        ensure = _function_body(source, "ensureOriginalSizeOutputs(node)")
+        assert "node.addOutput(name, ORIGINAL_SIZE_TYPE)" in ensure
+        # the shared draw-suppression now covers the pair too
+        hidden = _function_body(source, "hiddenOutputNames(node)")
+        assert "ORIGINAL_SIZE_NAMES" in hidden
+
+    def test_converge_is_deferred_and_capped(self, source: str) -> None:
+        schedule = _function_body(source, "scheduleImageConverge(node)")
+        assert "setTimeout(" in schedule and "_epsResConvergeQueued" in schedule
+        converge = _function_body(source, "convergeExtraImageInputs(node)")
+        assert "Math.min(highest + 1, MAX_IMAGES)" in converge
+        assert "node.inputs[idx].link == null" in converge  # only unwired extras removed
+
+    def test_reveal_orders_pair_first_and_never_removes_wired(self, source: str) -> None:
+        reveal = _function_body(source, "revealExtraOutputs(node)")
+        assert reveal.index("ensureOriginalSizeOutputs(node)") < reveal.index("addOutput")
+        assert "!isOutputConnected(node.outputs[idx])" in reveal

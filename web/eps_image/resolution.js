@@ -297,40 +297,47 @@ function widgetByName(node, name) {
 
 // ------------------------------------------------- "Show original size"
 
-/** REAL removeOutput/addOutput, tail-only (see file header for why that's
- * the safety boundary). Idempotent: safe to call redundantly from
- * onPropertyChanged regardless of whether `configure()` already applied the
- * saved outputs array for a reloaded workflow. */
+/** COSMETIC since v0.61.0 (FORMAT.md §6.5): the pair sits at slots 4-5
+ * with the multi-image `resized_N` outputs BEHIND it, so the old REAL
+ * `removeOutput()` mechanism became structurally unsafe -- removing a
+ * non-tail output decrements every later link's `origin_slot`, the exact
+ * hazard the file header documents. Hiding now uses the passthrough
+ * output's draw-suppression (shared `hiddenOutputNames`/`drawSlots`
+ * patch); the pair keeps its slots, its space, and every wire index.
+ * `ensureOriginalSizeOutputs` handles pre-v0.61.0 saves that serialized
+ * WITHOUT the pair. Idempotent, as before. */
 function applyOriginalSizeVisibility(node) {
-  const show = node.properties?.[PROP_SHOW_ORIGINAL_SIZE] !== false
-  const [widthName, heightName] = ORIGINAL_SIZE_NAMES
-
-  if (show) {
-    if (outputIndexByName(node, widthName) === -1) node.addOutput(widthName, ORIGINAL_SIZE_TYPE)
-    if (outputIndexByName(node, heightName) === -1) node.addOutput(heightName, ORIGINAL_SIZE_TYPE)
-    resyncSize(node)
-    return
+  ensureOriginalSizeOutputs(node)
+  const hide = node.properties?.[PROP_SHOW_ORIGINAL_SIZE] === false
+  if (hide) {
+    const wired = ORIGINAL_SIZE_NAMES.some((name) => {
+      const idx = outputIndexByName(node, name)
+      return idx !== -1 && isOutputConnected(node.outputs[idx])
+    })
+    if (wired) {
+      // Never leave a wire drawn to an invisible dot -- same refusal as
+      // the passthrough hide.
+      node.properties[PROP_SHOW_ORIGINAL_SIZE] = true
+      toast(node, 'warn', 'Unwire the original-size outputs before hiding them.')
+    }
   }
+  node.setDirtyCanvas(true, true) // cosmetic-only: no layout change needed
+}
 
-  const widthIdx = outputIndexByName(node, widthName)
-  const heightIdx = outputIndexByName(node, heightName)
-  if (widthIdx === -1 && heightIdx === -1) return // already hidden
-
-  const widthOut = widthIdx !== -1 ? node.outputs[widthIdx] : null
-  const heightOut = heightIdx !== -1 ? node.outputs[heightIdx] : null
-  if (isOutputConnected(widthOut) || isOutputConnected(heightOut)) {
-    // Never silently sever an existing wire — restore the property instead.
-    node.properties[PROP_SHOW_ORIGINAL_SIZE] = true
-    toast(node, 'warn', 'Unwire the original-size outputs before hiding them.')
-    return
+/** Re-APPEND the original-size pair when a pre-v0.61.0 save serialized the
+ * node without it (the old hide really removed the sockets). Append-only
+ * and canonical by construction: such saves have exactly the four leading
+ * outputs, so the pair lands back at its declared slots 4-5, and existing
+ * links' indices are untouched. */
+function ensureOriginalSizeOutputs(node) {
+  let appended = false
+  for (const name of ORIGINAL_SIZE_NAMES) {
+    if (outputIndexByName(node, name) === -1) {
+      node.addOutput(name, ORIGINAL_SIZE_TYPE)
+      appended = true
+    }
   }
-
-  // True tail removal, LIFO: height (the last RETURN_NAMES entry) first,
-  // then width becomes the new tail.
-  if (heightIdx !== -1) node.removeOutput(heightIdx)
-  const widthIdxAfter = outputIndexByName(node, widthName)
-  if (widthIdxAfter !== -1) node.removeOutput(widthIdxAfter)
-  resyncSize(node)
+  if (appended) resyncSize(node)
 }
 
 // ------------------------------------------------- "Show passthrough image"
@@ -357,6 +364,17 @@ function applyPassthroughVisibility(node) {
   node.setDirtyCanvas(true, true) // cosmetic-only: no layout change needed
 }
 
+/** Every output name currently cosmetically hidden -- the passthrough
+ * (its original mechanism) and, since v0.61.0, the original-size pair
+ * (whose hide converted from real removal to this same suppression --
+ * see applyOriginalSizeVisibility). */
+function hiddenOutputNames(node) {
+  const names = []
+  if (node.properties?.[PROP_SHOW_PASSTHROUGH] === false) names.push(PASSTHROUGH_NAME)
+  if (node.properties?.[PROP_SHOW_ORIGINAL_SIZE] === false) names.push(...ORIGINAL_SIZE_NAMES)
+  return names
+}
+
 function installPassthroughVisibility(node) {
   if (node._epsPassthroughPatched) return
   node._epsPassthroughPatched = true
@@ -365,27 +383,35 @@ function installPassthroughVisibility(node) {
   if (typeof originalDrawSlots !== 'function') return // defensive: unrecognized litegraph build
 
   node.drawSlots = function (ctx, options) {
-    const hide = this.properties?.[PROP_SHOW_PASSTHROUGH] === false
-    const idx = hide ? outputIndexByName(this, PASSTHROUGH_NAME) : -1
-    const slot = idx !== -1 ? this._concreteOutputs?.[idx] : null
+    const slots = []
+    for (const name of hiddenOutputNames(this)) {
+      const idx = outputIndexByName(this, name)
+      const slot = idx !== -1 ? this._concreteOutputs?.[idx] : null
+      if (slot && typeof slot.draw === 'function') slots.push(slot)
+    }
 
-    if (!slot || typeof slot.draw !== 'function') {
+    if (slots.length === 0) {
       originalDrawSlots.call(this, ctx, options)
       return
     }
 
-    // Patch just this one slot's own draw() for this single synchronous
-    // call, then put it back exactly as found (own-property vs. inherited —
-    // see file header: never leave an own `undefined` shadowing the
-    // prototype's real draw()).
-    const hadOwnDraw = Object.prototype.hasOwnProperty.call(slot, 'draw')
-    const original = slot.draw
-    slot.draw = () => {}
+    // Patch just these slots' own draw() for this single synchronous
+    // call, then put each back exactly as found (own-property vs.
+    // inherited — see file header: never leave an own `undefined`
+    // shadowing the prototype's real draw()).
+    const restores = slots.map((slot) => ({
+      slot,
+      hadOwnDraw: Object.prototype.hasOwnProperty.call(slot, 'draw'),
+      original: slot.draw
+    }))
+    for (const { slot } of restores) slot.draw = () => {}
     try {
       originalDrawSlots.call(this, ctx, options)
     } finally {
-      if (hadOwnDraw) slot.draw = original
-      else delete slot.draw
+      for (const { slot, hadOwnDraw, original } of restores) {
+        if (hadOwnDraw) slot.draw = original
+        else delete slot.draw
+      }
     }
   }
 }
@@ -2332,6 +2358,88 @@ export function init() {
 }
 
 /** Per-node-instance attach; no-op unless node is EPSResolution. */
+// ------------------------------------- v0.61.0: multi-image + widget layout
+
+/** FORMAT.md §6.5 multi-image: the extras' name shape and the 8-image
+ * ceiling (paired resized_N outputs are positional -- §8). */
+const EXTRA_IMAGE_RE = /^image_([2-8])$/
+const MAX_IMAGES = 8
+const RESIZED_PREFIX = 'resized_'
+
+/** The properties marker resolving the v0.61.0 HEIGHT-FIRST widget swap
+ * (FORMAT.md §6.5): files WITHOUT it predate the swap, so their
+ * positionally-restored width/height VALUES arrive transposed and get
+ * swapped back by name. The DECISION always reads the incoming file --
+ * never node.properties, which attach pre-stamps on every node. */
+const WIDGET_LAYOUT_PROP = 'eps_res_widget_layout'
+const WIDGET_LAYOUT_CURRENT = 2
+
+/** Grow/shrink the image_N inputs (§6.4's converge idea, local minimal
+ * form): keep exactly one unwired trailing extra once the chain has
+ * started, capped at image_8. Deferred callers coalesce via
+ * scheduleImageConverge -- never splice inputs from inside litegraph's own
+ * connection dispatch (the v0.16.0 reentrancy lesson). */
+function convergeExtraImageInputs(node) {
+  const inputs = node.inputs || []
+  const baseWired = inputs.find((input) => input?.name === 'image')?.link != null
+  let highest = 1
+  for (const input of inputs) {
+    const match = EXTRA_IMAGE_RE.exec(input?.name || '')
+    if (match && input.link != null) highest = Math.max(highest, Number(match[1]))
+  }
+  // One empty trailing slot once the chain is active; none before.
+  const wantThrough = baseWired || highest >= 2 ? Math.min(highest + 1, MAX_IMAGES) : 1
+
+  for (let n = 2; n <= wantThrough; n++) {
+    if (!inputs.some((input) => input?.name === `image_${n}`)) {
+      node.addInput(`image_${n}`, 'IMAGE')
+    }
+  }
+  for (let n = MAX_IMAGES; n > wantThrough && n >= 2; n--) {
+    const idx = (node.inputs || []).findIndex((input) => input?.name === `image_${n}`)
+    if (idx !== -1 && node.inputs[idx].link == null) node.removeInput(idx)
+  }
+}
+
+/** Reveal resized_N tail outputs through the highest wired image_N -- TRUE
+ * add/remove is safe here because they are the genuine tail (appended
+ * after original_height, §8). A wired resized_N is never removed. */
+function revealExtraOutputs(node) {
+  ensureOriginalSizeOutputs(node) // the pair must occupy slots 4-5 FIRST
+  let highest = 1
+  for (const input of node.inputs || []) {
+    const match = EXTRA_IMAGE_RE.exec(input?.name || '')
+    if (match && input.link != null) highest = Math.max(highest, Number(match[1]))
+  }
+  for (let n = 2; n <= highest; n++) {
+    if (outputIndexByName(node, `${RESIZED_PREFIX}${n}`) === -1) {
+      node.addOutput(`${RESIZED_PREFIX}${n}`, 'IMAGE')
+    }
+  }
+  for (let n = MAX_IMAGES; n > highest && n >= 2; n--) {
+    const idx = outputIndexByName(node, `${RESIZED_PREFIX}${n}`)
+    if (idx !== -1 && !isOutputConnected(node.outputs[idx])) node.removeOutput(idx)
+  }
+  resyncSize(node)
+}
+
+/** setTimeout(0)-deferred, coalesced converge+reveal -- the same deferral
+ * shape switcher.js's live converge uses (never mutate the inputs array
+ * from inside litegraph's in-flight connection dispatch). */
+function scheduleImageConverge(node) {
+  if (node._epsResConvergeQueued) return
+  node._epsResConvergeQueued = true
+  setTimeout(() => {
+    node._epsResConvergeQueued = false
+    try {
+      convergeExtraImageInputs(node)
+      revealExtraOutputs(node)
+    } catch (error) {
+      console.warn(PREFIX, 'image-input converge failed', error)
+    }
+  }, 0)
+}
+
 export function attach(node) {
   if (node.comfyClass !== NODE_TYPE) return
 
@@ -2372,4 +2480,59 @@ export function attach(node) {
 
   attachSizeGrid(node)
   attachPresetsUi(node)
+
+  // v0.61.0 (FORMAT.md §6.5): height-first layout stamp + old-save value
+  // migration, multi-image converge/reveal. The stamp is set on EVERY node
+  // here (fresh saves must carry it); the migration DECISION reads the
+  // incoming file inside the wrap below, so pre-stamping cannot skip it.
+  node.properties[WIDGET_LAYOUT_PROP] = WIDGET_LAYOUT_CURRENT
+
+  const originalOnConnectionsChange = node.onConnectionsChange
+  node.onConnectionsChange = function (...args) {
+    let result
+    if (typeof originalOnConnectionsChange === 'function') {
+      try {
+        result = originalOnConnectionsChange.apply(this, args)
+      } catch (error) {
+        console.warn(PREFIX, 'original onConnectionsChange threw', error)
+      }
+    }
+    scheduleImageConverge(this)
+    return result
+  }
+
+  const originalOnConfigureV61 = node.onConfigure
+  node.onConfigure = function (info) {
+    // Read BEFORE the original runs -- configure merges info.properties
+    // into node.properties, after which the file's absence of the stamp
+    // is no longer observable.
+    const fromOldLayout = info?.properties?.[WIDGET_LAYOUT_PROP] !== WIDGET_LAYOUT_CURRENT
+    const result = originalOnConfigureV61?.apply(this, arguments)
+    try {
+      if (fromOldLayout) {
+        // Old file: widgets_values was saved width-first and restored
+        // positionally onto the new height-first widget order -- the two
+        // VALUES arrived transposed. Swap them back, by name.
+        const widthWidget = widgetByName(this, 'width')
+        const heightWidget = widgetByName(this, 'height')
+        if (widthWidget && heightWidget) {
+          const carried = widthWidget.value
+          widthWidget.value = heightWidget.value
+          heightWidget.value = carried
+        }
+      }
+      this.properties[WIDGET_LAYOUT_PROP] = WIDGET_LAYOUT_CURRENT
+      convergeExtraImageInputs(this)
+      revealExtraOutputs(this)
+    } catch (error) {
+      console.warn(PREFIX, 'v0.61.0 post-configure migration failed', error)
+    }
+    return result
+  }
+
+  // A FRESH node gets neither configure nor a connection event, so the
+  // backend's 13 declared outputs would all stay visible. One deferred
+  // converge trims to the base shape; for a reloaded node it coalesces
+  // harmlessly after configure's own converge above.
+  scheduleImageConverge(node)
 }
