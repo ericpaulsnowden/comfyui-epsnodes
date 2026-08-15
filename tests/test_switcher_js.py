@@ -412,9 +412,81 @@ def test_row_toggles_share_one_aligned_column(switcher_source: str) -> None:
     max is >= every row's own requirement."""
     body = _function_body(switcher_source, "drawRowToggles(node, ctx)")
     assert "requiredX" in body
-    assert "if (row.requiredX > boxX) boxX = row.requiredX" in body
+    assert "if (row.requiredX > ownRequiredX) ownRequiredX = row.requiredX" in body
     # ONE boxX resolved before the draw loop, then reused for every row.
     draw_call = body.index("drawToggleBox(ctx, boxX, boxY, ROW_BOX")
-    assert body.index("if (row.requiredX > boxX)") < draw_call
+    assert body.index("if (row.requiredX > ownRequiredX)") < draw_call
+    assert body.index("const boxX = sharedColumnX(node, ownRequiredX)") < draw_call
     # The per-row recompute inside the draw loop is what regressed here.
     assert "const boxX = Math.max(inputHitWidth" not in body
+
+
+def test_every_switcher_in_the_graph_shares_one_column(switcher_source: str) -> None:
+    """Owner ask 2026-08-14, the follow-up to the above: aligning each
+    node's OWN rows still left a stack of switchers ragged, because every
+    node picked its column from its own longest label (rig-measured: four
+    270px-wide switchers at x = 95 / 144 / 186 / 92). Each node now
+    publishes its requirement and takes the MAX across every switcher in
+    the SAME graph."""
+    body = _function_body(switcher_source, "drawRowToggles(node, ctx)")
+    assert "const boxX = sharedColumnX(node, ownRequiredX)" in body
+    shared = _function_body(switcher_source, "sharedColumnX(node, ownRequiredX)")
+    # Same graph only -- subgraphs / other tabs must not couple.
+    assert "node.graph?._nodes" in shared
+    assert "if (other === node || !switcherSpecOf(other)) continue" in shared
+    assert "const otherNeed = columnNeedOf(other)" in shared
+    assert "if (otherNeed > need) need = otherNeed" in shared
+
+
+def test_column_requirement_is_pure_so_offscreen_switchers_still_count(
+    switcher_source: str,
+) -> None:
+    """litegraph only calls onDrawForeground for VISIBLE nodes, so a
+    publish-as-you-draw scheme would omit every switcher scrolled out of
+    view and the column would jump as nodes entered the viewport. The
+    requirement is instead derived from labels + wiring alone -- no ctx,
+    no draw -- so all switchers agree within a single frame."""
+    need = _function_body(switcher_source, "columnNeedOf(node)")
+    assert "ctx" not in need
+    assert "getConnectionPos" not in need
+    assert "if (!entry.connected) continue" in need
+    assert "return need" in need
+    # ...and no cross-frame state survives to go stale.
+    assert "__epsSwitcherColumnNeed" not in switcher_source
+    assert "__epsSwitcherColumnDrawn" not in switcher_source
+
+
+def test_shared_column_yields_to_clearance_and_the_output_edge(
+    switcher_source: str,
+) -> None:
+    """Priority order, both directions: the shared column may never push a
+    box past this node's output-label zone (a narrow sibling would land
+    under its own outputs), and may never drop below the node's own
+    required clearance -- a box inside litegraph's input hit region starts
+    a link-drag instead of toggling, so clearance is functional and wins
+    over both."""
+    shared = _function_body(switcher_source, "sharedColumnX(node, ownRequiredX)")
+    assert "return Math.max(ownRequiredX, Math.min(need, ceiling))" in shared
+    # The CEILING is shared too: a per-node ceiling puts the boxes back at
+    # different x the moment clamping binds (rig-measured: 200/207/214,
+    # because each node's outputs are named differently).
+    assert "if (otherCeiling < ceiling) ceiling = otherCeiling" in shared
+    # ...and a switcher with no boxes neither raises nor constrains it.
+    assert "if (otherNeed === 0) continue" in shared
+    ceiling = _function_body(switcher_source, "outputSafeColumnX(node)")
+    # litegraph's own length*7 approximation, NOT ctx.measureText -- the
+    # mirror is what keeps the box clear of ITS regions.
+    assert "widestLabel * OUTPUT_LABEL_CHAR_W" in ceiling
+    assert "measureText" not in ceiling
+    assert "Math.max(ROW_MIN_X, width - ROW_BOX - reserve)" in ceiling
+
+
+def test_unwired_switcher_contributes_nothing_to_the_shared_column(
+    switcher_source: str,
+) -> None:
+    """A switcher with no wired rows draws no boxes and must not drag the
+    column: columnNeedOf returns 0 for it by construction."""
+    need = _function_body(switcher_source, "columnNeedOf(node)")
+    assert "let need = 0" in need
+    body = _function_body(switcher_source, "drawRowToggles(node, ctx)")
+    assert "if (drawn.length === 0) {" in body

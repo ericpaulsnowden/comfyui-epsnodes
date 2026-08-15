@@ -674,7 +674,27 @@ per-input toggle + toggle-all header + N-enabled→N-runs fan-out.
   the checkbox furthest to the right, not randomly spaced based on the
   string length"; §6.11's Distributor already did this on its output side
   from the same ask on 2026-07-27). Aligning is safe rather than a
-  compromise: the max is ≥ every row's own clearance requirement. The
+  compromise: the max is ≥ every row's own clearance requirement.
+  **That column is shared by EVERY switcher in the same graph (v0.62.0,
+  owner follow-up 2026-08-14: "for ALL of the EPS switchers … a straight
+  horizontal column based on where the furthest checkbox is").** Per-node
+  alignment alone still left a stack ragged, because each node picked its
+  own longest label (rig-measured: four 270px-wide switchers at x =
+  95/144/186/92). Each node takes the MAX requirement across the switchers
+  in `node.graph` — same graph only, so subgraphs and other tabs stay
+  independent — computed from labels + wiring alone (NO ctx, no draw pass),
+  because litegraph only draws visible nodes and a publish-as-you-draw
+  scheme would omit every switcher scrolled out of view. Purity is what
+  lets all of them agree within one frame, with no stored state to go
+  stale and no redraw nudge. Two clamps, in priority order: the column
+  never passes the SMALLEST output-label ceiling among the switchers that
+  actually draw boxes (a per-node ceiling would go ragged again the moment
+  clamping binds — measured 200/207/214), and it never drops below a
+  node's OWN clearance, since a box inside litegraph's input hit region
+  starts a link-drag instead of toggling. A node whose labels are too long
+  for its width therefore still overhangs its right edge (widen it) — an
+  unclickable box would be the worse failure. A switcher with no wired
+  rows neither raises the column nor constrains the ceiling. The
   `Toggle All` header box is a full-width WIDGET row, deliberately
   left-anchored and never string-dependent, so it is outside this column.
   Renaming to an empty string resets the label back to the socket name.

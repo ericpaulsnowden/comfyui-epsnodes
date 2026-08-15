@@ -391,6 +391,13 @@ off means three runs.
 - **Double-click a row to rename it:** the label is display-only (wires,
   toggles, and the backend still see `image_N`), persists with the
   workflow, and an empty name resets it.
+- **The checkboxes line up in one straight column — across every switcher
+  in the workflow**, not just within a node (since v0.62.0). Rename rows to
+  whatever you like and the boxes still form a single vertical line at the
+  furthest-right one, so a stack of Image/Model/CLIP/VAE Switchers reads as
+  a tidy column instead of a ragged stagger. If one node's names are too
+  long for its width, widen that node — its box has to stay clear of the
+  socket to remain clickable.
 - Toggle states save with the workflow and survive reload.
 
 ## EPS Model / CLIP / VAE Switcher (shipped)

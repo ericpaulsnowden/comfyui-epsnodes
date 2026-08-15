@@ -242,6 +242,13 @@ const ROW_BOX = 12
 //: LEFT-anchored rather than measured from the node's right edge.
 const ROW_LABEL_PAD = 12
 const ROW_MIN_X = 92
+//: Right-edge reserve for the OUTPUT side when clamping a shared column
+//: (below): the socket dot (~10px) plus its right-aligned label, measured
+//: with litegraph's own `length * 7` approximation (measureSlots.ts), plus
+//: a small gap. Only ever binds on a narrow node or an unusually long
+//: renamed label -- clearance still wins over it (see sharedColumnX).
+const OUTPUT_LABEL_CHAR_W = 7
+const OUTPUT_SOCKET_RESERVE = 16
 //: Half-height of the Y band (around a row's getConnectionPos) that counts
 //: as "this row" for double-click rename hit-testing (file header point 4).
 //: Rows are ~20px apart (litegraph's default slot height); 9 leaves a small
@@ -683,6 +690,96 @@ function drawToggleBox(ctx, x, y, size, enabled, mixed) {
 }
 
 /**
+ * The right-edge ceiling for *node*'s toggle column: far enough left that a
+ * box can't land under an output socket or its right-aligned label. Output
+ * label widths use litegraph's OWN `length * 7` approximation
+ * (canvas/measureSlots.ts) rather than ctx.measureText, for the same reason
+ * the input side does -- mirroring litegraph's math is what keeps the box
+ * clear of ITS regions, and a measured width would drift from it.
+ * @param {object} node @returns {number}
+ */
+function outputSafeColumnX(node) {
+  let widestLabel = 0
+  for (const output of node.outputs || []) {
+    const text = output?.label || output?.localized_name || output?.name || ''
+    if (text.length > widestLabel) widestLabel = text.length
+  }
+  const reserve = OUTPUT_SOCKET_RESERVE + widestLabel * OUTPUT_LABEL_CHAR_W
+  const width = Array.isArray(node.size) || node.size ? node.size[0] : 0
+  return Math.max(ROW_MIN_X, width - ROW_BOX - reserve)
+}
+
+/**
+ * One switcher's own column requirement -- the x its rows need to clear
+ * litegraph's input hit regions. PURE: derived from the row labels and
+ * their wiring alone, with no canvas and no draw pass, so it reads the same
+ * for an off-screen node as for a visible one. That is what lets every
+ * switcher reach the same shared answer within a SINGLE frame (litegraph
+ * only calls onDrawForeground for visible nodes, so a publish-as-you-draw
+ * scheme would silently omit every switcher scrolled out of view, and the
+ * column would jump as nodes entered the viewport).
+ * `0` = no wired rows, i.e. no boxes and nothing to contribute.
+ * @param {object} node @returns {number}
+ */
+function columnNeedOf(node) {
+  let need = 0
+  for (const entry of imageInputEntries(node)) {
+    if (!entry.connected) continue
+    const inputHitWidth = 20 + displayText(entry.input).length * 7
+    const required = Math.max(inputHitWidth + ROW_LABEL_PAD, ROW_MIN_X)
+    if (required > need) need = required
+  }
+  return need
+}
+
+/**
+ * ONE COLUMN ACROSS EVERY SWITCHER IN THE GRAPH (owner ask 2026-08-14:
+ * "for all of the EPS switchers, the checkboxes should right align in a
+ * straight horizontal column based on where the furthest checkbox is").
+ *
+ * v0.59.1 aligned each node's own rows, which is why a single switcher
+ * looked right -- but every node still picked its column from ITS OWN
+ * longest label, so a stack of switchers with different renamed rows sat at
+ * different x (rig-measured 2026-08-14: four 270px-wide switchers at x =
+ * 95 / 144 / 186 / 92). This takes the MAX over every switcher in the SAME
+ * graph (subgraphs and other tabs stay independent) via the pure
+ * `columnNeedOf` above -- every node computes the identical value in the
+ * same frame, so there is no publish step, no staleness and no redraw nudge.
+ *
+ * Two clamps, in priority order:
+ *  - the shared column never goes past the SMALLEST `outputSafeColumnX`
+ *    among the switchers that actually draw boxes, so no node's box lands
+ *    under its own output labels. The ceiling is shared for the same reason
+ *    the column is: a per-node ceiling puts them back at different x the
+ *    moment clamping binds (rig-measured 2026-08-14: 200 / 207 / 214, ragged
+ *    again, because each node's outputs are named differently);
+ *  - but it never falls below the node's OWN `ownRequiredX` either --
+ *    clearing litegraph's input hit region is functional (a box inside it
+ *    starts a link-drag instead of toggling), so clearance outranks both
+ *    the shared column and the ceiling. A node whose own labels are too long
+ *    for its width therefore still puts its box past its right edge, exactly
+ *    as before this change: that node needs widening, and forcing its box
+ *    inward would only make it unclickable.
+ * @param {object} node @param {number} ownRequiredX @returns {number}
+ */
+function sharedColumnX(node, ownRequiredX) {
+  let need = ownRequiredX
+  let ceiling = outputSafeColumnX(node)
+  const siblings = node.graph?._nodes
+  if (Array.isArray(siblings)) {
+    for (const other of siblings) {
+      if (other === node || !switcherSpecOf(other)) continue
+      const otherNeed = columnNeedOf(other)
+      if (otherNeed === 0) continue // no boxes: neither raises nor constrains
+      if (otherNeed > need) need = otherNeed
+      const otherCeiling = outputSafeColumnX(other)
+      if (otherCeiling < ceiling) ceiling = otherCeiling
+    }
+  }
+  return Math.max(ownRequiredX, Math.min(need, ceiling))
+}
+
+/**
  * Recomputes and draws every connected image_N row's toggle box, caching
  * their hit rects on the node for wireRowToggleClicks() to consume.
  * @param {object} node
@@ -699,6 +796,8 @@ function drawRowToggles(node, ctx) {
   // (owner's 2026-07-27 ask there; see its comment). Pass 1 takes the
   // LONGEST drawn row's required x, pass 2 draws every box at it, so mixed
   // -length socket names give a straight edge instead of a ragged stagger.
+  // Since v0.62.0 that column is shared with every OTHER switcher in the
+  // graph too (sharedColumnX -- the 2026-08-14 follow-up ask).
   //
   // Per-row x is what has to clear litegraph's own input hit-region:
   // getNodeInputOnPos sizes that region off the row's DISPLAYED text
@@ -725,10 +824,16 @@ function drawRowToggles(node, ctx) {
     })
   }
 
-  let boxX = ROW_MIN_X
-  for (const row of drawn) {
-    if (row.requiredX > boxX) boxX = row.requiredX
+  if (drawn.length === 0) {
+    node.__epsSwitcherRowRects = []
+    return
   }
+
+  let ownRequiredX = ROW_MIN_X
+  for (const row of drawn) {
+    if (row.requiredX > ownRequiredX) ownRequiredX = row.requiredX
+  }
+  const boxX = sharedColumnX(node, ownRequiredX)
 
   const rects = []
   for (const row of drawn) {
