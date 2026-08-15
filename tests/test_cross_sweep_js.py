@@ -1399,18 +1399,22 @@ def test_throttle_constant_and_gate(source: str) -> None:
 
 def test_no_window_listeners_and_no_interval_timers(source: str) -> None:
     """§7.5 (window listeners) and §6.10's "no polling timers of its own"
-    -- neither may appear even once, so this pin stays trivially
-    auditable."""
+    -- neither may appear even once. setTimeout appears EXACTLY once: the
+    one-shot post-add deferral (at nodeCreated the node has no id yet;
+    the Vue renderer never self-heals via a redraw -- 2026-08-14), which
+    is a deferral, not a polling timer."""
     assert "window.addEventListener" not in source
     assert "setInterval" not in source
-    assert "setTimeout" not in source
+    assert source.count("setTimeout(") == 1
+    attach = _function_body(source, "attach(node)")
+    assert "setTimeout(() => {" in attach  # the documented deferral, nowhere else
 
 
 def test_recompute_repaints_only_on_change(source: str) -> None:
     """A busy canvas redraws constantly; identical text must not thrash the
     DOM."""
     body = _function_body(source, "recompute(state)")
-    assert "if (view.text === state.lastText && view.cls === state.lastCls) return" in body
+    assert "if (view.text === state.lastText && view.cls === state.lastCls) {" in body
     assert "estimateRuns(snapshotFromGraph(graph), String(state.node.id))" in body
 
 
@@ -1446,7 +1450,40 @@ def test_readout_sizes_itself_the_compact_standalone_way(source: str) -> None:
     widgets riding the node's spare height.)"""
     body = _function_body(source, "attach(node)")
     assert "root.style.height = `${READOUT_HEIGHT}px`" in body
-    assert "domWidget.computeSize = (width) => [width, READOUT_HEIGHT]" in body
-    assert "domWidget.computedHeight = READOUT_HEIGHT" in body
+    # v0.61.3 (owner report 2026-08-14, "still cropped"): every height
+    # REPORTED to litegraph budgets the overlay's 2*margin, because the
+    # visible box is `computedHeight - margin*2` (DomWidgets.vue) -- the
+    # bare text height left a 6px window. The element keeps the text half.
+    assert "state.outerHeight = READOUT_HEIGHT + 2 * margin" in body
+    assert "domWidget.computeSize = (width) => [width, state.outerHeight]" in body
+    assert "domWidget.computedHeight = state.outerHeight" in body
     # The belt-and-braces hints stay for renderers that DO honor them.
-    assert "getMinHeight: () => READOUT_HEIGHT" in body
+    assert "getMinHeight: () => state.outerHeight" in body
+
+
+def test_readout_wraps_and_grows_to_fit_long_messages(source: str) -> None:
+    """Owner report 2026-08-14: long floor/error messages must be readable,
+    not ellipsized -- the line wraps and sizeToContent grows the box (and
+    the node) to fit, capped at READOUT_MAX_HEIGHT, never acting on a 0
+    measurement (the §7.5 frozen-RAF artifact)."""
+    assert "white-space: normal; overflow-wrap: anywhere;" in source
+    assert "text-overflow" not in source
+    body = _function_body(source, "sizeToContent(state)")
+    # 0-height = hidden/between-frames; 0-WIDTH = pre-layout, where every
+    # character wraps and scrollHeight reads hundreds of px -- neither may
+    # be trusted, and the skipped pass retries via needsMeasure.
+    assert "if (!scrollH || !lineEl.clientWidth) {" in body
+    assert "state.needsMeasure = true" in body
+    recompute_body = _function_body(source, "recompute(state)")
+    # ...and a stale-WIDTH measurement re-sizes too: wrapping depends on
+    # width, so a pass taken mid-layout (or before a node resize) must be
+    # redone once the width settles.
+    assert (
+        "if (state.needsMeasure || state.lineEl.clientWidth !== state.lastMeasuredWidth)"
+        in recompute_body
+    )
+    assert "state.lastMeasuredWidth = lineEl.clientWidth" in body
+    assert "Math.min(scrollH + 6, READOUT_MAX_HEIGHT)" in body
+    assert "if (needed === state.textHeight) return" in body
+    assert "Math.max(node.size[1] + (state.outerHeight - previousOuter), floor)" in body
+    assert "sizeToContent(state)" in _function_body(source, "recompute(state)")

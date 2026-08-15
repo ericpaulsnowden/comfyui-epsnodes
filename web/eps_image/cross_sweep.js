@@ -108,10 +108,25 @@ const READOUT_WIDGET_NAME = 'eps_rc_readout'
 const READOUT_WIDGET_TYPE = 'eps_run_count_readout'
 const STYLE_TAG_ID = 'eps-run-count-styles'
 
-/** One readout line's pixel height -- fixed, not fill-style: unlike the
- * picker/notebook panels this widget must never eat the node's spare
- * height. */
+/** One readout line's pixel height -- the widget's TEXT box floor, not
+ * fill-style: unlike the picker/notebook panels this widget must never eat
+ * the node's spare height. Long messages WRAP and the box grows (owner
+ * report 2026-08-14, capped at READOUT_MAX_HEIGHT). */
 const READOUT_HEIGHT = 22
+
+/** Growth ceiling for a wrapped message (~4 lines) -- anything taller is
+ * pathological and the title tooltip still carries the full text. */
+const READOUT_MAX_HEIGHT = 66
+
+/** The frontend's DOM-widget overlay sizes the VISIBLE box to
+ * `computedHeight - margin*2` (DomWidgets.vue: `widgetState.size = [...,
+ * (widget.computedHeight ?? 50) - margin * 2]`), so every height this file
+ * reports to litegraph must BUDGET the margins on top of the text box --
+ * reporting the bare text height leaves `22+4-20 = 6px` of window and the
+ * text renders cropped/clipped (owner report 2026-08-14: "still cropped
+ * and illegible"; v0.59.1 fixed the collapse-to-7px half but missed this).
+ * Read from the live widget when present; this is the litegraph default. */
+const DOM_WIDGET_MARGIN_FALLBACK = 10
 
 /** §6.3 controller idiom (controller.js `HEARTBEAT_MIN_MS`): the
  * redraw-driven recompute runs at most once per this many ms, no matter
@@ -1045,7 +1060,7 @@ let stylesInjected = false
 
 const CSS_TEXT = `
 .eps-rc-root { display: flex; align-items: center; width: 100%; height: 100%; box-sizing: border-box; overflow: hidden; }
-.eps-rc-line { flex: 1 1 auto; min-width: 0; font-family: inherit; font-size: 11px; color: var(--descrip-text, #999); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; padding: 0 4px; }
+.eps-rc-line { flex: 1 1 auto; min-width: 0; font-family: inherit; font-size: 11px; color: var(--descrip-text, #999); white-space: normal; overflow-wrap: anywhere; overflow: hidden; padding: 0 4px; }
 .eps-rc-warn { color: var(--warning-text, #e6a23c); }
 .eps-rc-error { color: var(--error-text, #ff4444); }
 `
@@ -1075,12 +1090,62 @@ function recompute(state) {
   if (!graph) return
   const est = estimateRuns(snapshotFromGraph(graph), String(state.node.id))
   const view = formatReadout(est)
-  if (view.text === state.lastText && view.cls === state.lastCls) return
+  if (view.text === state.lastText && view.cls === state.lastCls) {
+    // Unchanged text can still owe a size pass: the last one may have run
+    // before layout gave the element real dimensions, or at a DIFFERENT
+    // width (mid-layout, or the node was resized) -- wrapping depends on
+    // width, so a stale-width measurement over- or under-sizes the box.
+    if (state.needsMeasure || state.lineEl.clientWidth !== state.lastMeasuredWidth) {
+      sizeToContent(state)
+    }
+    return
+  }
   state.lastText = view.text
   state.lastCls = view.cls
   state.lineEl.className = view.cls ? `eps-rc-line ${view.cls}` : 'eps-rc-line'
   state.lineEl.textContent = view.text
   state.lineEl.title = view.text
+  sizeToContent(state)
+}
+
+/**
+ * Grow (or shrink back) the readout to FIT its current text -- long floor/
+ * error messages wrap instead of ellipsizing (owner report 2026-08-14),
+ * capped at READOUT_MAX_HEIGHT with the title tooltip as the overflow
+ * fallback. All heights reported to litegraph include the overlay's
+ * 2*margin budget (see DOM_WIDGET_MARGIN_FALLBACK). Only acts when the
+ * needed height CHANGES, and never on a 0 measurement -- a hidden or
+ * between-frames element measures 0 and must not collapse the box (the
+ * §7.5 frozen-RAF probe artifact).
+ */
+function sizeToContent(state) {
+  const { lineEl, node, domWidget } = state
+  if (!domWidget) return
+  // A 0-HEIGHT element is hidden/between frames; a 0-WIDTH one is worse:
+  // pre-layout, every character wraps and scrollHeight reads hundreds of
+  // px -- growing the box to its cap for a one-line message. Trust no
+  // measurement until both are real; needsMeasure retries on the next
+  // recompute pass (even an unchanged-text one).
+  const scrollH = lineEl.scrollHeight
+  if (!scrollH || !lineEl.clientWidth) {
+    state.needsMeasure = true
+    return
+  }
+  state.needsMeasure = false
+  state.lastMeasuredWidth = lineEl.clientWidth
+  const needed = Math.max(READOUT_HEIGHT, Math.min(scrollH + 6, READOUT_MAX_HEIGHT))
+  if (needed === state.textHeight) return
+  const margin = typeof domWidget.margin === 'number' ? domWidget.margin : DOM_WIDGET_MARGIN_FALLBACK
+  const previousOuter = state.textHeight + 2 * margin
+  state.textHeight = needed
+  state.outerHeight = needed + 2 * margin
+  state.rootEl.style.height = `${needed}px`
+  domWidget.computedHeight = state.outerHeight
+  if (node?.size && typeof node.setSize === 'function') {
+    const floor = typeof node.computeSize === 'function' ? node.computeSize()[1] : 0
+    node.setSize([node.size[0], Math.max(node.size[1] + (state.outerHeight - previousOuter), floor)])
+    node.graph?.setDirtyCanvas(true, true)
+  }
 }
 
 /** The §6.3 throttle: at most one recompute per READOUT_MIN_INTERVAL_MS,
@@ -1145,23 +1210,39 @@ export function attach(node) {
     // root-cause: the notebook/picker panels never hit it because they are
     // FILL widgets riding the node's spare height. getMinHeight/
     // getMaxHeight stay as the belt-and-braces for renderers that DO honor
-    // them.
+    // them. Every REPORTED height is `text + 2*margin`, because the
+    // overlay's visible box is `computedHeight - margin*2` (owner report
+    // 2026-08-14 -- see DOM_WIDGET_MARGIN_FALLBACK); the element itself is
+    // sized to the text half only, and sizeToContent() re-derives both
+    // whenever the message needs more lines.
     root.style.height = `${READOUT_HEIGHT}px`
+    const state = {
+      node,
+      lineEl,
+      rootEl: root,
+      domWidget: null,
+      textHeight: READOUT_HEIGHT,
+      outerHeight: READOUT_HEIGHT + 2 * DOM_WIDGET_MARGIN_FALLBACK,
+      lastStamp: 0,
+      lastText: null,
+      lastCls: null
+    }
     const domWidget = node.addDOMWidget(READOUT_WIDGET_NAME, READOUT_WIDGET_TYPE, root, {
       hideOnZoom: true,
       serialize: false, // excludes from the API prompt (utils/executionUtil.ts)
-      getMinHeight: () => READOUT_HEIGHT,
-      getMaxHeight: () => READOUT_HEIGHT
+      getMinHeight: () => state.outerHeight,
+      getMaxHeight: () => state.outerHeight
     })
-    domWidget.computeSize = (width) => [width, READOUT_HEIGHT]
-    domWidget.computedHeight = READOUT_HEIGHT
+    state.domWidget = domWidget
+    const margin = typeof domWidget.margin === 'number' ? domWidget.margin : DOM_WIDGET_MARGIN_FALLBACK
+    state.outerHeight = READOUT_HEIGHT + 2 * margin
+    domWidget.computeSize = (width) => [width, state.outerHeight]
+    domWidget.computedHeight = state.outerHeight
     // Excludes from the workflow JSON -- a DIFFERENT flag from
     // options.serialize above (notebook.js's attachDomWidget() header
     // explains why both exist).
     domWidget.serialize = false
     domWidget.serializeValue = () => undefined
-
-    const state = { node, lineEl, lastStamp: 0, lastText: null, lastCls: null }
 
     // Refresh triggers (§6.3's controller idiom -- wrap, never replace,
     // never throw out of the caller; ONE shared throttle via
@@ -1189,6 +1270,18 @@ export function attach(node) {
     } catch (error) {
       console.warn(PREFIX, 'initial run-count estimate failed', error)
     }
+    // ...and once more next tick: at nodeCreated the node has NO id yet
+    // (-1, graph.add assigns it after), so the paint above reads "node -1
+    // is not an EPSCrossSweep". The classic renderer self-heals on the
+    // next draw, but the Vue renderer never fires onDrawForeground and the
+    // error text would STAND until a rewire (caught 2026-08-14).
+    setTimeout(() => {
+      try {
+        recompute(state)
+      } catch (error) {
+        console.warn(PREFIX, 'deferred run-count estimate failed', error)
+      }
+    }, 0)
   } catch (error) {
     console.warn(PREFIX, 'cross_sweep attach failed', error)
   }
