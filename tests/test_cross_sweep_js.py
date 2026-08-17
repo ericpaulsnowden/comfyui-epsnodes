@@ -1399,15 +1399,18 @@ def test_throttle_constant_and_gate(source: str) -> None:
 
 def test_no_window_listeners_and_no_interval_timers(source: str) -> None:
     """§7.5 (window listeners) and §6.10's "no polling timers of its own"
-    -- neither may appear even once. setTimeout appears EXACTLY once: the
-    one-shot post-add deferral (at nodeCreated the node has no id yet;
-    the Vue renderer never self-heals via a redraw -- 2026-08-14), which
-    is a deferral, not a polling timer."""
+    -- neither may appear even once. setTimeout appears exactly TWICE, and
+    both are DEFERRALS, not polling timers: the one-shot post-add recompute
+    (at nodeCreated the node has no id yet, and the Vue renderer never
+    self-heals via a redraw -- 2026-08-14), and the per-tick coalescer for
+    the graph-change watch (v0.63.2)."""
     assert "window.addEventListener" not in source
     assert "setInterval" not in source
-    assert source.count("setTimeout(") == 1
+    assert source.count("setTimeout(") == 2
     attach = _function_body(source, "attach(node)")
-    assert "setTimeout(() => {" in attach  # the documented deferral, nowhere else
+    assert "setTimeout(() => {" in attach  # the documented post-add deferral
+    coalescer = _function_body(source, "scheduleGraphRecompute(graph)")
+    assert "graph.__epsRcRefreshQueued" in coalescer
 
 
 def test_recompute_repaints_only_on_change(source: str) -> None:
@@ -1487,3 +1490,20 @@ def test_readout_wraps_and_grows_to_fit_long_messages(source: str) -> None:
     assert "if (needed === state.textHeight) return" in body
     assert "Math.max(node.size[1] + (state.outerHeight - previousOuter), floor)" in body
     assert "sizeToContent(state)" in _function_body(source, "recompute(state)")
+
+
+def test_run_count_refreshes_on_graph_changes_not_only_draws(source: str) -> None:
+    """The count depends on the WHOLE upstream graph, but every other
+    trigger fires only for this node's OWN edits -- and the Vue renderer
+    never calls onDrawForeground (§7.5). EPSCrossSweep is deliberately NOT
+    in eps_image.js's VUE_AFFECTED_CLASSES, so "works under Vue" is a
+    promise this file has to keep: deleting an upstream loader must not
+    leave a stale number behind."""
+    assert "function installGraphNodeWatch(graph)" in source
+    watch = _function_body(source, "installGraphNodeWatch(graph)")
+    assert "graph.__epsRcNodeWatch" in watch, "install once per graph"
+    assert "'onNodeAdded', 'onNodeRemoved', 'onAfterChange'" in watch
+    assert "original?.apply(this, args)" in watch, "chained, never replaced"
+    # State hangs off the node, so a deleted node takes its state with it.
+    assert "node.__epsRcState = state" in source
+    assert "installGraphNodeWatch(node.graph || app.graph)" in source

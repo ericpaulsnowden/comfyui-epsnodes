@@ -1234,3 +1234,30 @@ class TestUiRound20260814:
         send = _function_body(source, "renderSend(state)")
         assert "text: 'Send to'" in send
         assert "The picker itself already applies its loras" in send
+
+
+class TestSendRowGraphWatchV0632:
+    """v0.63.2: the Send row's BEHAVIOUR was always correct (options rebuild
+    on open, the click re-probes), but its printed message was painted at
+    render time -- so after adding a loader the row could keep claiming
+    there is none. That is the very message the owner once read as an
+    error, so it must not linger once it is untrue."""
+
+    @pytest.fixture(scope="class")
+    def source(self) -> str:
+        return PICKER_JS.read_text(encoding="utf-8")
+
+    def test_send_row_repaints_on_graph_add_and_remove(self, source: str) -> None:
+        assert "function installGraphNodeWatch(graph)" in source
+        watch = _function_body(source, "installGraphNodeWatch(graph)")
+        assert "graph.__epsLpNodeWatch" in watch, "install once per graph"
+        assert "'onNodeAdded', 'onNodeRemoved'" in watch
+        assert "original?.apply(this, args)" in watch, "chained, never replaced"
+        assert "scheduleSendRowRefresh(this)" in watch
+
+    def test_refresh_is_coalesced_and_state_hangs_off_the_node(self, source: str) -> None:
+        body = _function_body(source, "scheduleSendRowRefresh(graph)")
+        assert "graph.__epsLpSendRefreshQueued" in body
+        assert "renderSend(state)" in body
+        assert "node?.__epsLpState" in body  # no module registry to leak
+        assert "node.__epsLpState = state" in source

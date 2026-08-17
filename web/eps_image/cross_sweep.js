@@ -1180,6 +1180,69 @@ function wrapWithRecompute(original, state) {
   }
 }
 
+/**
+ * Recompute every run-count readout in *graph*, coalesced to one pass per
+ * tick. Same shape (and same reason) as controller.js's
+ * `scheduleControllerRefresh` -- see `installGraphNodeWatch` below.
+ */
+function scheduleGraphRecompute(graph) {
+  if (!graph || graph.__epsRcRefreshQueued) return
+  graph.__epsRcRefreshQueued = true
+  setTimeout(() => {
+    graph.__epsRcRefreshQueued = false
+    // The state hangs off the node itself (no module-level registry to
+    // leak): a deleted node takes its state with it.
+    for (const node of graph._nodes || []) {
+      const state = node?.__epsRcState
+      if (!state) continue
+      try {
+        recompute(state)
+      } catch (error) {
+        console.warn(PREFIX, 'graph-change recompute failed', error)
+      }
+    }
+  }, 0)
+}
+
+/**
+ * Install the graph-level change watch ONCE per graph object (v0.63.2).
+ *
+ * The count depends on the WHOLE upstream graph, but the triggers below
+ * only ever fire for this node's OWN edits: `onDrawForeground` is the
+ * catch-all in the classic renderer, and the Vue renderer never calls it
+ * (§7.5) -- so under Vue nodes, deleting an upstream loader or toggling a
+ * switcher left the number stale with nothing to correct it. EPSCrossSweep
+ * is deliberately NOT in `eps_image.js`'s VUE_AFFECTED_CLASSES (it draws
+ * no controls of its own), so "works under Vue" is a promise this file has
+ * to keep. `onNodeAdded`/`onNodeRemoved` are draw-free and rig-verified to
+ * fire in both renderers (controller.js v0.63.1).
+ *
+ * `onAfterChange` rides along as an OPPORTUNISTIC extra for rewires
+ * between other nodes: litegraph has no dependable graph-level connection
+ * hook (rig-probed 2026-08-14 -- `onConnectionChange` never fired at all,
+ * and `onAfterChange` caught a programmatic connect but not a disconnect),
+ * so it is a bonus, never the guarantee. The recompute is throttle-free
+ * here but repaints only on an actual text change, so extra calls cost
+ * nothing.
+ */
+function installGraphNodeWatch(graph) {
+  if (!graph || graph.__epsRcNodeWatch) return
+  graph.__epsRcNodeWatch = true
+  for (const hook of ['onNodeAdded', 'onNodeRemoved', 'onAfterChange']) {
+    const original = graph[hook]
+    graph[hook] = function (...args) {
+      let result
+      try {
+        result = original?.apply(this, args)
+      } catch (error) {
+        console.warn(PREFIX, `original ${hook} threw`, error)
+      }
+      scheduleGraphRecompute(this)
+      return result
+    }
+  }
+}
+
 /** Per-node-instance attach; no-op unless *node* is an EPSCrossSweep. */
 export function attach(node) {
   try {
@@ -1227,6 +1290,10 @@ export function attach(node) {
       lastText: null,
       lastCls: null
     }
+    // Reachable from the graph-level watch below (and only from there);
+    // stored on the node so it dies with the node.
+    node.__epsRcState = state
+    installGraphNodeWatch(node.graph || app.graph)
     const domWidget = node.addDOMWidget(READOUT_WIDGET_NAME, READOUT_WIDGET_TYPE, root, {
       hideOnZoom: true,
       serialize: false, // excludes from the API prompt (utils/executionUtil.ts)

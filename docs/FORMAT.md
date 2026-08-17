@@ -611,7 +611,23 @@ queue. It drives a **genuine, untouched `Power Lora Loader (rgthree)`**:
   never beats; and the Vue renderer never calls `onDrawForeground` at all
   (the §7.5 rule, biting a THIRD time after the v0.61.3 run-count readout).
   Rig-proven: after a drop the combo still read `(none found)` until a draw
-  was forced by hand. The node now also watches the GRAPH — a chained,
+  was forced by hand. **The same watch was audited across the pack and
+  added where it was load-bearing (v0.63.2): the Run Multiplier's run-count
+  readout** (its count depends on the WHOLE upstream graph, but its other
+  triggers only fire for its own edits, and `EPSCrossSweep` is deliberately
+  NOT in `eps_image.js`'s `VUE_AFFECTED_CLASSES`, so Vue support is a
+  promise that file has to keep) **and the LoRA Picker's Send row** (whose
+  behavior was already correct -- options rebuild on open, the click
+  re-probes -- but whose printed "no loader" message could outlive the
+  truth). Audited and deliberately NOT changed: `sets.js`'s `mirrors
+  loader` combo (dynamic `options.values`, re-evaluated on every open),
+  `image_grid.js`'s graph scans (action- and event-driven), and
+  `switcher.js`'s shared checkbox column (canvas-drawn by nature, so the
+  draw IS its trigger). NOTE for anyone extending this: litegraph has NO
+  dependable graph-level CONNECTION hook -- rig-probed 2026-08-14,
+  `onConnectionChange` never fired at all and `onAfterChange` caught a
+  programmatic connect but not a disconnect -- so `onAfterChange` may ride
+  along as an opportunistic extra, never as the guarantee. The node now also watches the GRAPH — a chained,
   install-once wrap of `onNodeAdded`/`onNodeRemoved` (verified on the rig
   to fire for a manual drop, a delete, and every node of a
   `loadGraphData`, in both renderers, with `app.graph` surviving a load as

@@ -1535,6 +1535,54 @@ const MSG_NO_SEND_TARGET_IN_GRAPH = `Optional — the picker applies its loras i
 )} node, then pick it here.`
 const MSG_NO_SEND_TARGET_SELECTED = 'Pick a target loader node above.'
 
+/**
+ * Repaint every picker's Send row in *graph*, coalesced per tick (v0.63.2).
+ *
+ * The Send row's BEHAVIOUR was already correct without this -- the combo
+ * rebuilds its options on every open and the click re-probes -- but the
+ * TEXT it shows is painted at render time, so after adding a loader the row
+ * could keep saying there is none until some unrelated repaint. That
+ * message is exactly the one the owner already read as an error once
+ * (v0.61.1), so it must not linger when it has stopped being true.
+ * Draw-free hooks, so it holds in the Vue renderer too (controller.js
+ * v0.63.1 carries the same watch for the same reason).
+ */
+function scheduleSendRowRefresh(graph) {
+  if (!graph || graph.__epsLpSendRefreshQueued) return
+  graph.__epsLpSendRefreshQueued = true
+  setTimeout(() => {
+    graph.__epsLpSendRefreshQueued = false
+    for (const node of graph._nodes || []) {
+      const state = node?.__epsLpState
+      if (!state) continue
+      try {
+        renderSend(state)
+      } catch (error) {
+        api.warn('graph-change send-row refresh failed', error)
+      }
+    }
+  }, 0)
+}
+
+/** Install once per graph -- see scheduleSendRowRefresh. */
+function installGraphNodeWatch(graph) {
+  if (!graph || graph.__epsLpNodeWatch) return
+  graph.__epsLpNodeWatch = true
+  for (const hook of ['onNodeAdded', 'onNodeRemoved']) {
+    const original = graph[hook]
+    graph[hook] = function (...args) {
+      let result
+      try {
+        result = original?.apply(this, args)
+      } catch (error) {
+        api.warn(`original ${hook} threw`, error)
+      }
+      scheduleSendRowRefresh(this)
+      return result
+    }
+  }
+}
+
 /** Every adapter family's live candidates, merged ascending id ACROSS
  * families (§6.13 M4) -- the combo's order AND the auto-adopt universe. */
 function findSendCandidates() {
@@ -1741,6 +1789,10 @@ export function attachPickerPanel(node) {
     attachedNodes.add(node)
 
     const state = createState(node, widget)
+    // Reachable from the graph-level watch (and only from there); stored on
+    // the node so it dies with the node.
+    node.__epsLpState = state
+    installGraphNodeWatch(node.graph || app.graph)
     state.selection = selectionFromWidgetValue(widget.value)
     // Read-only info surfaced in right-click -> Properties (owner ask
     // 2026-08-14, replacing the status bar's standing count); refreshed
