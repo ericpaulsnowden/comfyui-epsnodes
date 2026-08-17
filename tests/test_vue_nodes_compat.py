@@ -209,3 +209,42 @@ def test_window_pointer_listeners_are_capture_phase(rel: str) -> None:
     adds = len(re.findall("window\\.addEvent" + cap, source))
     removes = len(re.findall("window\\.removeEvent" + cap, source))
     assert adds > 0 and removes > 0, f"{rel}: expected capture-phase pairs, found {adds}/{removes}"
+
+
+def test_controller_target_discovery_does_not_depend_on_drawing() -> None:
+    """Owner report 2026-08-14: "the Lora Loader State Controller won't see
+    a Power Lora Loader node when dropped into a workflow".
+
+    Discovery rode only on `_heartbeat()`, which runs from
+    `onDrawForeground()` -- and that loses the event three separate ways:
+    the heartbeat self-throttles to 1/sec (so the draws a drop triggers are
+    swallowed, after which an idle canvas never re-triggers it), litegraph
+    only draws VISIBLE nodes (an off-screen controller never beats), and
+    the Vue renderer never calls onDrawForeground at all. Rig-proven: after
+    a drop the combo still read "(none found)" until a draw was forced.
+
+    The fix must be a GRAPH-level add/remove watch -- no draw involved --
+    so it works in both renderers."""
+    source = _source("web/lora_library/controller.js")
+    assert "function installGraphNodeWatch(graph)" in source
+    watch = source.split("function installGraphNodeWatch(graph)", 1)[1].split("\n}\n", 1)[0]
+    assert "graph.__epsCtrlNodeWatch" in watch, "must install once per graph"
+    assert "'onNodeAdded', 'onNodeRemoved'" in watch
+    assert "original?.apply(this, args)" in watch, "chained, never replaced"
+    assert "scheduleControllerRefresh(this)" in watch
+    # ...installed from onAdded, so every controller arms the graph it joins.
+    assert "installGraphNodeWatch(this.graph || app.graph)" in source
+
+
+def test_controller_graph_refresh_is_coalesced_per_tick() -> None:
+    """`onNodeAdded` fires once per node, so a workflow load would re-scan
+    the graph hundreds of times without this. A one-tick deferral, not a
+    polling timer (§6.10)."""
+    source = _source("web/lora_library/controller.js")
+    body = source.split("function scheduleControllerRefresh(graph)", 1)[1].split("\n}\n", 1)[0]
+    assert "graph.__epsCtrlRefreshQueued" in body
+    assert "setTimeout(" in body
+    assert "node._refreshTargetCombo()" in body
+    assert "node._probeAndUpdateStatus()" in body
+    # Never throws into litegraph's own add/remove dispatch.
+    assert "api.warn" in body

@@ -601,7 +601,24 @@ queue. It drives a **genuine, untouched `Power Lora Loader (rgthree)`**:
   DOM-widget sizing so the panel fills the node and never collapses.
 - Widgets/controls retained: `target` (COMBO of PLL nodes by title `#id`,
   PLUS `All Power Lora Loaders (N)` when N ≥ 2 — the WAN high/low case;
-  auto-selects when exactly one exists). Buttons (stacked in the RIGHT
+  auto-selects when exactly one exists). **Target discovery must NEVER
+  depend on drawing (v0.63.1, owner report 2026-08-14: "won't see a Power
+  Lora Loader node when dropped into a workflow").** It rode only on
+  `_heartbeat()`, which runs from `onDrawForeground()`, and that loses the
+  event three separate ways: the heartbeat self-throttles to 1/sec so the
+  draws a drop triggers are swallowed and an idle canvas never re-triggers
+  it; litegraph only draws VISIBLE nodes, so an off-screen controller
+  never beats; and the Vue renderer never calls `onDrawForeground` at all
+  (the §7.5 rule, biting a THIRD time after the v0.61.3 run-count readout).
+  Rig-proven: after a drop the combo still read `(none found)` until a draw
+  was forced by hand. The node now also watches the GRAPH — a chained,
+  install-once wrap of `onNodeAdded`/`onNodeRemoved` (verified on the rig
+  to fire for a manual drop, a delete, and every node of a
+  `loadGraphData`, in both renderers, with `app.graph` surviving a load as
+  the same object), refreshing every controller in that graph coalesced to
+  one pass per tick (a DEFERRAL, not a polling timer — `onNodeAdded` fires
+  once per node, so a workflow load would otherwise re-scan hundreds of
+  times). The heartbeat stays for slower drift (titles, row counts). Buttons (stacked in the RIGHT
   pane, Delete LAST — owner ask 2026-07-22): `New State`, `Save State`,
   `Push State` (broadcast to all EPS Apply LoRA Set nodes), `Delete State`
   (two-click "Are you sure?" confirm; the armed button is visually

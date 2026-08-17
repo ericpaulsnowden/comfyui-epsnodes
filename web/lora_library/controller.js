@@ -842,6 +842,69 @@ function findTargetCandidates() {
 }
 
 /**
+ * Re-run every controller's target discovery in *graph*, coalesced to one
+ * pass per tick (owner report 2026-08-14: "won't see a Power Lora Loader
+ * node when dropped into a workflow").
+ *
+ * Discovery used to ride ONLY on `_heartbeat()`, which runs from
+ * `onDrawForeground()`. Three separate ways that loses the event, all real:
+ * the heartbeat self-throttles to 1/sec, so the draws that a drop triggers
+ * are usually swallowed and the canvas then goes idle with nothing left to
+ * re-trigger it; litegraph only draws VISIBLE nodes, so a controller
+ * scrolled off-screen never beats at all; and the Vue node renderer never
+ * calls `onDrawForeground` in the first place (the v0.61.3 lesson, again).
+ * Rig-proven 2026-08-14: after dropping a PLL the combo still read
+ * "(none found)" until a draw was forced by hand.
+ *
+ * The coalescing matters: `onNodeAdded` fires once per node, so a workflow
+ * load would otherwise re-scan the graph hundreds of times. This is a
+ * one-tick DEFERRAL, not a polling timer (§6.10).
+ */
+function scheduleControllerRefresh(graph) {
+  if (!graph || graph.__epsCtrlRefreshQueued) return
+  graph.__epsCtrlRefreshQueued = true
+  setTimeout(() => {
+    graph.__epsCtrlRefreshQueued = false
+    try {
+      for (const node of graph._nodes || []) {
+        if (!node || node.type !== NODE_TYPE) continue
+        node._guarded?.('graph changed', () => {
+          node._refreshTargetCombo()
+          node._probeAndUpdateStatus()
+        })
+      }
+    } catch (error) {
+      api.warn(`${NODE_TITLE}: graph-change refresh failed`, error)
+    }
+  }, 0)
+}
+
+/**
+ * Install the graph-level add/remove watch ONCE per graph object. Verified
+ * on the rig 2026-08-14: `onNodeAdded`/`onNodeRemoved` fire for a manual
+ * drop, a delete, AND every node of a `loadGraphData`, in both renderers
+ * and with no draw involved -- and `app.graph` survives a workflow load as
+ * the SAME object, so one install keeps working. Chained, never replaced.
+ */
+function installGraphNodeWatch(graph) {
+  if (!graph || graph.__epsCtrlNodeWatch) return
+  graph.__epsCtrlNodeWatch = true
+  for (const hook of ['onNodeAdded', 'onNodeRemoved']) {
+    const original = graph[hook]
+    graph[hook] = function (...args) {
+      let result
+      try {
+        result = original?.apply(this, args)
+      } catch (error) {
+        api.warn(`${NODE_TITLE}: original ${hook} threw`, error)
+      }
+      scheduleControllerRefresh(this)
+      return result
+    }
+  }
+}
+
+/**
  * FORMAT.md §6.2/§6.3: the node id embedded in a "<title> #<id>" combo
  * label — the shape both this file's `target` combo and sets.js's `mirrors
  * loader` tag use for the same underlying concept (which PLL). `null` for
@@ -1875,6 +1938,10 @@ export function registerControllerNode() {
 
       onAdded() {
         this._guarded('onAdded', () => {
+          // Watch the graph this node just joined, so a loader dropped in
+          // LATER is noticed without waiting for a draw-driven heartbeat
+          // (owner report 2026-08-14 -- see installGraphNodeWatch).
+          installGraphNodeWatch(this.graph || app.graph)
           this._refreshTargetCombo()
           this._probeAndUpdateStatus()
           this._refreshSetsCache()
