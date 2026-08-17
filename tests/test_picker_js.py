@@ -651,12 +651,13 @@ class TestSendToLoaderM2:
     def test_select_class_option_labels_and_id_values(self, source: str) -> None:
         body = _function_body(source, "renderSend(state)")
         assert "className: 'eps-lp-pll-select'" in body
-        assert "`${node.title || node.type} #${node.id}`" in body
-        assert "value: String(node.id)" in body
+        # Path ids since v0.64.0 ("#3:2" names a loader inside a subgraph).
+        assert "`${node.title || node.type} #${pathId}`" in body
+        assert "attrs: { value: pathId }" in body
 
     def test_previous_target_reselected_by_id_when_still_present(self, source: str) -> None:
         body = _function_body(source, "renderSend(state)")
-        assert "fresh.some((node) => String(node.id) === state.pllTargetId)" in body
+        assert "fresh.some((c) => c.pathId === state.pllTargetId)" in body
         assert "select.value = state.pllTargetId" in body
 
     def test_vanished_target_stays_on_placeholder_never_first_option(self, source: str) -> None:
@@ -707,7 +708,7 @@ class TestSendToLoaderM2:
     def test_send_click_adopts_a_lone_late_added_pll(self, source: str) -> None:
         body = _function_body(source, "sendToPll(state)")
         assert "candidates.length === 1" in body
-        assert "state.pllTargetId = String(candidates[0].id)" in body
+        assert "state.pllTargetId = candidates[0].pathId" in body
 
     def test_empty_selection_disables_send_with_its_own_title(self, source: str) -> None:
         body = _function_body(source, "renderSend(state)")
@@ -1126,10 +1127,14 @@ class TestSendRegistryM4:
         assert "write: dasiwa.writeRowsToDasiwa" in registry
 
     def test_candidates_merge_across_families_ascending_id(self, source: str) -> None:
+        """v0.64.0: candidates come from ONE nested-aware walk matched
+        against the registry's own comfyClass keys — a family cannot forget
+        to be subgraph-aware, and walk order (root first, then each
+        subgraph in place) is the stable combo order."""
         body = _function_body(source, "findSendCandidates()")
-        assert "Object.values(SEND_ADAPTERS)" in body
-        assert "adapter.find()" in body
-        assert "sort((a, b) => a.id - b.id)" in body
+        assert "walkLiveNodes(app.graph)" in body
+        assert "SEND_ADAPTERS[node.type]" in body
+        assert "candidates.push({ node, pathId })" in body
 
     def test_no_target_message_is_family_agnostic_naming_both_loaders(self, source: str) -> None:
         """The M2 message shape, composed from every adapter's label -- so it
@@ -1155,7 +1160,7 @@ class TestSendRegistryM4:
 
     def test_target_resolution_spans_both_families(self, source: str) -> None:
         body = _function_body(source, "resolveSendTarget(state)")
-        assert "findSendCandidates().find((node) => String(node.id) === state.pllTargetId)" in body
+        assert "findSendCandidates().find((c) => c.pathId === state.pllTargetId)?.node" in body
 
     def test_auto_adopt_universe_is_cross_family_in_render_and_click_paths(
         self, source: str
@@ -1261,3 +1266,39 @@ class TestSendRowGraphWatchV0632:
         assert "renderSend(state)" in body
         assert "node?.__epsLpState" in body  # no module registry to leak
         assert "node.__epsLpState = state" in source
+
+
+class TestClickToLoadV0640:
+    """v0.64.0 (owner ask 2026-08-14, pinned choice): first click on a
+    browser row highlights it, clicking the SAME row again loads it --
+    exactly what + Add does. Ghosts stay click-inert."""
+
+    @pytest.fixture(scope="class")
+    def source(self) -> str:
+        return PICKER_JS.read_text(encoding="utf-8")
+
+    def test_second_click_adds_first_click_highlights(self, source: str) -> None:
+        body = _function_body(source, "buildLoraRowEl(state, file, displayLabel)")
+        assert "if (state.highlightedFile === file) {" in body
+        add_at = body.index("addLora(state, file)", body.index("rowEl.addEventListener('click'"))
+        assert add_at > 0
+        assert "state.highlightedFile = file" in body
+        # buttons/inputs inside the row keep their own jobs
+        assert "event.target.closest('button, input')" in body
+        # ghosts have nothing to add -- the handler is gated behind !ghost
+        gate = body.index("if (!ghost) {", body.index("const rowEl ="))
+        assert gate < body.index("rowEl.addEventListener('click'")
+
+    def test_added_row_lands_checked_and_stays_highlighted(self, source: str) -> None:
+        """Owner's "selected by default" (clarified: the on/off checkbox):
+        addLora writes on: true, and a restored row missing `on` defaults
+        to true too -- both directions of the invariant."""
+        add = _function_body(source, "addLora(state, file)")
+        assert "state.selection.loras.push({ file, on: true, strength: 1, strength_clip: null })" in add
+        assert "state.highlightedFile = file" in add
+        parse = _function_body(source, "selectionFromWidgetValue(raw)")
+        assert "on: row.on !== false" in parse
+
+    def test_send_watch_covers_subgraphs(self, source: str) -> None:
+        assert "for (const graph of walkGraphs(app.graph)) installGraphNodeWatch(graph)" in source
+        assert "node.__epsLpReload = () => reloadFromWidget(state)" in source

@@ -52,6 +52,7 @@
 
 import { app } from '../../../scripts/app.js'
 import * as api from './api.js'
+import { walkLiveNodes, walkGraphs } from './api.js'
 import * as pll from './pll_bridge.js'
 import * as dasiwa from './dasiwa_bridge.js'
 
@@ -338,6 +339,7 @@ const CSS_TEXT = `
 .eps-lp-pll-select { flex: 1 1 auto; min-width: 0; background: var(--comfy-menu-bg, #262626); border: 1px solid var(--border-color, #444); color: var(--input-text, #ccc); border-radius: 3px; padding: 1px 3px; font-size: 11px; font-family: inherit; }
 .eps-lp-send-status { flex: 0 1 auto; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: var(--descrip-text, #999); font-style: italic; }
 .eps-lp-row { display: flex; align-items: center; gap: 6px; padding: 2px 6px; border-radius: 3px; user-select: none; }
+.eps-lp-row-active { background: var(--comfy-menu-bg, #262626); outline: 1px solid var(--border-color, #444); }
 .eps-lp-row:hover { background: var(--content-hover-bg, #2a2a2a); }
 .eps-lp-row input[type="checkbox"] { flex: 0 0 auto; margin: 0; cursor: pointer; }
 .eps-lp-row-label { flex: 1 1 auto; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -435,6 +437,7 @@ function createState(node, widget) {
     searchInputEl: null,
     favRowEls: [], // favorites-view row order (file+el) for the M3 drag -- rebuilt each render
     lastSelectedCount: null, // last painted Selected row count -- drives the node-growth delta
+    highlightedFile: null, // browser row click-to-highlight (v0.64.0); second click adds
     selectedHeaderEl: null,
     selectedListEl: null,
     sendRowEl: null,
@@ -694,8 +697,10 @@ function addLora(state, file) {
     return
   }
   state.selection.loras.push({ file, on: true, strength: 1, strength_clip: null })
+  state.highlightedFile = file // the just-added row stays the current one
   writeSelectionWidget(state)
   renderSelected(state)
+  renderBrowser(state) // repaint the highlight without waiting for a nav
   recordRecent(state, file)
 }
 
@@ -1166,7 +1171,25 @@ function buildLoraRowEl(state, file, displayLabel) {
     addBtn.addEventListener('click', () => addLora(state, file))
     children.push(copyBtn, addBtn)
   }
-  return el('div', { className: ghost ? 'eps-lp-row eps-lp-row-ghost' : 'eps-lp-row' }, children)
+  const rowEl = el('div', { className: ghost ? 'eps-lp-row eps-lp-row-ghost' : 'eps-lp-row' }, children)
+  if (!ghost) {
+    // Owner ask 2026-08-14 (pinned choice): first click on a row highlights
+    // it; clicking the SAME row again loads it — exactly what ＋ Add does.
+    // One guard on the row rather than stopPropagation in every child, so
+    // the star/copy/Add buttons (and any future child control) keep their
+    // own jobs. Ghosts stay click-inert: there is nothing to add here.
+    rowEl.classList.toggle('eps-lp-row-active', state.highlightedFile === file)
+    rowEl.addEventListener('click', (event) => {
+      if (event.target instanceof Element && event.target.closest('button, input')) return
+      if (state.highlightedFile === file) {
+        addLora(state, file)
+      } else {
+        state.highlightedFile = file
+        renderBrowser(state)
+      }
+    })
+  }
+  return rowEl
 }
 
 // --- §6.13 M3: Clear recents (armed two-click) ---
@@ -1586,16 +1609,21 @@ function installGraphNodeWatch(graph) {
 /** Every adapter family's live candidates, merged ascending id ACROSS
  * families (§6.13 M4) -- the combo's order AND the auto-adopt universe. */
 function findSendCandidates() {
+  // Whole workflow, subgraphs included (v0.64.0): entries are
+  // {node, pathId} — pathId ("3:2" style) is the combo value AND the
+  // display id, since inner node ids can collide with root ids.
   const candidates = []
-  for (const adapter of Object.values(SEND_ADAPTERS)) candidates.push(...adapter.find())
-  return candidates.sort((a, b) => a.id - b.id)
+  for (const { node, pathId } of walkLiveNodes(app.graph)) {
+    if (node && SEND_ADAPTERS[node.type]) candidates.push({ node, pathId })
+  }
+  return candidates
 }
 
 /** The live loader the select currently names, or null -- resolved BY ID at
  * use time, since the node may have been deleted since the last render. */
 function resolveSendTarget(state) {
   if (state.pllTargetId == null) return null
-  return findSendCandidates().find((node) => String(node.id) === state.pllTargetId) || null
+  return findSendCandidates().find((c) => c.pathId === state.pllTargetId)?.node || null
 }
 
 /**
@@ -1645,17 +1673,17 @@ function renderSend(state) {
         text: fresh.length ? 'Pick a loader…' : 'No loader in graph',
         attrs: { value: '' }
       }),
-      ...fresh.map((node) =>
-        el('option', { text: `${node.title || node.type} #${node.id}`, attrs: { value: String(node.id) } })
+      ...fresh.map(({ node, pathId }) =>
+        el('option', { text: `${node.title || node.type} #${pathId}`, attrs: { value: pathId } })
       )
     )
-    if (state.pllTargetId != null && fresh.some((node) => String(node.id) === state.pllTargetId)) {
+    if (state.pllTargetId != null && fresh.some((c) => c.pathId === state.pllTargetId)) {
       select.value = state.pllTargetId
     } else if (state.pllTargetId == null && fresh.length === 1) {
       // No explicit choice + exactly one candidate ACROSS families (§6.13
       // M4): adopt it (controller.js's "picked automatically when there is
       // exactly one" behavior).
-      state.pllTargetId = String(fresh[0].id)
+      state.pllTargetId = fresh[0].pathId
       select.value = state.pllTargetId
     } else {
       // The chosen target is GONE (deleted since it was picked): stay on the
@@ -1728,7 +1756,7 @@ function sendToPll(state) {
   // several; "single candidate" spans BOTH adapter families (§6.13 M4).
   if (state.pllTargetId == null) {
     const candidates = findSendCandidates()
-    if (candidates.length === 1) state.pllTargetId = String(candidates[0].id)
+    if (candidates.length === 1) state.pllTargetId = candidates[0].pathId
   }
   const node = resolveSendTarget(state)
   const probe = probeSendTarget(node)
@@ -1792,7 +1820,11 @@ export function attachPickerPanel(node) {
     // Reachable from the graph-level watch (and only from there); stored on
     // the node so it dies with the node.
     node.__epsLpState = state
-    installGraphNodeWatch(node.graph || app.graph)
+    // Whole workflow: a loader inside a subgraph must refresh this row too
+    // (v0.64.0) — and the controller's APPLY writes this node's selection
+    // widget from outside, so publish the panel-reload seam it pokes.
+    for (const graph of walkGraphs(app.graph)) installGraphNodeWatch(graph)
+    node.__epsLpReload = () => reloadFromWidget(state)
     state.selection = selectionFromWidgetValue(widget.value)
     // Read-only info surfaced in right-click -> Properties (owner ask
     // 2026-08-14, replacing the status bar's standing count); refreshed

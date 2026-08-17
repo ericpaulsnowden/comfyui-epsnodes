@@ -85,3 +85,80 @@ async function unwrap(response) {
   }
   return data
 }
+
+// ---------------------------------------------------------------------------
+// Nested-graph traversal (v0.64.0, owner ask 2026-08-14: "make sure it works
+// even when the nodes are nested") -- shared by controller.js, sets.js and
+// picker.js so every "find loaders in the workflow" walk agrees on what a
+// workflow IS. Rig ground truth 2026-08-14: a SubgraphNode carries
+// `.subgraph` (an LGraph subclass with its own `_nodes` and its OWN id
+// space), execution flattens ids by joining the containing SubgraphNode
+// ids with ':' ("3:2" -- graphToPrompt output keys, probed live), and
+// events inside a subgraph fire only that subgraph's own hooks.
+// ---------------------------------------------------------------------------
+
+//: Recursion ceiling for nested subgraphs. The frontend itself throws
+//: RecursionError on genuinely cyclic definitions; this cap just keeps a
+//: pathological workflow from stalling a UI walk.
+const MAX_SUBGRAPH_DEPTH = 16
+
+/**
+ * Every live node under *rootGraph*, subgraphs included, as
+ * `{node, graph, pathId}` -- `pathId` is the execution-id shape
+ * ("3:2" for node 2 inside SubgraphNode 3; plain "2" at the root), so a
+ * label built from it matches what the API prompt calls the node.
+ * @param {object} rootGraph @returns {Array<{node: object, graph: object, pathId: string}>}
+ */
+export function walkLiveNodes(rootGraph) {
+  const out = []
+  const visit = (graph, prefix, depth) => {
+    if (!graph || depth > MAX_SUBGRAPH_DEPTH) return
+    for (const node of graph._nodes || graph.nodes || []) {
+      if (!node || node.id == null) continue
+      const pathId = prefix ? `${prefix}:${node.id}` : String(node.id)
+      out.push({ node, graph, pathId })
+      if (node.subgraph) visit(node.subgraph, pathId, depth + 1)
+    }
+  }
+  visit(rootGraph, '', 0)
+  return out
+}
+
+/**
+ * Every graph under *rootGraph* (itself included) -- the install targets
+ * for per-graph event watches, since a subgraph's `onNodeAdded` fires on
+ * the SUBGRAPH, never the root.
+ * @param {object} rootGraph @returns {Array<object>}
+ */
+export function walkGraphs(rootGraph) {
+  const out = []
+  const visit = (graph, depth) => {
+    if (!graph || depth > MAX_SUBGRAPH_DEPTH || out.includes(graph)) return
+    out.push(graph)
+    for (const node of graph._nodes || graph.nodes || []) {
+      if (node?.subgraph) visit(node.subgraph, depth + 1)
+    }
+  }
+  visit(rootGraph, 0)
+  return out
+}
+
+/**
+ * The live node a `pathId` from `walkLiveNodes` names right now, or null.
+ * Resolves segment by segment so a stale tail (deleted node, unpacked
+ * subgraph) degrades to null rather than a wrong node.
+ * @param {object} rootGraph @param {string} pathId @returns {object|null}
+ */
+export function findByPathId(rootGraph, pathId) {
+  const segments = String(pathId || '').split(':')
+  let graph = rootGraph
+  let node = null
+  for (const segment of segments) {
+    if (!graph) return null
+    const nodes = graph._nodes || graph.nodes || []
+    node = nodes.find((n) => n && String(n.id) === segment) || null
+    if (!node) return null
+    graph = node.subgraph || null
+  }
+  return node
+}

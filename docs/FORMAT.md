@@ -443,7 +443,7 @@ execution — **the file is the truth; the UI is a view.**
   needs no structural change for this: the controller's Push State button
   sets each EPS Apply LoRA Set node's `set` widget to a chosen state and
   triggers a re-read. So one controller can keep any number of EPS Apply LoRA Set nodes on the same state at once — the owner's "multiple EPS Apply LoRA Set nodes all controlled by one controller, kept in sync" use case.
-- **`mirrors loader` tag (owner ask 2026-07-19c: "set different EPS Apply LoRA Set nodes to different Power Lora Loaders as targets").** A FRONTEND-ONLY
+- **`mirrors loader` tag (owner ask 2026-07-19c: "set different EPS Apply LoRA Set nodes to different Power Lora Loaders as targets"; since v0.64.0 the tag may name an EPS LoRA Picker too, anywhere in the workflow — candidates walk subgraphs and labels carry path ids, `#3:2`-style, matching §6.3's target combo).** A FRONTEND-ONLY
   combo widget (added by `sets.js` on nodeCreated; the server never sees
   it) listing the graph's PLL nodes plus `"(any)"` (default). It's a
   GROUPING TAG for §6.3's selective Push — it does not change what the
@@ -634,7 +634,36 @@ queue. It drives a **genuine, untouched `Power Lora Loader (rgthree)`**:
   the same object), refreshing every controller in that graph coalesced to
   one pass per tick (a DEFERRAL, not a polling timer — `onNodeAdded` fires
   once per node, so a workflow load would otherwise re-scan hundreds of
-  times). The heartbeat stays for slower drift (titles, row counts). Buttons (stacked in the RIGHT
+  times). The heartbeat stays for slower drift (titles, row counts).
+  **TWO TARGET FAMILIES + NESTING (v0.64.0, owner ask 2026-08-14: "eps
+  lora state controller and eps apply lora set should be able to control
+  eps lora picker. make sure it works even when the nodes are nested"):**
+  the target combo lists BOTH `Power Lora Loader (rgthree)` and
+  `EPSLoraPicker` nodes, found by `api.walkLiveNodes(app.graph)` — the
+  whole workflow, subgraphs included. Identity is the execution-shaped
+  PATH id (`#3:2` = node 2 inside SubgraphNode 3; rig ground truth: that
+  is exactly what `graphToPrompt` calls it), so an inner id colliding
+  with a root id can never mis-resolve; `api.findByPathId` resolves
+  segment by segment and degrades to null on a stale tail. The picker
+  family's technique: its whole state IS the hidden `selection` JSON
+  widget (§6.13), whose row shape equals the controller's internal
+  `{file, on, strength, strength_clip}` — probe = widget present,
+  capture = parse, apply = rewrite `loras` with the picker's per-workflow
+  `scope` PRESERVED, then poke `node.__epsLpReload` (picker.js publishes
+  it) so the panel repaints from the widget. The no-rgthree gate lives
+  INSIDE the PLL branch — a picker target works with rgthree
+  uninstalled. The multi-target entry is now **`All loaders (N)`** across
+  both families; the regex still accepts the sticky pre-v0.64.0 "All
+  Power Lora Loaders (N)" value from saved workflows and the first combo
+  refresh rewrites it. Ascending order (All-capture reads lowest,
+  composites map `loaders[i]` by rank) is `comparePathIds` —
+  segment-numeric over the path. Push State reaches Apply Set nodes in
+  subgraphs too, and `mirrors loader` tags carry path ids and may name a
+  PICKER (§6.2). Graph watches install on EVERY graph
+  (`api.walkGraphs`) — a subgraph's `onNodeAdded` fires only on the
+  subgraph itself — re-armed on each refresh so a newly created
+  subgraph is watched before anything happens inside it.
+  Buttons (stacked in the RIGHT
   pane, Delete LAST — owner ask 2026-07-22): `New State`, `Save State`,
   `Push State` (broadcast to all EPS Apply LoRA Set nodes), `Delete State`
   (two-click "Are you sure?" confirm; the armed button is visually
@@ -2352,6 +2381,21 @@ apply/text helpers, so it drops in anywhere Apply LoRA Set does.
   it sizes to content and `syncSelectedGrowth` grows/shrinks the NODE by
   the row-count delta (`SELECTED_ROW_PX`), with `getMinHeight` carrying
   the same per-row term so a manual resize can't crop it either;
+  **Click-to-load (v0.64.0, owner ask 2026-08-14, pinned choice):** the
+  first click on a browser lora row HIGHLIGHTS it
+  (`.eps-lp-row-active`); clicking the same row again loads it — exactly
+  ＋ Add. Buttons/inputs inside the row keep their own jobs (one
+  `closest('button, input')` guard on the row, not stopPropagation in
+  every child); ghosts stay click-inert. A just-added lora becomes the
+  highlighted row, and added rows always land with `on: true` (both
+  directions pinned: `addLora` writes it, and a restored row missing
+  `on` defaults to true).
+  **Controlled from outside (v0.64.0):** the picker is a §6.3 target
+  family — the controller captures/applies its `selection`, and
+  `node.__epsLpReload` (published at attach) is the seam an external
+  write pokes to repaint the panel. The Send row's own candidates are
+  nested-aware too (one `walkLiveNodes` walk matched on the adapter
+  registry's comfyClass keys; combo values are PATH ids).
   (5) the Send row leads with a `Send to` label whose tooltip — and the
   no-target message — say the row is OPTIONAL, because the picker
   applies its loras itself via model/clip (the owner's own "no loader in

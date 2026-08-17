@@ -29,8 +29,8 @@ const MAX_ROW_ADJUST_STEPS = 500
 const MSG_NO_RGTHREE = 'Install rgthree-comfy, or use EPS Apply LoRA Set instead'
 const MSG_SHAPE_DRIFT = 'Power Lora Loader internals changed — controller disabled (v-check)'
 const MSG_NO_TARGET_IN_GRAPH =
-  'No Power Lora Loader (rgthree) node in this graph yet — add one, then pick it above.'
-const MSG_NO_TARGET_SELECTED = 'Pick a target Power Lora Loader node above.'
+  'No Power Lora Loader (rgthree) or EPS LoRA Picker node in this workflow yet — add one, then pick it above.'
+const MSG_NO_TARGET_SELECTED = 'Pick a target loader node above.'
 
 /** Every live `Power Lora Loader (rgthree)` instance in the current graph,
  * ascending node id — §6.13 M2's target-combo order. */

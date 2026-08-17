@@ -776,13 +776,28 @@ const PROP_SHOW_STATUS = 'Show status'
 const PROP_DEBUG_CAPTURE = 'Debug capture'
 
 /**
- * FORMAT.md §6.3 multi-target: label prefix + matching regex for the "All
- * Power Lora Loaders (N)" target-combo entry. Keep these two in sync by
- * hand (formatAllTargetsLabel() below is the only writer) — there's no
- * runtime derivation of one from the other.
+ * FORMAT.md §6.3 target FAMILIES (v0.64.0, owner ask 2026-08-14: "eps lora
+ * state controller ... should be able to control eps lora picker"): the
+ * EPS LoRA Picker joins the Power Lora Loader as a first-class target.
+ * Its whole state is the single hidden `selection` JSON widget
+ * (FORMAT.md §6.13), whose row shape {file, on, strength, strength_clip}
+ * is IDENTICAL to this file's internal row shape — capture parses it,
+ * apply writes it. Kept-in-sync-by-hand constants, per file convention.
  */
-const ALL_TARGETS_LABEL_PREFIX = 'All Power Lora Loaders'
-const ALL_TARGETS_RE = /^All Power Lora Loaders \(\d+\)$/
+const PICKER_NODE_CLASS = 'EPSLoraPicker'
+const PICKER_SELECTION_WIDGET = 'selection'
+
+/**
+ * FORMAT.md §6.3 multi-target: label prefix + matching regex for the "All
+ * loaders (N)" target-combo entry. Keep these two in sync by hand
+ * (formatAllTargetsLabel() below is the only writer). The regex ALSO
+ * accepts the pre-v0.64.0 "All Power Lora Loaders (N)" spelling — that
+ * value is STICKY (it serializes with the workflow), so an old save must
+ * keep meaning "all of them"; the first combo refresh rewrites it to the
+ * new spelling via the existing count-rewrite branch.
+ */
+const ALL_TARGETS_LABEL_PREFIX = 'All loaders'
+const ALL_TARGETS_RE = /^All (?:Power Lora )?[Ll]oaders \(\d+\)$/
 
 /**
  * Button labels (owner, 2026-07-18c rename). Identifier names below stay
@@ -821,22 +836,56 @@ const PLACEHOLDER_NO_SETS = '(no states saved)'
 const MSG_NO_RGTHREE = 'Install rgthree-comfy, or use EPS Apply LoRA Set instead'
 const MSG_SHAPE_DRIFT = 'Power Lora Loader internals changed — controller disabled (v-check)'
 const MSG_NO_TARGET_IN_GRAPH =
-  'No Power Lora Loader (rgthree) node in this graph yet — add one, then pick it above.'
-const MSG_NO_TARGET_SELECTED = 'Pick a target Power Lora Loader node above.'
+  'No Power Lora Loader (rgthree) or EPS LoRA Picker node in this workflow yet — add one, then pick it above.'
+const MSG_NO_TARGET_SELECTED = 'Pick a target loader node above.'
+const MSG_PICKER_DRIFT = 'EPS LoRA Picker internals changed — controller disabled (v-check)'
 
 // ------------------------------------------------------- pure graph helpers
 // (No `this` — these only ever read/write a passed-in node, so probe/capture/
 // apply can be reasoned about and, if needed, exercised independently of the
 // widget/UI plumbing below.)
 
-/** Every live `Power Lora Loader (rgthree)` instance in the current graph. */
+/**
+ * Which target family *node* belongs to — 'pll', 'picker', or null for
+ * everything else. The family picks the probe/capture/apply technique.
+ */
+function familyOf(node) {
+  if (!node) return null
+  if (node.type === POWER_LORA_LOADER_TYPE) return 'pll'
+  const cls = node.comfyClass ?? node.constructor?.comfyClass ?? node.type
+  if (cls === PICKER_NODE_CLASS) return 'picker'
+  return null
+}
+
+/**
+ * Path-id ordering ("3:2" style, segment-numeric) — the ascending order
+ * "All loaders" capture/apply and the composite loader-slot mapping use.
+ * Root ids sort before subgraph paths with the same head, and each
+ * segment compares numerically, so "10" > "9" and "3:2" > "3".
+ */
+function comparePathIds(a, b) {
+  const as = String(a).split(':').map(Number)
+  const bs = String(b).split(':').map(Number)
+  const len = Math.max(as.length, bs.length)
+  for (let i = 0; i < len; i++) {
+    const d = (as[i] ?? -Infinity) - (bs[i] ?? -Infinity)
+    if (d) return d
+  }
+  return 0
+}
+
+/**
+ * Every live target-family node in the WHOLE workflow — subgraphs included
+ * (v0.64.0, owner: "make sure it works even when the nodes are nested").
+ * `id` is the execution-shaped PATH id from `api.walkLiveNodes` ("3:2" for
+ * a node inside SubgraphNode 3), so labels stay unambiguous when an inner
+ * id collides with a root id, and match what the API prompt calls the node.
+ */
 function findTargetCandidates() {
-  const nodes = app.graph?._nodes || app.graph?.nodes || []
   const out = []
-  for (const node of nodes) {
-    if (node && node.type === POWER_LORA_LOADER_TYPE) {
-      out.push({ id: node.id, node, label: `${node.title || node.type} #${node.id}` })
-    }
+  for (const { node, pathId } of api.walkLiveNodes(app.graph)) {
+    if (!familyOf(node)) continue
+    out.push({ id: pathId, node, label: `${node.title || node.type} #${pathId}` })
   }
   return out
 }
@@ -860,13 +909,21 @@ function findTargetCandidates() {
  * load would otherwise re-scan the graph hundreds of times. This is a
  * one-tick DEFERRAL, not a polling timer (§6.10).
  */
-function scheduleControllerRefresh(graph) {
-  if (!graph || graph.__epsCtrlRefreshQueued) return
-  graph.__epsCtrlRefreshQueued = true
+function scheduleControllerRefresh() {
+  // Coalesce on the ROOT graph regardless of which (sub)graph fired: a
+  // change anywhere in the workflow can affect any controller anywhere
+  // (v0.64.0 — targets and controllers may both be nested).
+  const root = app.graph
+  if (!root || root.__epsCtrlRefreshQueued) return
+  root.__epsCtrlRefreshQueued = true
   setTimeout(() => {
-    graph.__epsCtrlRefreshQueued = false
+    root.__epsCtrlRefreshQueued = false
     try {
-      for (const node of graph._nodes || []) {
+      // A refresh is also when NEW subgraphs get their watch — a
+      // SubgraphNode added moments ago fired the add event that got us
+      // here, so its inner graph is armed before anything happens inside.
+      for (const graph of api.walkGraphs(root)) installGraphNodeWatch(graph)
+      for (const { node } of api.walkLiveNodes(root)) {
         if (!node || node.type !== NODE_TYPE) continue
         node._guarded?.('graph changed', () => {
           node._refreshTargetCombo()
@@ -898,7 +955,7 @@ function installGraphNodeWatch(graph) {
       } catch (error) {
         api.warn(`${NODE_TITLE}: original ${hook} threw`, error)
       }
-      scheduleControllerRefresh(this)
+      scheduleControllerRefresh()
       return result
     }
   }
@@ -912,19 +969,22 @@ function installGraphNodeWatch(graph) {
  * Loaders (N)").
  */
 function pllIdFromLabel(label) {
-  const match = /#(-?\d+)\s*$/.exec(String(label || ''))
+  // Path ids since v0.64.0: "#3:2" names node 2 inside SubgraphNode 3
+  // (execution-id shape); plain "#2" stays valid for root nodes and every
+  // pre-v0.64.0 saved tag/target value.
+  const match = /#(-?\d+(?::-?\d+)*)\s*$/.exec(String(label || ''))
   return match ? match[1] : null
 }
 
-/** Resolve a combo label ("<title> #<id>") back to a live node, or null. */
+/** Resolve a combo label ("<title> #<pathId>") back to a live node, or null. */
 function resolveTargetNode(label) {
   const id = pllIdFromLabel(label)
   if (id == null) return null
-  const nodes = app.graph?._nodes || app.graph?.nodes || []
-  return nodes.find((n) => n && String(n.id) === id && n.type === POWER_LORA_LOADER_TYPE) || null
+  const node = api.findByPathId(app.graph, id)
+  return node && familyOf(node) ? node : null
 }
 
-/** FORMAT.md §6.3: the target combo's multi-target entry text, e.g. "All Power Lora Loaders (2)". */
+/** FORMAT.md §6.3: the target combo's multi-target entry text, e.g. "All loaders (2)". */
 function formatAllTargetsLabel(count) {
   return `${ALL_TARGETS_LABEL_PREFIX} (${count})`
 }
@@ -943,7 +1003,7 @@ function resolveTargetNodes(label) {
   if (!label) return []
   if (ALL_TARGETS_RE.test(String(label))) {
     return findTargetCandidates()
-      .sort((a, b) => a.id - b.id)
+      .sort((a, b) => comparePathIds(a.id, b.id))
       .map((c) => c.node)
   }
   const single = resolveTargetNode(label)
@@ -984,7 +1044,7 @@ function lorasForLoaderIndex(setData, index) {
  * loader 0 rather than throwing.
  */
 function pllAscendingIndex(node) {
-  const candidates = findTargetCandidates().sort((a, b) => a.id - b.id)
+  const candidates = findTargetCandidates().sort((a, b) => comparePathIds(a.id, b.id))
   const index = candidates.findIndex((c) => c.node === node)
   return index === -1 ? 0 : index
 }
@@ -1000,7 +1060,7 @@ function pllAscendingIndex(node) {
  */
 function pllAscendingIndexById(id) {
   if (id == null) return null
-  const candidates = findTargetCandidates().sort((a, b) => a.id - b.id)
+  const candidates = findTargetCandidates().sort((a, b) => comparePathIds(a.id, b.id))
   const index = candidates.findIndex((c) => String(c.id) === String(id))
   return index === -1 ? null : index
 }
@@ -1013,6 +1073,97 @@ function pllAscendingIndexById(id) {
  * like rgthree's row shape) — zero rows found at all is a normal, healthy
  * "empty PLL", not drift.
  */
+/** The picker's hidden `selection` widget, or null (its presence IS the probe). */
+function pickerSelectionWidget(node) {
+  return (node?.widgets || []).find((w) => w && w.name === PICKER_SELECTION_WIDGET) || null
+}
+
+/**
+ * A picker's selection rows in this file's internal shape — which is the
+ * picker's OWN shape (FORMAT.md §6.13): {file, on, strength,
+ * strength_clip}. Malformed JSON degrades to [] (view state must never
+ * throw a capture).
+ */
+function pickerRowsOf(node) {
+  const widget = pickerSelectionWidget(node)
+  if (!widget) return []
+  try {
+    const parsed = JSON.parse(String(widget.value || '') || '{}')
+    const loras = Array.isArray(parsed?.loras) ? parsed.loras : []
+    return loras
+      .filter((row) => row && typeof row.file === 'string' && row.file)
+      .map((row) => {
+        const strength = coerceStrength(row.strength, 1, 'picker', 'strength')
+        const rawClip = row.strength_clip
+        return {
+          file: row.file,
+          on: row.on !== false,
+          strength,
+          strength_clip: rawClip == null ? null : coerceStrength(rawClip, strength, 'picker', 'strength_clip')
+        }
+      })
+  } catch {
+    return []
+  }
+}
+
+/** §6.3-style probe for the picker family: the `selection` widget IS the seam. */
+function probePickerTarget(node) {
+  const widget = pickerSelectionWidget(node)
+  if (!widget || typeof widget.value !== 'string') {
+    return { ok: false, code: 'shape-drift', message: MSG_PICKER_DRIFT }
+  }
+  const rows = pickerRowsOf(node)
+  return {
+    ok: true,
+    code: 'ok',
+    message: `Ready — target has ${rows.length} row${rows.length === 1 ? '' : 's'}.`,
+    rowCount: rows.length
+  }
+}
+
+/**
+ * APPLY for the picker family: rewrite `selection.loras` (scope preserved —
+ * it is per-workflow VIEW state, §6.13, not part of any saved state), then
+ * poke the panel via the `__epsLpReload` seam picker.js publishes on the
+ * node — the panel renders FROM the widget, so value + callback alone would
+ * leave the visible list stale until the next configure.
+ */
+function applySetToPicker(node, desired) {
+  const widget = pickerSelectionWidget(node)
+  if (!widget) return
+  let scope = ''
+  try {
+    const parsed = JSON.parse(String(widget.value || '') || '{}')
+    if (typeof parsed?.scope === 'string') scope = parsed.scope
+  } catch {
+    // unreadable old value: keep default '' scope, rows are replaced anyway
+  }
+  const loras = desired.map((row) => ({
+    file: row.file,
+    on: row.on !== false,
+    strength: row.strength ?? 1,
+    strength_clip: row.strength_clip ?? null
+  }))
+  widget.value = JSON.stringify({ scope, loras })
+  try {
+    widget.callback?.(widget.value)
+  } catch (error) {
+    api.warn(`${NODE_TITLE}: picker selection callback threw`, error)
+  }
+  try {
+    node.__epsLpReload?.()
+  } catch (error) {
+    api.warn(`${NODE_TITLE}: picker panel reload failed`, error)
+  }
+  node.setDirtyCanvas?.(true, true)
+}
+
+/** Family-aware row count for status lines. */
+function rowCountOf(node) {
+  return familyOf(node) === 'picker' ? pickerRowsOf(node).length : scanLoraRows(node).rows.length
+}
+
 function scanLoraRows(node) {
   const named = []
   const rows = []
@@ -1041,9 +1192,6 @@ function isRgthreeInstalled() {
  * multi-target-aware wrapper the UI layer actually calls.
  */
 function probeTarget(node) {
-  if (!isRgthreeInstalled()) {
-    return { ok: false, code: 'no-rgthree', message: MSG_NO_RGTHREE }
-  }
   if (!node) {
     const hasAny = findTargetCandidates().length > 0
     return {
@@ -1051,6 +1199,13 @@ function probeTarget(node) {
       code: hasAny ? 'no-target-selected' : 'no-target-in-graph',
       message: hasAny ? MSG_NO_TARGET_SELECTED : MSG_NO_TARGET_IN_GRAPH
     }
+  }
+  // Family dispatch (v0.64.0): a picker target needs no rgthree at all —
+  // the no-rgthree gate moved INSIDE the PLL branch, so the controller
+  // keeps working against pickers on a machine without rgthree.
+  if (familyOf(node) === 'picker') return probePickerTarget(node)
+  if (!isRgthreeInstalled()) {
+    return { ok: false, code: 'no-rgthree', message: MSG_NO_RGTHREE }
   }
   if (node.type !== POWER_LORA_LOADER_TYPE) {
     return { ok: false, code: 'wrong-type', message: MSG_NO_TARGET_SELECTED }
@@ -1091,9 +1246,6 @@ function probeTarget(node) {
  * and unchanged.
  */
 function probeTargets(nodes) {
-  if (!isRgthreeInstalled()) {
-    return { ok: false, code: 'no-rgthree', message: MSG_NO_RGTHREE }
-  }
   if (!nodes || nodes.length === 0) {
     const hasAny = findTargetCandidates().length > 0
     return {
@@ -1110,7 +1262,7 @@ function probeTargets(nodes) {
       return { ...single, message }
     }
   }
-  const rowCount = nodes.reduce((sum, node) => sum + scanLoraRows(node).rows.length, 0)
+  const rowCount = nodes.reduce((sum, node) => sum + rowCountOf(node), 0)
   return {
     ok: true,
     code: 'ok',
@@ -1205,6 +1357,9 @@ function coerceStrength(raw, fallback, rowName, fieldName) {
  * unconditionally either way.
  */
 async function captureRows(node, { debugCapture = false } = {}) {
+  // Picker family (v0.64.0): the selection widget already stores this
+  // file's exact row shape — parse and done, no per-row source merging.
+  if (familyOf(node) === 'picker') return pickerRowsOf(node)
   const { rows } = scanLoraRows(node)
   const out = []
   const debugRows = debugCapture ? [] : null
@@ -1313,6 +1468,10 @@ function announceSetsChanged() {
 
 function applySetToTarget(node, setData) {
   const desired = Array.isArray(setData?.loras) ? setData.loras : []
+  if (familyOf(node) === 'picker') {
+    applySetToPicker(node, desired)
+    return
+  }
   const dualMode = !!(node.properties && node.properties[PROP_SHOW_STRENGTHS] === PROP_SHOW_STRENGTHS_DUAL)
 
   let { rows: current } = scanLoraRows(node)
@@ -1409,8 +1568,12 @@ function applySetToTargets(nodes, setData, { loaderIndexForSingle } = {}) {
  * `attachApplySetBehavior()` already uses for this same node type.
  */
 function findApplySetNodes() {
-  const nodes = app.graph?._nodes || app.graph?.nodes || []
-  return nodes.filter((node) => (node?.comfyClass ?? node?.constructor?.comfyClass) === APPLY_SET_NODE_CLASS)
+  // Whole workflow, subgraphs included (v0.64.0) — a Push must reach an
+  // Apply Set nested inside a subgraph exactly like a root-level one.
+  return api
+    .walkLiveNodes(app.graph)
+    .map(({ node }) => node)
+    .filter((node) => (node?.comfyClass ?? node?.constructor?.comfyClass) === APPLY_SET_NODE_CLASS)
 }
 
 /**
@@ -1941,7 +2104,7 @@ export function registerControllerNode() {
           // Watch the graph this node just joined, so a loader dropped in
           // LATER is noticed without waiting for a draw-driven heartbeat
           // (owner report 2026-08-14 -- see installGraphNodeWatch).
-          installGraphNodeWatch(this.graph || app.graph)
+          for (const graph of api.walkGraphs(app.graph)) installGraphNodeWatch(graph)
           this._refreshTargetCombo()
           this._probeAndUpdateStatus()
           this._refreshSetsCache()
@@ -2003,10 +2166,11 @@ export function registerControllerNode() {
         // backend def to hang input tooltips on; `NodeTooltip.vue` reads a
         // widget's own `.tooltip` first, which is the only route available.
         this._w.target.tooltip =
-          'Which Power Lora Loader in this workflow the buttons act on. ' +
-          'Picked automatically when there is exactly one. With two or ' +
-          'more, "All Power Lora Loaders" captures and applies each one ' +
-          'separately, keeping their configs apart.'
+          'Which loader in this workflow the buttons act on — Power Lora ' +
+          'Loader (rgthree) and EPS LoRA Picker nodes both count, ' +
+          'subgraphs included. Picked automatically when there is exactly ' +
+          'one. With two or more, "All loaders" captures and applies each ' +
+          'one separately, keeping their configs apart.'
 
         // FORMAT.md §6.3 TWO-PANE layout (owner ask 2026-07-21): the `set`
         // COMBO and its on-canvas dropdown are gone — state selection is now

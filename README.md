@@ -152,6 +152,13 @@ drives a genuine, untouched
 elsewhere in your graph — rgthree stays the loader; this node just moves
 whole configurations ("states") in and out of it:
 
+- **Targets both loader families, anywhere in the workflow** (since
+  v0.64.0): the `target` dropdown lists every Power Lora Loader (rgthree)
+  AND every [EPS LoRA Picker](#eps-lora-picker-shipped) — including ones
+  nested inside subgraphs, shown with their nested id (`#3:2`). Capture
+  reads a picker's current selection, Apply writes a state into it (its
+  folder scope is left alone), and `All loaders (N)` spans both kinds.
+  Picker targets don't even need rgthree installed.
 - **Two-pane layout** (like the EPS Prompt Notebook): a scrolling list of all
   your saved states on the left, the buttons stacked on the right.
 - **One click selects, a second click applies.** A single click just
@@ -213,6 +220,16 @@ favorites or recently-used anywhere in the ecosystem.
   — visible, never silently dropped. Your library's total lora count
   lives in right-click → Properties (`library_loras`) and the breadcrumb
   root's tooltip.
+- **Click a lora once to select it, again to load it** — the second click
+  does exactly what ＋ Add does, and the just-added lora stays
+  highlighted. Added loras always arrive enabled.
+- **Works with the State Controller and saved states** (since v0.64.0):
+  the [EPS Lora Loader State Controller](#eps-lora-loader-state-controller-shipped-requires-rgthree-comfy)
+  lists pickers in its target dropdown right next to Power Lora Loaders —
+  including pickers nested inside subgraphs — so you can capture a
+  picker's selection as a named state, apply states back into it, and
+  Push to Apply Set nodes tagged to it. Apply Set's `mirrors loader` tag
+  can name a picker too.
 - **Scope is per-workflow.** Pin a folder and the browser shows only it
   and its subfolders — the pin saves **into the workflow file**, so the
   character workflow opens scoped to `characters/`, the style workflow to

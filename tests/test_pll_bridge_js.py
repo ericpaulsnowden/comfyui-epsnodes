@@ -49,10 +49,12 @@ pytestmark = pytest.mark.skipif(NODE is None, reason="node (JS runtime) not inst
 #: each against both sources, so drift in either file fails loudly.
 MSG_NO_RGTHREE = "Install rgthree-comfy, or use EPS Apply LoRA Set instead"
 MSG_SHAPE_DRIFT = "Power Lora Loader internals changed — controller disabled (v-check)"
+# v0.64.0: the controller's target universe grew to both loader families
+# (PLL + EPS LoRA Picker), so the shared vocabulary names both.
 MSG_NO_TARGET_IN_GRAPH = (
-    "No Power Lora Loader (rgthree) node in this graph yet — add one, then pick it above."
+    "No Power Lora Loader (rgthree) or EPS LoRA Picker node in this workflow yet — add one, then pick it above."
 )
-MSG_NO_TARGET_SELECTED = "Pick a target Power Lora Loader node above."
+MSG_NO_TARGET_SELECTED = "Pick a target loader node above."
 
 PLL_TYPE = "Power Lora Loader (rgthree)"
 
@@ -426,3 +428,78 @@ def test_attribution_comment_and_no_controller_import(source: str) -> None:
     assert re.findall(r"^import .*$", source, flags=re.MULTILINE) == [
         "import { app } from '../../../scripts/app.js'"
     ]
+
+
+class TestPickerTargetFamilyV0640:
+    """v0.64.0 (owner ask 2026-08-14: "eps lora state controller ... should
+    be able to control eps lora picker ... even when the nodes are
+    nested"): the EPS LoRA Picker joins the controller's target universe as
+    a second family, and every discovery walk covers subgraphs."""
+
+    def test_candidates_walk_the_whole_workflow_with_path_ids(
+        self, controller_source: str
+    ) -> None:
+        body = _function_body(controller_source, "findTargetCandidates()")
+        assert "api.walkLiveNodes(app.graph)" in body
+        assert "if (!familyOf(node)) continue" in body
+        assert "label: `${node.title || node.type} #${pathId}`" in body
+        # ...and label resolution round-trips through the path-aware finder.
+        resolve = _function_body(controller_source, "resolveTargetNode(label)")
+        assert "api.findByPathId(app.graph, id)" in resolve
+        assert "familyOf(node)" in resolve
+        # The label regex accepts "#3:2"-style paths.
+        assert "/#(-?\\d+(?::-?\\d+)*)\\s*$/" in controller_source
+
+    def test_picker_probe_capture_apply_reuse_the_selection_widget(
+        self, controller_source: str
+    ) -> None:
+        """The picker's whole state IS its hidden `selection` JSON widget
+        (FORMAT.md §6.13), whose row shape equals the controller's internal
+        shape -- capture parses it, apply rewrites it (scope preserved: it
+        is per-workflow VIEW state, not part of a saved state)."""
+        rows = _function_body(controller_source, "pickerRowsOf(node)")
+        assert "JSON.parse" in rows
+        assert "on: row.on !== false" in rows
+        capture = _function_body(controller_source, "captureRows(node, { debugCapture = false } = {})".replace("async function ", ""))
+        assert capture is not None
+        assert "if (familyOf(node) === 'picker') return pickerRowsOf(node)" in controller_source
+        apply_fn = _function_body(controller_source, "applySetToPicker(node, desired)")
+        assert "if (typeof parsed?.scope === 'string') scope = parsed.scope" in apply_fn
+        assert "widget.value = JSON.stringify({ scope, loras })" in apply_fn
+        # The panel renders FROM the widget -- poke picker.js's reload seam.
+        assert "node.__epsLpReload?.()" in apply_fn
+
+    def test_rgthree_gate_moved_inside_the_pll_branch(self, controller_source: str) -> None:
+        """A picker target must keep working on a machine WITHOUT rgthree:
+        probeTarget dispatches to the picker probe BEFORE the rgthree gate,
+        and probeTargets no longer gates up front at all."""
+        probe = _function_body(controller_source, "probeTarget(node)")
+        picker_dispatch = probe.index("if (familyOf(node) === 'picker') return probePickerTarget(node)")
+        rgthree_gate = probe.index("if (!isRgthreeInstalled()) {")
+        assert picker_dispatch < rgthree_gate
+        multi = _function_body(controller_source, "probeTargets(nodes)")
+        assert "isRgthreeInstalled" not in multi
+
+    def test_all_targets_label_renamed_with_legacy_spelling_accepted(
+        self, controller_source: str
+    ) -> None:
+        """"All loaders (N)" now spans both families; the sticky value in a
+        pre-v0.64.0 save says "All Power Lora Loaders (N)" and must keep
+        meaning "all of them" -- the regex accepts both spellings."""
+        assert "const ALL_TARGETS_LABEL_PREFIX = 'All loaders'" in controller_source
+        assert (
+            "const ALL_TARGETS_RE = /^All (?:Power Lora )?[Ll]oaders \\(\\d+\\)$/"
+            in controller_source
+        )
+
+    def test_push_receivers_and_ascending_order_are_nested_aware(
+        self, controller_source: str
+    ) -> None:
+        body = _function_body(controller_source, "findApplySetNodes()")
+        assert "walkLiveNodes(app.graph)" in body
+        # Path ids order segment-numerically for All-capture and composites.
+        cmp_body = _function_body(controller_source, "comparePathIds(a, b)")
+        assert "split(':').map(Number)" in cmp_body
+        assert "comparePathIds(a.id, b.id)" in _function_body(
+            controller_source, "pllAscendingIndex(node)"
+        )

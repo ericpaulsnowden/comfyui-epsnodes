@@ -161,10 +161,13 @@ async function refreshSetsCache(force = false) {
   }
 }
 
-/** Every `LoraLibraryApplySet` node currently in the graph. */
+/** Every `LoraLibraryApplySet` node in the whole workflow — subgraphs
+ * included (v0.64.0, owner: nested nodes must work). */
 function applySetNodes() {
-  const nodes = app.graph?._nodes || app.graph?.nodes || []
-  return nodes.filter((node) => (node?.comfyClass ?? node?.constructor?.comfyClass) === NODE_CLASS)
+  return api
+    .walkLiveNodes(app.graph)
+    .map(({ node }) => node)
+    .filter((node) => (node?.comfyClass ?? node?.constructor?.comfyClass) === NODE_CLASS)
 }
 
 /**
@@ -206,21 +209,30 @@ function valuesIncluding(current) {
   return cachedValues.includes(current) ? cachedValues : [...cachedValues, current]
 }
 
-/** Every live PLL node in the graph, labeled "<title> #<id>" — same label shape controller.js's `target` combo uses, so a Push State toast and this tag's on-canvas display both read the same identity string. */
+/** FORMAT.md §6.2 (v0.64.0): the class id of the OTHER taggable loader
+ * family — kept in sync by hand with controller.js's PICKER_NODE_CLASS,
+ * same no-cross-import convention as NODE_CLASS above. */
+const PICKER_NODE_CLASS = 'EPSLoraPicker'
+
+/** Every taggable loader in the whole WORKFLOW (subgraphs included),
+ * labeled "<title> #<pathId>" — the exact label shape controller.js's
+ * `target` combo uses (path ids since v0.64.0, e.g. "#3:2" for a loader
+ * inside SubgraphNode 3), so a Push State toast and this tag's on-canvas
+ * display read the same identity string. Both families count: Power Lora
+ * Loader (rgthree) AND EPS LoRA Picker (owner ask 2026-08-14). */
 function findPllCandidates() {
-  const nodes = app.graph?._nodes || app.graph?.nodes || []
   const out = []
-  for (const node of nodes) {
-    if (node && node.type === POWER_LORA_LOADER_TYPE) {
-      out.push({ id: node.id, label: `${node.title || node.type} #${node.id}` })
-    }
+  for (const { node, pathId } of api.walkLiveNodes(app.graph)) {
+    const cls = node?.comfyClass ?? node?.constructor?.comfyClass ?? node?.type
+    if (node?.type !== POWER_LORA_LOADER_TYPE && cls !== PICKER_NODE_CLASS) continue
+    out.push({ id: pathId, label: `${node.title || node.type} #${pathId}` })
   }
   return out
 }
 
-/** FORMAT.md §6.2: the node id embedded in a "<title> #<id>" label, or null for "(any)"/anything else — same regex shape as controller.js's `pllIdFromLabel()` (duplicated by hand, not imported; see file header). */
+/** FORMAT.md §6.2: the node PATH id embedded in a "<title> #<pathId>" label ("#2", or "#3:2" for a nested loader), or null for "(any)"/anything else — same regex shape as controller.js's `pllIdFromLabel()` (duplicated by hand, not imported; see file header). */
 function pllIdFromLabel(label) {
-  const match = /#(-?\d+)\s*$/.exec(String(label || ''))
+  const match = /#(-?\d+(?::-?\d+)*)\s*$/.exec(String(label || ''))
   return match ? match[1] : null
 }
 

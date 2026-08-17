@@ -231,9 +231,10 @@ def test_controller_target_discovery_does_not_depend_on_drawing() -> None:
     assert "graph.__epsCtrlNodeWatch" in watch, "must install once per graph"
     assert "'onNodeAdded', 'onNodeRemoved'" in watch
     assert "original?.apply(this, args)" in watch, "chained, never replaced"
-    assert "scheduleControllerRefresh(this)" in watch
-    # ...installed from onAdded, so every controller arms the graph it joins.
-    assert "installGraphNodeWatch(this.graph || app.graph)" in source
+    assert "scheduleControllerRefresh()" in watch
+    # ...installed from onAdded across EVERY graph in the workflow (v0.64.0:
+    # subgraph events fire only on the subgraph's own hooks).
+    assert "for (const graph of api.walkGraphs(app.graph)) installGraphNodeWatch(graph)" in source
 
 
 def test_controller_graph_refresh_is_coalesced_per_tick() -> None:
@@ -241,9 +242,13 @@ def test_controller_graph_refresh_is_coalesced_per_tick() -> None:
     the graph hundreds of times without this. A one-tick deferral, not a
     polling timer (§6.10)."""
     source = _source("web/lora_library/controller.js")
-    body = source.split("function scheduleControllerRefresh(graph)", 1)[1].split("\n}\n", 1)[0]
-    assert "graph.__epsCtrlRefreshQueued" in body
+    body = source.split("function scheduleControllerRefresh()", 1)[1].split("\n}\n", 1)[0]
+    assert "root.__epsCtrlRefreshQueued" in body
     assert "setTimeout(" in body
+    # v0.64.0: the refresh walks the WHOLE workflow (nested controllers
+    # refresh too) and arms any newly created subgraph's own hooks.
+    assert "for (const graph of api.walkGraphs(root)) installGraphNodeWatch(graph)" in body
+    assert "api.walkLiveNodes(root)" in body
     assert "node._refreshTargetCombo()" in body
     assert "node._probeAndUpdateStatus()" in body
     # Never throws into litegraph's own add/remove dispatch.

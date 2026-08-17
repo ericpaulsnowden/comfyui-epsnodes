@@ -101,3 +101,28 @@ def test_push_seeds_the_option_when_the_list_is_frozen() -> None:
     assert "widget.options.values = [...widget.options.values, slug]" in body
     # Still no cross-module import between the two files (both headers' rule).
     assert "from './sets.js'" not in controller
+
+
+class TestMirrorsPickerNestedV0640:
+    """v0.64.0: the `mirrors loader` tag can name an EPS LoRA Picker too,
+    and candidates come from the whole workflow (subgraphs included) with
+    path-id labels matching controller.js's target combo."""
+
+    @pytest.fixture(scope="class")
+    def source(self) -> str:
+        return SETS_JS.read_text(encoding="utf-8")
+
+    def test_mirror_candidates_span_both_families_and_subgraphs(self, source: str) -> None:
+        body = _function_body(source, "findPllCandidates()")
+        assert "api.walkLiveNodes(app.graph)" in body
+        assert "PICKER_NODE_CLASS" in body
+        assert "label: `${node.title || node.type} #${pathId}`" in body
+        assert "const PICKER_NODE_CLASS = 'EPSLoraPicker'" in source
+
+    def test_label_id_regex_accepts_paths(self, source: str) -> None:
+        body = _function_body(source, "pllIdFromLabel(label)")
+        assert "/#(-?\\d+(?::-?\\d+)*)\\s*$/" in body
+
+    def test_apply_set_discovery_is_nested_aware(self, source: str) -> None:
+        body = _function_body(source, "applySetNodes()")
+        assert "walkLiveNodes(app.graph)" in body
