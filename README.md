@@ -530,6 +530,12 @@ dimensions. It replaces a resize node + a reroute + a get-image-size node.
   and `pad` (black), with a choice of interpolation. `multiple_of` snaps the
   result to a multiple (e.g. 64) for latent-friendly sizes.
 - **Set one axis to `0`** to derive it from the other and the image's aspect.
+- **`copy from image`** (since v0.63.0): a button above the size fields that
+  fills `width`/`height` with the wired image's own pixel size in one click
+  — no reading the numbers off the panel and retyping them. It copies the
+  EXACT size (if you've set `multiple_of`, the Run rounds it just as it
+  would a size you typed), and it tells you why nothing happened if there's
+  no image wired, or if the one you wired hasn't loaded a preview yet.
 - **`height` sits above `width`** (since v0.61.0) so the fields read in the
   same H-before-W order most model cards use. Old workflows load with their
   saved values intact — the values follow the field *names*, not the rows.

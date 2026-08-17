@@ -723,3 +723,18 @@ def test_fallback_dialog_is_self_contained_and_canvas_safe(source: str) -> None:
     assert "keyEvent.stopPropagation()" in body
     assert "overlay.remove()" in body
     assert "'Enter'" in body and "'Escape'" in body
+
+
+def test_preset_buttons_stay_out_of_the_api_prompt() -> None:
+    """v0.63.0: `options.serialize` gates the API PROMPT while
+    `widget.serialize` gates the workflow FILE (executionUtil.ts vs
+    LGraphNode.ts). Both preset buttons had only the latter, so every
+    queued prompt carried phantom `"Save"`/`"Delete"` inputs for the node
+    (rig-caught 2026-08-14 while adding the copy-from-image button)."""
+    source = RESOLUTION_JS.read_text(encoding="utf-8")
+    save = _function_body(source, "createSaveButton(node)")
+    assert "{ serialize: false }" in save
+    assert "btn.serialize = false" in save
+    delete = _function_body(source, "createDeleteButton(node, state)")
+    assert "{ serialize: false }" in delete
+    assert "btn.serialize = false" in delete

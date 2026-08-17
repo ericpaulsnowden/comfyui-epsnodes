@@ -2198,7 +2198,12 @@ function createSaveButton(node) {
     'Save',
     null,
     (_value, _canvas, _node, _pos, event) => openSaveDialog(node, event),
-    {}
+    // `options.serialize: false` keeps this button out of the API PROMPT --
+    // a DIFFERENT flag from `btn.serialize` below, which keeps it out of the
+    // workflow FILE (executionUtil.ts vs LGraphNode.ts). Rig-caught
+    // 2026-08-14 alongside the new copy button: every queued prompt was
+    // carrying phantom `"Save"`/`"Delete"` inputs for this node.
+    { serialize: false }
   )
   btn.serialize = false
   btn.tooltip =
@@ -2222,7 +2227,7 @@ function createDeleteButton(node, state) {
       if (!state.deleteBtn || state.deleteBtn.disabled) return
       performDelete(node)
     },
-    {}
+    { serialize: false } // out of the API prompt -- see createSaveButton
   )
   btn.serialize = false
   btn.tooltip =
@@ -2440,6 +2445,83 @@ function scheduleImageConverge(node) {
   }, 0)
 }
 
+//: The v0.63.0 one-click "make the target match what's wired in" button
+//: (owner ask 2026-08-14). Label is the owner's own wording.
+const COPY_FROM_IMAGE_LABEL = 'copy from image'
+
+/**
+ * `copy from image`: writes the incoming image's own pixel size into
+ * `width`/`height` (owner ask 2026-08-14, "sets the width/height to the
+ * width/height of the input image with one click"). Sits ABOVE the size
+ * fields, which is where the ask puts it and where it reads as a heading
+ * for the two numbers it fills in.
+ *
+ * The size comes from `readIncomingImageSize` -- the same live read the
+ * source line uses, so the button is right whenever that line is (and the
+ * two can never disagree). EXACT pixels, deliberately not snapped to
+ * `multiple_of`: "copy" means copy, and a set `multiple_of` then rounds at
+ * run time exactly as it would for a hand-typed size.
+ *
+ * Failure is never silent (§6.3): nothing wired and "wired but no decoded
+ * image yet" are DIFFERENT toasts, because they need different fixes.
+ */
+function attachCopyFromImage(node) {
+  const button = node.addWidget('button', COPY_FROM_IMAGE_LABEL, null, () => {
+    const size = readIncomingImageSize(node)
+    if (!size) {
+      const wired = imageInputSlot(node) >= 0 && node.inputs?.[imageInputSlot(node)]?.link != null
+      toast(
+        node,
+        'warn',
+        wired
+          ? "The wired image hasn't loaded yet — run the loader once (or wait for its preview), then try again."
+          : 'Wire an image into this node first.'
+      )
+      return
+    }
+    writeSize(node, size.width, size.height)
+    node.graph?.setDirtyCanvas(true, true)
+  })
+  // BOTH flags, and they are NOT interchangeable (executionUtil.ts says so
+  // in as many words): `options.serialize` gates the API PROMPT,
+  // `widget.serialize` gates the WORKFLOW file. Rig-caught 2026-08-14 --
+  // with only the latter set, every queued prompt carried a phantom
+  // `"copy from image": null` input for this node.
+  button.serialize = false
+  button.options = { ...(button.options || {}), serialize: false }
+  // Move it above the size fields. A non-tail widget is normally forbidden
+  // (FORMAT.md §8: `widgets_values` restores POSITIONALLY), and the reason
+  // is real -- litegraph SERIALIZES by array index, skipping
+  // `serialize:false` widgets and leaving a HOLE, but CONFIGURES with a
+  // compacted counter that skips them again. Rig-proven 2026-08-14: a
+  // leading skipped widget turned [333, 777, ...] into [null, 333, 777,
+  // ...] and every value shifted by one on the next load.
+  const index = node.widgets.indexOf(button)
+  if (index !== -1) node.widgets.splice(index, 1)
+  node.widgets.unshift(button)
+
+  // ...which is why the hole is compacted back out on the way to disk (see
+  // above). The saved `widgets_values` is then byte-identical to what a
+  // button-less build writes, so old workflows load here AND workflows
+  // saved here still load on an older build -- no migration shim, no
+  // downgrade hazard. Chained, never replaced.
+  const originalOnSerialize = node.onSerialize
+  node.onSerialize = function (info) {
+    const result = originalOnSerialize?.apply(this, arguments)
+    try {
+      const values = info?.widgets_values
+      // `i in values` is the point: it is false exactly for the holes a
+      // skipped widget leaves, and true for a real stored `null`.
+      if (Array.isArray(values)) {
+        info.widgets_values = values.filter((_, i) => i in values)
+      }
+    } catch (error) {
+      console.warn(PREFIX, 'widgets_values compaction failed', error)
+    }
+    return result
+  }
+}
+
 export function attach(node) {
   if (node.comfyClass !== NODE_TYPE) return
 
@@ -2480,6 +2562,8 @@ export function attach(node) {
 
   attachSizeGrid(node)
   attachPresetsUi(node)
+  // Last, so the unshift lands above widgets that are all already present.
+  attachCopyFromImage(node)
 
   // v0.61.0 (FORMAT.md §6.5): height-first layout stamp + old-save value
   // migration, multi-image converge/reveal. The stamp is set on EVERY node

@@ -442,3 +442,70 @@ class TestV0610MultiImageAndLayout:
         reveal = _function_body(source, "revealExtraOutputs(node)")
         assert reveal.index("ensureOriginalSizeOutputs(node)") < reveal.index("addOutput")
         assert "!isOutputConnected(node.outputs[idx])" in reveal
+
+
+class TestCopyFromImageV0630:
+    """v0.63.0 (owner ask 2026-08-14): a `copy from image` button above the
+    size fields that writes the wired image's own pixel size into
+    width/height -- and the serialization guard that makes a NON-TAIL
+    widget safe to add at all."""
+
+    @pytest.fixture(scope="class")
+    def source(self) -> str:
+        return (REPO_ROOT / "web" / "eps_image" / "resolution.js").read_text(encoding="utf-8")
+
+    def test_button_label_is_the_owners_wording(self, source: str) -> None:
+        assert "const COPY_FROM_IMAGE_LABEL = 'copy from image'" in source
+        body = _function_body(source, "attachCopyFromImage(node)")
+        assert "node.addWidget('button', COPY_FROM_IMAGE_LABEL" in body
+
+    def test_button_sits_above_the_size_fields(self, source: str) -> None:
+        body = _function_body(source, "attachCopyFromImage(node)")
+        assert "node.widgets.unshift(button)" in body
+        # ...and it is attached last, so the unshift lands above every
+        # widget rather than racing the presets cluster.
+        attach = _function_body(source, "attach(node)")
+        assert attach.index("attachPresetsUi(node)") < attach.index("attachCopyFromImage(node)")
+
+    def test_copy_reuses_the_live_source_read_and_the_one_size_writer(
+        self, source: str
+    ) -> None:
+        """Same read the source line uses (so the two can never disagree),
+        and the same writeSize() every drag goes through."""
+        body = _function_body(source, "attachCopyFromImage(node)")
+        assert "readIncomingImageSize(node)" in body
+        assert "writeSize(node, size.width, size.height)" in body
+        # EXACT pixels -- "copy" means copy; multiple_of still rounds at run
+        # time exactly as it would for a hand-typed size.
+        assert "multiple_of" not in body
+
+    def test_both_failure_modes_toast_differently(self, source: str) -> None:
+        """§6.3 never-silent: nothing wired vs wired-but-not-decoded need
+        different fixes, so they get different messages."""
+        body = _function_body(source, "attachCopyFromImage(node)")
+        assert "Wire an image into this node first." in body
+        assert "hasn't loaded yet" in body
+        assert "link != null" in body
+
+    def test_non_tail_widget_is_made_format_safe_by_compacting_holes(
+        self, source: str
+    ) -> None:
+        """THE reason §8 bans non-tail frontend widgets: litegraph
+        SERIALIZES by array index (skipping serialize:false widgets, which
+        leaves a hole) but CONFIGURES with a compacted counter. Rig-proven
+        2026-08-14: a leading skipped widget turned [333, 777, ...] into
+        [null, 333, 777, ...] and shifted every value on reload. Compacting
+        the hole on the way out makes the saved array byte-identical to a
+        button-less build's -- old saves load here, and saves made here
+        still load on an older build."""
+        body = _function_body(source, "attachCopyFromImage(node)")
+        # BOTH flags: options.serialize gates the API PROMPT, widget.serialize
+        # gates the WORKFLOW file (executionUtil.ts says so in as many words).
+        # Rig-caught: with only the latter, every queued prompt carried a
+        # phantom `"copy from image": null` input.
+        assert "button.serialize = false" in body
+        assert "button.options = { ...(button.options || {}), serialize: false }" in body
+        assert "const originalOnSerialize = node.onSerialize" in body
+        assert "originalOnSerialize?.apply(this, arguments)" in body
+        # `i in values` distinguishes a HOLE from a genuinely stored null.
+        assert "values.filter((_, i) => i in values)" in body

@@ -857,6 +857,35 @@ is the functional core WITHOUT the grid.
   the file, never `node.properties` (attach pre-stamps every node,
   including ones about to be configured — deciding off node state would
   skip every migration). API prompts are name-resolved and unaffected.
+- **`copy from image` button (v0.63.0, owner ask 2026-08-14: "a button …
+  that sets the width/height to the width/height of the input image with
+  one click … above the width box … should say copy from image").** A
+  button widget ABOVE the size fields (above both, so the height/width
+  pair the ask above put in order stays together). The size comes from the
+  SAME live `readIncomingImageSize` the source line uses — button and line
+  can never disagree — written through the SAME `writeSize` every drag
+  goes through. EXACT pixels, deliberately unsnapped: "copy" means copy,
+  and a set `multiple_of` then rounds at run time exactly as it would for
+  a hand-typed size. Never silent (§6.3): nothing wired vs wired-but-not-
+  yet-decoded are DIFFERENT toasts, because they need different fixes.
+  **This is the ONE sanctioned exception to §8's tail-only rule for
+  frontend widgets, and only because the hole it opens is closed again.**
+  litegraph SERIALIZES `widgets_values` by ARRAY INDEX, skipping
+  `serialize:false` widgets and leaving a HOLE, but CONFIGURES with a
+  COMPACTED counter that skips them again — rig-proven 2026-08-14: a
+  leading skipped widget turned `[333, 777, …]` into `[null, 333, 777, …]`
+  and shifted every value on the next load. A chained `onSerialize`
+  compacts the hole back out (`i in values` distinguishes a hole from a
+  genuinely stored `null`), so the saved array is byte-identical to a
+  button-less build's: old workflows load here AND workflows saved here
+  still load on an older build — no migration shim, no downgrade hazard.
+  Any future non-tail frontend widget MUST carry this compaction.
+  BOTH serialize flags are required and they are NOT interchangeable:
+  `options.serialize` gates the API PROMPT (`utils/executionUtil.ts` says
+  so in as many words), `widget.serialize` gates the workflow FILE
+  (`LGraphNode.ts`). The same rig round caught the preset `Save`/`Delete`
+  buttons setting only the latter and therefore shipping phantom
+  `"Save"`/`"Delete"` inputs in every queued prompt (fixed v0.63.0).
 - **MULTI-IMAGE mode (v0.61.0, owner ask 2026-08-10: "plug in multiple
   images so you can resize more than one image to the same size at the
   same time … multiple image inputs and multiple image outputs").**
