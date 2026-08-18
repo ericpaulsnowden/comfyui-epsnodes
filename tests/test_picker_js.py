@@ -452,7 +452,12 @@ def test_fetch_and_configure_both_reconcile_through_the_same_resync(source: str)
     the final render -- both re-derive `state.selection` from the widget's
     CURRENT value via the same function."""
     assert "reloadFromWidget(state)" in _function_body(source, "wireConfigureReload(state)")
-    assert "reloadFromWidget(state)" in _function_body(source, "loadPicker(state)")
+    # v0.65.1: the reconcile moved into applyFeed(), which BOTH the
+    # instant cached paint and the fresh fetch go through.
+    assert "reloadFromWidget(state)" in _function_body(source, "applyFeed(state, data)")
+    load = _function_body(source, "loadPicker(state)")
+    assert "applyFeed(state, lastFeed)" in load
+    assert "applyFeed(state, data)" in load
     reload_body = _function_body(source, "reloadFromWidget(state)")
     assert "selectionFromWidgetValue(state.widget.value)" in reload_body
 
@@ -1302,3 +1307,31 @@ class TestClickToLoadV0640:
     def test_send_watch_covers_subgraphs(self, source: str) -> None:
         assert "for (const graph of walkGraphs(app.graph)) installGraphNodeWatch(graph)" in source
         assert "node.__epsLpReload = () => reloadFromWidget(state)" in source
+
+
+class TestTabSwitchFixesV0651:
+    """Owner report 2026-08-14: switching workflow tabs (a) grew the node
+    every time and (b) sat on "Loading loras…" for seconds."""
+
+    @pytest.fixture(scope="class")
+    def source(self) -> str:
+        return PICKER_JS.read_text(encoding="utf-8")
+
+    def test_restore_resets_the_growth_baseline(self, source: str) -> None:
+        """attach renders 0 rows off the pre-restore widget; the configure
+        reload then rendered N and added N*SELECTED_ROW_PX ON TOP of the
+        restored size, compounding per switch. A wholesale selection
+        replace forgets the baseline -- the floor still prevents crops."""
+        body = _function_body(source, "reloadFromWidget(state)")
+        assert "state.lastSelectedCount = null" in body
+
+    def test_cached_feed_paints_instantly_and_refresh_failure_keeps_it(
+        self, source: str
+    ) -> None:
+        load = _function_body(source, "loadPicker(state)")
+        assert "if (!state.loaded && lastFeed) {" in load
+        assert "lastFeed = data" in load
+        # a cached paint survives a mere refresh hiccup; a never-loaded
+        # panel still gets the honest §7.2 error + Retry
+        assert "if (state.loaded) {" in load
+        assert "state.error = (error && error.message) || 'Failed to load loras'" in load

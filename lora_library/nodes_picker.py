@@ -259,7 +259,10 @@ class EPSLoraPicker:
         "trigger-word source feeding EPS LoRA Iterator or another stack-"
         "consuming node. trigger_words is read live from each lora's "
         "sidecar .txt file; loras_text is ready for Save Image's "
-        "filename_prefix."
+        "filename_prefix. Click a lora once to select it and again to "
+        "load it. The EPS Lora Loader State Controller can capture this "
+        "node's selection as a named state and apply states back into it "
+        "-- including when either node sits inside a subgraph."
     )
 
     @classmethod

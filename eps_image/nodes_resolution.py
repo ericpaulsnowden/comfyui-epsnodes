@@ -492,7 +492,11 @@ class EPSResolution:
         "wired, the node still reports the requested size, so it can drive "
         "downstream nodes on its own. Save named size presets and select "
         "several to run the rest of the workflow once per preset, in one "
-        "queue."
+        "queue. Wire extra images (image_2 ... image_8 appear as you "
+        "connect them) and every one is resized to the same target in one "
+        "run, each on its own resized_N output. The 'copy from image' "
+        "button fills width/height with the wired image's own size in one "
+        "click."
     )
 
     @classmethod

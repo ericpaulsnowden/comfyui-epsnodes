@@ -83,7 +83,10 @@ class EPSFrameSaver:
         "full path (Ctrl/Cmd+V). The in-node preview is an "
         "approximation for scrubbing; the output frame is always decoded "
         "fresh from the source file, so what you get matches the file, not "
-        "the preview."
+        "the preview. Or skip paths entirely: the optional video INPUT "
+        "takes any VIDEO wire (Load Video, Video Slice, a generated clip) "
+        "and the wire wins over the browsed path -- a wired Load Video "
+        "even scrubs from another machine's browser."
     )
 
     # `video_path` and `frame` below have no `tooltip`: both widgets are

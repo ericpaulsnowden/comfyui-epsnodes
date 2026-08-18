@@ -134,7 +134,10 @@ class LoraLibraryApplySet:
         "you can feed into other nodes. Re-reads the saved set file on "
         "every run, so edits made in the set editor apply the next time you "
         "queue. A missing or empty set passes model/clip through unchanged "
-        "rather than failing the run."
+        "rather than failing the run. The EPS Lora Loader State "
+        "Controller's Push State button can point this node (or every "
+        "Apply Set at once) at a state; the node's 'mirrors loader' tag "
+        "scopes which pushes it follows."
     )
 
     @classmethod

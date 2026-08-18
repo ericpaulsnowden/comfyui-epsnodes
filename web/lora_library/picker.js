@@ -552,6 +552,15 @@ function reloadFromWidget(state) {
   // in-render commit alone would mutate a row object this line discards.
   commitActiveStrengthEdit(state)
   state.selection = selectionFromWidgetValue(state.widget.value)
+  // The selection was just replaced WHOLESALE (a configure restore, the
+  // controller's apply, a fetch reconcile) -- the node's CURRENT size is
+  // the authority, so forget the row-count baseline: syncSelectedGrowth's
+  // delta must not fire against it (owner report 2026-08-14: every tab
+  // switch grew the node -- attach rendered 0 rows off the pre-restore
+  // widget, then this reload rendered N and added N*SELECTED_ROW_PX ON
+  // TOP of the size configure had just restored, compounding per switch).
+  // The getMinHeight floor still guarantees the full list stays visible.
+  state.lastSelectedCount = null
   state.path = [] // a restored scope invalidates any drill-down into the old one
   state.view = 'browse'
   clearSearch(state) // ...and any search typed against the old scope (§6.13 M3)
@@ -581,38 +590,65 @@ function invalidateInFlightLoad(state) {
   state.loadToken++
 }
 
+/** The last successful feed, shared by every picker node in the session
+ * (owner report 2026-08-14: "several seconds to reload when switching
+ * tabs" -- a tab switch recreates the node, and the panel sat on
+ * "Loading loras…" until a FRESH fetch finished, every time). A new
+ * panel paints from this instantly and the fetch refreshes it in the
+ * background; mutations (stars, recents) already invalidate in-flight
+ * loads per node, and every applied response overwrites this cache. */
+let lastFeed = null
+
+/** Apply one feed payload to *state* -- shared by the instant cached
+ * paint and the fresh-fetch path, so they can never drift. */
+function applyFeed(state, data) {
+  state.loras = (Array.isArray(data?.loras) ? data.loras : [])
+    .filter((entry) => typeof entry === 'string')
+    .map(normalizeLoraName)
+  state.loraSet = new Set(state.loras)
+  // Which loras have a sidecar preview -- server-computed (v0.61.2), so
+  // rows never have to probe with a 404-destined <img> of their own.
+  state.previewSet = new Set(
+    (Array.isArray(data?.previews) ? data.previews : [])
+      .filter((entry) => typeof entry === 'string')
+      .map(normalizeLoraName)
+  )
+  state.favorites = (Array.isArray(data?.favorites) ? data.favorites : [])
+    .filter((entry) => typeof entry === 'string')
+    .map(normalizeLoraName)
+  state.recents = sanitizeRecents(data?.recents)
+  state.loaded = true
+  state.error = null
+  // The library total lives in the right-click Properties panel now
+  // (owner ask 2026-08-14) -- per-machine info, refreshed on every load.
+  if (state.node.properties) state.node.properties.library_loras = state.loras.length
+  reloadFromWidget(state) // race-safe reconcile -- see file header
+}
+
 async function loadPicker(state) {
   state.error = null
   const token = ++state.loadToken
-  render(state) // shows "Loading loras…" (state.loaded may already be true on a retry)
+  if (!state.loaded && lastFeed) {
+    // Instant paint from the session cache; the fetch below reconciles.
+    applyFeed(state, lastFeed)
+  } else {
+    render(state) // "Loading loras…" (state.loaded may already be true on a retry)
+  }
 
   try {
     const data = await api.getJson(ROUTE)
     if (token !== state.loadToken) return // superseded by a newer fetch
-
-    state.loras = (Array.isArray(data?.loras) ? data.loras : [])
-      .filter((entry) => typeof entry === 'string')
-      .map(normalizeLoraName)
-    state.loraSet = new Set(state.loras)
-    // Which loras have a sidecar preview -- server-computed (v0.61.2), so
-    // rows never have to probe with a 404-destined <img> of their own.
-    state.previewSet = new Set(
-      (Array.isArray(data?.previews) ? data.previews : [])
-        .filter((entry) => typeof entry === 'string')
-        .map(normalizeLoraName)
-    )
-    state.favorites = (Array.isArray(data?.favorites) ? data.favorites : [])
-      .filter((entry) => typeof entry === 'string')
-      .map(normalizeLoraName)
-    state.recents = sanitizeRecents(data?.recents)
-    state.loaded = true
-    state.error = null
-    // The library total lives in the right-click Properties panel now
-    // (owner ask 2026-08-14) -- per-machine info, refreshed on every load.
-    if (state.node.properties) state.node.properties.library_loras = state.loras.length
-    reloadFromWidget(state) // race-safe reconcile -- see file header
+    lastFeed = data
+    applyFeed(state, data)
   } catch (error) {
     if (token !== state.loadToken) return
+    // A cached paint already on screen stays: stale rows beat an error
+    // wall when the server merely hiccuped; a NEVER-loaded panel still
+    // shows the honest §7.2 error + Retry.
+    if (state.loaded) {
+      api.warn('picker feed refresh failed (showing cached list)', error)
+      return
+    }
     state.error = (error && error.message) || 'Failed to load loras'
     api.warn('picker feed fetch failed', error)
     render(state)

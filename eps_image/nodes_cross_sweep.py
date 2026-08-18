@@ -256,7 +256,11 @@ class EPSCrossSweep:
         "it and this node is a pure image x text multiplier. Wire "
         "save_prefix into Save Image's filename_prefix and runs land in "
         "folders named by step and pair, so big batches stay organized on "
-        "disk."
+        "disk. sweep_mode=multiply crosses the model/clip/label axis with "
+        "an independent vae axis (4 models x 2 VAEs = 8 runs) instead of "
+        "pairing them one-to-one. The readout at the bottom of the node "
+        "shows how many runs are planned BEFORE you queue, so an "
+        "overnight batch can be sanity-checked first."
     )
 
     @classmethod
