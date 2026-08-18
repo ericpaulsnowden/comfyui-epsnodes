@@ -490,3 +490,35 @@ def test_unwired_switcher_contributes_nothing_to_the_shared_column(
     assert "let need = 0" in need
     body = _function_body(switcher_source, "drawRowToggles(node, ctx)")
     assert "if (drawn.length === 0) {" in body
+
+
+def test_high_low_pairing_frontend_pins(switcher_source: str) -> None:
+    """v0.66.0 (owner spec): pairing is a per-node property on the MODEL
+    switcher only; lows never match inputRe (no checkbox/rename/column of
+    their own -- the row's one toggle governs the pair)."""
+    assert "EPSModelSwitcher: { prefix: 'model', type: 'MODEL', pairable: true }" in switcher_source
+    assert "const PROP_HIGH_LOW = 'High/low pairs'" in switcher_source
+    assert "if (spec.pairable) spec.lowInputRe" in switcher_source
+    # every high converge drags the pair machinery with it -- one choke point
+    body = _function_body(switcher_source, "convergeImageInputs(node)")
+    assert "convergePairInputs(node)" in body
+    assert "convergePairOutput(node)" in body
+
+
+def test_pair_moves_fix_link_slots_and_off_refuses_wired_lows(switcher_source: str) -> None:
+    """litegraph stores link targets by POSITION: any insert/move must fix
+    target_slot for every later input (removeInput has its own fixup;
+    insertion/move have none built in). And the property can never
+    silently orphan a wire -- OFF with a wired low reverts + toasts
+    (resolution.js's hide-refusal posture)."""
+    for fn in ("insertInputAt(node, name, type, at)", "moveInput(node, from, to)"):
+        body = _function_body(switcher_source, fn)
+        assert "link.target_slot = i" in body
+    pair_in = _function_body(switcher_source, "convergePairInputs(node)")
+    assert "node.properties[PROP_HIGH_LOW] = true" in pair_in
+    assert "Unwire the low-model sockets" in pair_in
+    pair_out = _function_body(switcher_source, "convergePairOutput(node)")
+    assert "Unwire the models_low output" in pair_out
+    # the tail output is a TRUE add/remove -- §8's one safe removal spot
+    assert "node.addOutput(LOW_OUTPUT_NAME, spec.type)" in pair_out
+    assert "node.removeOutput(idx)" in pair_out

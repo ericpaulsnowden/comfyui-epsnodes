@@ -1507,3 +1507,14 @@ def test_run_count_refreshes_on_graph_changes_not_only_draws(source: str) -> Non
     # State hangs off the node, so a deleted node takes its state with it.
     assert "node.__epsRcState = state" in source
     assert "installGraphNodeWatch(node.graph || app.graph)" in source
+
+
+def test_model_low_is_a_welded_axis_member_in_the_estimator(source: str) -> None:
+    """v0.66.0 WAN pairing: model_low participates in zero-collapse, the
+    aligned agreement check, and the axis length -- and NEVER adds an axis
+    of its own, so the readout's counts stay exactly what they were.
+    Backend wired_sweep parity, which the referee rounds taught us to keep
+    exact."""
+    assert "for (const name of ['model', 'model_low', 'clip', 'label', 'vae'])" in source
+    assert "for (const name of ['model', 'model_low', 'clip', 'label'])" in source
+    assert "7: 'model_low'" in source  # chained dead-output guard covers the new tail

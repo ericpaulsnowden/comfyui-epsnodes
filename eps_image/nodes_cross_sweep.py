@@ -220,9 +220,10 @@ class EPSCrossSweep:
     # this tuple (a saved link records [origin_id, origin_slot]), so appending
     # is the only §8-safe way to add one -- inserting next to `clip` would
     # silently repoint every saved workflow's image/text/save_prefix wires.
-    RETURN_TYPES = ("MODEL", "CLIP", "IMAGE", "STRING", "STRING", "STRING", "VAE")
-    RETURN_NAMES = ("model", "clip", "image", "text", "save_prefix", "label", "vae")
-    OUTPUT_IS_LIST = (True, True, True, True, True, True, True)
+    # §8 tail-append law: model_low (v0.66.0, WAN pairing) lands LAST.
+    RETURN_TYPES = ("MODEL", "CLIP", "IMAGE", "STRING", "STRING", "STRING", "VAE", "MODEL")
+    RETURN_NAMES = ("model", "clip", "image", "text", "save_prefix", "label", "vae", "model_low")
+    OUTPUT_IS_LIST = (True, True, True, True, True, True, True, True)
     INPUT_IS_LIST = True
     OUTPUT_TOOLTIPS = (
         "This run's model -- only when the optional model input is wired; "
@@ -240,6 +241,11 @@ class EPSCrossSweep:
         "This run's VAE, index-aligned with model/clip -- only when the "
         "optional vae input is wired (e.g. from EPS Checkpoint Switcher); "
         "unwired, this output blocks whatever consumes it.",
+        "The LOW-noise partner model for each run, index-aligned with the "
+        "model output (WAN-style high/low pairs -- wire from EPS Model "
+        "Switcher's models_low). Blocks its consumers on runs where no "
+        "low model was wired.",
+
     )
     FUNCTION = "run"
     DESCRIPTION = (
@@ -260,7 +266,9 @@ class EPSCrossSweep:
         "an independent vae axis (4 models x 2 VAEs = 8 runs) instead of "
         "pairing them one-to-one. The readout at the bottom of the node "
         "shows how many runs are planned BEFORE you queue, so an "
-        "overnight batch can be sanity-checked first."
+        "overnight batch can be sanity-checked first. For WAN-style "
+        "high/low models, wire model_low alongside model: the pair stays "
+        "welded together on every run and never multiplies the count."
     )
 
     @classmethod
@@ -295,6 +303,23 @@ class EPSCrossSweep:
                             "Optional: leave the whole sweep side unwired "
                             "to just multiply images x texts; this output "
                             "then blocks whatever consumes it."
+                        ),
+                    },
+                ),
+                # v0.66.0 WAN pairing: WELDED to the model axis, never a
+                # new one -- run counts are untouched.
+                "model_low": (
+                    "MODEL",
+                    {
+                        "tooltip": (
+                            "Each step's LOW-noise partner model (WAN-style "
+                            "high/low pairs) -- wire from EPS Model "
+                            "Switcher's models_low. Travels welded to the "
+                            "model input: same length (or a single low to "
+                            "broadcast), never a new sweep axis, so run "
+                            "counts don't change. In sweep_mode multiply "
+                            "the pair stays a pair while vae crosses "
+                            "against it."
                         ),
                     },
                 ),
@@ -446,6 +471,7 @@ class EPSCrossSweep:
     def run(
         self,
         model: Any = None,
+        model_low: Any = None,
         clip: Any = None,
         label: Any = None,
         image: Any = None,
@@ -459,6 +485,7 @@ class EPSCrossSweep:
         unique_id: Any = None,
     ) -> tuple[list[Any], ...]:
         models = _as_clean_list(model)
+        model_lows = _as_clean_list(model_low)
         clips = _as_clean_list(clip)
         labels = _as_clean_list(label)
         images = _as_clean_list(image)
@@ -478,11 +505,12 @@ class EPSCrossSweep:
         # sweep-group member: steps is the min over the WIRED sweep lists
         # only, and each unwired member's output blocks per run.
         model_wired = model is not None
+        model_low_wired = model_low is not None
         clip_wired = clip is not None
         label_wired = label is not None
         vae_wired = vae is not None
         text_only = image is None
-        sweep_wired = model_wired or clip_wired or label_wired or vae_wired
+        sweep_wired = model_wired or model_low_wired or clip_wired or label_wired or vae_wired
 
         # v0.51.0 guard (owner report 2026-08-03: a txt2img graph consuming
         # the image OUTPUT with no image INPUT wired "completes immediately,
@@ -518,6 +546,14 @@ class EPSCrossSweep:
             input_name: length
             for input_name, wired, length in (
                 ("model", model_wired, len(models)),
+                # v0.66.0: model_low is a MEMBER of the aligned model axis
+                # (welded, per the owner's WAN spec) -- the existing length
+                # rules do exactly the right thing: equal lengths pair,
+                # length 1 broadcasts, a disagreement fails loudly naming
+                # it, and a wired-but-empty low collapses the node like any
+                # other empty sweep input. It is never its own axis, so
+                # step math never changes.
+                ("model_low", model_low_wired, len(model_lows)),
                 ("clip", clip_wired, len(clips)),
                 ("label", label_wired, len(labels)),
                 ("vae", vae_wired, len(vaes)),
@@ -565,7 +601,11 @@ class EPSCrossSweep:
                     "but EMPTY, which would block the whole node on its own"
                 )
             fine_note = f" ({'; '.join(notes)})." if notes else "."
-            group = "model/clip/label" if sweep_multiply else "model/clip/label (and vae)"
+            group = (
+                "model/model_low/clip/label"
+                if sweep_multiply
+                else "model/model_low/clip/label (and vae)"
+            )
             # The multiply hint ONLY when vae is actually a party to the
             # disagreement (review 2026-08-09: for a model-vs-label conflict
             # the hint was wrong advice -- multiply mode still checks the
@@ -594,7 +634,7 @@ class EPSCrossSweep:
                 _unwrap_hidden(prompt), _unwrap_hidden(unique_id), "vae"
             )
             if vae_origin is not None:
-                for axis1_input in ("model", "clip", "label"):
+                for axis1_input in ("model", "model_low", "clip", "label"):
                     origin = _input_origin(
                         _unwrap_hidden(prompt), _unwrap_hidden(unique_id), axis1_input
                     )
@@ -736,6 +776,11 @@ class EPSCrossSweep:
                 pair_component = _safe_component(pair_name) or f"pair_{p + 1:02d}"
                 out["model"].append(
                     models[_sweep_index(len(models), a1_idx)] if model_wired else run_blocker
+                )
+                out["model_low"].append(
+                    model_lows[_sweep_index(len(model_lows), a1_idx)]
+                    if model_low_wired
+                    else run_blocker
                 )
                 out["clip"].append(
                     clips[_sweep_index(len(clips), a1_idx)] if clip_wired else run_blocker

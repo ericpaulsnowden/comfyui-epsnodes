@@ -221,7 +221,9 @@ const PREFIX = '[eps_image:switcher]'
  */
 export const SWITCHER_CLASSES = {
   EPSSwitcher: { prefix: 'image', type: 'IMAGE' },
-  EPSModelSwitcher: { prefix: 'model', type: 'MODEL' },
+  // §6.4 WAN pairing (v0.66.0): the MODEL switcher alone supports per-row
+  // high/low pairs, enabled by the node's 'High/low pairs' property.
+  EPSModelSwitcher: { prefix: 'model', type: 'MODEL', pairable: true },
   // `noun` overrides the header label's naive `<prefix>s` pluralization
   // where the prefix is an initialism -- "no CLIPs connected" reads right,
   // "no clips connected" reads like film clips.
@@ -230,7 +232,16 @@ export const SWITCHER_CLASSES = {
 }
 for (const spec of Object.values(SWITCHER_CLASSES)) {
   spec.inputRe = new RegExp(`^${spec.prefix}_(\\d+)$`)
+  // Lows deliberately do NOT match inputRe: no checkbox of their own (the
+  // row's one toggle governs the pair), no rename target, no column math.
+  if (spec.pairable) spec.lowInputRe = new RegExp(`^${spec.prefix}_(\\d+)_low$`)
 }
+
+//: v0.66.0 pairing property + names (owner spec: "call them high and low
+//: ... an option that gets turned on in properties and is for all models
+//: in that node").
+const PROP_HIGH_LOW = 'High/low pairs'
+const LOW_OUTPUT_NAME = 'models_low'
 
 const TOGGLES_WIDGET_NAME = 'toggles'
 const HEADER_WIDGET_NAME = '__eps_switcher_toggle_all'
@@ -494,6 +505,175 @@ function addImageInput(node, n, template) {
   return node.addInput(name, type, extraInfo)
 }
 
+//: v0.66.0 WAN pairing helpers -----------------------------------------
+
+/** Whether this node's high/low pairing is ON (pairable classes only). */
+function pairingOn(node) {
+  const spec = switcherSpecOf(node)
+  return !!(spec?.pairable && node.properties?.[PROP_HIGH_LOW] === true)
+}
+
+/** Re-seat an existing input, fixing every affected link-slot index. */
+function moveInput(node, from, to) {
+  if (from === to) return
+  const [input] = node.inputs.splice(from, 1)
+  node.inputs.splice(to, 0, input)
+  const links = node.graph?.links
+  if (!links) return
+  const start = Math.min(from, to)
+  for (let i = start; i < node.inputs.length; i++) {
+    const linkId = node.inputs[i]?.link
+    if (linkId == null) continue
+    const link = typeof links.get === 'function' ? links.get(linkId) : links[linkId]
+    if (link) link.target_slot = i
+  }
+}
+
+/** Insert a fresh input at *at*, fixing the link-slot indices litegraph
+ * stores by POSITION on every input after it (removeInput does its own
+ * fixup; insertion has no built-in, so this is its mirror). */
+function insertInputAt(node, name, type, at) {
+  node.addInput(name, type)
+  const input = node.inputs.pop()
+  node.inputs.splice(at, 0, input)
+  const links = node.graph?.links
+  if (!links) return input
+  for (let i = at; i < node.inputs.length; i++) {
+    const linkId = node.inputs[i]?.link
+    if (linkId == null) continue
+    const link = typeof links.get === 'function' ? links.get(linkId) : links[linkId]
+    if (link) link.target_slot = i
+  }
+  return input
+}
+
+/**
+ * Converge the `model_N_low` sockets to the pairing property (owner spec
+ * 2026-08-14: high/low, per-node, all rows). ON: every `model_N` row --
+ * the trailing spare included -- gets its `_low` partner directly BELOW
+ * it, so pairs read as pairs. OFF: unwired lows are removed; a WIRED low
+ * refuses the flip (property reverts + toast -- resolution.js's
+ * hide-refusal posture: never silently orphan a user's wire).
+ */
+function convergePairInputs(node) {
+  const spec = switcherSpecOf(node)
+  if (!spec?.pairable || !node.inputs) return
+  const on = pairingOn(node)
+  const lowNameOf = (n) => `${spec.prefix}_${n}_low`
+
+  if (!on) {
+    const wiredLows = node.inputs.filter(
+      (input) => input && spec.lowInputRe.test(input.name) && input.link != null
+    )
+    if (wiredLows.length && node.properties[PROP_HIGH_LOW] === false) {
+      node.properties[PROP_HIGH_LOW] = true
+      toastSwitcher(node, 'Unwire the low-model sockets before turning High/low pairs off.')
+      return
+    }
+    for (let i = node.inputs.length - 1; i >= 0; i--) {
+      const input = node.inputs[i]
+      if (input && spec.lowInputRe.test(input.name) && input.link == null) {
+        node.removeInput(i)
+      }
+    }
+    return
+  }
+
+  // ON: highs first (their converge already ran), then place lows --
+  // creating missing ones AND re-seating existing ones directly under
+  // their high (a workflow reload restores inputs in file order, which
+  // can interleave `toggles` between a pair; wires are name-bound so a
+  // seat move only needs the link-slot fixup insertInputAt already does).
+  const highs = imageInputEntries(node)
+  for (const entry of highs) {
+    const lowName = lowNameOf(entry.n)
+    const highIdx = node.inputs.findIndex((input) => input?.name === entry.name)
+    const at = node.inputs.findIndex((input) => input?.name === lowName)
+    if (at === -1) {
+      insertInputAt(node, lowName, spec.type, highIdx + 1)
+    } else if (at !== highIdx + 1) {
+      moveInput(node, at, at < highIdx ? highIdx : highIdx + 1)
+    }
+  }
+  // Drop lows whose high is gone (a collapsed trailing spare).
+  const liveHighNs = new Set(highs.map((entry) => entry.n))
+  for (let i = node.inputs.length - 1; i >= 0; i--) {
+    const input = node.inputs[i]
+    const match = input && spec.lowInputRe.exec(input.name)
+    if (match && !liveHighNs.has(Number(match[1])) && input.link == null) {
+      node.removeInput(i)
+    }
+  }
+}
+
+/**
+ * Show/hide the paired `models_low` output with the property. It is the
+ * TAIL output (§8: tail add/remove is the one safe true removal), so OFF
+ * removes it outright when unwired -- and refuses (revert + toast) when
+ * wired -- and ON re-appends it at its canonical last slot.
+ */
+function convergePairOutput(node) {
+  const spec = switcherSpecOf(node)
+  if (!spec?.pairable) return
+  const idx = (node.outputs || []).findIndex((output) => output?.name === LOW_OUTPUT_NAME)
+  if (pairingOn(node)) {
+    if (idx === -1) node.addOutput(LOW_OUTPUT_NAME, spec.type)
+    return
+  }
+  if (idx === -1) return
+  const output = node.outputs[idx]
+  const wired =
+    (Array.isArray(output.links) && output.links.length > 0) ||
+    (typeof output._floatingLinks?.size === 'number' && output._floatingLinks.size > 0)
+  if (wired) {
+    if (node.properties[PROP_HIGH_LOW] === false) {
+      node.properties[PROP_HIGH_LOW] = true
+      toastSwitcher(node, 'Unwire the models_low output before turning High/low pairs off.')
+    }
+    return
+  }
+  node.removeOutput(idx)
+}
+
+function toastSwitcher(node, detail) {
+  try {
+    app.extensionManager?.toast?.add?.({
+      severity: 'warn',
+      summary: node.title || 'EPS Model Switcher',
+      detail,
+      life: 4000
+    })
+  } catch (error) {
+    console.warn(PREFIX, 'toast failed', error)
+  }
+}
+
+/** The property + its live hook -- pairable classes only. */
+function wirePairingProperty(node) {
+  const spec = switcherSpecOf(node)
+  if (!spec?.pairable) return
+  node.addProperty(PROP_HIGH_LOW, false, 'boolean')
+  const original = node.onPropertyChanged
+  node.onPropertyChanged = function (name, value, prevValue) {
+    const result = original?.call(this, name, value, prevValue)
+    if (name === PROP_HIGH_LOW) {
+      try {
+        convergePairInputs(this)
+        convergePairOutput(this)
+        this.setSize?.([this.size[0], Math.max(this.size[1], this.computeSize()[1])])
+        this.graph?.setDirtyCanvas(true, true)
+      } catch (error) {
+        console.warn(PREFIX, 'pair visibility failed', error)
+      }
+    }
+    return result
+  }
+  // Fresh node: property is false -> the backend-declared models_low tail
+  // comes off until the property turns it on (resolution.js's apply-once
+  // rationale: addProperty alone never fires onPropertyChanged).
+  convergePairOutput(node)
+}
+
 /**
  * Grows/shrinks *node*'s growing-socket inputs (`image_N`/`model_N`/
  * `clip_N`/`vae_N`, per SWITCHER_CLASSES/switcherSpecOf) to the one
@@ -541,6 +721,14 @@ function convergeImageInputs(node) {
   }
 
   pruneToggles(node)
+  // v0.66.0: the low sockets + paired output track every high converge --
+  // one choke point, so a grown/collapsed spare's partner can never lag.
+  try {
+    convergePairInputs(node)
+    convergePairOutput(node)
+  } catch (error) {
+    console.warn(PREFIX, 'pair converge failed', error)
+  }
 }
 
 /**
@@ -1154,6 +1342,7 @@ export function attach(node) {
 
     hideTogglesWidget(node)
     ensureMinNodeWidth(node)
+    wirePairingProperty(node)
     wireImageInputGrowth(node)
     wireRowToggleDrawing(node)
     wireRowToggleClicks(node)

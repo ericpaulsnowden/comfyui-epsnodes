@@ -821,6 +821,30 @@ per-input toggle + toggle-all header + N-enabled→N-runs fan-out.
   `Toggle All` header box is a full-width WIDGET row, deliberately
   left-anchored and never string-dependent, so it is outside this column.
   Renaming to an empty string resets the label back to the socket name.
+- **WAN high/low pairs — MODEL switcher only (v0.66.0, owner ask
+  2026-08-14: "models like WAN that have more than one model (high and
+  low version) … two diffusion models … just two [stages] … call them
+  high and low … an option that gets turned on in properties and is for
+  all models in that node").** The `High/low pairs` node property
+  (boolean, right-click → Properties, default off) gives EVERY row a
+  `model_N_low` partner socket directly under its `model_N` (the high),
+  and reveals the `models_low` TAIL output — index-aligned with `models`
+  BY CONSTRUCTION, so the pairing can never be maintained by hand. One
+  checkbox per row governs the pair; a toggled-off row lazy-skips BOTH
+  upstreams. Per-slot rules in `execute` (backend always declares both
+  outputs; §8 tail-append): equal lengths pair 1:1, a single low
+  broadcasts across a list-producing high, any other disagreement FAILS
+  the queue naming the slot (a silent clamp is exactly the wrong
+  high+low pairing WAN must never get), and a row with no low wired
+  contributes per-element `ExecutionBlocker`s so only `models_low`'s
+  consumers skip (Resolution's §6.5 precedent). Frontend: lows never
+  match `inputRe` (no checkbox/rename/column entry of their own);
+  socket inserts/moves fix litegraph's positional `target_slot` on every
+  later input (removeInput has built-in fixup, insertion has none);
+  reloads re-seat each low under its high; the `models_low` output is a
+  true tail add/remove with the wired-refusal toast; property-off with a
+  wired low reverts + toasts. CLIP/VAE stay single-output — the owner's
+  spec is models only (WAN shares CLIP/VAE).
 - **Output:** single `IMAGE` declared `OUTPUT_IS_LIST` — emits the ENABLED
   images in slot order; downstream runs once per enabled image (N enabled →
   N runs) via core list execution. A list-producing upstream (e.g. EPS
@@ -1935,6 +1959,20 @@ deletion:
   (`eps_image/nodes_cross.py`) and its tests.
 
 ### §6.10 `EPSCrossSweep` (display: "EPS Run Multiplier") — sweep × pairs, organized
+
+**`model_low` (v0.66.0, WAN pairing):** an optional input + tail output
+WELDED to the model axis — it is a MEMBER of the aligned
+model/clip/label group (never an axis of its own), so run counts are
+untouched: equal length pairs 1:1 by the same index, length 1
+broadcasts, a wired-but-empty list collapses the node, and a
+disagreement fails the queue naming `model_low` through the existing
+v0.49.1 error. In `sweep_mode: multiply` the pair stays welded while
+`vae` crosses against it (each vae runs the SAME high+low pair), and
+the multiply-mode same-origin guard covers it. The `model_low` output
+column indexes exactly like `model`'s; unwired it emits the standard
+per-run blocker. The §6.10 run-count readout mirrors all of this —
+`model_low` participates in zero-collapse/agreement and never changes
+the number (rig-verified: 2 models + 2 lows reads "2 sweep steps").
 
 Display name renamed from "EPS Cross Sweep" in v0.48.4 (owner ask
 2026-08-02; his "EPS Node Multiplier" adjusted to "Run Multiplier" since

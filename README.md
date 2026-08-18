@@ -437,6 +437,14 @@ fan out in slot order — three enabled models means the rest of the workflow
 runs three times, once per model. Built for "try the same prompt across
 several models/VAEs in one queue".
 
+- **WAN-style high/low pairs** (Model Switcher only, since v0.66.0): flip
+  `High/low pairs` on in right-click → Properties and every row gains a
+  `model_N_low` socket under its high model, plus a `models_low` output
+  that stays perfectly index-aligned with `models`. One checkbox still
+  governs the whole pair — toggle a row off and neither model loads. Rows
+  where the two sides' counts disagree fail the queue loudly instead of
+  silently mispairing; a row with no low wired simply skips whatever
+  consumes `models_low`.
 - **Everything the image Switcher does, identically:** growing sockets (wire
   the last one and a new one appears), per-row toggles, Toggle All,
   double-click rename, all-off is valid (queue succeeds, downstream skips).
@@ -735,6 +743,12 @@ source feeding the input **fails the Run with an error naming the miswire**
 always a mistake; the same rule covers `model`/`clip`/`image`/`label`).
 
 
+- **WAN high/low sweeps** (since v0.66.0): wire the Model Switcher's
+  `models` → `model` and `models_low` → `model_low`, and every run carries
+  its high+low pair welded together — `model_low` is never a new axis, so
+  run counts (and the readout) don't change. In `sweep_mode: multiply`
+  each VAE runs the same high+low pair. Mismatched lengths fail the queue
+  naming `model_low`, never a silent wrong pairing.
 - **Why you need it:** ComfyUI's own list pairing ZIPS index-by-index —
   two fanned lists into one sampler give you max(11, 8) = 11 runs, not
   11 × 8. This node is the pack's one true multiplier: sweep group ×

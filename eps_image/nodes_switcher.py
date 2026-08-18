@@ -117,6 +117,18 @@ _IMAGE_INPUT_TOOLTIP = (
     "An image to include when enabled. Toggle it from the row on the node; "
     "when off, nothing upstream of this socket runs at all."
 )
+#: §6.4 WAN high/low pairing (v0.66.0, owner ask 2026-08-14: "models like
+#: WAN that have more than one model (high and low version)"; his spec:
+#: two stages exactly, named high/low, enabled per-node from Properties).
+#: A `model_N_low` slot pairs with `model_N` (the HIGH model); the row's
+#: single toggle governs both.
+_MODEL_LOW_INPUT_PATTERN = re.compile(r"model_(\d+)_low")
+_MODEL_LOW_INPUT_TOOLTIP = (
+    "The LOW-noise partner of this row's model (WAN-style two-stage "
+    "pairs). Appears when the node's 'High/low pairs' property is on; "
+    "the row's one toggle governs both models together."
+)
+
 _MODEL_INPUT_TOOLTIP = (
     "A model to include when enabled. Toggle it from the row on the node; "
     "when off, nothing upstream of this socket runs at all."
@@ -340,7 +352,10 @@ def _slots_fed_by_an_empty_switcher(
 
 
 def _make_flexible_optional_inputs_class(
-    pattern: re.Pattern[str], io_type: str, tooltip: str
+    pattern: re.Pattern[str],
+    io_type: str,
+    tooltip: str,
+    extra_specs: list[tuple[re.Pattern[str], str, str]] | None = None,
 ) -> type[dict]:
     """Build a dict-subclass accepting ANY ``<prefix>_N`` key -- the
     ``optional`` half of a switcher's INPUT_TYPES (FORMAT.md §6.4).
@@ -380,10 +395,22 @@ def _make_flexible_optional_inputs_class(
     frontend JS grows the rest.
     """
 
+    # v0.66.0: a class may accept MORE than one slot shape (the model
+    # switcher's paired `model_N_low` slots ride alongside `model_N`).
+    # `extra_specs` entries are (pattern, io_type, tooltip) checked AFTER
+    # the primary pattern; everything else about the mechanism is
+    # unchanged. fullmatch keeps the shapes disjoint: `model_1_low` can
+    # only ever match its own spec, never slot-1's `model_(\d+)`.
+    extra_specs = extra_specs or []
+
     class _FlexibleOptionalInputs(dict):
         def __contains__(self, key: object) -> bool:
             if isinstance(key, str) and pattern.fullmatch(key):
                 return True
+            if isinstance(key, str):
+                for extra_pattern, _io, _tip in extra_specs:
+                    if extra_pattern.fullmatch(key):
+                        return True
             return super().__contains__(key)
 
         def __getitem__(self, key: str) -> Any:
@@ -391,6 +418,10 @@ def _make_flexible_optional_inputs_class(
                 return super().__getitem__(key)
             if isinstance(key, str) and pattern.fullmatch(key):
                 return (io_type, {"lazy": True, "tooltip": tooltip})
+            if isinstance(key, str):
+                for extra_pattern, extra_io, extra_tip in extra_specs:
+                    if extra_pattern.fullmatch(key):
+                        return (extra_io, {"lazy": True, "tooltip": extra_tip})
             raise KeyError(key)
 
     return _FlexibleOptionalInputs
@@ -421,6 +452,10 @@ def _make_switcher_ns(
     description: str,
     class_doc: str,
     flexible_cls: type[dict] | None = None,
+    low_pattern: re.Pattern[str] | None = None,
+    low_tooltip: str = "",
+    low_output_name: str = "",
+    low_output_tooltip: str = "",
 ) -> type:
     """Build one switcher class (FORMAT.md §6.4 and its MODEL/CLIP/VAE
     generalization). ``EPSSwitcher`` (IMAGE) and its three siblings
@@ -447,7 +482,10 @@ def _make_switcher_ns(
     every other class lets this factory build its own private one.
     """
     if flexible_cls is None:
-        flexible_cls = _make_flexible_optional_inputs_class(pattern, io_type, input_tooltip)
+        extra = [(low_pattern, io_type, low_tooltip)] if low_pattern is not None else None
+        flexible_cls = _make_flexible_optional_inputs_class(
+            pattern, io_type, input_tooltip, extra_specs=extra
+        )
     _SWITCHER_SLOT_PATTERNS[class_id] = pattern
 
     def INPUT_TYPES(cls) -> dict[str, Any]:
@@ -545,11 +583,21 @@ def _make_switcher_ns(
                 log_prefix,
                 ", ".join(sorted(skip)),
             )
-        return [
+        wanted = [
             name
             for index in _connected_slot_indices(kwargs, pattern)
             if (name := f"{prefix}_{index}") not in skip and toggle_map.get(name, True) is not False
         ]
+        if low_pattern is not None:
+            # §6.4 pairing (v0.66.0): a row's LOW slot follows its row's one
+            # toggle (keyed by the HIGH name) -- a disabled row skips both
+            # upstreams, so a toggled-off WAN pair loads neither model.
+            wanted.extend(
+                f"{prefix}_{index}_low"
+                for index in _connected_slot_indices(kwargs, low_pattern)
+                if toggle_map.get(f"{prefix}_{index}", True) is not False
+            )
+        return wanted
 
     def execute(
         self,
@@ -585,15 +633,50 @@ def _make_switcher_ns(
         # the lazy "not resolved" placeholder for a slot that -- because it's
         # disabled -- was never actually requested and so never resolved).
         enabled_values: list[Any] = []
+        low_values: list[Any] = []
+
+        def _flatten(raw: Any) -> list[Any]:
+            if isinstance(raw, (list, tuple)):
+                return [element for element in raw if element is not None]
+            return [raw]
+
         for index in connected:
             key = f"{prefix}_{index}"
             if toggle_map.get(key, True) is False:
                 continue
-            elements = kwargs[key]
-            if isinstance(elements, (list, tuple)):
-                enabled_values.extend(element for element in elements if element is not None)
+            highs = _flatten(kwargs[key])
+            enabled_values.extend(highs)
+            if low_pattern is None:
+                continue
+            # §6.4 WAN pairing (v0.66.0): the low output stays index-aligned
+            # with the high output BY CONSTRUCTION. Per enabled slot: a
+            # wired low pairs 1:1 with that slot's highs, a SINGLE low
+            # broadcasts across them (a list-producing high with one low
+            # partner), any other length disagreement is a MISWIRE and
+            # fails loudly -- a silent clamp here is exactly the wrong
+            # high+low pairing WAN must never get. An unwired low
+            # contributes per-element ExecutionBlockers, so only consumers
+            # of the LOW output are skipped for that row (Resolution's §6.5
+            # per-slot blocker precedent).
+            low_key = f"{key}_low"
+            if low_key in kwargs and kwargs[low_key] is not None:
+                lows = _flatten(kwargs[low_key])
+                if len(lows) == len(highs):
+                    low_values.extend(lows)
+                elif len(lows) == 1 and highs:
+                    low_values.extend(lows * len(highs))
+                else:
+                    raise ValueError(
+                        f"{log_prefix}: row {index} pairs {len(highs)} high "
+                        f"model(s) with {len(lows)} low model(s) -- the two "
+                        "sides of a high/low pair must match (or wire a "
+                        "single low to broadcast). Fix the wiring on "
+                        f"{low_key}."
+                    )
             else:
-                enabled_values.append(elements)
+                from comfy_execution.graph import ExecutionBlocker
+
+                low_values.extend(ExecutionBlocker(None) for _ in highs)
 
         if not enabled_values:
             # FORMAT.md §6.4 "All-off / none-connected is a VALID state"
@@ -643,19 +726,24 @@ def _make_switcher_ns(
             # test_module_never_imports_comfy_or_torch).
             from comfy_execution.graph import ExecutionBlocker
 
-            return ([ExecutionBlocker(None)],)
+            blocked = [ExecutionBlocker(None)]
+            return (blocked, [ExecutionBlocker(None)]) if low_pattern is not None else (blocked,)
 
+        if low_pattern is not None:
+            return (enabled_values, low_values)
         return (enabled_values,)
 
+    paired = low_pattern is not None
     namespace: dict[str, Any] = {
         "__module__": __name__,
         "__doc__": class_doc,
         "CATEGORY": "EPSNodes/Switchers",
-        "RETURN_TYPES": (io_type,),
-        "RETURN_NAMES": (output_name,),
+        # §8: the low output is a TAIL append -- existing wires never move.
+        "RETURN_TYPES": (io_type, io_type) if paired else (io_type,),
+        "RETURN_NAMES": (output_name, low_output_name) if paired else (output_name,),
         "INPUT_IS_LIST": True,
-        "OUTPUT_IS_LIST": (True,),
-        "OUTPUT_TOOLTIPS": (output_tooltip,),
+        "OUTPUT_IS_LIST": (True, True) if paired else (True,),
+        "OUTPUT_TOOLTIPS": (output_tooltip, low_output_tooltip) if paired else (output_tooltip,),
         "FUNCTION": "execute",
         "DESCRIPTION": description,
         "INPUT_TYPES": classmethod(INPUT_TYPES),
@@ -770,6 +858,15 @@ EPSModelSwitcher = _make_switcher_ns(
     output_name="models",
     log_prefix="EPS Model Switcher",
     noun="model",
+    low_pattern=_MODEL_LOW_INPUT_PATTERN,
+    low_tooltip=_MODEL_LOW_INPUT_TOOLTIP,
+    low_output_name="models_low",
+    low_output_tooltip=(
+        "Every enabled row's LOW-noise partner model, index-aligned with "
+        "the models output (WAN-style high/low pairs -- see the 'High/low "
+        "pairs' property). Rows without a low wired contribute a skip for "
+        "this output only."
+    ),
     input_tooltip=_MODEL_INPUT_TOOLTIP,
     output_tooltip=(
         "Every enabled model, in slot order, as a list -- the rest of the "
@@ -785,7 +882,11 @@ EPSModelSwitcher = _make_switcher_ns(
         "state: the queue still succeeds and the downstream branch simply "
         "doesn't run. A value wired further downstream that isn't itself a "
         "list, like a fixed seed, repeats identically across every run "
-        "unless you give it an explicit per-model list."
+        "unless you give it an explicit per-model list. For WAN-style "
+        "two-stage models, turn on the 'High/low pairs' property: every "
+        "row gains a low-model socket, the models_low output stays "
+        "index-aligned with models, and the row's one toggle governs the "
+        "pair."
     ),
     class_doc=_EPS_MODEL_SWITCHER_CLASS_DOC,
 )

@@ -483,13 +483,13 @@ function switcherIsStaticallyAllOff(snapshot, node) {
 
 /** Chained-multiplier OUTPUT slot -> the INPUT that must be wired for that
  * output to carry values, positionally off nodes_cross_sweep.py's
- * RETURN_NAMES ('model','clip','image','text','save_prefix','label','vae')
+ * RETURN_NAMES ('model','clip','image','text','save_prefix','label','vae','model_low')
  * -- text (3) and save_prefix (4) are always live. Consuming any of THESE
  * outputs while the matching input is unwired trips run()'s v0.51.0
  * dead-output ValueError (`_consumed_output_slots` + the dead_outputs
  * block): every run on that wire would be a silent blocker, so the
  * backend fails the queue naming both ends. */
-const DEAD_OUTPUT_INPUTS = { 0: 'model', 1: 'clip', 2: 'image', 5: 'label', 6: 'vae' }
+const DEAD_OUTPUT_INPUTS = { 0: 'model', 1: 'clip', 2: 'image', 5: 'label', 6: 'vae', 7: 'model_low' }
 
 /**
  * How many list elements the node behind *link* emits -- the per-source
@@ -801,7 +801,11 @@ function estimateInner(snapshot, nodeId, path) {
   // (header: BLOCKED/EMPTY PROPAGATION), so its zero/blocked state and
   // its atLeast floor must propagate like every other member's.
   const members = {}
-  for (const name of ['model', 'clip', 'label', 'vae']) {
+  // v0.66.0: model_low is a WELDED member of the model axis (backend
+  // wired_sweep parity) -- it participates in zero-collapse, the aligned
+  // agreement check, and the axis length, and NEVER adds an axis of its
+  // own, so counts stay exactly what they were without it.
+  for (const name of ['model', 'model_low', 'clip', 'label', 'vae']) {
     members[name] = sourceCount(snapshot, inputs[name] ?? null, path)
     if (members[name]?.atLeast) unknowns.add(name)
   }
@@ -861,7 +865,7 @@ function estimateInner(snapshot, nodeId, path) {
     // post-reroute -- exactly what the serialized prompt's link origins
     // resolve to.
     if (sweepMultiply && vae && vae.count > 1 && vae.srcId != null) {
-      for (const name of ['model', 'clip', 'label']) {
+      for (const name of ['model', 'model_low', 'clip', 'label']) {
         const member = members[name]
         if (member && member.srcId != null && member.srcId === vae.srcId) {
           result.error =

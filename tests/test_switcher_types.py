@@ -29,6 +29,27 @@ from pathlib import Path
 
 import pytest
 
+
+@pytest.fixture(autouse=True)
+def _fake_execution_blocker(monkeypatch: pytest.MonkeyPatch):
+    """Autouse since v0.66.0: EPSModelSwitcher's execute now builds
+    per-slot ExecutionBlockers for its models_low output whenever a row has
+    no low wired (the common non-WAN case), so the lazy
+    `comfy_execution.graph` import fires on ordinary executes here too --
+    not just the all-off path. Same fake as test_switcher.py's fixture."""
+
+    class FakeExecutionBlocker:
+        def __init__(self, message: object) -> None:
+            self.message = message
+
+    graph_module = types.ModuleType("comfy_execution.graph")
+    graph_module.ExecutionBlocker = FakeExecutionBlocker
+    package = types.ModuleType("comfy_execution")
+    package.graph = graph_module
+    monkeypatch.setitem(sys.modules, "comfy_execution", package)
+    monkeypatch.setitem(sys.modules, "comfy_execution.graph", graph_module)
+    return FakeExecutionBlocker
+
 from eps_image import nodes_switcher
 from eps_image.nodes_switcher import (
     EPSClipSwitcher,
@@ -171,7 +192,7 @@ class TestExecuteFlattenSemantics:
     ) -> None:
         node = cls()
         result = node.execute(toggles=_toggles(), **{f"{prefix}_1": "a"})
-        assert result == (["a"],)
+        assert result[0] == ["a"]
 
     def test_default_toggles_enables_every_connected_slot(
         self, cls, prefix, io_type, output_name
@@ -180,7 +201,7 @@ class TestExecuteFlattenSemantics:
         # the frontend JS.
         node = cls()
         result = node.execute(**{f"{prefix}_1": "a", f"{prefix}_2": "b"})
-        assert result == (["a", "b"],)
+        assert result[0] == ["a", "b"]
 
     def test_collects_in_ascending_n_regardless_of_kwarg_order(
         self, cls, prefix, io_type, output_name
@@ -190,7 +211,7 @@ class TestExecuteFlattenSemantics:
             toggles=_toggles(),
             **{f"{prefix}_3": "c", f"{prefix}_1": "a", f"{prefix}_2": "b"},
         )
-        assert result == (["a", "b", "c"],)
+        assert result[0] == ["a", "b", "c"]
 
     def test_toggles_key_absent_for_a_slot_keeps_it_enabled(
         self, cls, prefix, io_type, output_name
@@ -199,7 +220,7 @@ class TestExecuteFlattenSemantics:
         node = cls()
         toggles = json.dumps({f"{prefix}_2": False})
         result = node.execute(toggles=toggles, **{f"{prefix}_1": "a", f"{prefix}_2": "b"})
-        assert result == (["a"],)
+        assert result[0] == ["a"]
 
     @pytest.mark.parametrize("falsy", [None, 0, "", [], {}])
     def test_non_bool_falsy_toggle_value_keeps_slot_enabled(
@@ -213,7 +234,7 @@ class TestExecuteFlattenSemantics:
             toggles=toggles,
             **{f"{prefix}_1": "a", f"{prefix}_2": "b", f"{prefix}_3": "c"},
         )
-        assert result == (["a", "b", "c"],)
+        assert result[0] == ["a", "b", "c"]
 
     def test_explicit_boolean_false_is_the_only_disabler(
         self, cls, prefix, io_type, output_name
@@ -223,7 +244,7 @@ class TestExecuteFlattenSemantics:
             toggles=json.dumps({f"{prefix}_2": False}),
             **{f"{prefix}_1": "a", f"{prefix}_2": "b"},
         )
-        assert result == (["a"],)
+        assert result[0] == ["a"]
 
     def test_disconnected_slot_none_is_skipped_even_if_marked_enabled(
         self, cls, prefix, io_type, output_name
@@ -233,7 +254,7 @@ class TestExecuteFlattenSemantics:
             toggles=_toggles(**{f"{prefix}_2": True}),
             **{f"{prefix}_1": "a", f"{prefix}_2": None, f"{prefix}_3": "c"},
         )
-        assert result == (["a", "c"],)
+        assert result[0] == ["a", "c"]
 
     def test_multiple_disabled_slots_all_omitted(self, cls, prefix, io_type, output_name) -> None:
         node = cls()
@@ -246,7 +267,7 @@ class TestExecuteFlattenSemantics:
                 f"{prefix}_4": "d",
             },
         )
-        assert result == (["b", "d"],)
+        assert result[0] == ["b", "d"]
 
     def test_malformed_toggles_json_falls_back_to_all_enabled(
         self, cls, prefix, io_type, output_name
@@ -255,28 +276,28 @@ class TestExecuteFlattenSemantics:
         result = node.execute(
             toggles="not json{{", **{f"{prefix}_1": "a", f"{prefix}_2": "b"}
         )
-        assert result == (["a", "b"],)
+        assert result[0] == ["a", "b"]
 
     def test_toggles_that_is_not_a_json_object_falls_back_to_all_enabled(
         self, cls, prefix, io_type, output_name
     ) -> None:
         node = cls()
         result = node.execute(toggles="[1, 2, 3]", **{f"{prefix}_1": "a"})
-        assert result == (["a"],)
+        assert result[0] == ["a"]
 
     def test_list_wrapped_toggles_is_unwrapped(self, cls, prefix, io_type, output_name) -> None:
         # INPUT_IS_LIST shape: real ComfyUI wraps every input, `toggles`
         # included, in a list.
         node = cls()
         result = node.execute(toggles=[_toggles()], **{f"{prefix}_1": ["a"]})
-        assert result == (["a"],)
+        assert result[0] == ["a"]
 
     def test_empty_list_toggles_falls_back_to_default(
         self, cls, prefix, io_type, output_name
     ) -> None:
         node = cls()
         result = node.execute(toggles=[], **{f"{prefix}_1": ["a"]})
-        assert result == (["a"],)
+        assert result[0] == ["a"]
 
     def test_list_producing_upstream_merges_element_wise(
         self, cls, prefix, io_type, output_name
@@ -290,7 +311,7 @@ class TestExecuteFlattenSemantics:
             toggles=[_toggles()],
             **{f"{prefix}_1": ["x0", "x1", "x2"], f"{prefix}_2": ["y0"]},
         )
-        assert result == (["x0", "x1", "x2", "y0"],)
+        assert result[0] == ["x0", "x1", "x2", "y0"]
 
     def test_disabled_list_shaped_slot_contributes_nothing(
         self, cls, prefix, io_type, output_name
@@ -300,7 +321,7 @@ class TestExecuteFlattenSemantics:
             toggles=[_toggles(**{f"{prefix}_1": False})],
             **{f"{prefix}_1": ["x0", "x1"], f"{prefix}_2": ["y0"]},
         )
-        assert result == (["y0"],)
+        assert result[0] == ["y0"]
 
     def test_flatten_preserves_slot_order_and_intra_slot_order(
         self, cls, prefix, io_type, output_name
@@ -314,7 +335,7 @@ class TestExecuteFlattenSemantics:
                 f"{prefix}_2": ["b0"],
             },
         )
-        assert result == (["a0", "a1", "a2", "b0", "c0", "c1"],)
+        assert result[0] == ["a0", "a1", "a2", "b0", "c0", "c1"]
 
     def test_single_element_list_batch_stays_one_output_element(
         self, cls, prefix, io_type, output_name
@@ -322,21 +343,21 @@ class TestExecuteFlattenSemantics:
         node = cls()
         batch_stand_in = object()
         result = node.execute(toggles=[_toggles()], **{f"{prefix}_1": [batch_stand_in]})
-        assert result == ([batch_stand_in],)
+        assert result[0] == [batch_stand_in]
 
     def test_none_elements_within_a_resolved_list_are_skipped(
         self, cls, prefix, io_type, output_name
     ) -> None:
         node = cls()
         result = node.execute(toggles=[_toggles()], **{f"{prefix}_1": ["x0", None, "x2"]})
-        assert result == (["x0", "x2"],)
+        assert result[0] == ["x0", "x2"]
 
     def test_bare_non_list_value_is_tolerated_as_one_element(
         self, cls, prefix, io_type, output_name
     ) -> None:
         node = cls()
         result = node.execute(toggles=_toggles(), **{f"{prefix}_1": "plain_stand_in"})
-        assert result == (["plain_stand_in"],)
+        assert result[0] == ["plain_stand_in"]
 
 
 # --------------------------------------------------------------- all-off
@@ -349,7 +370,8 @@ class TestAllOffOrNoneConnectedReturnsAnExecutionBlocker:
     ) -> None:
         node = cls()
         result = node.execute(toggles=_toggles())
-        assert isinstance(result, tuple) and len(result) == 1
+        expected_arity = 2 if cls is nodes_switcher.EPSModelSwitcher else 1
+        assert isinstance(result, tuple) and len(result) == expected_arity
         assert isinstance(result[0], list) and len(result[0]) == 1
         blocker = result[0][0]
         assert isinstance(blocker, fake_execution_blocker)
@@ -604,7 +626,7 @@ class TestEmptySiblingSkipAcrossClassTypes:
         result = cls().execute(
             toggles=["{}"], **{f"{prefix}_1": (None,), f"{prefix}_2": ["live"]}
         )
-        assert result == (["live"],)
+        assert result[0] == ["live"]
 
 
 # --------------------------------------------------------- class shape / spec
@@ -616,11 +638,20 @@ class TestClassShape:
         assert cls.CATEGORY == "EPSNodes/Switchers"
 
     def test_return_types_and_names(self, cls, prefix, io_type, output_name) -> None:
-        assert (io_type,) == cls.RETURN_TYPES
-        assert (output_name,) == cls.RETURN_NAMES
+        # v0.66.0: the MODEL class carries the WAN high/low paired tail
+        # output; CLIP/VAE stay single-output (owner spec: models only).
+        if cls is nodes_switcher.EPSModelSwitcher:
+            assert (io_type, io_type) == cls.RETURN_TYPES
+        else:
+            assert (io_type,) == cls.RETURN_TYPES
+        if cls is nodes_switcher.EPSModelSwitcher:
+            assert (output_name, "models_low") == cls.RETURN_NAMES
+        else:
+            assert (output_name,) == cls.RETURN_NAMES
 
     def test_output_is_list_flagged_true(self, cls, prefix, io_type, output_name) -> None:
-        assert cls.OUTPUT_IS_LIST == (True,)
+        expected = (True, True) if cls is nodes_switcher.EPSModelSwitcher else (True,)
+        assert expected == cls.OUTPUT_IS_LIST
 
     def test_input_is_list_flagged_true(self, cls, prefix, io_type, output_name) -> None:
         assert cls.INPUT_IS_LIST is True
@@ -641,7 +672,7 @@ class TestClassShape:
     ) -> None:
         result = cls().execute(toggles=_toggles(), **{f"{prefix}_1": "a"})
         assert isinstance(result, tuple)
-        assert len(result) == 1
+        assert len(result) == (2 if cls is nodes_switcher.EPSModelSwitcher else 1)
         assert isinstance(result[0], list)
 
     def test_hidden_inputs_declared(self, cls, prefix, io_type, output_name) -> None:
@@ -649,7 +680,9 @@ class TestClassShape:
         assert spec["hidden"] == {"prompt": "PROMPT", "unique_id": "UNIQUE_ID"}
 
     def test_output_tooltips_present(self, cls, prefix, io_type, output_name) -> None:
-        assert (cls.OUTPUT_TOOLTIPS[0],) == cls.OUTPUT_TOOLTIPS
+        expected_len = 2 if cls is nodes_switcher.EPSModelSwitcher else 1
+        assert len(cls.OUTPUT_TOOLTIPS) == expected_len
+        assert all(isinstance(tip, str) and tip for tip in cls.OUTPUT_TOOLTIPS)
         assert isinstance(cls.OUTPUT_TOOLTIPS[0], str) and cls.OUTPUT_TOOLTIPS[0]
 
     def test_classes_are_distinct_objects(self, cls, prefix, io_type, output_name) -> None:

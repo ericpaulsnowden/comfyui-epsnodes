@@ -680,3 +680,114 @@ class TestHiddenInputsDeclared:
     def test_prompt_and_unique_id_are_declared_hidden(self) -> None:
         spec = EPSSwitcher.INPUT_TYPES()
         assert spec["hidden"] == {"prompt": "PROMPT", "unique_id": "UNIQUE_ID"}
+
+
+EPSModelSwitcher = nodes_switcher.EPSModelSwitcher
+EPSClipSwitcher = nodes_switcher.EPSClipSwitcher
+EPSVaeSwitcher = nodes_switcher.EPSVaeSwitcher
+
+
+class TestModelHighLowPairsV0660:
+    """§6.4 WAN pairing (v0.66.0, owner: "models like WAN that have more
+    than one model (high and low version)"; two stages exactly, named
+    high/low, one row toggle governing both)."""
+
+    def _node(self):
+        return EPSModelSwitcher()
+
+    def test_model_switcher_declares_the_low_tail_output(self) -> None:
+        assert EPSModelSwitcher.RETURN_TYPES == ("MODEL", "MODEL")
+        assert EPSModelSwitcher.RETURN_NAMES == ("models", "models_low")
+        assert EPSModelSwitcher.OUTPUT_IS_LIST == (True, True)
+        # ...and the sibling classes are untouched single-output nodes.
+        assert EPSClipSwitcher.RETURN_TYPES == ("CLIP",)
+        assert EPSVaeSwitcher.RETURN_TYPES == ("VAE",)
+
+    def test_input_types_accepts_low_slots(self) -> None:
+        optional = EPSModelSwitcher.INPUT_TYPES()["optional"]
+        assert "model_3_low" in optional
+        io_type, options = optional["model_3_low"]
+        assert io_type == "MODEL"
+        assert options["lazy"] is True
+        assert "LOW-noise" in options["tooltip"]
+        # the high pattern never swallows a low name
+        assert "model_3" in optional
+
+    def test_paired_rows_stay_index_aligned(self, fake_execution_blocker) -> None:
+        node = self._node()
+        highs, lows = node.execute(
+            toggles=["{}"],
+            model_1=["high-A"],
+            model_1_low=["low-A"],
+            model_2=["high-B"],
+            model_2_low=["low-B"],
+        )
+        assert highs == ["high-A", "high-B"]
+        assert lows == ["low-A", "low-B"]
+
+    def test_row_toggle_governs_both_and_lazy_skips_both(self, fake_execution_blocker) -> None:
+        node = self._node()
+        toggles = ['{"model_1": false}']
+        highs, lows = node.execute(
+            toggles=toggles,
+            model_1=["high-A"],
+            model_1_low=["low-A"],
+            model_2=["high-B"],
+            model_2_low=["low-B"],
+        )
+        assert highs == ["high-B"]
+        assert lows == ["low-B"]
+        wanted = node.check_lazy_status(
+            toggles=toggles,
+            model_1=[None],
+            model_1_low=[None],
+            model_2=[None],
+            model_2_low=[None],
+        )
+        assert "model_1" not in wanted and "model_1_low" not in wanted
+        assert "model_2" in wanted and "model_2_low" in wanted
+
+    def test_missing_low_blocks_only_the_low_output(self, fake_execution_blocker) -> None:
+        from comfy_execution.graph import ExecutionBlocker
+
+        node = self._node()
+        highs, lows = node.execute(
+            toggles=["{}"],
+            model_1=["high-A"],  # no low wired on this row
+            model_2=["high-B"],
+            model_2_low=["low-B"],
+        )
+        assert highs == ["high-A", "high-B"]
+        assert isinstance(lows[0], ExecutionBlocker)
+        assert lows[1] == "low-B"
+
+    def test_single_low_broadcasts_across_a_list_producing_high(
+        self, fake_execution_blocker
+    ) -> None:
+        node = self._node()
+        highs, lows = node.execute(
+            toggles=["{}"],
+            model_1=["h1", "h2", "h3"],
+            model_1_low=["lo"],
+        )
+        assert highs == ["h1", "h2", "h3"]
+        assert lows == ["lo", "lo", "lo"]
+
+    def test_length_disagreement_fails_loudly_naming_the_slot(
+        self, fake_execution_blocker
+    ) -> None:
+        node = self._node()
+        with pytest.raises(ValueError, match=r"model_1_low"):
+            node.execute(
+                toggles=["{}"],
+                model_1=["h1", "h2", "h3"],
+                model_1_low=["l1", "l2"],
+            )
+
+    def test_all_off_blocks_both_outputs(self, fake_execution_blocker) -> None:
+        from comfy_execution.graph import ExecutionBlocker
+
+        node = self._node()
+        highs, lows = node.execute(toggles=['{"model_1": false}'], model_1=["high-A"])
+        assert isinstance(highs[0], ExecutionBlocker)
+        assert isinstance(lows[0], ExecutionBlocker)
