@@ -83,7 +83,7 @@ Core's own `prompt` chunk stays for compatibility.
 
 ## Milestones
 
-### M1 — Run tokens + solo (independently useful: identifiable files, manual re-run)
+### M1 — Run tokens + solo (independently useful: identifiable files, manual re-run) — SHIPPED v0.67.0 (2026-08-18)
 - Multiplier: token computation; `save_prefix` gains the token as the pair
   component's suffix (or dedicated `run_token` STRING output — decide at
   build time by testing what reads best in folder trees); `set_id` per
