@@ -293,6 +293,35 @@ distinct set), a state may store per-loader configs. Format 2 ADDS a
   → `-`; strip everything outside `[a-z0-9-_]`; collision → `-2`, `-3`, …).
   `name` is the display name and may be any string.
 
+### §4.2 Sets layout — groups + display order (v0.65.0)
+
+Owner ask 2026-08-14: the controller's left pane gets the Notebook's
+grouping — "add a # to the left row and create groups … same drag and
+drop". One JSON file, `lora_sets_layout.json`, directly inside
+`library_dir` (a sibling of `lora_picker.json`, deliberately NOT inside
+`sets_dir` — `list_sets` globs `*.json` there and would warn about it on
+every listing):
+
+```json
+{ "categories": ["Portraits", "Styles"],
+  "order": { "": ["slug-a"], "Portraits": ["slug-b", "slug-c"] } }
+```
+
+- **Set files (§4) never change shape.** The layout is a pure sidecar: an
+  older build neither reads nor writes it, so a downgrade loses nothing —
+  the same reasoning that keeps picker favorites out of workflow files.
+- **Self-healing on every read/write** (the picker `favorites_order`
+  posture): unknown slugs are dropped, duplicate slugs keep their first
+  appearance, and sets missing from the layout append (name-sorted) to the
+  UNCATEGORIZED (`""`) tail — so a set saved on another machine, or by an
+  older build, always shows up rather than vanishing from the pane.
+- Uncategorized entries render BEFORE any category header (the Notebook's
+  rule for entries above the first `#` heading). Empty categories persist.
+- Two machines' concurrent writes are an accepted read-modify-write race
+  that heals on the next write (the picker store's documented posture).
+- Collapse state is per-browser view state — never in this file, never in
+  the workflow.
+
 ## §5 HTTP routes
 
 All under `/lora_library/`, JSON in/out; errors are `{"error": "<human
@@ -319,6 +348,8 @@ message>"}` with a 4xx status. `mtime` values are float POSIX seconds.
 | `GET /lora_library/set?slug=` | the full §4 JSON + `"slug"` |
 | `POST /lora_library/set` `{"slug"?, "set": {…}}` | save (slug derived from `set.name` when absent); `{"ok","slug","sets"}` |
 | `POST /lora_library/set/delete` `{"slug"}` | `{"ok","sets"}` |
+| `GET /lora_library/sets_layout` | §4.2: `{"layout": {"categories", "order"}}`, HEALED against the sets on disk. No loopback gate — the file lives inside `library_dir` (§2 grants remote read+write; the picker feed's rationale) |
+| `POST /lora_library/sets_layout` `{"layout"}` | §4.2 full replace; body normalized + healed server-side (unknown slugs dropped, missing sets appended uncategorized), so a stale client can never vanish a set. → `{"ok","layout"}`; 400 non-JSON body / non-object layout |
 | `GET /lora_library/picker` | §6.13 panel feed: `{"loras": [installed spellings, `get_filename_list("loras")` order], "previews": [subset of `loras` with a sidecar preview image — v0.61.2, computed with one directory listing per unique folder, case-insensitive name match; the panel builds a thumbnail `<img>` ONLY for these, so no-preview rows never fire a 404 probe or paint a placeholder (owner jank report 2026-08-14)], "favorites": [forward-slash names, store order], "recents": [{"file","ts"} newest first], "mtime": float\|null}`. NO loopback gate — the picker file lives inside `library_dir`, which §2 already grants remote read+write (the presets-routes rationale verbatim; the lora LIST is the same one `/object_info` exposes to every viewer) |
 | `POST /lora_library/picker/favorite` `{"file","on"}` | star/unstar one lora (name normalized to forward slashes in the store). `file` non-empty string, `on` bool, else 400. NOT required to be installed — unstarring a favorite that only exists on the other machine must work. → `{"ok","favorites","mtime"}` |
 | `POST /lora_library/picker/recent` `{"files": [..]}` | record used loras: each moves to the FRONT of `recents` (dedup by file, fresh server-stamped `ts`), list capped at 30. Empty list = no-op 200. Non-list / non-string entry ⇒ 400. → `{"ok","recents","mtime"}` |
@@ -663,6 +694,36 @@ queue. It drives a **genuine, untouched `Power Lora Loader (rgthree)`**:
   (`api.walkGraphs`) — a subgraph's `onNodeAdded` fires only on the
   subgraph itself — re-armed on each refresh so a newly created
   subgraph is watched before anything happens inside it.
+  **GROUPS in the left pane (§4.2, v0.65.0 — owner: "the same ability to
+  add a # to the left row and create groups as the lora notebooks. Same
+  drag and drop etc."):** a `#`-prefixed name in the `name` field turns
+  New State into New GROUP (the Notebook's exact New-button contract;
+  `isCategoryNameInput`/`categoryNameFromInput` duplicated by hand). The
+  pane renders uncategorized rows first, then each group's header +
+  rows, from the §4.2 layout merged with the sets cache (layout-only
+  slugs skipped, cache-only sets appended ungrouped). Headers: tap =
+  collapse toggle (▸ + count when collapsed; per-browser state), drag =
+  move the whole group, hover ✕ = armed two-click GROUP remove (its
+  states move to ungrouped — a state is never deleted from a header).
+  Rows: the Notebook's pointerdown machinery verbatim — movement under
+  STATE_DRAG_THRESHOLD_PX stays a click and lands in `_onSetPicked()`
+  (select-vs-apply untouched); a real drag reorders/moves with the same
+  nearest-midpoint drop geometry, headers meaning "append to this
+  group". CAPTURE-phase window listeners (the 2026-07-30 Vue lesson).
+  Every drop is a client-side layout edit + one full-replace POST; the
+  server's HEALED response replaces the cache, and a failed save
+  refetches so the pane snaps back to stored truth. `New State`
+  (captureBtn) left the probe-driven disable loop for this — group
+  creation must work with no loader in the graph; `_doCapture()` already
+  probes first and toasts (the picker Send button's blocked-not-disabled
+  precedent).
+  **The `set` combo displays NAMES (v0.65.0, owner report: a pushed
+  state showed as "state-1"):** sets.js installs ComboWidget's own
+  `options.getOptionLabel` (frontend source: it drives both the
+  on-canvas text and the dropdown rows) mapping slug → display name from
+  the same feed the values come from; the VALUE stays the slug — that is
+  what the API prompt executes — and an unknown slug falls back to
+  itself, never blank.
   Buttons (stacked in the RIGHT
   pane, Delete LAST — owner ask 2026-07-22): `New State`, `Save State`,
   `Push State` (broadcast to all EPS Apply LoRA Set nodes), `Delete State`

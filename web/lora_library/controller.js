@@ -840,6 +840,69 @@ const MSG_NO_TARGET_IN_GRAPH =
 const MSG_NO_TARGET_SELECTED = 'Pick a target loader node above.'
 const MSG_PICKER_DRIFT = 'EPS LoRA Picker internals changed — controller disabled (v-check)'
 
+// ----------------------------------------------------- §4.2 layout helpers
+// (v0.65.0, owner ask 2026-08-14: "the same ability to add a # to the left
+// row and create groups as the lora notebooks. Same drag and drop etc.")
+
+const LAYOUT_ROUTE = '/lora_library/sets_layout'
+const UNCATEGORIZED = ''
+//: notebook.js's DRAG_THRESHOLD_PX twin -- same feel, same reason.
+const STATE_DRAG_THRESHOLD_PX = 4
+const CATEGORY_DELETE_CONFIRM_MS = 4000
+
+/** notebook.js's isCategoryNameInput/categoryNameFromInput, verbatim by
+ * hand (no cross-module import -- the two files' standing convention). */
+function isCategoryNameInput(rawName) {
+  return (rawName || '').trim().startsWith('#')
+}
+function categoryNameFromInput(rawName) {
+  return (rawName || '').trim().replace(/^#+\s*/, '').trim()
+}
+
+/** A structurally-sound client copy of the §4.2 layout -- categories
+ * unique + non-empty, every category (and UNCATEGORIZED) has an order
+ * list. The SERVER's healing (drop unknown slugs, append missing sets)
+ * stays authoritative; this only keeps local mutations well-formed. */
+function normalizeLayoutClient(raw) {
+  const categories = []
+  const order = {}
+  if (raw && typeof raw === 'object') {
+    for (const entry of Array.isArray(raw.categories) ? raw.categories : []) {
+      if (typeof entry !== 'string') continue
+      const name = entry.trim()
+      if (name && !categories.includes(name)) categories.push(name)
+    }
+    if (raw.order && typeof raw.order === 'object') {
+      for (const [key, slugs] of Object.entries(raw.order)) {
+        if (typeof key !== 'string' || !Array.isArray(slugs)) continue
+        const name = key.trim()
+        if (name && !categories.includes(name)) categories.push(name)
+        order[name] = slugs.filter((s) => typeof s === 'string')
+      }
+    }
+  }
+  for (const name of categories) if (!order[name]) order[name] = []
+  if (!order[UNCATEGORIZED]) order[UNCATEGORIZED] = []
+  return { categories, order }
+}
+
+/** Remove *slug* from every order list of *layout* (the first half of any
+ * move -- a slug lives in exactly one list at a time). */
+function pullSlugFromLayout(layout, slug) {
+  for (const key of Object.keys(layout.order)) {
+    layout.order[key] = layout.order[key].filter((s) => s !== slug)
+  }
+}
+
+/** Which category's order list currently holds *slug* (UNCATEGORIZED when
+ * none -- an unlisted slug renders in the uncategorized tail). */
+function categoryOfSlug(layout, slug) {
+  for (const [key, slugs] of Object.entries(layout.order)) {
+    if (slugs.includes(slug)) return key
+  }
+  return UNCATEGORIZED
+}
+
 // ------------------------------------------------------- pure graph helpers
 // (No `this` — these only ever read/write a passed-in node, so probe/capture/
 // apply can be reasoned about and, if needed, exercised independently of the
@@ -1822,6 +1885,42 @@ const STATE_PANE_CSS_TEXT = `
   border-left-color: rgba(66, 133, 244, 1);
   font-weight: 600;
 }
+.llsc-category {
+  padding: 4px 6px 2px;
+  margin-top: 4px;
+  font-size: 9.5px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--descrip-text, #999);
+  user-select: none;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  cursor: pointer;
+  border-radius: 3px;
+  outline: none;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.llsc-category:hover { background: var(--content-hover-bg, #2a2a2a); }
+.llsc-category:focus-visible { box-shadow: inset 0 0 0 1px var(--border-color, #444); }
+.llsc-category-label { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.llsc-category-delete {
+  flex: 0 0 auto; background: none; border: none; cursor: pointer; padding: 0 2px;
+  color: var(--descrip-text, #999); font-size: 10px; line-height: 1; font-family: inherit;
+  visibility: hidden;
+}
+.llsc-category:hover .llsc-category-delete { visibility: visible; }
+.llsc-category-delete-armed { color: #ff6b6b; visibility: visible; }
+.llsc-row-dragging { opacity: 0.4; }
+.llsc-drag-marker {
+  height: 2px;
+  margin: 3px 4px;
+  border-radius: 1px;
+  background: rgba(66, 133, 244, 0.9);
+}
 .llsc-empty {
   padding: 6px 7px;
   color: var(--descrip-text, #999);
@@ -2014,6 +2113,11 @@ export function registerControllerNode() {
         // litegraph widgets) since these are plain DOM nodes.
         this._pane = null
         this._setsCache = []
+        // §4.2 (v0.65.0): categories + display order for the left pane --
+        // server-healed, cached here; collapse is per-browser view state.
+        this._layoutCache = normalizeLayoutClient(null)
+        this._collapsedCategories = new Set()
+        this._stateDrag = null
         this._lastProbe = null
         this._lastStatusMessage = ''
         this._lastHeartbeat = 0
@@ -2304,7 +2408,12 @@ export function registerControllerNode() {
             'selected state, so they all switch together. Works even with no ' +
             'Power Lora Loader in the graph.'
         )
-        this._actionButtons = [this._w.captureBtn, this._w.updateBtn, this._w.deleteBtn]
+        // v0.65.0: captureBtn left OUT of the probe-driven disable loop --
+        // `#`-named group creation is pure layout and must work with no
+        // loader in the graph, and `_doCapture()` already probes first and
+        // toasts (the picker Send button's blocked-not-disabled precedent:
+        // a disabled button could never run the click-time re-check).
+        this._actionButtons = [this._w.updateBtn, this._w.deleteBtn]
 
         // 2026-07-22 (owner ask): Delete moved LAST — New State / Save State
         // / Push State / Delete State. Pure visual reorder of this array
@@ -2356,6 +2465,49 @@ export function registerControllerNode() {
        * Delete auto-select, and the initial paint once the first
        * `_refreshSetsCache()` resolves after a workflow load).
        */
+      /**
+       * §4.2 (v0.65.0): the render plan -- uncategorized entries first (the
+       * Notebook's rule for entries above the first `#` heading), then each
+       * group's header + entries in layout order. A slug the layout names
+       * but the sets cache doesn't know is skipped (a just-deleted set the
+       * layout hasn't healed past yet); a cached set no layout list names
+       * appends to the uncategorized tail (a just-captured set before the
+       * layout refetch).
+       */
+      _groupedRows() {
+        const bySlug = new Map(this._setsCache.map((entry) => [entry.slug, entry]))
+        const placed = new Set()
+        const rows = []
+        const pushEntries = (slugs) => {
+          for (const slug of slugs) {
+            const entry = bySlug.get(slug)
+            if (!entry || placed.has(slug)) continue
+            placed.add(slug)
+            rows.push({ kind: 'entry', entry })
+          }
+        }
+        pushEntries(this._layoutCache.order[UNCATEGORIZED] || [])
+        const leftovers = this._setsCache.filter((entry) => {
+          if (placed.has(entry.slug)) return false
+          return !this._layoutCache.categories.some((c) =>
+            (this._layoutCache.order[c] || []).includes(entry.slug)
+          )
+        })
+        for (const entry of leftovers) {
+          placed.add(entry.slug)
+          rows.push({ kind: 'entry', entry })
+        }
+        for (const category of this._layoutCache.categories) {
+          rows.push({ kind: 'header', category })
+          if (!this._collapsedCategories.has(category)) {
+            pushEntries(this._layoutCache.order[category] || [])
+          } else {
+            for (const slug of this._layoutCache.order[category] || []) placed.add(slug)
+          }
+        }
+        return rows
+      }
+
       _renderStateList() {
         const listEl = this._pane?.listEl
         if (!listEl) return
@@ -2371,14 +2523,24 @@ export function registerControllerNode() {
         const focused = document.activeElement
         const focusedSlug = focused && listEl.contains(focused) ? focused.getAttribute('data-slug') : null
         listEl.replaceChildren()
+        // Drag hit-testing reads THIS array, rebuilt every render — the
+        // Notebook's `state.dragRows` twin.
+        this._pane.dragRows = []
 
-        if (!this._setsCache.length) {
+        if (!this._setsCache.length && !this._layoutCache.categories.length) {
           listEl.append(el('div', { className: 'llsc-empty', text: PLACEHOLDER_NO_SETS }))
           return
         }
 
         const selected = this._selectedSetEntry()
-        for (const entry of this._setsCache) {
+        for (const planRow of this._groupedRows()) {
+          if (planRow.kind === 'header') {
+            const header = this._buildCategoryHeader(planRow.category)
+            listEl.append(header)
+            this._pane.dragRows.push({ kind: 'header', category: planRow.category, el: header })
+            continue
+          }
+          const entry = planRow.entry
           const active = !!selected && entry.slug === selected.slug
           const row = el('div', {
             className: active ? 'llsc-row llsc-row-active' : 'llsc-row',
@@ -2387,21 +2549,311 @@ export function registerControllerNode() {
           })
           // FORMAT.md §6.3 select-vs-apply split (2026-07-21b): a click only
           // SELECTS this row — unless it is already the current selection,
-          // in which case it APPLIES. Both steps live in `_onSetPicked()`,
-          // which branches on the current selection; see its doc comment
-          // for why ONE plain `click` listener (no `dblclick`) covers
-          // single-click select, double-click apply, AND click-the-already-
-          // highlighted-row apply. Still zero litegraph widget internals —
-          // the 2026-07-21 version-proofing argument holds unchanged.
-          row.addEventListener('click', () => this._onSetPicked(entry.label))
+          // in which case it APPLIES. Since v0.65.0 the click is DECIDED by
+          // the drag machinery (pointerdown + movement threshold, the
+          // Notebook's onEntryPointerDown): a press that never travels
+          // STATE_DRAG_THRESHOLD_PX is a click and lands in
+          // `_onSetPicked()` exactly as before; one that does travel is a
+          // reorder drag. Still zero litegraph widget internals.
+          row.addEventListener('pointerdown', (event) =>
+            this._onStateRowPointerDown(event, { kind: 'entry', entry, el: row })
+          )
           row.addEventListener('keydown', (event) => {
             if (event.key !== 'Enter' && event.key !== ' ') return
             event.preventDefault()
             this._onSetPicked(entry.label)
           })
           listEl.append(row)
+          this._pane.dragRows.push({ kind: 'entry', slug: entry.slug, label: entry.label, el: row })
           if (focusedSlug && entry.slug === focusedSlug) row.focus({ preventScroll: true })
         }
+      }
+
+      /** One group header: collapse caret + name (+ count when collapsed),
+       * an armed two-click ✕ that deletes the GROUP only (its states move
+       * to uncategorized — a state is never deleted from here), drag
+       * source for whole-group reordering, tap = collapse toggle. */
+      _buildCategoryHeader(category) {
+        const collapsed = this._collapsedCategories.has(category)
+        const count = (this._layoutCache.order[category] || []).length
+        const label = el('span', {
+          className: 'llsc-category-label',
+          text: `${collapsed ? '▸' : '▾'} ${category}${collapsed ? ` (${count})` : ''}`
+        })
+        const deleteBtn = el('button', {
+          className: 'llsc-category-delete',
+          text: '✕',
+          attrs: { title: 'Remove this group — its states move to the ungrouped list. Click twice.' }
+        })
+        deleteBtn.addEventListener('click', (event) => {
+          event.stopPropagation()
+          if (!deleteBtn._armed) {
+            deleteBtn._armed = true
+            deleteBtn.classList.add('llsc-category-delete-armed')
+            deleteBtn.textContent = 'sure?'
+            clearTimeout(deleteBtn._armTimer)
+            deleteBtn._armTimer = setTimeout(() => {
+              deleteBtn._armed = false
+              deleteBtn.classList.remove('llsc-category-delete-armed')
+              deleteBtn.textContent = '✕'
+            }, CATEGORY_DELETE_CONFIRM_MS)
+            return
+          }
+          clearTimeout(deleteBtn._armTimer)
+          this._guarded('delete group', () => this._deleteCategory(category))
+        })
+        const header = el(
+          'div',
+          {
+            className: 'llsc-category',
+            attrs: { tabindex: '0', title: category, 'data-category': category }
+          },
+          [label, deleteBtn]
+        )
+        header.addEventListener('pointerdown', (event) => {
+          if (event.target === deleteBtn) return
+          this._onStateRowPointerDown(event, { kind: 'header', category, el: header })
+        })
+        header.addEventListener('keydown', (event) => {
+          if (event.key !== 'Enter' && event.key !== ' ') return
+          event.preventDefault()
+          this._toggleCategoryCollapsed(category)
+        })
+        return header
+      }
+
+      _toggleCategoryCollapsed(category) {
+        if (this._collapsedCategories.has(category)) this._collapsedCategories.delete(category)
+        else this._collapsedCategories.add(category)
+        this._renderStateList()
+      }
+
+      _deleteCategory(category) {
+        const layout = this._layoutCache
+        const orphans = layout.order[category] || []
+        layout.order[UNCATEGORIZED] = [...(layout.order[UNCATEGORIZED] || []), ...orphans]
+        delete layout.order[category]
+        layout.categories = layout.categories.filter((c) => c !== category)
+        this._collapsedCategories.delete(category)
+        this._setStatusText(`Group "${category}" removed — its states are ungrouped.`)
+        this._saveLayout().catch((error) => api.warn(`${NODE_TITLE}: group delete failed`, error))
+      }
+
+      /**
+       * §4.2 drag-to-reorder — notebook.js's onEntryPointerDown adapted
+       * function-for-function: pointerdown + STATE_DRAG_THRESHOLD_PX
+       * decides click-vs-drag; CAPTURE-phase window listeners (the
+       * 2026-07-30 Vue-renderer lesson: bubble-phase listeners never fire
+       * there); a header is both a drop target (append to that group) and
+       * a drag source (move the whole group). No multiselect — the
+       * controller selects exactly one state, so every drag moves one row.
+       */
+      _onStateRowPointerDown(event, source) {
+        if (event.button !== 0) return
+        this._disarmDeleteButton()
+        const drag = {
+          kind: source.kind,
+          pointerId: event.pointerId,
+          slug: source.kind === 'entry' ? source.entry.slug : null,
+          label: source.kind === 'entry' ? source.entry.label : null,
+          category: source.kind === 'header' ? source.category : null,
+          startX: event.clientX,
+          startY: event.clientY,
+          active: false,
+          rowEl: source.el,
+          marker: null,
+          target: null
+        }
+        this._stateDrag = drag
+
+        const onMove = (moveEvent) => {
+          if (moveEvent.pointerId !== drag.pointerId) return
+          if (!drag.active) {
+            const dx = moveEvent.clientX - drag.startX
+            const dy = moveEvent.clientY - drag.startY
+            if (Math.hypot(dx, dy) < STATE_DRAG_THRESHOLD_PX) return
+            drag.active = true
+            try {
+              drag.rowEl.setPointerCapture(drag.pointerId)
+            } catch {
+              // Best-effort — the window-level listeners cover it either way.
+            }
+            drag.rowEl.classList.add('llsc-row-dragging')
+            drag.marker = el('div', { className: 'llsc-drag-marker' })
+          }
+          drag.target =
+            drag.kind === 'header'
+              ? this._computeCategoryDropTarget(moveEvent.clientY, drag.category)
+              : this._computeStateDropTarget(moveEvent.clientY, drag.slug)
+          drag.marker.remove()
+          if (drag.target) {
+            if (drag.target.kind === 'before') drag.target.markerBeforeEl.before(drag.marker)
+            else drag.target.markerAfterEl.after(drag.marker)
+          }
+        }
+        const endVisuals = () => {
+          try {
+            drag.rowEl.releasePointerCapture(drag.pointerId)
+          } catch {
+            // Already released, or never captured.
+          }
+          drag.rowEl.classList.remove('llsc-row-dragging')
+          drag.marker?.remove()
+        }
+        const onUp = (upEvent) => {
+          if (upEvent.pointerId !== drag.pointerId) return
+          detach()
+          if (drag.active) {
+            endVisuals()
+            this._guarded('state drag drop', () => this._finishStateDrag(drag))
+          } else if (drag.kind === 'entry') {
+            this._guarded('state row click', () => this._onSetPicked(drag.label))
+          } else {
+            this._guarded('group collapse', () => this._toggleCategoryCollapsed(drag.category))
+          }
+          this._stateDrag = null
+        }
+        const onCancel = (cancelEvent) => {
+          if (cancelEvent.pointerId !== drag.pointerId) return
+          detach()
+          if (drag.active) endVisuals()
+          this._stateDrag = null
+        }
+        function detach() {
+          window.removeEventListener('pointermove', onMove, { capture: true })
+          window.removeEventListener('pointerup', onUp, { capture: true })
+          window.removeEventListener('pointercancel', onCancel, { capture: true })
+        }
+        drag.cleanup = () => {
+          detach()
+          if (drag.active) endVisuals()
+        }
+        window.addEventListener('pointermove', onMove, { capture: true })
+        window.addEventListener('pointerup', onUp, { capture: true })
+        window.addEventListener('pointercancel', onCancel, { capture: true })
+      }
+
+      /** notebook.js computeDropTarget, single-row form: nearest row
+       * midpoint decides; a header always means "append to that group". */
+      _computeStateDropTarget(clientY, excludeSlug) {
+        const rows = (this._pane.dragRows || []).filter(
+          (row) => row.kind !== 'entry' || row.slug !== excludeSlug
+        )
+        if (!rows.length) return null
+        let bestIndex = -1
+        let bestMid = 0
+        let bestDist = Infinity
+        for (let i = 0; i < rows.length; i++) {
+          const rect = rows[i].el.getBoundingClientRect()
+          const mid = rect.top + rect.height / 2
+          const dist = Math.abs(clientY - mid)
+          if (dist < bestDist) {
+            bestDist = dist
+            bestIndex = i
+            bestMid = mid
+          }
+        }
+        const best = rows[bestIndex]
+        if (best.kind === 'header') {
+          let lastEl = best.el
+          for (let i = bestIndex + 1; i < rows.length; i++) {
+            if (rows[i].kind === 'header') break
+            lastEl = rows[i].el
+          }
+          return { kind: 'category', category: best.category, markerAfterEl: lastEl }
+        }
+        if (clientY < bestMid) {
+          return { kind: 'before', before: best.slug, markerBeforeEl: best.el }
+        }
+        const next = rows[bestIndex + 1]
+        if (next && next.kind === 'entry') {
+          return { kind: 'before', before: next.slug, markerBeforeEl: next.el }
+        }
+        return {
+          kind: 'category',
+          category: this._categoryOfRenderedRow(rows, bestIndex),
+          markerAfterEl: best.el
+        }
+      }
+
+      /** The group the rendered row at *index* sits under (UNCATEGORIZED
+       * above the first header) — render order, not layout lookup, so a
+       * leftover row (not yet in any layout list) still resolves right. */
+      _categoryOfRenderedRow(rows, index) {
+        for (let i = index; i >= 0; i--) {
+          if (rows[i].kind === 'header') return rows[i].category
+        }
+        return UNCATEGORIZED
+      }
+
+      /** notebook.js computeCategoryDropTarget: headers only; past the last
+       * header (or with no other group) falls to "end". */
+      _computeCategoryDropTarget(clientY, excludeCategory) {
+        const rows = this._pane.dragRows || []
+        if (!rows.length) return null
+        const headers = rows.filter((row) => row.kind === 'header' && row.category !== excludeCategory)
+        if (!headers.length) return { kind: 'end', markerAfterEl: rows[rows.length - 1].el }
+        let best = null
+        let bestMid = 0
+        let bestDist = Infinity
+        for (const header of headers) {
+          const rect = header.el.getBoundingClientRect()
+          const mid = rect.top + rect.height / 2
+          const dist = Math.abs(clientY - mid)
+          if (dist < bestDist) {
+            bestDist = dist
+            best = header
+            bestMid = mid
+          }
+        }
+        if (clientY < bestMid) return { kind: 'before', before: best.category, markerBeforeEl: best.el }
+        const after = rows[rows.length - 1]
+        return best === headers[headers.length - 1] && clientY >= bestMid
+          ? { kind: 'end', markerAfterEl: after.el }
+          : { kind: 'before', before: this._nextCategoryAfter(best.category, excludeCategory), markerBeforeEl: this._headerElOf(this._nextCategoryAfter(best.category, excludeCategory)) || after.el }
+      }
+
+      _nextCategoryAfter(category, excludeCategory) {
+        const cats = this._layoutCache.categories.filter((c) => c !== excludeCategory)
+        const idx = cats.indexOf(category)
+        return idx >= 0 && idx + 1 < cats.length ? cats[idx + 1] : null
+      }
+
+      _headerElOf(category) {
+        if (!category) return null
+        return (this._pane.dragRows || []).find((r) => r.kind === 'header' && r.category === category)?.el || null
+      }
+
+      /** Apply the drop to the LAYOUT (client-side), then persist — every
+       * move is a full-replace POST the server heals (§4.2). */
+      _finishStateDrag(drag) {
+        const target = drag.target
+        if (!target) return
+        const layout = this._layoutCache
+        if (drag.kind === 'header') {
+          const cats = layout.categories.filter((c) => c !== drag.category)
+          if (target.kind === 'before' && target.before) {
+            const at = cats.indexOf(target.before)
+            cats.splice(at === -1 ? cats.length : at, 0, drag.category)
+          } else {
+            cats.push(drag.category)
+          }
+          layout.categories = cats
+        } else if (target.kind === 'before') {
+          if (target.before === drag.slug) return
+          pullSlugFromLayout(layout, drag.slug)
+          const holder = categoryOfSlug(layout, target.before)
+          const list = layout.order[holder] || (layout.order[holder] = [])
+          const at = list.indexOf(target.before)
+          list.splice(at === -1 ? list.length : at, 0, drag.slug)
+        } else {
+          pullSlugFromLayout(layout, drag.slug)
+          const list = layout.order[target.category] || (layout.order[target.category] = [])
+          if (!list.includes(drag.slug)) list.push(drag.slug)
+          this._collapsedCategories.delete(target.category) // show where it landed
+        }
+        this._renderStateList()
+        this._saveLayout().catch((error) => api.warn(`${NODE_TITLE}: reorder save failed`, error))
       }
 
       /**
@@ -2496,6 +2948,30 @@ export function registerControllerNode() {
             `${NODE_TITLE}: GET /lora_library/sets failed (backend sets routes may not be deployed yet)`,
             error
           )
+        }
+        try {
+          const layoutData = await api.getJson(LAYOUT_ROUTE)
+          this._layoutCache = normalizeLayoutClient(layoutData?.layout)
+          this._renderStateList()
+        } catch (error) {
+          // Older backend without §4.2: the pane simply stays flat.
+          api.warn(`${NODE_TITLE}: GET ${LAYOUT_ROUTE} failed (flat list until it succeeds)`, error)
+        }
+      }
+
+      /** POST the whole layout (full replace, §4.2); the response is the
+       * server-HEALED truth and replaces the cache -- a stale client edit
+       * can never vanish a set from the pane. Failure refetches so the
+       * pane snaps back to what is actually stored. */
+      async _saveLayout() {
+        try {
+          const data = await api.postJson(LAYOUT_ROUTE, { layout: this._layoutCache })
+          this._layoutCache = normalizeLayoutClient(data?.layout)
+          this._renderStateList()
+        } catch (error) {
+          api.warn(`${NODE_TITLE}: saving the sets layout failed`, error)
+          this._setStatusText(`Could not save the group layout: ${error?.message || error}`)
+          this._refreshSetsCache().catch(() => {})
         }
       }
 
@@ -2712,7 +3188,33 @@ export function registerControllerNode() {
         // armed; capturing a new state is a big enough context switch that
         // it should never be silently confirmed by the next click instead.
         this._disarmDeleteButton()
+        // §4.2 (v0.65.0): a `#`-prefixed name creates a GROUP, not a state
+        // -- the Notebook's exact New-button contract, and the owner's own
+        // wording ("add a # to the left row and create groups").
+        if (isCategoryNameInput(this._w.name?.value)) {
+          this._runAction('New Group', () => this._doNewCategory())
+          return
+        }
         this._runAction(LABEL_CAPTURE, () => this._doCapture())
+      }
+
+      /** Create an empty group from the name field ("# Portraits" ->
+       * "Portraits") -- Notebook's confirmNewCategory sibling. */
+      async _doNewCategory() {
+        const name = categoryNameFromInput(this._w.name?.value)
+        if (!name) {
+          this._setStatusText('Enter a group name after the #.')
+          return
+        }
+        if (this._layoutCache.categories.includes(name)) {
+          this._setStatusText(`A group named "${name}" already exists.`)
+          return
+        }
+        this._layoutCache.categories.push(name)
+        this._layoutCache.order[name] = []
+        if (this._w.name) this._w.name.value = ''
+        this._setStatusText(`Group "${name}" created.`)
+        await this._saveLayout()
       }
 
       _onUpdateClick() {

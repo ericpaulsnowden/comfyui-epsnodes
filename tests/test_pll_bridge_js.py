@@ -503,3 +503,54 @@ class TestPickerTargetFamilyV0640:
         assert "comparePathIds(a.id, b.id)" in _function_body(
             controller_source, "pllAscendingIndex(node)"
         )
+
+
+class TestStateGroupsV0650:
+    """§4.2 (v0.65.0, owner ask 2026-08-14: "the same ability to add a # to
+    the left row and create groups as the lora notebooks. Same drag and
+    drop etc."): the controller's left pane gains the Notebook's grouping
+    -- `#`-named group creation, headers with tap-to-collapse, pointer
+    drag for rows and whole groups, an armed group-remove ✕."""
+
+    def test_hash_name_creates_a_group_not_a_state(self, controller_source: str) -> None:
+        click = controller_source.split("_onCaptureClick() {", 1)[1].split("\n      }\n", 1)[0]
+        assert "if (isCategoryNameInput(this._w.name?.value))" in click
+        assert "this._runAction('New Group', () => this._doNewCategory())" in controller_source
+        # the notebook's parse, verbatim by hand
+        assert "function isCategoryNameInput(rawName)" in controller_source
+        assert "function categoryNameFromInput(rawName)" in controller_source
+
+    def test_capture_button_is_blocked_not_disabled(self, controller_source: str) -> None:
+        """Group creation is pure layout and must work with NO loader in
+        the graph -- so captureBtn left the probe-driven disable loop
+        (its _doCapture already probes first and toasts; the picker Send
+        button's blocked-not-disabled precedent)."""
+        assert "this._actionButtons = [this._w.updateBtn, this._w.deleteBtn]" in controller_source
+
+    def test_drag_uses_capture_phase_window_listeners_and_a_threshold(
+        self, controller_source: str
+    ) -> None:
+        """notebook.js's exact posture: pointerdown + movement threshold
+        decides click-vs-drag (a press that never travels stays a click ->
+        _onSetPicked, so select-vs-apply is untouched), and the window
+        listeners are CAPTURE-phase -- the 2026-07-30 Vue-renderer lesson."""
+        assert "STATE_DRAG_THRESHOLD_PX" in controller_source
+        drag = controller_source.split("_onStateRowPointerDown(event, source) {", 1)[1].split("\n      _computeStateDropTarget", 1)[0]
+        assert "window.addEventListener('pointermove', onMove, { capture: true })" in drag
+        assert "this._guarded('state row click', () => this._onSetPicked(drag.label))" in drag
+        # a plain tap on a header collapses its group
+        assert "this._guarded('group collapse', () => this._toggleCategoryCollapsed(drag.category))" in drag
+
+    def test_moves_are_layout_edits_healed_by_the_server(self, controller_source: str) -> None:
+        finish = controller_source.split("_finishStateDrag(drag) {", 1)[1].split("\n      }\n", 1)[0]
+        assert "pullSlugFromLayout(layout, drag.slug)" in finish
+        save = controller_source.split("async _saveLayout() {", 1)[1].split("\n      }\n", 1)[0]
+        # the server's HEALED response replaces the cache -- a stale client
+        # edit can never vanish a set from the pane
+        assert "this._layoutCache = normalizeLayoutClient(data?.layout)" in save
+        assert "this._refreshSetsCache().catch(() => {})" in save  # failure snaps back
+
+    def test_group_delete_moves_states_out_never_deletes_them(self, controller_source: str) -> None:
+        body = controller_source.split("_deleteCategory(category) {", 1)[1].split("\n      }\n", 1)[0]
+        assert "layout.order[UNCATEGORIZED] = [...(layout.order[UNCATEGORIZED] || []), ...orphans]" in body
+        assert "api.postJson" not in body.replace("this._saveLayout()", "")  # only the layout changes

@@ -161,6 +161,17 @@ whole configurations ("states") in and out of it:
   Picker targets don't even need rgthree installed.
 - **Two-pane layout** (like the EPS Prompt Notebook): a scrolling list of all
   your saved states on the left, the buttons stacked on the right.
+- **Group your states like Notebook prompts** (since v0.65.0): type a
+  `#`-prefixed name (say `# Portraits`) and press **New State** to create a
+  group. Drag states between groups or drop one on a group's header; drag a
+  header to reorder whole groups; tap a header to collapse it (▸ shows the
+  count). Hover a header for a ✕ that removes just the group — its states
+  move back to the ungrouped list, nothing is deleted. Groups and order are
+  saved in your shared library folder, so every machine sees the same
+  arrangement.
+- **The Apply Set dropdown shows state names now** — a state named
+  "State 1" reads as `State 1`, not its `state-1` file slug (what executes
+  is unchanged).
 - **One click selects, a second click applies.** A single click just
   *selects* a state (highlights it, loads its name) — it does **not** touch
   your loaders, so you can safely rename or delete a state without rewriting

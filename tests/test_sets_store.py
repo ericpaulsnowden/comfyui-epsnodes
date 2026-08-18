@@ -699,3 +699,57 @@ class TestUnreachableLibraryFolder:
         # — its §4 message must keep winning over the folder diagnosis.
         with pytest.raises(sets_store.SetValidationError, match="loras"):
             sets_store.save_set(unreachable_context, {"name": "x", "loras": "nope"})
+
+
+class TestSetsLayoutV0650:
+    """§4.2 (v0.65.0): the controller pane's categories + order, in its own
+    file so §4 set files never change shape (downgrade-safe), self-healing
+    against the sets actually on disk."""
+
+    def _mk(self, context: LibraryContext, name: str) -> str:
+        slug, _ = sets_store.save_set(context, {"name": name, "loras": []})
+        return slug
+
+    def test_missing_file_heals_to_every_set_uncategorized_name_sorted(
+        self, context: LibraryContext
+    ) -> None:
+        b = self._mk(context, "bravo")
+        a = self._mk(context, "alpha")
+        layout = sets_store.load_layout(context)
+        assert layout == {"categories": [], "order": {"": [a, b]}}
+
+    def test_save_drops_unknown_slugs_and_appends_missing_sets(
+        self, context: LibraryContext
+    ) -> None:
+        a = self._mk(context, "alpha")
+        b = self._mk(context, "bravo")
+        c = self._mk(context, "charlie")
+        saved = sets_store.save_layout(
+            context,
+            {"categories": ["Portraits"], "order": {"Portraits": [b, "ghost-slug", b], "": [a]}},
+        )
+        # ghost dropped, duplicate b kept once, missing c appended uncategorized
+        assert saved == {"categories": ["Portraits"], "order": {"": [a, c], "Portraits": [b]}}
+        # ...and what was written is what loads back
+        assert sets_store.load_layout(context) == saved
+
+    def test_empty_categories_persist(self, context: LibraryContext) -> None:
+        saved = sets_store.save_layout(context, {"categories": ["Empty Group"], "order": {}})
+        assert saved["categories"] == ["Empty Group"]
+        assert sets_store.load_layout(context)["categories"] == ["Empty Group"]
+
+    def test_malformed_file_degrades_to_rebuilt_layout(self, context: LibraryContext) -> None:
+        a = self._mk(context, "alpha")
+        sets_store.layout_path(context).write_text("{not json", encoding="utf-8")
+        assert sets_store.load_layout(context) == {"categories": [], "order": {"": [a]}}
+
+    def test_order_key_implies_category_membership(self, context: LibraryContext) -> None:
+        """A category present only as an `order` key still counts -- a
+        hand-edited or older file must not lose the group."""
+        layout = sets_store.normalize_layout({"order": {"Styles": []}})
+        assert layout["categories"] == ["Styles"]
+
+    def test_layout_file_lives_outside_sets_dir(self, context: LibraryContext) -> None:
+        """list_sets globs sets_dir/*.json and warns on non-slug stems --
+        the layout must never be inside it."""
+        assert sets_store.layout_path(context).parent != context.sets_dir()

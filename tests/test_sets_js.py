@@ -126,3 +126,22 @@ class TestMirrorsPickerNestedV0640:
     def test_apply_set_discovery_is_nested_aware(self, source: str) -> None:
         body = _function_body(source, "applySetNodes()")
         assert "walkLiveNodes(app.graph)" in body
+
+
+class TestComboDisplaysNamesV0650:
+    """Owner report 2026-08-14: a pushed state rendered as its SLUG
+    ("state-1") instead of its NAME ("State 1"). The combo's value stays
+    the slug (that is what executes); only the display maps through
+    ComboWidget's own options.getOptionLabel seam."""
+
+    @pytest.fixture(scope="class")
+    def source(self) -> str:
+        return SETS_JS.read_text(encoding="utf-8")
+
+    def test_get_option_label_maps_slug_to_name_with_slug_fallback(self, source: str) -> None:
+        body = _function_body(source, "installSetValues(node)")
+        assert "widget.options.getOptionLabel = (value) =>" in body
+        assert "cachedNames.get(String(value)) || String(value)" in body
+        assert "value == null || value === 'None' ? 'None'" in body
+        # the cache is rebuilt from the same feed the values come from
+        assert "cachedNames = new Map((data.sets ?? []).map((row) => [row.slug, row.name || row.slug]))" in source

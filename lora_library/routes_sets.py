@@ -44,6 +44,31 @@ def register(context: LibraryContext, routes: web.RouteTableDef) -> None:
     async def get_sets(_request: web.Request) -> web.Response:
         return web.json_response({"sets": sets_store.list_sets(context)})
 
+    # ---- §4.2 sets layout (v0.65.0): categories + display order for the
+    # controller's left pane. No loopback gate -- the file lives inside
+    # library_dir, which §2 already grants remote read+write (the picker
+    # feed's exact rationale). POST is a full-replace, healed server-side
+    # (unknown slugs dropped, missing sets appended uncategorized), so a
+    # stale client can never vanish a set from the pane.
+
+    @routes.get("/lora_library/sets_layout")
+    async def get_sets_layout(_request: web.Request) -> web.Response:
+        return web.json_response({"layout": sets_store.load_layout(context)})
+
+    @routes.post("/lora_library/sets_layout")
+    async def post_sets_layout(request: web.Request) -> web.Response:
+        try:
+            body = await request.json()
+        except Exception:  # broad: malformed body is a client error
+            return error_response(400, "body must be JSON")
+        if not isinstance(body, dict) or not isinstance(body.get("layout"), dict):
+            return error_response(400, "'layout' must be an object")
+        try:
+            layout = sets_store.save_layout(context, body["layout"])
+        except OSError as exc:
+            return error_response(500, f"could not write the sets layout: {exc}")
+        return web.json_response({"ok": True, "layout": layout})
+
     @routes.get("/lora_library/set")
     async def get_set(request: web.Request) -> web.Response:
         slug = request.query.get("slug", "")

@@ -454,3 +454,109 @@ def resolve_lora(context: LibraryContext, file: str) -> str | None:
             ", ".join(matches),
         )
     return None
+
+
+# ------------------------------------------------- §4.2 sets LAYOUT (v0.65.0)
+# Categories + display order for the State Controller's left pane (owner ask
+# 2026-08-14: "the same ability to add a # to the left row and create groups
+# as the lora notebooks"). The layout lives in its OWN file so set files (§4)
+# never change shape: an older build neither reads nor writes it, so nothing
+# is lost on downgrade -- the exact reasoning that kept picker favorites out
+# of the workflow file. Self-healing on every read, like the picker's
+# favorites_order: unknown slugs are dropped, sets missing from the layout
+# are appended (name-sorted) to the UNCATEGORIZED tail, and duplicate slugs
+# keep their first appearance. Two machines' concurrent writes are an
+# accepted read-modify-write race that heals on the next write (the picker
+# store's documented posture).
+
+#: The file's own name, directly inside context.library_dir() -- a sibling
+#: of lora_picker.json, deliberately NOT inside sets_dir() (list_sets globs
+#: *.json there and would warn about it on every listing).
+LAYOUT_FILENAME = "lora_sets_layout.json"
+
+#: Uncategorized entries render before any category header (the Notebook's
+#: own rule for entries above the first `#` heading).
+UNCATEGORIZED = ""
+
+
+def layout_path(context: LibraryContext) -> Path:
+    return context.library_dir() / LAYOUT_FILENAME
+
+
+def normalize_layout(raw: object) -> dict:
+    """Coerce *raw* into ``{"categories": [str...], "order": {cat: [slugs]}}``.
+
+    Tolerant, never raises: a malformed file/body degrades to an empty
+    layout (healing then rebuilds it from the sets on disk). Category names
+    are stripped strings, deduplicated case-sensitively, with the empty
+    (uncategorized) name excluded from ``categories`` -- it is implicit and
+    always first. Order lists keep only string slugs.
+    """
+    categories: list[str] = []
+    order: dict[str, list[str]] = {}
+    if isinstance(raw, dict):
+        raw_categories = raw.get("categories")
+        if isinstance(raw_categories, list):
+            for entry in raw_categories:
+                if not isinstance(entry, str):
+                    continue
+                name = entry.strip()
+                if name and name not in categories:
+                    categories.append(name)
+        raw_order = raw.get("order")
+        if isinstance(raw_order, dict):
+            for key, slugs in raw_order.items():
+                if not isinstance(key, str) or not isinstance(slugs, list):
+                    continue
+                name = key.strip()
+                if name and name not in categories:
+                    categories.append(name)
+                order[name] = [s for s in slugs if isinstance(s, str)]
+    for name in categories:
+        order.setdefault(name, [])
+    order.setdefault(UNCATEGORIZED, [])
+    return {"categories": categories, "order": order}
+
+
+def healed_layout(context: LibraryContext, raw: object) -> dict:
+    """*raw* normalized, then reconciled against the sets actually on disk:
+    every existing slug appears exactly ONCE (first appearance wins), slugs
+    with no set file are dropped, and sets absent from the layout append to
+    the uncategorized tail in name order -- so a set saved on another
+    machine (or by an older build that never writes layouts) always shows
+    up rather than silently vanishing from the pane."""
+    layout = normalize_layout(raw)
+    existing = {entry["slug"] for entry in list_sets(context)}
+    seen: set[str] = set()
+    for name in [UNCATEGORIZED, *layout["categories"]]:
+        kept = []
+        for slug in layout["order"].get(name, []):
+            if slug not in existing or slug in seen:
+                continue
+            seen.add(slug)
+            kept.append(slug)
+        layout["order"][name] = kept
+    missing = [e["slug"] for e in list_sets(context) if e["slug"] not in seen]
+    layout["order"][UNCATEGORIZED].extend(missing)
+    return layout
+
+
+def load_layout(context: LibraryContext) -> dict:
+    """The healed layout currently on disk (a missing/unreadable file is an
+    empty layout -- healing fills in every set, uncategorized)."""
+    try:
+        path = layout_path(context)
+        if not path.is_file():
+            return healed_layout(context, None)
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        logger.warning("EPSNodes: unreadable sets layout (%s); rebuilding", exc)
+        raw = None
+    return healed_layout(context, raw)
+
+
+def save_layout(context: LibraryContext, raw: object) -> dict:
+    """Normalize + heal *raw*, write atomically, return what was written."""
+    layout = healed_layout(context, raw)
+    _atomic_write_text(layout_path(context), json.dumps(layout, indent=2))
+    return layout

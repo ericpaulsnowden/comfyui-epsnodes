@@ -410,3 +410,38 @@ async def test_post_set_delete_unreachable_library_folder_is_400_not_404(
     assert resp.status == 400
     body = await resp.json()
     assert "library folder" in body["error"]
+
+
+# ------------------------------------------------ §4.2 sets layout (v0.65.0)
+
+
+async def test_layout_get_heals_and_post_full_replaces(
+    context: LibraryContext, aiohttp_client
+) -> None:
+    slug_a, _ = sets_store.save_set(context, {"name": "alpha", "loras": []})
+    slug_b, _ = sets_store.save_set(context, {"name": "bravo", "loras": []})
+    client = await aiohttp_client(make_app(context))
+
+    resp = await client.get("/lora_library/sets_layout")
+    assert resp.status == 200
+    body = await resp.json()
+    assert body["layout"] == {"categories": [], "order": {"": [slug_a, slug_b]}}
+
+    resp = await client.post(
+        "/lora_library/sets_layout",
+        json={"layout": {"categories": ["Grp"], "order": {"Grp": [slug_b, "ghost"], "": [slug_a]}}},
+    )
+    assert resp.status == 200
+    body = await resp.json()
+    assert body["ok"] is True
+    assert body["layout"] == {"categories": ["Grp"], "order": {"": [slug_a], "Grp": [slug_b]}}
+
+
+async def test_layout_post_rejects_malformed_bodies(
+    context: LibraryContext, aiohttp_client
+) -> None:
+    client = await aiohttp_client(make_app(context))
+    resp = await client.post("/lora_library/sets_layout", data=b"not json")
+    assert resp.status == 400
+    resp = await client.post("/lora_library/sets_layout", json={"layout": "nope"})
+    assert resp.status == 400

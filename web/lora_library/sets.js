@@ -138,6 +138,13 @@ const REFRESH_THROTTLE_MS = 2000
 
 /** Module-level cache shared by every ApplySet node in the graph. */
 let cachedValues = ['None']
+/** slug -> display NAME (owner report 2026-08-14: a pushed state showed as
+ * its slug, "state-1", instead of its name, "State 1"). The combo's VALUE
+ * stays the slug — that is what the API prompt executes — only the pixels
+ * change, via ComboWidget's own `options.getOptionLabel` seam (it drives
+ * both the on-canvas text and the dropdown rows; read from the frontend
+ * source, ComboWidget.ts `_displayValue`/`onClick`). */
+let cachedNames = new Map()
 let lastFetchStarted = 0
 let fetchInFlight = false
 
@@ -154,6 +161,7 @@ async function refreshSetsCache(force = false) {
     const data = await api.getJson('/lora_library/sets')
     const slugs = (data.sets ?? []).map((row) => row.slug)
     cachedValues = ['None', ...slugs]
+    cachedNames = new Map((data.sets ?? []).map((row) => [row.slug, row.name || row.slug]))
   } catch (error) {
     api.warn('refreshing set list failed (keeping previous combo values)', error)
   } finally {
@@ -191,6 +199,11 @@ function installSetValues(node) {
     refreshSetsCache()
     return valuesIncluding(widget.value)
   }
+  // Display NAMES for slug values (owner report 2026-08-14) -- an unknown
+  // slug (pushed before our cache caught up, or another machine's set)
+  // falls back to the slug itself: exactly what will execute, never blank.
+  widget.options.getOptionLabel = (value) =>
+    value == null || value === 'None' ? 'None' : cachedNames.get(String(value)) || String(value)
 }
 
 /**
