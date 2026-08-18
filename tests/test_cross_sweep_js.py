@@ -1518,3 +1518,26 @@ def test_model_low_is_a_welded_axis_member_in_the_estimator(source: str) -> None
     assert "for (const name of ['model', 'model_low', 'clip', 'label', 'vae'])" in source
     assert "for (const name of ['model', 'model_low', 'clip', 'label'])" in source
     assert "7: 'model_low'" in source  # chained dead-output guard covers the new tail
+
+
+def test_estimator_defaults_missing_modes_to_multiply(source: str) -> None:
+    """v0.66.1 backend parity: run()'s python defaults are multiply, so a
+    snapshot with no stored mode value must read as multiply too -- the
+    referee lesson: estimator and backend must never disagree."""
+    assert "const pairMultiply = (widgets.pair_mode ?? 'multiply') === 'multiply'" in source
+    assert "const sweepMultiply = (widgets.sweep_mode ?? 'multiply') === 'multiply'" in source
+
+
+def test_mode_combos_hidden_behind_a_property(source: str) -> None:
+    """v0.66.1 (owner): both mode combos hidden by default, revealed by the
+    'Show mode options' node property. BOTH hide flags per §7.5 (canvas
+    reads widget.hidden, Vue reads options.hidden); the widgets stay in
+    node.widgets so §8's positional widgets_values contract is untouched."""
+    assert "const PROP_SHOW_MODES = 'Show mode options'" in source
+    body = _function_body(source, "applyModeVisibility(node)")
+    assert "widget.hidden = hidden" in body
+    assert "widget.options = { ...(widget.options || {}), hidden }" in body
+    wire = _function_body(source, "wireModeVisibility(node)")
+    assert "node.addProperty(PROP_SHOW_MODES, false, 'boolean')" in wire
+    assert "applyModeVisibility(node)" in wire  # apply-once at attach
+    assert "wireModeVisibility(node)" in _function_body(source, "attach(node)")

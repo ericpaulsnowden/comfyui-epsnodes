@@ -1960,6 +1960,24 @@ deletion:
 
 ### §6.10 `EPSCrossSweep` (display: "EPS Run Multiplier") — sweep × pairs, organized
 
+**Multiply by default + hidden mode combos (v0.66.1, owner: "make both
+pair and sweep modes multiply by default. Also hide those two options
+and make a setting in properties to make them visible. There are rare
+occasions when you would want them to be anything but multiply."):**
+`pair_mode` and `sweep_mode` both default to `multiply` — INPUT_TYPES
+default, `run()`'s python fallback, AND the §6.10 estimator's
+missing-value read all agree. **Accepted compat cost, explicit:** a
+workflow saved BEFORE a mode widget existed now loads as multiply, not
+paired/aligned (a save carrying an explicit value is untouched —
+positional restore wins; every bundled example carries explicit
+values). The aligned-only same-origin guard means an old
+one-checkpoint-switcher wiring now fails LOUDLY with the actionable
+"use sweep_mode aligned" message rather than mispairing. The two combos
+are HIDDEN by default (both §7.5 flags — canvas `widget.hidden`, Vue
+`options.hidden`; the widgets stay in `node.widgets`, so §8's
+positional `widgets_values` contract is untouched), revealed by the
+`Show mode options` node property.
+
 **`model_low` (v0.66.0, WAN pairing):** an optional input + tail output
 WELDED to the model axis — it is a MEMBER of the aligned
 model/clip/label group (never an axis of its own), so run counts are

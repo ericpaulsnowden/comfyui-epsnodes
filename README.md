@@ -710,7 +710,15 @@ toast ("EPS Run Multiplier: 8 runs") — the multiplier executes in the
 first seconds, long before samplers, so a wrong number is cancellable
 while it's still free.
 
-**`sweep_mode` — every model × every VAE (v0.57.0).** By default the
+**Both modes default to `multiply` (v0.66.1)** — images × texts crossed,
+and the vae axis crossed against the model axis — because that's almost
+always what you want; the two mode dropdowns are hidden until you flip
+`Show mode options` in right-click → Properties. Set them to
+`paired`/`aligned` for the index-aligned cases below. Workflows that
+saved an explicit mode keep it; very old saves from before the modes
+existed now load as multiply.
+
+**`sweep_mode` — every model × every VAE (v0.57.0).** Previously the
 sweep side is one *aligned* set: step 3 runs model 3 with VAE 3 (what an
 EPS LoRA Iterator or Checkpoint Switcher emits, where they belong
 together). Set **`sweep_mode: multiply`** to treat `vae` as its own axis

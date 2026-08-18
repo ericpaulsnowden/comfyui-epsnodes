@@ -788,8 +788,10 @@ function estimateInner(snapshot, nodeId, path) {
   }
   const widgets = node.widgets || {}
   const inputs = node.inputs || {}
-  const pairMultiply = widgets.pair_mode === 'multiply'
-  const sweepMultiply = widgets.sweep_mode === 'multiply'
+  // v0.66.1: multiply is the DEFAULT for both modes (backend parity) --
+  // a snapshot with no stored value reads as multiply, same as run().
+  const pairMultiply = (widgets.pair_mode ?? 'multiply') === 'multiply'
+  const sweepMultiply = (widgets.sweep_mode ?? 'multiply') === 'multiply'
 
   const unknowns = new Set()
 
@@ -1247,6 +1249,49 @@ function installGraphNodeWatch(graph) {
   }
 }
 
+//: v0.66.1 (owner): the two mode combos are HIDDEN by default -- multiply
+//: is almost always what you want -- revealed by this node property.
+const PROP_SHOW_MODES = 'Show mode options'
+const MODE_WIDGET_NAMES = ['pair_mode', 'sweep_mode']
+
+/** Hide/show the two mode combos per the property. BOTH flags, per §7.5:
+ * canvas hides on `widget.hidden`, the Vue renderer reads
+ * `options.hidden` and ignores the other -- the controller's Show-status
+ * toggle is the proven live-flip precedent. The widgets stay in
+ * node.widgets (hidden widgets still serialize), so §8's positional
+ * widgets_values contract is untouched. */
+function applyModeVisibility(node) {
+  const hidden = node.properties?.[PROP_SHOW_MODES] !== true
+  for (const name of MODE_WIDGET_NAMES) {
+    const widget = (node.widgets || []).find((w) => w && w.name === name)
+    if (!widget) continue
+    widget.hidden = hidden
+    widget.options = { ...(widget.options || {}), hidden }
+  }
+  node.setSize?.([node.size[0], Math.max(node.size[1], node.computeSize()[1])])
+  node.graph?.setDirtyCanvas(true, true)
+}
+
+function wireModeVisibility(node) {
+  node.addProperty(PROP_SHOW_MODES, false, 'boolean')
+  const original = node.onPropertyChanged
+  node.onPropertyChanged = function (name, value, prevValue) {
+    const result = original?.call(this, name, value, prevValue)
+    if (name === PROP_SHOW_MODES) {
+      try {
+        applyModeVisibility(this)
+      } catch (error) {
+        console.warn(PREFIX, 'mode visibility failed', error)
+      }
+    }
+    return result
+  }
+  // Apply the hidden default once -- addProperty never fires the handler,
+  // and a restored file's own value lands via configure's property loop
+  // (which DOES fire it). resolution.js's exact rationale.
+  applyModeVisibility(node)
+}
+
 /** Per-node-instance attach; no-op unless *node* is an EPSCrossSweep. */
 export function attach(node) {
   try {
@@ -1332,6 +1377,7 @@ export function attach(node) {
       const widget = (node.widgets || []).find((w) => w && w.name === name)
       if (widget) widget.callback = wrapWithRecompute(widget.callback, state)
     }
+    wireModeVisibility(node)
 
     // First paint now rather than on the first redraw -- a restored
     // workflow's widgets land before nodeCreated returns control, and the

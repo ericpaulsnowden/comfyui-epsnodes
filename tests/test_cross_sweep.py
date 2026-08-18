@@ -38,8 +38,16 @@ def fake_execution_blocker(monkeypatch: pytest.MonkeyPatch):
 
 
 def run(**overrides):
-    """Two sweep steps x two pairs unless overridden."""
+    """Two sweep steps x two pairs unless overridden.
+
+    v0.66.1: the NODE's defaults flipped to multiply/multiply (owner
+    decision); this helper pins the classic paired/aligned modes
+    EXPLICITLY so every behavioral test of those modes stays a test of
+    those modes -- the new defaults get their own dedicated pins below.
+    """
     kwargs = {
+        "pair_mode": "paired",
+        "sweep_mode": "aligned",
         "model": ["m0", "m1"],
         "clip": ["c0", "c1"],
         "label": ["lora_0.0", "lora_0.5"],
@@ -203,7 +211,8 @@ class TestClassShape:
         assert optional_keys.index("pair_mode") == len(optional_keys) - 2
         assert optional_keys.index("base_folder") == len(optional_keys) - 3
         assert spec["optional"]["pair_mode"][0] == ["paired", "multiply"]
-        assert spec["optional"]["pair_mode"][1]["default"] == "paired"
+        # v0.66.1 (owner): multiply is the default for both modes.
+        assert spec["optional"]["pair_mode"][1]["default"] == "multiply"
 
     def test_function_entry_point(self) -> None:
         assert callable(getattr(EPSCrossSweep, EPSCrossSweep.FUNCTION))
@@ -455,7 +464,8 @@ class TestSweepModeMultiply:
         spec = EPSCrossSweep.INPUT_TYPES()
         values, options = spec["optional"]["sweep_mode"]
         assert values == ["aligned", "multiply"]
-        assert options["default"] == "aligned"
+        # v0.66.1 (owner): multiply by default.
+        assert options["default"] == "multiply"
 
     def test_four_models_times_two_vaes_is_eight_model_major_steps(self) -> None:
         outputs = run(
@@ -684,3 +694,20 @@ class TestModelLowWeldedV0660:
         out = EPSCrossSweep().run(model=["h1"], text=["t"])
         assert out[0] == ["h1"]
         assert "ExecutionBlocker" in type(out[7][0]).__name__
+
+
+class TestMultiplyDefaultsV0661:
+    """v0.66.1 (owner: "make both pair and sweep modes multiply by
+    default ... there are rare occasions when you would want them to be
+    anything but multiply"). The accepted compat cost is explicit: a
+    workflow saved BEFORE these widgets existed now loads as multiply."""
+
+    def test_omitted_modes_run_as_multiply(self) -> None:
+        out = EPSCrossSweep().run(image=["i1", "i2"], text=["tA", "tB"])
+        # multiply: 2 images x 2 texts = 4 pairs (paired would zip to 2)
+        assert len(out[3]) == 4
+
+    def test_omitted_sweep_mode_multiplies_vae(self) -> None:
+        out = EPSCrossSweep().run(model=["m1", "m2"], vae=["vA", "vB"], text=["t"])
+        # multiply: 2 models x 2 vaes = 4 runs (aligned would pair to 2)
+        assert len(out[0]) == 4

@@ -254,9 +254,10 @@ class EPSCrossSweep:
         "Switcher's model/clip/label, plus vae from the latter) and a pair "
         "side (images and texts), and every sweep step runs every pair -- "
         "11 steps across 8 pairs means 88 runs, grouped step by step. The "
-        "pair side runs index-aligned as wired (pair_mode: paired, when "
-        "image and text are already index-aligned), or set pair_mode to "
-        "multiply and every image is crossed with every text right here "
+        "pair side multiplies by default -- every image crossed with every "
+        "text right here (both mode dropdowns are hidden; reveal them "
+        "via the Show mode options property to pick the index-aligned "
+        "paired/aligned modes) "
         "-- an Image Grid and a multi-select Prompt Notebook wired "
         "straight in. The sweep side is optional: wire none of "
         "it and this node is a pure image x text multiplier. Wire "
@@ -426,7 +427,12 @@ class EPSCrossSweep:
                 "pair_mode": (
                     PAIR_MODES,
                     {
-                        "default": PAIR_MODE_PAIRED,
+                        # v0.66.1 (owner): multiply is the default -- "there
+                        # are rare occasions when you would want them to be
+                        # anything but multiply". NOTE the compat cost,
+                        # accepted explicitly: a workflow saved BEFORE this
+                        # widget existed now loads as multiply, not paired.
+                        "default": PAIR_MODE_MULTIPLY,
                         "tooltip": (
                             "How image and text combine. paired: they "
                             "arrive already index-aligned (one image per "
@@ -434,8 +440,9 @@ class EPSCrossSweep:
                             "is crossed with EVERY text right here "
                             "(image-major), so you can wire an Image "
                             "Grid and a multi-select Prompt Notebook "
-                            "straight in. Workflows saved before this "
-                            "widget existed behave as paired."
+                            "straight in. multiply is the default; "
+                            "workflows that never saved this widget load "
+                            "as multiply too."
                         ),
                     },
                 ),
@@ -446,7 +453,12 @@ class EPSCrossSweep:
                 "sweep_mode": (
                     SWEEP_MODES,
                     {
-                        "default": SWEEP_MODE_ALIGNED,
+                        # v0.66.1: multiply by default (same owner decision
+                        # and the same accepted pre-widget-save compat cost
+                        # as pair_mode above; the same-origin guard keeps a
+                        # one-checkpoint-switcher wiring failing LOUDLY with
+                        # an actionable message rather than mispairing).
+                        "default": SWEEP_MODE_MULTIPLY,
                         "tooltip": (
                             "How the sweep side combines with vae. "
                             "aligned: model/clip/label/vae are one "
@@ -457,8 +469,9 @@ class EPSCrossSweep:
                             "EVERY step of it runs with EVERY vae -- e.g. "
                             "a 4-model Model Switcher x a 2-VAE VAE "
                             "Switcher = 8 runs, model-major so each model "
-                            "loads once. Workflows saved before this "
-                            "widget existed behave as aligned."
+                            "loads once. multiply is the default; "
+                            "workflows that never saved this widget load "
+                            "as multiply too."
                         ),
                     },
                 ),
@@ -479,8 +492,8 @@ class EPSCrossSweep:
         name: Any = None,
         base_folder: Any = "",
         vae: Any = None,
-        pair_mode: Any = PAIR_MODE_PAIRED,
-        sweep_mode: Any = SWEEP_MODE_ALIGNED,
+        pair_mode: Any = PAIR_MODE_MULTIPLY,
+        sweep_mode: Any = SWEEP_MODE_MULTIPLY,
         prompt: Any = None,
         unique_id: Any = None,
     ) -> tuple[list[Any], ...]:
@@ -493,9 +506,9 @@ class EPSCrossSweep:
         names = _as_clean_list(name)
         vaes = _as_clean_list(vae)
         base_parts = _safe_base(_unwrap_scalar(base_folder, ""))
-        multiply = _unwrap_scalar(pair_mode, PAIR_MODE_PAIRED) == PAIR_MODE_MULTIPLY
+        multiply = _unwrap_scalar(pair_mode, PAIR_MODE_MULTIPLY) == PAIR_MODE_MULTIPLY
         sweep_multiply = (
-            _unwrap_scalar(sweep_mode, SWEEP_MODE_ALIGNED) == SWEEP_MODE_MULTIPLY
+            _unwrap_scalar(sweep_mode, SWEEP_MODE_MULTIPLY) == SWEEP_MODE_MULTIPLY
         )
 
         # `x is None` distinguishes UNWIRED (emit blockers on that output;
