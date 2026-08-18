@@ -67,9 +67,10 @@ class TestCrossSweep:
         assert images == ["iA", "iB", "iA", "iB"]
         assert texts == ["tA", "tB", "tA", "tB"]
         assert labels == ["lora_0.0", "lora_0.0", "lora_0.5", "lora_0.5"]
+        # v0.67.0: the file-level component carries the run token.
         assert prefixes == [
-            "lora_0.0/pair_01", "lora_0.0/pair_02",
-            "lora_0.5/pair_01", "lora_0.5/pair_02",
+            "lora_0.0/pair_01_m1_p1", "lora_0.0/pair_02_m1_p2",
+            "lora_0.5/pair_01_m2_p1", "lora_0.5/pair_02_m2_p2",
         ]
 
     def test_owner_scale_11_steps_x_8_pairs_is_88(self) -> None:
@@ -91,10 +92,10 @@ class TestCrossSweep:
             base_folder=["shoot42/tuesday"],
         )
         assert prefixes == [
-            "shoot42/tuesday/lora_0.0/Portrait A",
-            "shoot42/tuesday/lora_0.0/Landscape B",
-            "shoot42/tuesday/lora_0.5/Portrait A",
-            "shoot42/tuesday/lora_0.5/Landscape B",
+            "shoot42/tuesday/lora_0.0/Portrait A_m1_p1",
+            "shoot42/tuesday/lora_0.0/Landscape B_m1_p2",
+            "shoot42/tuesday/lora_0.5/Portrait A_m2_p1",
+            "shoot42/tuesday/lora_0.5/Landscape B_m2_p2",
         ]
 
     def test_hostile_characters_are_sanitized_out_of_paths(self) -> None:
@@ -104,14 +105,14 @@ class TestCrossSweep:
             base_folder=["../weird/../base"],
         )
         first = prefixes[0]
-        assert first == "weird/base/lo_ra_0_0/pa_ir__one"
+        assert first == "weird/base/lo_ra_0_0/pa_ir__one_m1_p1"
         for bad in ("..", ":", "*", "?", '"', "\\"):
             assert bad not in first
 
     def test_empty_name_falls_back_to_stable_pair_number(self) -> None:
         _m, _c, _i, _t, prefixes, _l, _v, _mlow5 = run(name=["", "RealName"])
-        assert prefixes[0].endswith("/pair_01")
-        assert prefixes[1].endswith("/RealName")
+        assert prefixes[0].endswith("/pair_01_m1_p1")
+        assert prefixes[1].endswith("/RealName_m1_p2")
 
     def test_mismatched_sweep_side_fails_loudly_naming_lengths(self) -> None:
         """v0.49.1 (owner bug 2026-08-03): a stale 2-long label wire clamped
@@ -162,7 +163,9 @@ class TestCrossSweep:
     )
     def test_empty_side_returns_blocker_six(self, overrides, fake_execution_blocker) -> None:
         outputs = run(**overrides)
-        assert len(outputs) == 7
+        # v0.67.0: derived from RETURN_NAMES (the v0.66.0 literal 7-tuple
+        # missed the model_low tail -- a real latent bug this fixed).
+        assert len(outputs) == len(EPSCrossSweep.RETURN_NAMES)
         for lst in outputs:
             assert len(lst) == 1 and isinstance(lst[0], fake_execution_blocker)
 
@@ -197,7 +200,7 @@ class TestClassShape:
         assert set(spec["required"]) == {"text"}
         assert set(spec["optional"]) == {
             "model", "model_low", "clip", "label", "name", "base_folder", "image", "vae", "pair_mode",
-            "sweep_mode",
+            "sweep_mode", "solo_run",
         }
         assert spec["optional"]["label"][1]["forceInput"] is True
         assert spec["required"]["text"][1]["forceInput"] is True
@@ -207,9 +210,11 @@ class TestClassShape:
         # INPUT_TYPES' own comments). v0.49.0 tail was ...base_folder,
         # pair_mode; v0.57.0 appended sweep_mode after pair_mode.
         optional_keys = list(spec["optional"])
-        assert optional_keys.index("sweep_mode") == len(optional_keys) - 1
-        assert optional_keys.index("pair_mode") == len(optional_keys) - 2
-        assert optional_keys.index("base_folder") == len(optional_keys) - 3
+        # v0.67.0 appended solo_run after sweep_mode (same tail law).
+        assert optional_keys.index("solo_run") == len(optional_keys) - 1
+        assert optional_keys.index("sweep_mode") == len(optional_keys) - 2
+        assert optional_keys.index("pair_mode") == len(optional_keys) - 3
+        assert optional_keys.index("base_folder") == len(optional_keys) - 4
         assert spec["optional"]["pair_mode"][0] == ["paired", "multiply"]
         # v0.66.1 (owner): multiply is the default for both modes.
         assert spec["optional"]["pair_mode"][1]["default"] == "multiply"
@@ -266,7 +271,7 @@ class TestVaePassthrough:
         self, fake_execution_blocker: type
     ) -> None:
         outputs = run(vae=[])
-        assert len(outputs) == 7
+        assert len(outputs) == len(EPSCrossSweep.RETURN_NAMES)
         for out in outputs:
             assert len(out) == 1
             assert isinstance(out[0], fake_execution_blocker)
@@ -304,12 +309,12 @@ class TestTextOnlyPairs:
         )
         assert models == ["mA", "mA", "mB", "mB"]
         assert vaes == ["vA", "vA", "vB", "vB"]
-        assert prefixes[0] == "ckptA/Portrait"
-        assert prefixes[3] == "ckptB/Landscape"
+        assert prefixes[0] == "ckptA/Portrait_m1_t1"
+        assert prefixes[3] == "ckptB/Landscape_m2_t2"
 
     def test_names_still_shape_save_prefix_in_text_only_mode(self) -> None:
         _m, _c, _i, _t, prefixes, _l, _v, _mlow14 = run(image=None, text=["x"], name=[])
-        assert prefixes == ["lora_0.0/pair_01", "lora_0.5/pair_01"]
+        assert prefixes == ["lora_0.0/pair_01_m1_t1", "lora_0.5/pair_01_m2_t1"]
 
 
 class TestNoSweepPureMultiplier:
@@ -334,7 +339,12 @@ class TestNoSweepPureMultiplier:
         assert out_texts == cp_texts
         # name doesn't ride out directly -- it becomes save_prefix's pair
         # component; "" falls back to pair_NN exactly like paired mode.
-        expected_components = [n or f"pair_{p + 1:02d}" for p, n in enumerate(cp_names)]
+        # v0.67.0: the pair component now carries the i/t run token.
+        n_texts = 3
+        expected_components = [
+            f"{n or f'pair_{p + 1:02d}'}_i{p // n_texts + 1}_t{p % n_texts + 1}"
+            for p, n in enumerate(cp_names)
+        ]
         assert prefixes == expected_components
         # Every sweep-side output blocks per run, keeping alignment.
         assert len(models) == len(cp_images)
@@ -347,7 +357,7 @@ class TestNoSweepPureMultiplier:
         _m, _c, _i, _t, prefixes, _l, _v, _mlx3 = EPSCrossSweep().run(
             text=["tA"], image=["i1"], base_folder=["shoot"], pair_mode="multiply"
         )
-        assert prefixes == ["shoot/pair_01"]
+        assert prefixes == ["shoot/pair_01_i1_t1"]
 
     def test_no_sweep_paired_zips_like_before(self) -> None:
         _m, _c, images, texts, prefixes, _l, _v, _mlx4 = EPSCrossSweep().run(
@@ -355,7 +365,7 @@ class TestNoSweepPureMultiplier:
         )
         assert images == ["i1", "i2"]
         assert texts == ["tA", "tB"]
-        assert prefixes == ["pair_01", "pair_02"]
+        assert prefixes == ["pair_01_p1", "pair_02_p2"]
 
     def test_no_sweep_empty_pair_side_blocks_whole_node(self, fake_execution_blocker) -> None:
         outputs = EPSCrossSweep().run(text=[], image=[], pair_mode="multiply")
@@ -386,7 +396,8 @@ class TestMultiplyWithSweep:
         )
         # names follow the TEXT axis: i1/tA, i1/tB, i2/tA, i2/tB per step.
         assert [p.split("/")[-1] for p in prefixes[:4]] == [
-            "portrait", "landscape", "portrait", "landscape",
+            "portrait_m1_i1_t1", "landscape_m1_i1_t2",
+            "portrait_m1_i2_t1", "landscape_m1_i2_t2",
         ]
 
     def test_default_pair_mode_is_paired(self) -> None:
@@ -485,7 +496,8 @@ class TestSweepModeMultiply:
         assert clips == ["c"] * 8  # length-1 broadcasts across every combination
         assert labels == ["A", "A", "B", "B", "C", "C", "D", "D"]
         assert prefixes[:4] == [
-            "A_vae01/pair_01", "A_vae02/pair_01", "B_vae01/pair_01", "B_vae02/pair_01"
+            "A_vae01/pair_01_m1_v1_p1", "A_vae02/pair_01_m1_v2_p1",
+            "B_vae01/pair_01_m2_v1_p1", "B_vae02/pair_01_m2_v2_p1",
         ]
 
     def test_vae_length_one_multiplies_to_the_plain_sweep(self) -> None:
@@ -566,7 +578,9 @@ class TestSweepModeMultiply:
         )
         assert outputs[6] == ["v0", "v1", "v2"]
         assert outputs[4] == [
-            "step_01_vae01/pair_01", "step_01_vae02/pair_01", "step_01_vae03/pair_01"
+            "step_01_vae01/pair_01_m1_v1_p1",
+            "step_01_vae02/pair_01_m1_v2_p1",
+            "step_01_vae03/pair_01_m1_v3_p1",
         ]
 
     def test_input_is_list_wrapped_widget_form(self) -> None:
@@ -711,3 +725,104 @@ class TestMultiplyDefaultsV0661:
         out = EPSCrossSweep().run(model=["m1", "m2"], vae=["vA", "vB"], text=["t"])
         # multiply: 2 models x 2 vaes = 4 runs (aligned would pair to 2)
         assert len(out[0]) == 4
+
+
+class TestRunTokensV0670:
+    """v0.67.0 provenance M1 (roadmap docs/ROADMAP-run-provenance.md).
+
+    Every emitted filename prefix ends with a run TOKEN built from pure
+    indices (owner's pinned choice over readable names): sweep fragment
+    ``m{N}`` (plus ``_v{M}`` ONLY when vae is an independent multiply
+    axis), then the pair fragment (``p{N}`` paired, ``i{N}_t{N}``
+    multiply, ``t{N}`` text-only). The token is the per-run identity a
+    file keeps even when separated from its folders -- M2 resolves it
+    back to a baked workflow, so its composition is CONTRACT, not
+    cosmetics."""
+
+    def test_paired_aligned_tokens(self) -> None:
+        prefixes = run()[4]
+        assert [p.rsplit("/", 1)[-1] for p in prefixes] == [
+            "pair_01_m1_p1", "pair_02_m1_p2",
+            "pair_01_m2_p1", "pair_02_m2_p2",
+        ]
+
+    def test_aligned_vae_never_gets_a_v_fragment(self) -> None:
+        # In aligned mode vae FOLLOWS the sweep axis -- it is not an
+        # independent axis, so m{N} alone already pins the vae. A _v
+        # fragment here would imply a choice that doesn't exist.
+        prefixes = run(vae=["vA", "vB"])[4]
+        assert all("_v" not in p.rsplit("/", 1)[-1] for p in prefixes)
+
+    def test_multiply_sweep_tokens_carry_the_vae_axis(self) -> None:
+        out = run(sweep_mode="multiply", vae=["vA", "vB"],
+                  image=["i"], text=["t"])
+        tokens = [p.rsplit("/", 1)[-1] for p in out[4]]
+        # model-major (divmod over the vae axis), matching the outputs.
+        assert tokens == [
+            "pair_01_m1_v1_p1", "pair_01_m1_v2_p1",
+            "pair_01_m2_v1_p1", "pair_01_m2_v2_p1",
+        ]
+
+    def test_no_sweep_token_is_pair_only(self) -> None:
+        out = EPSCrossSweep().run(
+            image=["i1"], text=["tA", "tB"], pair_mode="multiply",
+            sweep_mode="aligned",
+        )
+        assert out[4] == ["pair_01_i1_t1", "pair_02_i1_t2"]
+
+    def test_tokens_are_unique_across_the_set(self) -> None:
+        out = EPSCrossSweep().run(
+            model=["m1", "m2"], clip=["c"], label=["A", "B"],
+            vae=["v1", "v2"], image=["i1", "i2"], text=["t1", "t2", "t3"],
+            pair_mode="multiply", sweep_mode="multiply",
+        )
+        # 2 models x 2 vaes x (2 images x 3 texts) = 24 distinct runs,
+        # each with a distinct full prefix (folders + token).
+        assert len(out[4]) == 24
+        assert len(set(out[4])) == 24
+        # ...and the TOKENS alone are unique too (a file separated from
+        # its folders still identifies its run -- the M1 point).
+        tokens = [p.rsplit("/", 1)[-1] for p in out[4]]
+        assert len(set(tokens)) == 24
+
+
+class TestSoloRunV0670:
+    """v0.67.0 provenance M1: ``solo_run`` re-runs exactly ONE member of
+    a set. Paste a token from a filename, queue, get that file again --
+    the whole point of the tokens. A typo raises loudly (a silent 0-run
+    "success" would burn a queue and teach the user nothing)."""
+
+    def test_empty_solo_runs_the_whole_set(self) -> None:
+        assert len(run(solo_run="")[4]) == 4
+        assert len(run(solo_run="   ")[4]) == 4  # whitespace = unset
+
+    def test_solo_selects_exactly_one_run(self) -> None:
+        out = run(solo_run="m2_p1")
+        models, _c, images, texts, prefixes = out[0], out[1], out[2], out[3], out[4]
+        assert models == ["m1"]
+        assert images == ["iA"]
+        assert texts == ["tA"]
+        assert prefixes == ["lora_0.5/pair_01_m2_p1"]
+
+    def test_solo_multiply_pins_model_and_vae(self) -> None:
+        out = run(sweep_mode="multiply", vae=["vA", "vB"],
+                  image=["i"], text=["t"], solo_run="m2_v1_p1")
+        assert out[0] == ["m1"]   # models[1] -- token indices are 1-based
+        assert out[6] == ["vA"]
+        assert len(out[4]) == 1 and out[4][0].endswith("_m2_v1_p1")
+
+    def test_solo_pair_multiply_token(self) -> None:
+        out = EPSCrossSweep().run(
+            image=["i1", "i2"], text=["tA", "tB"], pair_mode="multiply",
+            sweep_mode="aligned", solo_run="i2_t1",
+        )
+        assert out[2] == ["i2"]
+        assert out[3] == ["tA"]
+
+    def test_solo_no_match_raises_with_an_example_token(self) -> None:
+        with pytest.raises(ValueError) as exc:
+            run(solo_run="m9_p9")
+        msg = str(exc.value)
+        assert "m9_p9" in msg
+        assert "4 runs" in msg          # steps x pairs of the helper set
+        assert "m1_p1" in msg           # a real token to copy from

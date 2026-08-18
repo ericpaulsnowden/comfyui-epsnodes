@@ -1960,6 +1960,36 @@ deletion:
 
 ### §6.10 `EPSCrossSweep` (display: "EPS Run Multiplier") — sweep × pairs, organized
 
+**Run tokens + `solo_run` (v0.67.0, provenance M1 — roadmap
+`docs/ROADMAP-run-provenance.md`, owner goal: "drop a single image
+from a set onto comfyui and recreate just that image"):** every
+`save_prefix` FILE component now ends with a run TOKEN built from pure
+1-based indices (owner's pinned choice over readable names — short,
+collision-free, drift-immune): sweep fragment `m{N}` — plus `_v{M}`
+ONLY when vae is an independent axis (`sweep_mode: multiply` with >1
+vaes; in aligned mode vae FOLLOWS the model axis, so `m{N}` alone
+already pins it) — then the pair fragment: `p{N}` (paired), `i{N}_t{N}`
+(pair multiply), `t{N}` (text-only). No sweep wired = pair fragment
+alone. Filenames become e.g. `lora_0.5/Portrait_m2_p1_00001_.png` — a
+file separated from its folders still names its exact run. **Token
+composition is CONTRACT, not cosmetics** (M2 resolves tokens back to
+baked workflows); it is pinned byte-exact in both test layers. The new
+`solo_run` STRING widget (tail-appended after `sweep_mode`, §8) re-runs
+exactly ONE member: paste a token, queue, get that file again — all
+outputs collapse to length 1. A token matching NOTHING raises a
+ValueError naming the set size and a real example token (a typo must
+never burn a queue as a silent 0-run success) — but the EMPTY-set
+blocker path still outranks it (a zero-run setup returns blockers
+before the solo check, same as always). The §6.10 estimator mirrors
+all of this: a solo'd node's `total` IS 1 (so a chained downstream
+multiplier counts 1, matching what run() truly emits), the readout
+shows `Solo <token> — 1 of N runs` — deliberately warn-painted even
+when valid, because solo is a mode you can forget you left on — and a
+provably-bad token (grammar or bounds, only when every count is exact;
+`≥` floors skip validation rather than risk a lying fail paint) gets
+the early error paint. `solo_run` joined the widget-callback recompute
+triggers (a token paste changes the count with no rewire).
+
 **Multiply by default + hidden mode combos (v0.66.1, owner: "make both
 pair and sweep modes multiply by default. Also hide those two options
 and make a setting in properties to make them visible. There are rare

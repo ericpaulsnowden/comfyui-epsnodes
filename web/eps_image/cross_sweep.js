@@ -779,7 +779,10 @@ function estimateInner(snapshot, nodeId, path) {
     pairsAtLeast: false,
     unknowns: [],
     error: null,
-    breakdown: ''
+    breakdown: '',
+    solo: null,
+    soloOf: 0,
+    soloOfAtLeast: false
   }
   const node = snapshot?.nodes?.[String(nodeId)]
   if (!node || node.classType !== CLASS_ID) {
@@ -939,6 +942,47 @@ function estimateInner(snapshot, nodeId, path) {
   // atLeast propagates like either group's.
   result.atLeast = result.stepsAtLeast || result.pairsAtLeast || Boolean(nameSrc?.atLeast)
   result.breakdown = `${plural(steps, 'sweep step')} × ${plural(pairs, 'pair')}`
+
+  // --- v0.67.0 provenance M1: `solo_run`. A non-empty token means run()
+  // emits exactly ONE of the set's runs (or raises, on a typo) -- so the
+  // solo-effective total IS 1, which a chained downstream multiplier's
+  // sourceCount picks up for free, and the full set size moves to
+  // `soloOf` for the readout's "1 of N". Zero-run sets never get here:
+  // run()'s empty-safety blocker return sits BEFORE its solo check, so
+  // the zero paths above already tell the truth.
+  const soloRaw = typeof widgets.solo_run === 'string' ? widgets.solo_run.trim() : ''
+  if (soloRaw) {
+    // Validate against run()'s _run_token grammar -- but only when every
+    // count is EXACT: with an atLeast floor anywhere the real axis
+    // lengths are unknowable and a fail paint could lie. (run() itself
+    // stays the referee either way; a bad token fails the queue loudly
+    // in its first seconds.)
+    if (!result.atLeast) {
+      const vaeAxisLen = sweepMultiply && vae ? Math.max(vae.count, 1) : 1
+      const hasVFrag = sweepWired && sweepMultiply && vaeAxisLen > 1
+      const sweepPart = sweepWired ? (hasVFrag ? 'm(\\d+)_v(\\d+)_' : 'm(\\d+)_') : ''
+      const pairPart = !imageSrc ? 't(\\d+)' : pairMultiply ? 'i(\\d+)_t(\\d+)' : 'p(\\d+)'
+      const match = new RegExp(`^${sweepPart}${pairPart}$`).exec(soloRaw)
+      const bounds = []
+      if (sweepWired) {
+        bounds.push(steps / vaeAxisLen) // axis1 length (steps = axis1 x vae)
+        if (hasVFrag) bounds.push(vaeAxisLen)
+      }
+      if (imageSrc && pairMultiply) bounds.push(imageSrc.count, textSrc.count)
+      else bounds.push(pairs)
+      const bad =
+        !match || match.slice(1).some((n, i) => Number(n) < 1 || Number(n) > bounds[i])
+      if (bad) {
+        result.error = `solo_run "${soloRaw}" matches none of the ${result.total} runs — the queue will fail`
+        return result
+      }
+    }
+    result.solo = soloRaw
+    result.soloOf = result.total
+    result.soloOfAtLeast = result.atLeast
+    result.total = 1
+    result.atLeast = false
+  }
   return result
 }
 
@@ -956,6 +1000,13 @@ export function formatReadout(est) {
   if (est.error) return { text: est.error, cls: 'eps-rc-error' }
   if (est.total === 0) {
     return { text: `Runs: 0 — ${est.breakdown || 'nothing to run'}`, cls: 'eps-rc-warn' }
+  }
+  if (est.solo) {
+    // Deliberately warn-painted even when valid: solo is a MODE you can
+    // forget you left on, and a full set silently shrunk to one run is
+    // exactly the surprise this readout exists to prevent.
+    const of = est.soloOfAtLeast ? `≥ ${est.soloOf}` : `${est.soloOf}`
+    return { text: `Solo ${est.solo} — 1 of ${of} runs`, cls: 'eps-rc-warn' }
   }
   const base = `${plural(est.steps, 'sweep step')} × ${plural(est.pairs, 'pair')}`
   if (est.atLeast) {
@@ -1373,7 +1424,7 @@ export function attach(node) {
     // change the math with no rewire at all).
     node.onDrawForeground = wrapWithRecompute(node.onDrawForeground, state)
     node.onConnectionsChange = wrapWithRecompute(node.onConnectionsChange, state)
-    for (const name of ['pair_mode', 'sweep_mode']) {
+    for (const name of ['pair_mode', 'sweep_mode', 'solo_run']) {
       const widget = (node.widgets || []).find((w) => w && w.name === name)
       if (widget) widget.callback = wrapWithRecompute(widget.callback, state)
     }

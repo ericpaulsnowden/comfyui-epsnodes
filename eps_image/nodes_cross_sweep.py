@@ -269,7 +269,11 @@ class EPSCrossSweep:
         "shows how many runs are planned BEFORE you queue, so an "
         "overnight batch can be sanity-checked first. For WAN-style "
         "high/low models, wire model_low alongside model: the pair stays "
-        "welded together on every run and never multiplies the count."
+        "welded together on every run and never multiplies the count. "
+        "Every saved filename ends with a run token like m2_i1_t3 (sweep "
+        "step 2, image 1, text 3); paste that token into solo_run to "
+        "re-run exactly that one image out of the whole set -- clear it "
+        "to run everything again."
     )
 
     @classmethod
@@ -475,6 +479,24 @@ class EPSCrossSweep:
                         ),
                     },
                 ),
+                # v0.67.0 provenance M1 (tail-append per §8, after
+                # sweep_mode): type one run's token here to re-run JUST
+                # that combination.
+                "solo_run": (
+                    "STRING",
+                    {
+                        "default": "",
+                        "multiline": False,
+                        "tooltip": (
+                            "Re-run ONE combination from a set: paste the "
+                            "run token from a saved file's name (e.g. "
+                            "m2_v1_i3_t1) and only that run executes. "
+                            "Leave empty for the whole set. A token that "
+                            "matches no run fails the queue loudly rather "
+                            "than silently doing nothing."
+                        ),
+                    },
+                ),
             },
             # v0.51.0: lets run() see its own consumers (the guard below).
             # Same hidden pair as nodes_switcher/nodes_distributor.
@@ -494,6 +516,7 @@ class EPSCrossSweep:
         vae: Any = None,
         pair_mode: Any = PAIR_MODE_MULTIPLY,
         sweep_mode: Any = SWEEP_MODE_MULTIPLY,
+        solo_run: Any = "",
         prompt: Any = None,
         unique_id: Any = None,
     ) -> tuple[list[Any], ...]:
@@ -688,15 +711,19 @@ class EPSCrossSweep:
         # crosses every image with every text right here, image-major --
         # §6.9's exact emission order, with names aligned per TEXT (the
         # Notebook wired straight in) rather than per pair.
-        pair_rows: list[tuple[Any, Any, str]]  # (image-or-None, text, name)
+        # v0.67.0 provenance M1: every pair row carries its own pure-index
+        # token fragment (owner's pinned naming choice) -- i/t for a
+        # multiplied pair, t alone for text-only, p for an aligned pair.
+        pair_rows: list[tuple[Any, Any, str, str]]  # (image-or-None, text, name, ptoken)
         if text_only:
             pair_rows = [
-                (None, texts[p], names[p] if p < len(names) else "") for p in range(len(texts))
+                (None, texts[p], names[p] if p < len(names) else "", f"t{p + 1}")
+                for p in range(len(texts))
             ]
         elif multiply:
             pair_rows = [
-                (img, texts[t], names[t] if t < len(names) else "")
-                for img in images
+                (img, texts[t], names[t] if t < len(names) else "", f"i{i + 1}_t{t + 1}")
+                for i, img in enumerate(images)
                 for t in range(len(texts))
             ]
         else:
@@ -710,7 +737,8 @@ class EPSCrossSweep:
                     len(images), len(texts), pairs,
                 )
             pair_rows = [
-                (images[p], texts[p], names[p] if p < len(names) else "") for p in range(pairs)
+                (images[p], texts[p], names[p] if p < len(names) else "", f"p{p + 1}")
+                for p in range(pairs)
             ]
 
         if steps == 0 or not pair_rows:
@@ -724,8 +752,10 @@ class EPSCrossSweep:
             )
             from comfy_execution.graph import ExecutionBlocker
 
-            blocked = [ExecutionBlocker(None)]
-            return (blocked, blocked, blocked, blocked, blocked, blocked, blocked)
+            # One blocked list per declared output -- derived from
+            # RETURN_NAMES so a future tail append can never drift this
+            # (v0.66.0 added model_low and this literal 7-tuple missed it).
+            return tuple([ExecutionBlocker(None)] for _ in self.RETURN_NAMES)
 
         # Unwired optional OUTPUTS emit one silent blocker PER RUN, keeping
         # every output list the same length (index alignment is this node's
@@ -746,7 +776,44 @@ class EPSCrossSweep:
         # cheaply. The on-node readout (web/eps_image/cross_sweep.js) is the
         # pre-queue ESTIMATE; this event is the execution-time truth. Same
         # degrade posture as the §6.6 grid toast: no live server, no event.
-        total = steps * len(pair_rows)
+        # v0.67.0 provenance M1: the run TOKEN -- pure indices (owner's
+        # pinned choice): sweep fragment m{axis1} (+_v{vae} only when vae
+        # is an independent axis; in aligned mode vae follows the axis and
+        # the folder already says so), then the pair fragment from
+        # pair_rows. A file separated from its folders still identifies.
+        def _run_token(a1_idx: int, v_idx: int, ptoken: str) -> str:
+            parts = []
+            if sweep_wired:
+                stoken = f"m{a1_idx + 1}"
+                if sweep_multiply and vae_axis_len > 1:
+                    stoken += f"_v{v_idx + 1}"
+                parts.append(stoken)
+            parts.append(ptoken)
+            return "_".join(parts)
+
+        solo = str(_unwrap_scalar(solo_run, "") or "").strip()
+        emission: list[tuple[int, int, int, int, tuple[Any, Any, str, str], str]] = []
+        for s in range(steps):
+            if sweep_multiply and vae_axis_len > 1:
+                a1_idx, v_idx = divmod(s, vae_axis_len)
+            else:
+                a1_idx = v_idx = s
+            for p, row in enumerate(pair_rows):
+                token = _run_token(a1_idx, v_idx, row[3])
+                if solo and token != solo:
+                    continue
+                emission.append((s, a1_idx, v_idx, p, row, token))
+        if solo and not emission:
+            # A typo must never burn a queue as a silent 0-run success.
+            raise ValueError(
+                f"EPS Run Multiplier: solo_run {solo!r} matches none of the "
+                f"{steps * len(pair_rows)} runs in this set (sweep steps "
+                f"1..{steps}, pairs 1..{len(pair_rows)} -- e.g. "
+                f"{_run_token(0, 0, pair_rows[0][3])!r}). Fix the token or "
+                "clear solo_run to run the whole set."
+            )
+
+        total = len(emission)
         logger.info(
             "EPS Run Multiplier: %d run(s) -- %d sweep step(s) x %d pair(s)",
             total, steps, len(pair_rows),
@@ -769,14 +836,11 @@ class EPSCrossSweep:
             pass
 
         out: dict[str, list[Any]] = {k: [] for k in self.RETURN_NAMES}
-        for s in range(steps):  # strength-major: sweep step is the OUTER loop
-            # v0.57.0: in multiply mode, s decomposes into (model-axis step,
-            # vae step), model-major -- each model runs all its vaes before
-            # the next model loads. Aligned mode keeps both indices = s.
-            if sweep_multiply and vae_axis_len > 1:
-                a1_idx, v_idx = divmod(s, vae_axis_len)
-            else:
-                a1_idx = v_idx = s
+        # strength-major: sweep step is the outer sort of `emission` (built
+        # in that order above); v0.57.0's model-major multiply decomposition
+        # and the v0.67.0 solo filter both already applied.
+        for _s, a1_idx, v_idx, p, row, token in emission:
+            pair_image, pair_text, pair_name, _ptoken = row
             label_component = (
                 (_safe_component(labels[_sweep_index(len(labels), a1_idx)]) if label_wired else "")
                 or f"step_{a1_idx + 1:02d}"
@@ -785,34 +849,36 @@ class EPSCrossSweep:
                 # One sortable folder level per (model, vae) combination --
                 # the vae axis has no label input, so it tags by position.
                 label_component = f"{label_component}_vae{v_idx + 1:02d}"
-            for p, (pair_image, pair_text, pair_name) in enumerate(pair_rows):
-                pair_component = _safe_component(pair_name) or f"pair_{p + 1:02d}"
-                out["model"].append(
-                    models[_sweep_index(len(models), a1_idx)] if model_wired else run_blocker
-                )
-                out["model_low"].append(
-                    model_lows[_sweep_index(len(model_lows), a1_idx)]
-                    if model_low_wired
-                    else run_blocker
-                )
-                out["clip"].append(
-                    clips[_sweep_index(len(clips), a1_idx)] if clip_wired else run_blocker
-                )
-                out["image"].append(run_blocker if text_only else pair_image)
-                out["text"].append(pair_text)
-                out["label"].append(
-                    labels[_sweep_index(len(labels), a1_idx)] if label_wired else run_blocker
-                )
-                # No sweep wired at all -> no sweep-label folder level: the
-                # save path is just <base>/<pair>, exactly what a plain
-                # image x text multiplication wants on disk.
-                prefix_parts = (
-                    [*base_parts, pair_component]
-                    if not sweep_wired
-                    else [*base_parts, label_component, pair_component]
-                )
-                out["save_prefix"].append("/".join(prefix_parts))
-                out["vae"].append(
-                    vaes[_sweep_index(len(vaes), v_idx)] if vae_wired else run_blocker
-                )
+            # v0.67.0: the FILE name carries the full run token, so a file
+            # separated from its folder tree still identifies itself.
+            pair_component = _safe_component(pair_name) or f"pair_{p + 1:02d}"
+            pair_component = f"{pair_component}_{token}"
+            out["model"].append(
+                models[_sweep_index(len(models), a1_idx)] if model_wired else run_blocker
+            )
+            out["model_low"].append(
+                model_lows[_sweep_index(len(model_lows), a1_idx)]
+                if model_low_wired
+                else run_blocker
+            )
+            out["clip"].append(
+                clips[_sweep_index(len(clips), a1_idx)] if clip_wired else run_blocker
+            )
+            out["image"].append(run_blocker if text_only else pair_image)
+            out["text"].append(pair_text)
+            out["label"].append(
+                labels[_sweep_index(len(labels), a1_idx)] if label_wired else run_blocker
+            )
+            # No sweep wired at all -> no sweep-label folder level: the
+            # save path is just <base>/<pair>, exactly what a plain
+            # image x text multiplication wants on disk.
+            prefix_parts = (
+                [*base_parts, pair_component]
+                if not sweep_wired
+                else [*base_parts, label_component, pair_component]
+            )
+            out["save_prefix"].append("/".join(prefix_parts))
+            out["vae"].append(
+                vaes[_sweep_index(len(vaes), v_idx)] if vae_wired else run_blocker
+            )
         return tuple(out[k] for k in self.RETURN_NAMES)

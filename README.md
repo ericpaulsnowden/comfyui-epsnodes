@@ -710,6 +710,22 @@ toast ("EPS Run Multiplier: 8 runs") — the multiplier executes in the
 first seconds, long before samplers, so a wrong number is cancellable
 while it's still free.
 
+**Every file names its exact run — and can be re-run alone (v0.67.0).**
+Each save path now ends with a short **run token** built from the run's
+indices: `m2` = 2nd sweep step, `_v1` = 1st VAE (only when VAEs are
+their own axis in `sweep_mode: multiply`), then the pair — `p1`
+(paired), `i2_t3` (image 2 × text 3), or `t1` (text-only). A filename
+like `lora_0.5/Portrait_m2_i1_t3_00001_.png` identifies its run even
+after the file leaves its folders. To **re-run just that one image**,
+paste the token (`m2_i1_t3`) into the node's new **`solo_run`** box and
+queue: the node emits exactly that single run out of the whole set —
+the readout switches to `Solo m2_i1_t3 — 1 of 24 runs` so you can't
+forget it's on, and a mistyped token fails the queue immediately with a
+real example token to copy (never a silent zero-run "success"). Clear
+the box to run the full set again. This is milestone M1 of the
+provenance roadmap (`docs/ROADMAP-run-provenance.md`); later milestones
+bake per-image workflows so a dropped file loads pre-soloed.
+
 **Both modes default to `multiply` (v0.66.1)** — images × texts crossed,
 and the vae axis crossed against the model axis — because that's almost
 always what you want; the two mode dropdowns are hidden until you flip

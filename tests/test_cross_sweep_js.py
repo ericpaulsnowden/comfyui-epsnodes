@@ -126,6 +126,28 @@ def _owner_shape_with_blocked_label() -> dict:
     return shape
 
 
+def _owner_shape_solo(token: str, sweep_mode: str = "multiply") -> dict:
+    """v0.67.0 provenance M1: the owner shape with a `solo_run` token --
+    text-only pairs, so valid multiply tokens are `m{1..4}_v{1..2}_t1`."""
+    shape = _owner_shape(sweep_mode)
+    shape["nodes"]["5"]["widgets"]["solo_run"] = token
+    return shape
+
+
+def _chained_solo_shape() -> dict:
+    """A solo'd multiplier feeding a second multiplier's model input: run()
+    truly emits ONE model, so the downstream count must be 1, not the full
+    set of 8 -- the reason estimateInner folds solo into `total` instead of
+    only dressing the readout."""
+    shape = _owner_shape_solo("m3_v2_t1")
+    shape["nodes"]["6"] = {
+        "classType": "EPSCrossSweep",
+        "widgets": {"base_folder": "", "pair_mode": "paired", "sweep_mode": "aligned"},
+        "inputs": {"model": _link("5", 0), "text": _link("3")},
+    }
+    return shape
+
+
 def _image_switcher_two_of_three() -> dict:
     """§6.4 Image Switcher: 3 wired, image_2 toggled off -> emits 2."""
     return {
@@ -916,6 +938,58 @@ ESTIMATE_CASES = [
             "breakdown": "nothing to run (label input is empty/blocked)",
         },
     ),
+    # ------------------------------------------------ v0.67.0 solo_run (M1)
+    (
+        # A valid token collapses the total to the ONE run the backend will
+        # emit; the full set size moves to soloOf for the readout.
+        "solo_valid_token_is_one_of_eight",
+        _owner_shape_solo("m3_v2_t1"),
+        "5",
+        {
+            "total": 1, "atLeast": False, "steps": 8, "pairs": 1,
+            "solo": "m3_v2_t1", "soloOf": 8, "soloOfAtLeast": False,
+            "error": None,
+        },
+    ),
+    (
+        # Out-of-bounds index: run() raises at queue time, the estimator
+        # paints that failure early (all counts here are exact, so the
+        # validation is definitive).
+        "solo_out_of_bounds_is_the_queue_error_early",
+        _owner_shape_solo("m9_v1_t1"),
+        "5",
+        {"error_contains": ["solo_run", "m9_v1_t1", "8 runs", "queue will fail"]},
+    ),
+    (
+        # Wrong grammar for the modes: aligned mode has no independent vae
+        # axis, so a _v fragment can never match (run()'s _run_token never
+        # emits one there).
+        "solo_v_fragment_in_aligned_mode_never_matches",
+        {
+            "nodes": {
+                "20": _checkpoint_switcher(["a.st", "b.st", "c.st"]),
+                "3": _text_source(),
+                "5": {
+                    "classType": "EPSCrossSweep",
+                    "widgets": {
+                        "base_folder": "", "pair_mode": "paired",
+                        "sweep_mode": "aligned", "solo_run": "m2_v1_t1",
+                    },
+                    "inputs": {"model": _link("20"), "text": _link("3")},
+                },
+            }
+        },
+        "5",
+        {"error_contains": ["solo_run", "m2_v1_t1", "queue will fail"]},
+    ),
+    (
+        # Chained: the solo'd upstream emits ONE model, so downstream is 1
+        # run, not 8 -- see _chained_solo_shape's docstring.
+        "chained_downstream_of_a_solo_multiplier_counts_one",
+        _chained_solo_shape(),
+        "6",
+        {"total": 1, "atLeast": False, "steps": 1, "pairs": 1, "error": None},
+    ),
 ]
 
 #: (estimate object, expected formatReadout result) -- pins the exact line
@@ -1014,6 +1088,27 @@ READOUT_CASES = [
             "breakdown": "1 sweep step × 1 pair",
         },
         {"text": "Runs: 1 — 1 sweep step × 1 pair", "cls": ""},
+    ),
+    (
+        # v0.67.0 solo -- warn-painted even when VALID: solo is a mode you
+        # can forget you left on.
+        {
+            "total": 1, "atLeast": False, "steps": 8, "stepsAtLeast": False,
+            "pairs": 1, "pairsAtLeast": False, "unknowns": [], "error": None,
+            "breakdown": "8 sweep steps × 1 pair",
+            "solo": "m3_v2_t1", "soloOf": 8, "soloOfAtLeast": False,
+        },
+        {"text": "Solo m3_v2_t1 — 1 of 8 runs", "cls": "eps-rc-warn"},
+    ),
+    (
+        # An unknowable set size keeps the honest floor in the "of N".
+        {
+            "total": 1, "atLeast": False, "steps": 8, "stepsAtLeast": True,
+            "pairs": 1, "pairsAtLeast": False, "unknowns": ["model"], "error": None,
+            "breakdown": "8 sweep steps × 1 pair",
+            "solo": "m3_v2_t1", "soloOf": 8, "soloOfAtLeast": True,
+        },
+        {"text": "Solo m3_v2_t1 — 1 of ≥ 8 runs", "cls": "eps-rc-warn"},
     ),
 ]
 
@@ -1373,7 +1468,9 @@ def test_all_three_refresh_triggers_share_the_wrapped_throttle(source: str) -> N
     assert (
         "node.onConnectionsChange = wrapWithRecompute(node.onConnectionsChange, state)" in body
     )
-    assert "for (const name of ['pair_mode', 'sweep_mode'])" in body
+    # v0.67.0: solo_run joined the widget-callback triggers (a token
+    # paste changes the count with no rewire, same as a mode flip).
+    assert "for (const name of ['pair_mode', 'sweep_mode', 'solo_run'])" in body
     assert "widget.callback = wrapWithRecompute(widget.callback, state)" in body
 
 
