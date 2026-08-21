@@ -133,6 +133,28 @@ TREE_LORAS = [
     "Top.safetensors",
     "another-top.safetensors",
 ]
+#: (prevScope, nextScope, path, loras, expected drillPathAfterReload()) --
+#: v0.67.2's sticky drill-down (owner report 2026-08-20: "if you pick a
+#: folder, the node goes back to the root library after a few seconds").
+DRILL_PATH_CASES = [
+    # same scope, folder still exists -> path survives the reload
+    (["", "", ["characters"], ["characters/hero.st", "styles/x.st"]], ["characters"]),
+    # deeper path, every prefix exists
+    (["", "", ["styles", "vintage"], ["styles/vintage/sepia.st"]], ["styles", "vintage"]),
+    # scope changed -> browse position resets to that scope's root
+    (["", "styles", ["characters"], ["characters/hero.st"]], []),
+    (["styles", "", ["vintage"], ["styles/vintage/sepia.st"]], []),
+    # a folder that vanished from the fresh list trims to the deepest real one
+    (["", "", ["styles", "gone"], ["styles/vintage/sepia.st"]], ["styles"]),
+    (["", "", ["gone"], ["styles/vintage/sepia.st"]], []),
+    # scoped: the path is RELATIVE to the scope root when checking existence
+    (["styles", "styles", ["vintage"], ["styles/vintage/sepia.st"]], ["vintage"]),
+    (["styles", "styles", ["vintage"], ["characters/hero.st"]], []),
+    # degenerate inputs never throw
+    ([None, None, None, None], []),
+    (["", "", ["a"], None], []),
+]
+
 LIST_FOLDER_CASES = [
     (
         (TREE_LORAS, ""),
@@ -180,7 +202,8 @@ const out = {
     hasSerializeSelection: typeof m.serializeSelection === 'function',
     hasListFolder: typeof m.listFolder === 'function',
     hasClampStrength: typeof m.clampStrength === 'function',
-    hasNormalizeLoraName: typeof m.normalizeLoraName === 'function'
+    hasNormalizeLoraName: typeof m.normalizeLoraName === 'function',
+    hasDrillPathAfterReload: typeof m.drillPathAfterReload === 'function'
   },
   constants: {
     classId: m.CLASS_ID,
@@ -194,7 +217,10 @@ const out = {
   serializeSelection: %(serialize_inputs)s.map((sel) => m.serializeSelection(sel)),
   listFolder: %(list_folder_inputs)s.map(([loras, folder]) => m.listFolder(loras, folder)),
   clampStrength: %(clamp_inputs)s.map((v) => m.clampStrength(v)),
-  normalizeLoraName: m.normalizeLoraName('a\\\\b\\\\c.safetensors')
+  normalizeLoraName: m.normalizeLoraName('a\\\\b\\\\c.safetensors'),
+  drillPathAfterReload: %(drill_inputs)s.map(
+    ([prev, next, path, loras]) => m.drillPathAfterReload(prev, next, path, loras)
+  )
 }
 
 process.stdout.write(JSON.stringify(out))
@@ -235,6 +261,7 @@ def picker_api(tmp_path_factory: pytest.TempPathFactory) -> dict:
             "serialize_inputs": json.dumps([sel for sel, _ in SERIALIZE_CASES]),
             "list_folder_inputs": json.dumps([list(args) for args, _ in LIST_FOLDER_CASES]),
             "clamp_inputs": json.dumps([value for value, _ in CLAMP_CASES]),
+            "drill_inputs": json.dumps([args for args, _ in DRILL_PATH_CASES]),
         },
         encoding="utf-8",
     )
@@ -291,7 +318,30 @@ def test_module_exports_the_entry_point_and_pure_helpers(picker_api: dict) -> No
         "hasListFolder": True,
         "hasClampStrength": True,
         "hasNormalizeLoraName": True,
+        "hasDrillPathAfterReload": True,
     }
+
+
+def test_drill_path_after_reload_cases(picker_api: dict) -> None:
+    """v0.67.2 sticky folder: the drill-down survives any reload that keeps
+    the scope (the feed refresh landing after the cached paint, the
+    controller's apply), trims to the deepest folder that still exists,
+    and resets only when the SCOPE changes."""
+    pairs = zip(DRILL_PATH_CASES, picker_api["drillPathAfterReload"], strict=True)
+    for (args, expected), got in pairs:
+        assert got == expected, f"drillPathAfterReload({args!r}) -> {got!r}, wanted {expected!r}"
+
+
+def test_reload_from_widget_keeps_the_path_unless_the_scope_changed(source: str) -> None:
+    """The wholesale reset (path/view/search) now sits behind a scope-change
+    check; the path itself always goes through drillPathAfterReload."""
+    body = _function_body(source, "reloadFromWidget(state)")
+    assert "const prevScope = state.selection?.scope || ''" in body
+    assert "drillPathAfterReload(prevScope, state.selection.scope, state.path, state.loras)" in body
+    assert "if ((state.selection.scope || '') !== prevScope) {" in body
+    assert "state.path = nextPath" in body
+    # the old unconditional reset is gone
+    assert "state.path = [] // a restored scope" not in body
 
 
 def test_class_id_widget_name_and_route_constants(picker_api: dict) -> None:

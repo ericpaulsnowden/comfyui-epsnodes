@@ -554,3 +554,88 @@ class TestStateGroupsV0650:
         body = controller_source.split("_deleteCategory(category) {", 1)[1].split("\n      }\n", 1)[0]
         assert "layout.order[UNCATEGORIZED] = [...(layout.order[UNCATEGORIZED] || []), ...orphans]" in body
         assert "api.postJson" not in body.replace("this._saveLayout()", "")  # only the layout changes
+
+
+# ------------------------------------------ v0.67.2: controller layout/poll/drag/name
+
+
+def _method_body(source_text: str, signature: str) -> str:
+    """The body of an INDENTED class method ``      <signature> {`` up to the
+    next method at the same indent -- controller.js's node class methods
+    are not top-level functions, so `_function_body` cannot find them."""
+    head = f"      {signature} {{\n"
+    start = source_text.index(head) + len(head)
+    end = re.search(r"\n      \}\n", source_text[start:])
+    assert end, f"{signature}: closing brace not found"
+    return source_text[start : start + end.start()]
+
+
+def test_layout_token_bumps_in_save_and_guards_the_poll(controller_source: str) -> None:
+    """Owner report 2026-08-20 (a reorder "moved, then moved back, then showed
+    up where I had moved them"): the sets-poll's layout GET used to paint
+    the OLD server layout over an optimistic drag before the POST landed.
+    The token is bumped in `_saveLayout` (every local edit calls it) and
+    `_refreshSetsCache` snapshots it BEFORE its awaits, discarding a
+    response the token outran or one landing mid-save."""
+    save = _method_body(controller_source, "async _saveLayout()")
+    assert save.lstrip().startswith("this._layoutToken++")
+    assert "if (this._layoutSaveInFlight) {" in save
+    assert "this._layoutSaveQueued = true" in save
+    assert "} while (this._layoutSaveQueued)" in save
+    assert "if (token === this._layoutToken) {" in save
+    refresh = _method_body(controller_source, "async _refreshSetsCache()")
+    assert refresh.index("const token = this._layoutToken") < refresh.index(
+        "await api.getJson('/lora_library/sets')"
+    )
+    assert refresh.count("if (this._layoutSaveInFlight || token !== this._layoutToken) return") == 2
+    assert "if (signature === this._layoutSignature) return" in refresh
+
+
+def test_state_list_never_rebuilds_under_an_active_drag(controller_source: str) -> None:
+    """A poll landing mid-gesture replaced the dragged row (and its pointer
+    capture) -- the render defers and the pointerup/cancel paths flush,
+    AFTER the drag is nulled so the drop's own render is never deferred."""
+    render = _method_body(controller_source, "_renderStateList()")
+    assert "if (this._stateDrag?.active) {" in render
+    assert "this._renderAfterDrag = true" in render
+    assert "_flushDeferredRender()" in controller_source
+    pointerdown = _method_body(controller_source, "_onStateRowPointerDown(event, source)")
+    on_up = pointerdown.split("const onUp = (upEvent) => {", 1)[1]
+    on_up = on_up.split("const onCancel", 1)[0]
+    assert on_up.index("this._stateDrag = null") < on_up.index("_finishStateDrag(drag)")
+    assert "this._flushDeferredRender()" in on_up
+    on_cancel = pointerdown.split("const onCancel = (cancelEvent) => {", 1)[1]
+    on_cancel = on_cancel.split("function detach()", 1)[0]
+    assert "this._flushDeferredRender()" in on_cancel
+
+
+def test_poll_repaints_are_change_gated(controller_source: str) -> None:
+    """The 4s poll tore every row down twice per tick for nothing; the sets
+    apply and the probe/status writes now compare a signature first."""
+    apply = _method_body(controller_source, "_applySetsResponse(data)")
+    assert "const signature = JSON.stringify(this._setsCache)" in apply
+    assert "if (signature === this._setsSignature) return" in apply
+    probe = _method_body(controller_source, "_probeAndUpdateStatus()")
+    assert "const probeKey = `${probe.ok ? 1 : 0}|${probe.message}`" in probe
+    assert "if (probeKey === this._lastProbeKey) return" in probe
+    # the probe itself still runs every beat (a deleted loader must be noticed)
+    assert probe.index("probeTargets(targets)") < probe.index("probeKey")
+    disarm = _method_body(controller_source, "_disarmDeleteButton()")
+    assert "if (this._lastProbe) button.disabled = !this._lastProbe.ok" in disarm
+
+
+def test_name_field_clears_through_the_widget_callback(controller_source: str) -> None:
+    """Owner report 2026-08-20: after `# name` made a group, "the '# name'
+    element also still shows". Clearing `.value` only repaints on the next
+    canvas draw and the Vue input keeps its own copy until the callback
+    fires -- every clear now goes through one helper doing value +
+    callback + dirty (rig-verified under the Vue renderer)."""
+    helper = _method_body(controller_source, "_clearNameField()")
+    assert "widget.value = ''" in helper
+    assert "widget.callback?.('')" in helper
+    assert "this.setDirtyCanvas(true, true)" in helper
+    assert "if (this._w.name) this._w.name.value = ''" not in controller_source
+    new_cat = _method_body(controller_source, "async _doNewCategory()")
+    assert "this._clearNameField()" in new_cat
+    assert "this._collapsedCategories.delete(name)" in new_cat
+

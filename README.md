@@ -224,7 +224,9 @@ favorites or recently-used anywhere in the ecosystem.
   the full list is always visible — the node makes the room, nothing
   crops or scrolls); the **Send to** row; then the **browser** — a
   breadcrumb you drill down through (with a ✕ at its right edge to clear
-  a pinned scope), the search box, `★ Favorites` and `🕘 Recent`
+  a pinned scope — and the folder you drilled into stays put until you
+  navigate back or change the scope; since v0.67.2 a background refresh
+  never bounces you to the root), the search box, `★ Favorites` and `🕘 Recent`
   pseudo-folders at the top, every folder with a lora count and a
   **Scope** pin, every lora with a ★ star and `＋ Add`. A selected or
   starred lora that isn't installed on this machine shows a dimmed ⚠ row

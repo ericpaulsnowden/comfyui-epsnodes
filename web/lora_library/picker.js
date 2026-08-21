@@ -543,6 +543,35 @@ function attachDomWidget(state) {
 
 // --- Data flow -- widget <-> state, and the restore/fetch race (file header) ---
 
+/**
+ * The drill-down path that survives a selection reload (v0.67.2, owner
+ * report 2026-08-20: "if you pick a folder, the node goes back to the root
+ * library after a few seconds … the folder should be sticky"). Root cause:
+ * the background feed fetch that lands a few seconds after the instant
+ * cached paint ran the same wholesale reset as a workflow restore, and
+ * the drill-down went with it. The rule now: the browse position is
+ * transient VIEW state that only the SCOPE invalidates -- a reload that
+ * keeps the scope keeps the path (trimmed to the deepest folder that
+ * still exists in the freshly-loaded library, so a folder removed on disk
+ * can't strand the view in a ghost); a reload that CHANGES the scope
+ * (configure restore of a different workflow, a scope pin from outside)
+ * starts at that scope's root. Pure so the probe can pin it.
+ * @param {string} prevScope @param {string} nextScope
+ * @param {string[]} path @param {string[]} loras
+ * @returns {string[]}
+ */
+export function drillPathAfterReload(prevScope, nextScope, path, loras) {
+  if ((prevScope || '') !== (nextScope || '')) return []
+  let kept = Array.isArray(path) ? [...path] : []
+  const list = Array.isArray(loras) ? loras : []
+  while (kept.length) {
+    const folder = [nextScope || '', ...kept].filter(Boolean).join('/') + '/'
+    if (list.some((file) => typeof file === 'string' && file.startsWith(folder))) break
+    kept = kept.slice(0, -1)
+  }
+  return kept
+}
+
 /** Re-derives `state.selection` from the widget's CURRENT value and
  * repaints -- the shared reconciliation step both the fetch-completion path
  * and wireConfigureReload call. */
@@ -551,6 +580,7 @@ function reloadFromWidget(state) {
   // widget JSON so the fresh parse below picks the typed value up -- the
   // in-render commit alone would mutate a row object this line discards.
   commitActiveStrengthEdit(state)
+  const prevScope = state.selection?.scope || ''
   state.selection = selectionFromWidgetValue(state.widget.value)
   // The selection was just replaced WHOLESALE (a configure restore, the
   // controller's apply, a fetch reconcile) -- the node's CURRENT size is
@@ -561,9 +591,16 @@ function reloadFromWidget(state) {
   // TOP of the size configure had just restored, compounding per switch).
   // The getMinHeight floor still guarantees the full list stays visible.
   state.lastSelectedCount = null
-  state.path = [] // a restored scope invalidates any drill-down into the old one
-  state.view = 'browse'
-  clearSearch(state) // ...and any search typed against the old scope (§6.13 M3)
+  // v0.67.2: the drill-down is sticky across anything that keeps the scope
+  // (the feed refresh landing after the cached paint, the controller's
+  // apply); only a scope CHANGE resets the browse position and the search
+  // typed against the old scope (§6.13 M3) -- see drillPathAfterReload.
+  const nextPath = drillPathAfterReload(prevScope, state.selection.scope, state.path, state.loras)
+  if ((state.selection.scope || '') !== prevScope) {
+    state.view = 'browse'
+    clearSearch(state)
+  }
+  state.path = nextPath
   render(state)
 }
 

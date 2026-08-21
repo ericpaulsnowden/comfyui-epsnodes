@@ -731,7 +731,22 @@ queue. It drives a **genuine, untouched `Power Lora Loader (rgthree)`**:
   distinct, survives background cache refreshes for its full window, and
   selection is slug-anchored so a mid-window sets-poll cannot invalidate
   it — the 2026-07-18 "delete does nothing during a running workflow"
-  bug). All existing behavior — apply-on-select, composite
+  bug). **v0.67.2 (owner reports 2026-08-20):** (1) the §4.2 layout is
+  TOKENED — every local edit bumps `_layoutToken` in `_saveLayout`, the
+  4s poll snapshots it before its GETs and discards a response the token
+  outran or one landing mid-save, and saves coalesce (a newer edit during
+  an in-flight POST re-posts instead of racing) — a reorder no longer
+  "moves, moves back, then lands"; (2) `_renderStateList` never rebuilds
+  under an active drag (deferred; pointerup/cancel flush AFTER the drag
+  is nulled so the drop's own render is immediate); (3) repaints are
+  change-gated — the sets apply and the layout GET compare a JSON
+  signature, and the 1 Hz probe only writes status/buttons/dirty when
+  its verdict changed (`_disarmDeleteButton` re-syncs its own disabled
+  state) — the poll used to tear every row down twice per tick and force
+  a canvas redraw every second per controller; (4) `# name` → group
+  clears the name field through `_clearNameField` (value + callback +
+  dirty — the Vue input only follows the callback; rig-verified under
+  both renderers) and opens the group, the Notebook's behaviour. All existing behavior — apply-on-select, composite
   capture/apply with target `All`, selective Push, `Show status`,
   serialize-based capture (v0.14.1), own-menu version-proof apply (v0.13.0) —
   is PRESERVED; only the state-selection UI changes from a dropdown to the
@@ -2525,7 +2540,14 @@ apply/text helpers, so it drops in anywhere Apply LoRA Set does.
   state + Retry. The folder TREE is derived client-side from the §5
   `GET picker` list (forward-slash split — no tree route; matches how
   rgthree's own chooser gets nested paths). Drill-down position is
-  transient; only `scope` persists.
+  transient; only `scope` persists — and since v0.67.2 it is STICKY
+  across anything that keeps the scope (owner report 2026-08-20: "pick a
+  folder, the node goes back to the root library after a few seconds" —
+  the background feed fetch landing after the instant cached paint ran
+  the same wholesale reset as a workflow restore). `reloadFromWidget`
+  now keeps the path through `drillPathAfterReload` (trimmed to the
+  deepest folder the fresh list still contains) and resets it only when
+  the SCOPE changed; view + search reset on that same condition.
   **Layout round (owner ask 2026-08-14, v0.61.1)** amends the panel:
   (1) the standalone scope chip row is GONE — the breadcrumb root carries
   the scope identity + tooltip, and clear-scope is a ✕ at the crumbs

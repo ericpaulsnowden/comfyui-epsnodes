@@ -2118,6 +2118,24 @@ export function registerControllerNode() {
         this._layoutCache = normalizeLayoutClient(null)
         this._collapsedCategories = new Set()
         this._stateDrag = null
+        // v0.67.2 (owner report 2026-08-20: a reorder "moved, then moved
+        // back, and finally showed up again where I had moved them"): the
+        // local layout is the truth until the server confirms it. Every
+        // local layout edit bumps the token (in `_saveLayout`); a poll GET
+        // that was issued before the edit -- or lands while a save is in
+        // flight -- is discarded instead of painting the OLD server layout
+        // over the edit; a save whose response is already stale re-posts.
+        this._layoutToken = 0
+        this._layoutSaveInFlight = false
+        this._layoutSaveQueued = false
+        // Change-gated repaints: the two-pane list is only rebuilt when the
+        // sets or the layout actually differ from what is on screen --
+        // the 4s poll used to tear every row down twice per tick even when
+        // nothing had changed (the "big performance issues" report).
+        this._setsSignature = ''
+        this._layoutSignature = ''
+        this._renderAfterDrag = false
+        this._lastProbeKey = ''
         this._lastProbe = null
         this._lastStatusMessage = ''
         this._lastHeartbeat = 0
@@ -2511,6 +2529,15 @@ export function registerControllerNode() {
       _renderStateList() {
         const listEl = this._pane?.listEl
         if (!listEl) return
+        // v0.67.2: never rebuild the rows UNDER an active drag -- the
+        // dragged element (and its pointer capture) would be replaced mid-
+        // gesture, which is exactly how a poll landing mid-drag made a
+        // reorder visibly snap back. The pointerup/cancel paths flush.
+        if (this._stateDrag?.active) {
+          this._renderAfterDrag = true
+          return
+        }
+        this._renderAfterDrag = false
         // 2026-07-21b keyboard parity (file header, section A): this rebuild
         // replaces every row ELEMENT, which would silently drop focus to
         // <body> if it sat on a row — fatal for the two-step Enter flow (the
@@ -2703,6 +2730,10 @@ export function registerControllerNode() {
         const onUp = (upEvent) => {
           if (upEvent.pointerId !== drag.pointerId) return
           detach()
+          // v0.67.2: the drag is OVER before its handler runs, so the
+          // drop's own `_renderStateList()` is never deferred by the
+          // mid-drag guard; anything a poll deferred meanwhile flushes.
+          this._stateDrag = null
           if (drag.active) {
             endVisuals()
             this._guarded('state drag drop', () => this._finishStateDrag(drag))
@@ -2711,13 +2742,14 @@ export function registerControllerNode() {
           } else {
             this._guarded('group collapse', () => this._toggleCategoryCollapsed(drag.category))
           }
-          this._stateDrag = null
+          this._flushDeferredRender()
         }
         const onCancel = (cancelEvent) => {
           if (cancelEvent.pointerId !== drag.pointerId) return
           detach()
           if (drag.active) endVisuals()
           this._stateDrag = null
+          this._flushDeferredRender()
         }
         function detach() {
           window.removeEventListener('pointermove', onMove, { capture: true })
@@ -2826,6 +2858,14 @@ export function registerControllerNode() {
 
       /** Apply the drop to the LAYOUT (client-side), then persist — every
        * move is a full-replace POST the server heals (§4.2). */
+      /** A poll that arrived mid-drag deferred its repaint (see
+       * `_renderStateList`'s guard); paint it now that the gesture ended. */
+      _flushDeferredRender() {
+        if (!this._renderAfterDrag) return
+        this._renderAfterDrag = false
+        this._renderStateList()
+      }
+
       _finishStateDrag(drag) {
         const target = drag.target
         if (!target) return
@@ -2909,6 +2949,15 @@ export function registerControllerNode() {
         const targets = resolveTargetNodes(this._w.target?.value)
         const probe = probeTargets(targets)
         this._lastProbe = probe
+        // v0.67.2: the probe itself is cheap and must run every beat (a
+        // deleted loader has to be noticed), but the WRITES below -- status
+        // widget, five button states, a canvas dirty -- only happen when
+        // the verdict changed. Before this, every controller forced a full
+        // canvas redraw once a second forever, just to re-write the same
+        // status string (`_disarmDeleteButton` re-syncs its own button).
+        const probeKey = `${probe.ok ? 1 : 0}|${probe.message}`
+        if (probeKey === this._lastProbeKey) return
+        this._lastProbeKey = probeKey
         this._setStatusText(probe.message)
         for (const button of this._actionButtons || []) {
           // 2026-07-18c delete-bug fix: never let a heartbeat-driven probe
@@ -2940,6 +2989,10 @@ export function registerControllerNode() {
       // --------------------------------------------------------- sets cache
 
       async _refreshSetsCache() {
+        // v0.67.2: snapshot the layout token BEFORE any await -- a local
+        // layout edit that lands while these GETs are in flight outranks
+        // whatever the server says it had a moment ago.
+        const token = this._layoutToken
         try {
           const data = await api.getJson('/lora_library/sets')
           this._applySetsResponse(data)
@@ -2949,9 +3002,15 @@ export function registerControllerNode() {
             error
           )
         }
+        if (this._layoutSaveInFlight || token !== this._layoutToken) return
         try {
           const layoutData = await api.getJson(LAYOUT_ROUTE)
-          this._layoutCache = normalizeLayoutClient(layoutData?.layout)
+          if (this._layoutSaveInFlight || token !== this._layoutToken) return
+          const next = normalizeLayoutClient(layoutData?.layout)
+          const signature = JSON.stringify(next)
+          if (signature === this._layoutSignature) return // unchanged: no rebuild
+          this._layoutCache = next
+          this._layoutSignature = signature
           this._renderStateList()
         } catch (error) {
           // Older backend without §4.2: the pane simply stays flat.
@@ -2962,16 +3021,43 @@ export function registerControllerNode() {
       /** POST the whole layout (full replace, §4.2); the response is the
        * server-HEALED truth and replaces the cache -- a stale client edit
        * can never vanish a set from the pane. Failure refetches so the
-       * pane snaps back to what is actually stored. */
+       * pane snaps back to what is actually stored.
+       *
+       * v0.67.2: every caller mutated `_layoutCache` just before calling,
+       * so this is ALSO where the layout token bumps (one place, can't be
+       * forgotten). Saves COALESCE: a second edit during an in-flight POST
+       * queues one more POST of the newest layout instead of racing, and a
+       * response that is already stale (the token moved on) is not applied
+       * -- the loop posts the newer layout and applies THAT response. */
       async _saveLayout() {
+        this._layoutToken++
+        if (this._layoutSaveInFlight) {
+          this._layoutSaveQueued = true
+          return
+        }
+        this._layoutSaveInFlight = true
         try {
-          const data = await api.postJson(LAYOUT_ROUTE, { layout: this._layoutCache })
-          this._layoutCache = normalizeLayoutClient(data?.layout)
-          this._renderStateList()
-        } catch (error) {
-          api.warn(`${NODE_TITLE}: saving the sets layout failed`, error)
-          this._setStatusText(`Could not save the group layout: ${error?.message || error}`)
-          this._refreshSetsCache().catch(() => {})
+          do {
+            this._layoutSaveQueued = false
+            const token = this._layoutToken
+            try {
+              const data = await api.postJson(LAYOUT_ROUTE, { layout: this._layoutCache })
+              if (token === this._layoutToken) {
+                this._layoutCache = normalizeLayoutClient(data?.layout)
+                this._layoutSignature = JSON.stringify(this._layoutCache)
+                this._renderStateList()
+              }
+            } catch (error) {
+              api.warn(`${NODE_TITLE}: saving the sets layout failed`, error)
+              this._setStatusText(`Could not save the group layout: ${error?.message || error}`)
+              this._layoutSaveQueued = false // never loop against a failing server
+              this._layoutSaveInFlight = false
+              this._refreshSetsCache().catch(() => {})
+              return
+            }
+          } while (this._layoutSaveQueued)
+        } finally {
+          this._layoutSaveInFlight = false
         }
       }
 
@@ -2987,6 +3073,12 @@ export function registerControllerNode() {
         // FORMAT.md §6.3 (2026-07-21): keep the two-pane list in sync with
         // the cache on every rebuild — a capture/update/delete response, or
         // the periodic sets-poll (`_heartbeat()`/`_refreshSetsCache()`).
+        // v0.67.2: ...but only when the list actually CHANGED -- the poll
+        // used to rebuild every row (and dirty the canvas) every 4s for
+        // nothing; a capture/delete response differs by construction.
+        const signature = JSON.stringify(this._setsCache)
+        if (signature === this._setsSignature) return
+        this._setsSignature = signature
         this._renderStateList()
         this.setDirtyCanvas(true, false)
       }
@@ -3212,9 +3304,32 @@ export function registerControllerNode() {
         }
         this._layoutCache.categories.push(name)
         this._layoutCache.order[name] = []
-        if (this._w.name) this._w.name.value = ''
+        this._collapsedCategories.delete(name) // open, like the Notebook's fresh category
+        // v0.67.2 (owner report 2026-08-20: "a section gets added but the
+        // '# name' element also still shows"): clearing the litegraph text
+        // widget's value only repaints on the next canvas draw, and the Vue
+        // renderer's input keeps its own copy until the widget's callback
+        // announces the change -- so do what a real edit does: value +
+        // callback + dirty, the file's established write idiom.
+        this._clearNameField()
         this._setStatusText(`Group "${name}" created.`)
         await this._saveLayout()
+      }
+
+      /** Empties the `name` text widget the way a user edit would -- value,
+       * callback (the Vue renderer's input listens to that), canvas dirty --
+       * so "cleared" is what BOTH renderers show, not just what `.value`
+       * says (v0.67.2, the `#`-group report). */
+      _clearNameField() {
+        const widget = this._w.name
+        if (!widget) return
+        widget.value = ''
+        try {
+          widget.callback?.('')
+        } catch (error) {
+          api.warn(`${NODE_TITLE}: name widget callback threw`, error)
+        }
+        this.setDirtyCanvas(true, true)
       }
 
       _onUpdateClick() {
@@ -3268,6 +3383,9 @@ export function registerControllerNode() {
         button._armed = false
         button.textContent = LABEL_DELETE
         this._disarmDeleteButtonColor(button)
+        // v0.67.2: re-sync to the live probe HERE (the heartbeat's probe
+        // writes are change-gated now, so they no longer do it for us).
+        if (this._lastProbe) button.disabled = !this._lastProbe.ok
         this.setDirtyCanvas(true, false)
       }
 
@@ -3457,7 +3575,7 @@ export function registerControllerNode() {
         // explicit clear must have the last word. (Pressing New State again
         // right away therefore still auto-names "State N" instead of
         // minting a same-named copy.)
-        if (this._w.name) this._w.name.value = ''
+        this._clearNameField()
         // FORMAT.md §6.3: "Show status" names the capture-source loader id +
         // row count on every capture/save.
         this._setStatusText(
@@ -3498,7 +3616,7 @@ export function registerControllerNode() {
         this._selectSetBySlug(response.slug)
         // Deliberately AFTER _selectSetBySlug() — same New State epilogue
         // rule as _doCapture()'s, see the comment there (2026-07-21b).
-        if (this._w.name) this._w.name.value = ''
+        this._clearNameField()
         this._setStatusText(
           `Captured ${targets.length} loaders: ` +
             targets.map((_node, i) => `L${i} ${loadersRows[i].length} row${loadersRows[i].length === 1 ? '' : 's'}`).join(', ') +
@@ -3715,7 +3833,7 @@ export function registerControllerNode() {
         } else {
           this._selectedSlug = null
           this._setSetValueSilently('')
-          if (this._w.name) this._w.name.value = ''
+          this._clearNameField()
         }
         this._toast('success', NODE_TITLE, `Deleted "${entry.name}".`)
       }
