@@ -138,6 +138,19 @@ PRESET_ROW_INDEX_CASES = [
     (None, "grid", -1),  # non-array widgets degrades to -1, not a throw
 ]
 
+#: (state object, expected clearsPresetOnManualEdit() result) -- v0.67.1's
+#: "manual edit clears the preset" predicate: clear iff a selection exists
+#: AND the write is not our own preset-apply (the reentrancy guard).
+MANUAL_EDIT_CASES = [
+    ({"selection": ["A"], "applying": False}, True),
+    ({"selection": ["A", "B"], "applying": False}, True),  # multi-select clears too
+    ({"selection": [], "applying": False}, False),  # nothing selected: nothing to clear
+    ({"selection": ["A"], "applying": True}, False),  # our own applyPresetValues write
+    ({"selection": ["A"]}, True),  # flag absent = not applying
+    ({}, False),
+    (None, False),
+]
+
 PROBE_JS = """
 import * as m from './extensions/comfyui-epsnodes/eps_image/resolution.js'
 
@@ -149,7 +162,8 @@ const out = {
     hasToggleSelection: typeof m.toggleSelection === 'function',
     hasNormalizeSelectionOrder: typeof m.normalizeSelectionOrder === 'function',
     hasDropdownLabelFor: typeof m.dropdownLabelFor === 'function',
-    hasPresetRowIndexFor: typeof m.presetRowIndexFor === 'function'
+    hasPresetRowIndexFor: typeof m.presetRowIndexFor === 'function',
+    hasClearsPresetOnManualEdit: typeof m.clearsPresetOnManualEdit === 'function'
   },
   selectionFromWidgetValue: [%(raw_values)s].map((v) => m.selectionFromWidgetValue(v)),
   toggleSelection: %(toggle_inputs)s.map(
@@ -161,7 +175,8 @@ const out = {
   dropdownLabelFor: %(dropdown_inputs)s.map((selection) => m.dropdownLabelFor(selection)),
   presetRowIndexFor: %(row_index_inputs)s.map(
     ([widgets, name]) => m.presetRowIndexFor(widgets, name)
-  )
+  ),
+  clearsPresetOnManualEdit: %(manual_edit_inputs)s.map((state) => m.clearsPresetOnManualEdit(state))
 }
 
 process.stdout.write(JSON.stringify(out))
@@ -204,6 +219,7 @@ def presets_api(tmp_path_factory: pytest.TempPathFactory) -> dict:
             "row_index_inputs": json.dumps(
                 [[widgets, name] for widgets, name, _ in PRESET_ROW_INDEX_CASES]
             ),
+            "manual_edit_inputs": json.dumps([state for state, _ in MANUAL_EDIT_CASES]),
         },
         encoding="utf-8",
     )
@@ -266,6 +282,7 @@ def test_module_exports_the_presets_pure_helpers(presets_api: dict) -> None:
         "hasNormalizeSelectionOrder": True,
         "hasDropdownLabelFor": True,
         "hasPresetRowIndexFor": True,
+        "hasClearsPresetOnManualEdit": True,
     }
 
 
@@ -652,6 +669,52 @@ def test_no_bubble_phase_window_pointer_listeners_added(source: str) -> None:
     the rest of this file."""
     plain_adds = re.findall(r"window\.addEventListener\('pointer\w+', \w+\)", source)
     assert not plain_adds, f"bubble-phase window pointer listener(s) found: {plain_adds}"
+
+
+# ------------------------------------------- v0.67.1: manual edit clears the preset
+
+
+def test_clears_preset_on_manual_edit_cases(presets_api: dict) -> None:
+    """Owner report 2026-08-18: a hand-typed size was silently overridden
+    at run time by a still-selected preset. The predicate: clear iff a
+    selection exists and the write isn't our own preset-apply."""
+    for (state, expected), got in zip(
+        MANUAL_EDIT_CASES, presets_api["clearsPresetOnManualEdit"], strict=True
+    ):
+        assert got == expected, (
+            f"clearsPresetOnManualEdit({state!r}) -> {got!r}, wanted {expected!r}"
+        )
+
+
+def test_manual_edit_wrap_covers_every_preset_field_and_clears_via_commit(source: str) -> None:
+    """All five preset fields' callbacks are wrapped (chained, try/finally),
+    and the clear goes through `commitSelection(node, [])` -- the file's ONE
+    selection write path -- so combo, hidden widget and Delete state all
+    follow. The wrap is installed by attachPresetsUi right after the state
+    exists, so it sits OUTSIDE the M2 grid's own width/height wrap."""
+    body = _function_body(source, "wireManualEditClearsSelection(node, state)")
+    assert "for (const field of PRESET_FIELD_NAMES)" in body
+    assert "const originalCallback = widget.callback" in body
+    assert "originalCallback?.apply(this, args)" in body
+    assert "} finally {" in body
+    assert "if (clearsPresetOnManualEdit(state)) commitSelection(node, [])" in body
+    attach = _function_body(source, "attachPresetsUi(node)")
+    assert "node._epsPresets = state\n    wireManualEditClearsSelection(node, state)" in attach
+    assert "applying: false" in attach
+
+
+def test_apply_preset_values_is_guarded_against_clearing_itself(source: str) -> None:
+    """Picking a preset writes the five fields through setWidgetValue --
+    which fires the very callbacks the manual-edit wrap watches. The
+    `state.applying` flag (set/cleared in try/finally so a throwing
+    callback can never leave it stuck) is what keeps a pick from clearing
+    its own selection on the first field write."""
+    body = _function_body(source, "applyPresetValues(node, name)")
+    assert "state.applying = true" in body
+    assert "} finally {\n    state.applying = false\n  }" in body
+    # the flag is set BEFORE the field loop and cleared after it
+    loop = "for (const field of PRESET_FIELD_NAMES)"
+    assert body.index("state.applying = true") < body.index(loop)
 
 
 # --------------------------------------------------------------- req. 7: byte-identical

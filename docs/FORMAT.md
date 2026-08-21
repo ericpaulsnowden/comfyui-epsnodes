@@ -1259,7 +1259,13 @@ is the functional core WITHOUT the grid.
     names resolve against the store AT EXECUTE TIME (server-authoritative,
     like Notebook entries) into six K-length index-aligned lists — one full
     resize of the SAME wired image per preset, the node's own five widget
-    fields ignored entirely. A selected name absent from the store raises,
+    fields ignored entirely — which is exactly why, since v0.67.1, a MANUAL
+    edit of any of those five fields CLEARS the selection on the frontend
+    (owner report 2026-08-18: a hand-typed width was silently overridden at
+    run time by the still-selected preset; the combo resets to `(none)`,
+    the hidden widget to `"[]"`, so the fields you see are the fields that
+    run; `applyPresetValues`'s own field writes are guarded by
+    `state.applying` so a pick never clears itself). A selected name absent from the store raises,
     naming the preset(s) and the file — a rename/delete on another machine
     must fail the queue loudly, never silently substitute. `IS_CHANGED`
     folds the presets file's mtime+size into the cache key ONLY when a
@@ -1296,7 +1302,9 @@ is the functional core WITHOUT the grid.
     (suffixed ` (missing)` when absent from the store), or `N presets`.
     A plain pick applies that preset's five values onto the visible
     widgets (a courtesy preview — the BACKEND ignores those fields and
-    resolves from the store) and selects it; `(none)` clears.
+    resolves from the store) and selects it; `(none)` clears — and so
+    does editing any of the five fields by hand (v0.67.1), `copy from
+    image` and a grid drag included.
     SHIFT/Ctrl/Cmd+click opens a checkbox-style stay-open ContextMenu
     (each row's callback returns `true` — the verified `close_parent`
     mechanism) for multi-select; canvas-only, since Vue's combobox never
@@ -2112,8 +2120,13 @@ label, so two chained Cross Products cannot express it.
     count, Collect ⇒ 0), §6.8 LoRA Iterator (step math from its own
     widgets; a `per_lora`-style dependence on stack length follows the
     stack wire — §6.13 Picker selection is countable, a §6.2 set file is
-    not), a chained §6.10 multiplier (recursive, cycle-guarded), and
-    reroutes (followed). A short allow-list of core single-output loaders
+    not), §6.5 Resolution (v0.67.1, owner report: "an image grid run
+    through a resolution node … the multiplier can't count the images" —
+    no INPUT_IS_LIST, so it is MAPPED over its longest list input ×
+    max(1, selected presets); a Grid, or a Grid through a switcher, now
+    counts through it, and an image-typed output with no backing image
+    wired is the known-zero blocker family), a chained §6.10 multiplier
+    (recursive, cycle-guarded), and reroutes (followed). A short allow-list of core single-output loaders
     counts as 1. ANYTHING else is UNKNOWN: it contributes 1 and the
     readout downgrades to `≥ N`, naming which input is unknowable —
     never false confidence. An aligned-mode length disagreement or a

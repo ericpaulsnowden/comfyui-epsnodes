@@ -1475,7 +1475,9 @@ function attachSizeGrid(node) {
 // `presets` STRING widget the backend contract defines: JSON array of
 // preset NAMES, default `"[]"`. Non-empty selection = fan-out (backend
 // runs once per preset, ignoring the five typed fields); empty = classic
-// single-run, unchanged from M1/M2. eps_image/nodes_resolution.py's
+// single-run, unchanged from M1/M2. Since v0.67.1 a MANUAL edit of any of
+// the five fields clears the selection (`wireManualEditClearsSelection`)
+// -- the fields you see are always the fields that run. eps_image/nodes_resolution.py's
 // INPUT_TYPES already ships `presets` with `"hidden": True` in its OWN
 // options (the §7.5 Vue-mode hide flag) -- this section adds the matching
 // canvas-mode `widget.hidden` flag and replaces it with real UI.
@@ -1745,6 +1747,55 @@ function presetComboValues(state) {
 
 // ------------------------------------------------------- M3: selection commit
 
+/**
+ * v0.67.1 (owner report 2026-08-18: "if you have a preset set, and then
+ * change any of the properties manually, the preset menu should reset to
+ * none and there should be no preset applied. Currently it looks like a
+ * preset is still selected ... and the preset is overriding the manual
+ * size"). Root cause: `applyPresetValues` copies a preset onto the five
+ * fields as a courtesy preview, but the hidden `presets` array stays
+ * set -- and the BACKEND ignores the fields whenever that array is
+ * non-empty (nodes_resolution.py's contract), so a hand-typed width was
+ * silently overridden at run time by the still-selected preset. The
+ * rule now: a MANUAL edit of any preset field clears the selection, so
+ * what you see in the fields is what runs. Pure predicate so the probe
+ * can pin it: clear iff a selection exists and the edit is not our own
+ * preset-apply writing the fields (the reentrancy guard -- without it
+ * picking a preset would clear itself on its first field write).
+ * @param {{applying?: boolean, selection?: string[]}} state
+ * @returns {boolean}
+ */
+export function clearsPresetOnManualEdit(state) {
+  if (!state || state.applying) return false
+  return Array.isArray(state.selection) && state.selection.length > 0
+}
+
+/** Wraps the five preset fields' widget callbacks (the one write path both
+ * renderers share -- canvas `BaseWidget.setValue()` and Vue's
+ * `createWidgetUpdateHandler` both call `widget.callback`, per the M3
+ * header) so a manual edit clears the selection through `commitSelection`
+ * -- combo to "(none)", hidden `presets` to "[]". try/finally, chaining
+ * the original (the M2 grid's own width/height repaint wrap sits
+ * underneath) -- the file's established wrap idiom. `copy from image` and
+ * a grid drag both write through these same callbacks, so they count as
+ * manual edits too: the owner's "change any of the properties". */
+function wireManualEditClearsSelection(node, state) {
+  for (const field of PRESET_FIELD_NAMES) {
+    const widget = widgetByName(node, field)
+    if (!widget) continue
+    const originalCallback = widget.callback
+    widget.callback = function (...args) {
+      let result
+      try {
+        result = originalCallback?.apply(this, args)
+      } finally {
+        if (clearsPresetOnManualEdit(state)) commitSelection(node, [])
+      }
+      return result
+    }
+  }
+}
+
 /** Copies preset *name*'s five stored values onto the visible width/height/
  * resize_method/interpolation/multiple_of widgets, through the file's own
  * `setWidgetValue` (value + callback, so serialization and the M2 grid's
@@ -1763,9 +1814,17 @@ function applyPresetValues(node, name) {
   if (!state) return
   const values = state.presetsById && state.presetsById[name]
   if (!values || typeof values !== 'object') return
-  for (const field of PRESET_FIELD_NAMES) {
-    if (!(field in values)) continue
-    setWidgetValue(widgetByName(node, field), values[field])
+  // v0.67.1: these field writes are OURS, not a manual edit -- the guard
+  // `wireManualEditClearsSelection` reads (try/finally so a throwing
+  // widget callback can never leave the flag stuck on).
+  state.applying = true
+  try {
+    for (const field of PRESET_FIELD_NAMES) {
+      if (!(field in values)) continue
+      setWidgetValue(widgetByName(node, field), values[field])
+    }
+  } finally {
+    state.applying = false
   }
   renderGrid(node)
 }
@@ -2309,9 +2368,11 @@ function attachPresetsUi(node) {
       mtime: null,
       selection: selectionFromWidgetValue(widget.value),
       loaded: false,
-      loadToken: 0
+      loadToken: 0,
+      applying: false // v0.67.1: true only while applyPresetValues writes the fields
     }
     node._epsPresets = state
+    wireManualEditClearsSelection(node, state)
 
     state.combo = createPresetCombo(node, state)
     state.saveBtn = createSaveButton(node)

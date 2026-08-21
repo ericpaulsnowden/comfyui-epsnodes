@@ -593,7 +593,11 @@ dimensions. It replaces a resize node + a reroute + a get-image-size node.
   fields — width, height, mode, interpolation, `multiple_of` — as a named
   preset. Pick one to apply it; **Shift-click the dropdown to tick
   several**, and one Run then resizes once per preset (2 presets → the same
-  image at 2 sizes, like the Prompt Notebook's multi-select). Presets live
+  image at 2 sizes, like the Prompt Notebook's multi-select). **Edit any
+  of the five fields by hand and the preset un-selects itself** (v0.67.1)
+  — the dropdown drops back to `(none)` and the numbers you typed are what
+  runs; a preset is only ever "applied" while it's showing in the
+  dropdown. Presets live
   in one small JSON file in the same shared library folder as the Prompt
   Notebook (local or NAS), so your other machines — and a browser on
   another machine — all see the same list, and edits made anywhere are
@@ -697,9 +701,10 @@ into `label` from something unrelated.
 **Know the run count BEFORE an overnight run (v0.59.0).** The node shows
 a live **`Runs: N — S sweep steps × P pairs`** line computed from your
 graph before you ever queue: switcher ticks, Checkpoint Switcher
-selections, Notebook multi-select, Iterator step math, even chained
-multipliers — all counted the way ComfyUI will actually execute them
-(fanned lists through loaders included). It is honest about limits:
+selections, Notebook multi-select, Iterator step math, an Image Grid run
+through an EPS Resolution (or through a switcher and then a Resolution —
+v0.67.1), even chained multipliers — all counted the way ComfyUI will
+actually execute them (fanned lists through loaders included). It is honest about limits:
 anything it can't inspect (a third-party batch node, a saved set's file)
 turns the line into **`≥ N`** and names which input is unknowable; a
 wiring that will *fail* the queue (mismatched sweep lengths, an empty

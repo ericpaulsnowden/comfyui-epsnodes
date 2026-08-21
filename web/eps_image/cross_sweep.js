@@ -57,7 +57,9 @@
  * own widget step math x the max of its mapped model/clip input counts --
  * nodes_sweep.py has no INPUT_IS_LIST, so core maps it; per-lora mode
  * follows the `lora_stack` wire -- a §6.13 Picker's enabled rows are
- * countable, a §6.2 Apply-Set's file-backed stack is not), a chained
+ * countable, a §6.2 Apply-Set's file-backed stack is not), §6.5 Resolution
+ * (v0.67.1: mapped over its longest list input x max(1, selected presets)
+ * -- so a Grid, or a Grid through a switcher, counts through it), a chained
  * §6.10 multiplier (recursive, cycle-guarded), reroutes (followed), and a
  * short allow-list of core single-output nodes that core MAPS over their
  * list inputs (max over wired inputs' counts, floor 1). Anything else is
@@ -261,6 +263,26 @@ export function switcherEnabledCount(node, prefix) {
  * @param {unknown} raw @returns {number}
  */
 export function checkpointSelectionCount(raw) {
+  if (typeof raw !== 'string' || raw.trim() === '') return 0
+  let parsed
+  try {
+    parsed = JSON.parse(raw)
+  } catch {
+    return 0
+  }
+  if (!Array.isArray(parsed)) return 0
+  return parsed.filter((entry) => typeof entry === 'string').length
+}
+
+/**
+ * EPS Resolution's per-run fan-out: K selected size presets (§6.5 M3 --
+ * nodes_resolution.py `_parse_preset_names`: JSON array, string entries
+ * kept IN ORDER AND WITHOUT DEDUPE, non-strings dropped, malformed/non-
+ * array/empty -> 0 = "no presets selected", which `resolve()` runs ONCE).
+ * The caller floors this at 1 for that reason; 0 here is just "none".
+ * @param {unknown} raw @returns {number}
+ */
+export function resolutionPresetCount(raw) {
   if (typeof raw !== 'string' || raw.trim() === '') return 0
   let parsed
   try {
@@ -721,6 +743,44 @@ function sourceCount(snapshot, link, path) {
     if (!backingLink || !resolveSource(snapshot, backingLink)) {
       return { count: 0, atLeast: false, srcId: id }
     }
+  }
+  if (type === 'EPSResolution') {
+    // §6.5 (v0.67.1, owner report 2026-08-18: "if an image grid is run
+    // through a resolution node before going to a run multiplier, then the
+    // multiplier can't count the images"). nodes_resolution.py declares
+    // NO INPUT_IS_LIST, so core maps it over its LONGEST list input --
+    // an Image Grid's Emit fan, a switcher's flattened slots, anything --
+    // and each mapped run emits K = max(1, selected presets) elements per
+    // OUTPUT_IS_LIST output (`resolve()`: K names -> K-length columns, no
+    // names -> one run): count = mapLen x K. The Grid -> Switcher ->
+    // Resolution chain needs nothing extra: the switcher branch above
+    // already sums its slots' upstream counts and this branch just maps
+    // over that. Image-typed outputs whose backing image input is unwired
+    // are per-run ExecutionBlockers (`_resized(None)`; slots 0/1 <- image,
+    // slots 6..12 = resized_2..8 <- image_2..8), so consuming one with no
+    // image wired blocks the consumer outright -- the known-zero family.
+    const slot = resolved.slot ?? 0
+    const backing = slot <= 1 ? 'image' : slot >= 6 ? `image_${slot - 4}` : null
+    if (backing) {
+      const backingLink = node.inputs?.[backing] ?? null
+      if (!backingLink || !resolveSource(snapshot, backingLink)) {
+        return { count: 0, atLeast: false, srcId: id }
+      }
+    }
+    if (path.has(id)) return { count: 1, atLeast: true, srcId: id }
+    const sub = new Set([...path, id])
+    let mapLen = 1
+    let atLeast = false
+    for (const inputLink of Object.values(node.inputs || {})) {
+      const inner = sourceCount(snapshot, inputLink ?? null, sub)
+      if (!inner) continue
+      if (inner.error) return { count: 1, atLeast: true, srcId: id, error: inner.error }
+      if (inner.count === 0 && !inner.atLeast) return { count: 0, atLeast: false, srcId: id }
+      mapLen = Math.max(mapLen, inner.count)
+      atLeast = atLeast || inner.atLeast
+    }
+    const presets = Math.max(1, resolutionPresetCount(node.widgets?.presets))
+    return { count: mapLen * presets, atLeast, srcId: id }
   }
   if (CORE_SINGLE_CLASSES.has(type)) {
     // Map-over-list (see CORE_SINGLE_CLASSES' own comment): none of these

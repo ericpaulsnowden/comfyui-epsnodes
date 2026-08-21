@@ -148,6 +148,39 @@ def _chained_solo_shape() -> dict:
     return shape
 
 
+def _image_grid_emit(count: int) -> dict:
+    """§6.6 Image Grid in Emit mode with the adapter's injected live buffer
+    count (a client-side echo of server state, so always a FLOOR)."""
+    return {"classType": "EPSImageGrid", "widgets": {"mode": "Emit"}, "inputs": {},
+            "imageGridCount": count}
+
+
+def _resolution(inputs: dict, presets: str = "[]") -> dict:
+    """§6.5 EPS Resolution (v0.67.1 in the estimator): mapped over its
+    longest list input x max(1, selected presets)."""
+    return {
+        "classType": "EPSResolution",
+        "widgets": {"width": 1024, "height": 1024, "presets": presets},
+        "inputs": inputs,
+    }
+
+
+def _resolution_chain(resolution_inputs: dict, extra_nodes: dict, presets: str = "[]") -> dict:
+    """Text source + a Resolution (slot 1 = resized_image) feeding a pair-
+    multiply multiplier's image input -- the owner's exact report shape."""
+    nodes = {
+        "3": _text_source(),
+        "res": _resolution(resolution_inputs, presets),
+        "5": {
+            "classType": "EPSCrossSweep",
+            "widgets": {"base_folder": "", "pair_mode": "multiply", "sweep_mode": "multiply"},
+            "inputs": {"image": _link("res", 1), "text": _link("3")},
+        },
+    }
+    nodes.update(extra_nodes)
+    return {"nodes": nodes}
+
+
 def _image_switcher_two_of_three() -> dict:
     """§6.4 Image Switcher: 3 wired, image_2 toggled off -> emits 2."""
     return {
@@ -990,6 +1023,60 @@ ESTIMATE_CASES = [
         "6",
         {"total": 1, "atLeast": False, "steps": 1, "pairs": 1, "error": None},
     ),
+    # ------------------------------------ v0.67.1 EPS Resolution pass-through
+    (
+        # Owner report: "if an image grid is run through a resolution node
+        # before going to a run multiplier, then the multiplier can't count
+        # the images". Resolution is mapped over the grid's fan -> the
+        # grid's count comes through (still a floor -- the grid echo is),
+        # and `image` is no longer an UNKNOWN input.
+        "grid_through_resolution_counts_the_grid",
+        _resolution_chain({"image": _link("grid")}, {"grid": _image_grid_emit(3)}),
+        "5",
+        # unknowns lists `image` exactly as the DIRECT grid case above does
+        # (a floor is reported as "source unknown" -- parity with wiring
+        # the grid straight in is the whole point).
+        {"total": 3, "atLeast": True, "pairs": 3, "pairsAtLeast": True,
+         "unknowns": ["image"], "error": None},
+    ),
+    (
+        # Bonus shape: Grid -> Switcher -> Resolution -> multiplier. The
+        # switcher sums its slots (grid 3 + one LoadImage 1 = 4) and the
+        # Resolution maps over that.
+        "grid_through_switcher_through_resolution_counts_four",
+        _resolution_chain(
+            {"image": _link("sw")},
+            {
+                "grid": _image_grid_emit(3),
+                "91": _LOAD_IMAGES["91"],
+                "sw": {
+                    "classType": "EPSSwitcher",
+                    "widgets": {"toggles": "{}"},
+                    "inputs": {"image_1": _link("grid"), "image_2": _link("91")},
+                },
+            },
+        ),
+        "5",
+        {"total": 4, "atLeast": True, "pairs": 4, "unknowns": ["image"], "error": None},
+    ),
+    (
+        # Two size presets ticked = resolve() runs once per preset: a single
+        # LoadImage becomes 2 exact pairs.
+        "resolution_two_presets_doubles_one_image",
+        _resolution_chain({"image": _link("91")}, {"91": _LOAD_IMAGES["91"]}, '["A", "B"]'),
+        "5",
+        {"total": 2, "atLeast": False, "pairs": 2, "unknowns": [], "error": None},
+    ),
+    (
+        # No image wired into the Resolution: its resized_image output is a
+        # per-run ExecutionBlocker, so the multiplier is blocked -- the
+        # known-zero family, naming the input.
+        "resolution_with_no_image_is_known_zero",
+        _resolution_chain({}, {}),
+        "5",
+        {"total": 0, "atLeast": False, "error": None,
+         "breakdown": "nothing to run (image input is empty/blocked)"},
+    ),
 ]
 
 #: (estimate object, expected formatReadout result) -- pins the exact line
@@ -1170,6 +1257,21 @@ PICKER_CASES = [
     ),
 ]
 
+#: (case name, raw `presets` widget value, expected resolutionPresetCount)
+#: -- mirrors nodes_resolution.py `_parse_preset_names` byte-for-byte:
+#: strings kept in order WITHOUT dedupe, non-strings dropped, malformed /
+#: non-array / empty -> 0 ("no presets selected").
+RESOLUTION_PRESET_CASES = [
+    ("empty_string_is_none", "", 0),
+    ("empty_array_is_none", "[]", 0),
+    ("one_name", '["A"]', 1),
+    ("two_names", '["A", "B"]', 2),
+    ("duplicates_are_NOT_deduped_like_the_backend", '["A", "A"]', 2),
+    ("non_strings_dropped", '["A", 5, null, "B"]', 2),
+    ("non_array_json_is_none", '{"A": 1}', 0),
+    ("malformed_is_none", "not json", 0),
+]
+
 PROBE_JS = """
 import * as m from './extensions/comfyui-epsnodes/eps_image/cross_sweep.js'
 
@@ -1186,7 +1288,8 @@ const out = {
     hasCheckpointSelectionCount: typeof m.checkpointSelectionCount === 'function',
     hasNotebookEntryCount: typeof m.notebookEntryCount === 'function',
     hasPickerEnabledRowCount: typeof m.pickerEnabledRowCount === 'function',
-    hasIteratorValueCount: typeof m.iteratorValueCount === 'function'
+    hasIteratorValueCount: typeof m.iteratorValueCount === 'function',
+    hasResolutionPresetCount: typeof m.resolutionPresetCount === 'function'
   },
   constants: {
     classId: m.CLASS_ID,
@@ -1205,7 +1308,8 @@ const out = {
     m.iteratorValueCount(-1.35, -0.1, 0.1),
     m.iteratorValueCount(-1.04, 0.01, 0.1)
   ],
-  pickerCounts: %(picker_inputs)s.map((raw) => m.pickerEnabledRowCount(raw))
+  pickerCounts: %(picker_inputs)s.map((raw) => m.pickerEnabledRowCount(raw)),
+  resolutionPresetCounts: %(resolution_preset_inputs)s.map((raw) => m.resolutionPresetCount(raw))
 }
 
 process.stdout.write(JSON.stringify(out))
@@ -1243,6 +1347,9 @@ def cross_sweep_api(tmp_path_factory: pytest.TempPathFactory) -> dict:
             ),
             "readout_inputs": json.dumps([est for est, _ in READOUT_CASES]),
             "picker_inputs": json.dumps([raw for _, raw, _ in PICKER_CASES]),
+            "resolution_preset_inputs": json.dumps(
+                [raw for _, raw, _ in RESOLUTION_PRESET_CASES]
+            ),
         },
         encoding="utf-8",
     )
@@ -1301,6 +1408,7 @@ def test_module_exports_the_hooks_and_pure_helpers(cross_sweep_api: dict) -> Non
         "hasNotebookEntryCount": True,
         "hasPickerEnabledRowCount": True,
         "hasIteratorValueCount": True,
+        "hasResolutionPresetCount": True,
     }
 
 
@@ -1382,6 +1490,33 @@ def test_picker_enabled_row_count_matches_parse_selection(cross_sweep_api: dict)
         assert got == expected, (
             f"{name}: pickerEnabledRowCount({raw!r}) -> {got!r}, wanted {expected!r}"
         )
+
+
+def test_resolution_preset_count_mirrors_parse_preset_names(cross_sweep_api: dict) -> None:
+    """v0.67.1: the Resolution branch's K factor must match
+    nodes_resolution.py `_parse_preset_names` exactly -- including NOT
+    deduping (the UI never writes duplicates, but the backend would run
+    them twice, so the estimate must too)."""
+    for (name, _raw, expected), got in zip(
+        RESOLUTION_PRESET_CASES, cross_sweep_api["resolutionPresetCounts"], strict=True
+    ):
+        assert got == expected, f"{name}: got {got!r}, wanted {expected!r}"
+
+
+def test_resolution_branch_is_mapped_not_flattened(source: str) -> None:
+    """v0.67.1 structural pins: the Resolution branch maps over its longest
+    list input (max, not sum -- nodes_resolution.py has no INPUT_IS_LIST),
+    multiplies by max(1, presets), and treats an image-typed output with
+    its backing image input unwired as the known-zero family (the
+    per-run `_resized(None)` blocker)."""
+    body = _function_body(source, "sourceCount(snapshot, link, path)")
+    assert "if (type === 'EPSResolution') {" in body
+    branch = body.split("if (type === 'EPSResolution') {", 1)[1]
+    branch = branch.split("if (CORE_SINGLE_CLASSES.has(type))", 1)[0]
+    assert "mapLen = Math.max(mapLen, inner.count)" in branch
+    assert "Math.max(1, resolutionPresetCount(node.widgets?.presets))" in branch
+    assert "slot <= 1 ? 'image' : slot >= 6 ? `image_${slot - 4}` : null" in branch
+    assert "return { count: 0, atLeast: false, srcId: id }" in branch
 
 
 def test_format_readout_cases(cross_sweep_api: dict) -> None:
