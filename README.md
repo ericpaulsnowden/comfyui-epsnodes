@@ -68,6 +68,7 @@ list on the left (grouped by `# Category` headings, with `＋ New` /
 `text` and `name` (the entry's heading — handy for filename prefixes and
 captions).
 
+- **Pinned from an image (v0.72.0):** drop an EPS Save Image file and the Notebook shows a `📌 Pinned — captured from image …` badge: the prompt text exactly as it was when that image was made, read-only, with a `≠` mark wherever your notebook has changed since — the run recreates the image byte-for-byte. One click on **Unpin** goes back to the live file.
 - **Search everything:** the box at the top of the list filters as you
   type, matching every word you enter against prompt **titles and bodies**
   (so "portrait rim" finds a prompt titled "Studio A" whose text mentions
@@ -318,6 +319,7 @@ through — it *is* a loader, no Power Lora Loader involved. (For WAN-style
 dual-model workflows: two Apply nodes, one in the HIGH branch, one in the
 LOW branch, each with its own state.) Outputs:
 
+- **Pinned from an image (v0.72.0):** drop an EPS Save Image file and the node shows a `📌 Pinned state: … — captured from image …` badge with the LoRA rows as they were, says whether they match or differ from the current state (or that the state no longer exists), and ignores the dropdown until you click **Unpin**.
 - `model`, `clip` — patched (or passed through untouched on `"None"`).
 - `lora_stack` — a `LORA_STACK` list compatible with stack-consuming nodes
   from other packs.
@@ -854,6 +856,15 @@ readout reads `Solo m2_i1_t3 — 1 of 24 runs`, and queueing recreates
 exactly that one image (the multiplier is found even inside a subgraph).
 Leave `run_info` unwired and it behaves exactly like Save Image.
 
+
+**Recreate one image — exactly (v0.72.0).** Beyond the solo, EPS Save Image
+now pins the **Prompt Notebook text** and the **Apply LoRA Set rows** at
+save time into each file's workflow. Drop the image, queue — you get that
+one image back byte-for-byte, even if you have since rewritten the prompt
+or re-tuned the set. Pinned nodes show a **📌 Pinned — captured from
+image** badge with the OLD values readable right on the node, say whether
+they still match the current library or differ, and one click **Unpin**
+puts you back on the live library.
 - **Existing images** (saved through the core Save Image since v0.67.0, so
   their names carry the run token): dropping one still helps — the pack
   reads the token off the file name and, when the loaded workflow has one
@@ -863,9 +874,7 @@ Leave `run_info` unwired and it behaves exactly like Save Image.
   the full workflow as always.
 - **Caveat:** the file must keep its PNG metadata (re-encoding, stripping
   or converting to JPEG loses it), and the filename fallback needs the name
-  intact. What gets recreated is the run **with your library as it is
-  now** — the next provenance milestone (M3, pinning) records the values
-  themselves.
+  intact. The image also carries the Prompt Notebook text and Apply LoRA Set rows as they were (M3 pinning, v0.72.0) — the nodes show them pinned with a drift badge and an Unpin button.
 
 ## EPS Frame Saver (shipped)
 

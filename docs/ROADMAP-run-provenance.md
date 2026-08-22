@@ -106,7 +106,7 @@ Core's own `prompt` chunk stays for compatibility.
   drop handler; ComfyUI's standard path does everything.
 - README/FORMAT: the "recreate one image" story.
 
-### M3 — Full pinning (byte-faithful recreation after library edits)
+### M3 — Full pinning (byte-faithful recreation after library edits) — SHIPPED v0.72.0 (2026-08-22)
 - Capture: EPS Save Image (server-side, at save time) walks its hidden
   PROMPT for `LoraLibraryNotebook` / `LoraLibraryApplySet` /
   `EPSLoraPicker` nodes and resolves their file-backed references to

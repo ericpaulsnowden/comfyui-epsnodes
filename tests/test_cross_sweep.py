@@ -471,7 +471,8 @@ class TestConsumedButUnwiredGuard:
         assert all(isinstance(v, fake_execution_blocker) for v in vaes)
 
     def test_no_prompt_available_stays_out_of_the_way(self, fake_execution_blocker) -> None:
-        *_, vaes, _mlow, _run_info = run()  # direct call, no prompt/unique_id -- exactly the old behavior
+        # direct call, no prompt/unique_id -- exactly the old behavior
+        *_, vaes, _mlow, _run_info = run()
         assert all(isinstance(v, fake_execution_blocker) for v in vaes)
 
 
@@ -870,3 +871,44 @@ class TestRunInfoV0700:
         assert len(out[8]) == 1
         info = json.loads(out[8][0])
         assert info["token"] == "m2_p1" and info["total"] == 1
+
+
+class TestRunInfoM3Fields:
+    """v0.71.0 provenance M3: run_info also carries THIS run's name / text /
+    label (null when that input is unwired) so EPS Save Image can match a
+    multi-select Prompt Notebook's entry to the run and pin only that entry
+    (FORMAT §6.10/§6.14). Same JSON, three more keys -- no new output."""
+
+    def test_name_text_label_when_wired(self) -> None:
+        out = run(name=["Portrait", "Landscape"])
+        infos = [json.loads(raw) for raw in out[8]]
+        # paired/aligned helper: 2 steps x 2 pairs, strength-major
+        assert [i["name"] for i in infos] == ["Portrait", "Landscape", "Portrait", "Landscape"]
+        assert [i["text"] for i in infos] == ["tA", "tB", "tA", "tB"]
+        assert [i["label"] for i in infos] == ["lora_0.0", "lora_0.0", "lora_0.5", "lora_0.5"]
+        assert [i["text"] for i in infos] == out[3]  # index-aligned with the text output
+        assert [i["label"] for i in infos] == out[5]  # ... and with the label output
+
+    def test_name_and_label_are_null_when_unwired(self) -> None:
+        out = run(label=None)  # the helper never wires name; label unwired here
+        info = json.loads(out[8][0])
+        assert info["name"] is None
+        assert info["label"] is None
+        assert info["text"] == "tA"
+        assert set(info) == {
+            "format", "token", "node", "run", "total", "steps", "pairs", "name", "text", "label",
+        }
+
+    def test_short_name_list_is_empty_string_not_null(self) -> None:
+        # name IS wired, just shorter than the pairs: the save_prefix
+        # fallback's "" -- distinct from the unwired null.
+        out = run(name=["OnlyFirst"])
+        infos = [json.loads(raw) for raw in out[8]]
+        assert [i["name"] for i in infos] == ["OnlyFirst", "", "OnlyFirst", ""]
+
+    def test_multiply_mode_name_aligns_per_text(self) -> None:
+        out = run(pair_mode="multiply", name=["nA", "nB"])
+        infos = [json.loads(raw) for raw in out[8]]
+        # image-major within a step: iA x tA, iA x tB, iB x tA, iB x tB
+        assert [i["name"] for i in infos][:4] == ["nA", "nB", "nA", "nB"]
+        assert [i["text"] for i in infos][:4] == ["tA", "tB", "tA", "tB"]

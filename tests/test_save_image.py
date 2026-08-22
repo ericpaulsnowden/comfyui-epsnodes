@@ -147,7 +147,8 @@ class TestSaveRoundTrip:
         chunks = png.text
         assert json.loads(chunks["prompt"])["5"]["inputs"]["solo_run"] == "m2_i1_t3"
         baked_wf = json.loads(chunks["workflow"])
-        assert baked_wf["nodes"][0]["widgets_values"] == ["shoot", "multiply", "multiply", "m2_i1_t3"]
+        values = baked_wf["nodes"][0]["widgets_values"]
+        assert values == ["shoot", "multiply", "multiply", "m2_i1_t3"]
         run = json.loads(chunks[m.EPS_RUN_CHUNK])
         assert run["token"] == "m2_i1_t3" and run["baked"] is True and run["run"] == 4
         # the caller's dicts were not mutated
@@ -156,9 +157,14 @@ class TestSaveRoundTrip:
 
     def test_unwired_run_info_is_plain_save_image(self, fake_folder_paths: Path) -> None:
         node = m.EPSSaveImage()
-        workflow = {"nodes": [{"id": 5, "type": "EPSCrossSweep", "widgets_values": ["a", "multiply"]}]}
+        workflow = {
+            "nodes": [{"id": 5, "type": "EPSCrossSweep", "widgets_values": ["a", "multiply"]}]
+        }
         result = node.save(
-            [_image()], filename_prefix="plain", prompt={"5": {}}, extra_pnginfo={"workflow": workflow}
+            [_image()],
+            filename_prefix="plain",
+            prompt={"5": {}},
+            extra_pnginfo={"workflow": workflow},
         )
         png = Image.open(fake_folder_paths / result["ui"]["images"][0]["filename"])
         assert m.EPS_RUN_CHUNK not in png.text

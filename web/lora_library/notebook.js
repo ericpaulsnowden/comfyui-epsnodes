@@ -305,6 +305,38 @@
  * argument in full. A single-entry drag is unaffected — it still resolves
  * to plain performMove().
  *
+ * Pinned values (FORMAT.md §6.1/§7.2, provenance M3 — owner 2026-08-18/21:
+ * "will the user be able to see what the old values are? That would be
+ * important", plus a one-click clear). The backend declares a TAIL STRING
+ * widget `pinned` (hidden in both renderers: `options.hidden` from
+ * INPUT_TYPES + the canvas `widget.hidden` set here, exactly like `file`/
+ * `entry`). `""` = live; otherwise JSON `{format, entries: [{name, text}],
+ * source: {file, token, captured}}` written by EPS Save Image into a baked
+ * per-image workflow — NOTHING in this UI ever creates a pin; it arrives
+ * through `configure()` (a dropped image / a saved pinned workflow) and
+ * wireConfigureReload()'s reconcile (`syncPinnedFromWidget`) paints it
+ * without a click. While pinned the backend outputs the pinned entries and
+ * ignores the file, so the panel says so: a badge row at the top
+ * (`renderPinBar`: "📌 Pinned — captured from image <token> — matches
+ * library" / "— differs from current library" / "— library not loaded") with
+ * an Unpin button; the entry LIST shows the PINNED entries, read-only, each
+ * compared against the live library (`pinnedDrift`: same name → text compare,
+ * name gone → "not in the library anymore"; drifted rows carry a "≠" marker
+ * whose title shows the current text's first line); the editor pane shows
+ * the clicked pinned entry's OLD text read-only (`paintPinnedEditor` —
+ * readOnly, not disabled, so it stays legible and copyable). Every mutation
+ * path (New/Delete/Save/rename/drag/move, keyboard flows included) is gated
+ * on `isPinned(state)`; the `entry`/`file` widgets are never written while
+ * pinned, so a dropped workflow keeps its saved selection. Unpin writes `""`
+ * through the widget's value + callback (the file's write idiom), toasts
+ * "Unpinned — back to the live notebook", and reloads the live view. The
+ * bar is a row inside the FILL widget (§7.2 sizing laws: getMinHeight grows
+ * by the bar while pinned and the node is lifted once so nothing crops);
+ * the live library still loads underneath (that is what drift compares
+ * against), and the `loadToken`/restore-race guards are untouched. The
+ * pure halves (`parsePinned`, `pinnedDrift`, `pinnedBadgeText`) are
+ * exported for tests/test_m3_pinning_js.py.
+ *
  * Vanilla ES modules, no build step — DOM nodes are built with
  * `document.createElement` (see the local `el()` helper) rather than any
  * templating, matching this pack's other frontend modules.
@@ -317,6 +349,15 @@ const NODE_CLASS = 'LoraLibraryNotebook'
 
 const WIDGET_NAME = 'notebook'
 const WIDGET_TYPE = 'lora_library_notebook'
+
+/** FORMAT.md §6.1 (provenance M3): the backend's TAIL STRING widget holding
+ * the pinned values JSON, or "" for live. Looked up by NAME (`findWidget`),
+ * so a backend that hasn't shipped it yet simply leaves every pin path a
+ * no-op. */
+const PINNED_WIDGET_NAME = 'pinned'
+/** Height of the §7.2 pin badge row (`.llnb-pinbar`), added to
+ * getMinHeight while pinned so the panel makes room and nothing crops. */
+const PIN_BAR_HEIGHT = 26
 
 /** FORMAT.md §7.2: "resizable via getMinHeight (~180)". */
 const MIN_WIDGET_HEIGHT = 180
@@ -469,6 +510,43 @@ const CSS_TEXT = `
 }
 .llnb-filepanel-note:empty { display: none; }
 .llnb-filepanel-actions { flex: 0 0 auto; display: flex; gap: 4px; }
+.llnb-pinbar {
+  /* Provenance M3 pin badge (file header "Pinned values"): one row between
+     the file panel and the panes, present only while the 'pinned' widget
+     holds a pin (renderPinBar empties it otherwise, and :empty hides it).
+     No backticks in this block: CSS_TEXT is a template literal. */
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 6px;
+  border-bottom: 1px solid var(--border-color, #444);
+  background: var(--comfy-menu-bg, #262626);
+  color: var(--input-text, #ccc);
+  font-size: 11px;
+}
+.llnb-pinbar:empty { display: none; }
+.llnb-pinbar-text {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  font-weight: 600;
+}
+.llnb-pinbar-differs { color: var(--error-text, #ff9f43); }
+.llnb-pinbar-unknown { font-style: italic; }
+.llnb-btn-unpin { flex: 0 0 auto; padding: 2px 8px; }
+.llnb-entry-pinned { cursor: default; }
+.llnb-entry-drift { display: flex; align-items: center; gap: 4px; }
+.llnb-entry-drift-name { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.llnb-drift {
+  flex: 0 0 auto;
+  font-weight: 700;
+  color: var(--error-text, #ff9f43);
+  cursor: help;
+}
+.llnb-textarea-pinned { border-color: var(--error-text, #ff9f43); opacity: 1; }
 .llnb-panes {
   display: flex;
   flex-direction: row;
@@ -933,13 +1011,19 @@ export function attachNotebookWidget(node) {
       api.warn('LoraLibraryNotebook node is missing its file/entry widgets; notebook editor not attached')
       return
     }
+    // Provenance M3 (FORMAT.md §6.1): the backend's tail `pinned` widget --
+    // null on a backend that predates it, in which case every pin path
+    // below is a no-op and the panel is exactly the pre-M3 panel.
+    const pinnedWidget = findWidget(node, PINNED_WIDGET_NAME) || null
 
     attachedNodes.add(node)
 
-    const state = createState(node, fileWidget, entryWidget)
+    const state = createState(node, fileWidget, entryWidget, pinnedWidget)
     buildUi(state)
     hideFileWidget(state)
+    hidePinnedWidget(state)
     wireFileWidget(state)
+    wirePinnedWidget(state)
     wireConfigureReload(state)
     wireNodeCleanup(state)
 
@@ -973,11 +1057,24 @@ export function attachNotebookWidget(node) {
 // State
 // ---------------------------------------------------------------------------
 
-function createState(node, fileWidget, entryWidget) {
+function createState(node, fileWidget, entryWidget, pinnedWidget = null) {
   return {
     node,
     fileWidget,
     entryWidget,
+    // Provenance M3 (FORMAT.md §6.1, file header "Pinned values"): the
+    // backend's tail `pinned` STRING widget (null on an older backend), the
+    // raw value last reconciled from it, its parsed form (`parsePinned`,
+    // null = live), the pinned entry currently shown in the editor pane,
+    // the badge row element, and whether the node was lifted by the bar's
+    // height (so unpin can give it back). The pin is NEVER created here --
+    // it arrives via configure() and is only ever shown or cleared.
+    pinnedWidget,
+    pinnedRaw: '',
+    pinned: null,
+    pinnedActive: null,
+    pinBarEl: null,
+    pinGrown: false,
     file: null,
     // §7.2 "never reset unless the user resets" (owner report 2026-08-03):
     // non-null after a FAILED notebook load -- {file, message}. While set,
@@ -1200,7 +1297,11 @@ function buildUi(state) {
 
   const panesRow = el('div', { className: 'llnb-panes' }, [state.leftPane, splitter, rightPane])
   const filePanel = buildFilePanel(state)
-  state.root = el('div', { className: 'llnb-root' }, [filePanel, panesRow])
+  // Provenance M3 pin badge row -- between the file panel and the panes,
+  // empty (and therefore hidden, `.llnb-pinbar:empty`) until a pin arrives;
+  // see renderPinBar().
+  state.pinBarEl = el('div', { className: 'llnb-pinbar' })
+  state.root = el('div', { className: 'llnb-root' }, [filePanel, state.pinBarEl, panesRow])
 
   state.nameFieldEl.addEventListener('input', () => refreshDirty(state))
   state.nameFieldEl.addEventListener('keydown', (event) => {
@@ -1221,7 +1322,7 @@ function buildUi(state) {
   renderFooter(state)
   clearEditor(state)
 
-  attachDomWidget(state.node, state.root)
+  attachDomWidget(state.node, state.root, state)
 }
 
 /**
@@ -1229,14 +1330,16 @@ function buildUi(state) {
  * non-serialization flags (see file header) sit next to the call that needs
  * them, instead of being scattered across `buildUi`.
  */
-function attachDomWidget(node, rootEl) {
+function attachDomWidget(node, rootEl, state) {
   const domWidget = node.addDOMWidget(WIDGET_NAME, WIDGET_TYPE, rootEl, {
     // Same default litegraph itself applies (`scripts/domWidget.ts`); kept
     // explicit for readability.
     hideOnZoom: true,
     // Excludes the widget from the API prompt (utils/executionUtil.ts).
     serialize: false,
-    getMinHeight: () => MIN_WIDGET_HEIGHT
+    // Provenance M3: the pin badge row takes a row of the FILL widget, so
+    // the floor grows with it while pinned (§7.2: the panel makes room).
+    getMinHeight: () => MIN_WIDGET_HEIGHT + (state && isPinned(state) ? PIN_BAR_HEIGHT : 0)
   })
   // Excludes the widget from the workflow JSON (LGraphNode.serialize /
   // .configure check `widget.serialize`, a *different* flag from
@@ -1445,6 +1548,13 @@ function wireConfigureReload(state) {
           api.warn('notebook reload after configure failed', error)
         )
       }
+      // Provenance M3: a pin arrives the same way the saved file path does
+      // -- configure() assigns `widget.value` directly, no callback -- so
+      // this is the one reconcile point for a dropped baked image / a
+      // saved pinned workflow. Paints the badge without a click; the
+      // reload above (or the live entries already loaded) feeds the drift
+      // comparison as soon as it lands.
+      syncPinnedFromWidget(state)
     } catch (error) {
       api.warn('post-configure notebook reload failed', error)
     }
@@ -2085,6 +2195,7 @@ async function reloadNow(state) {
     state.resolvedFile = null
     updateFilePanelPath(state)
     renderList(state)
+    renderPinBar(state) // M3: a pinned badge now reads "library not loaded"
     updateDeleteButtonEnabled(state)
     showLoadError(state)
     toast(
@@ -2149,6 +2260,17 @@ async function reloadNow(state) {
   updateDeleteButtonEnabled(state)
   updateSelectionHint(state)
   updateModeHint(state)
+
+  // Provenance M3: while pinned the editor shows the PINNED entry's old
+  // text (read-only), never the live entry -- the live entries above were
+  // still loaded, because that is what the drift comparison (badge + row
+  // markers, both repainted here) reads against. Selection state stays as
+  // restored, untouched, for the moment the pin is cleared.
+  if (isPinned(state)) {
+    renderPinBar(state)
+    paintPinnedEditor(state)
+    return
+  }
 
   if (state.activeCategory != null) {
     const result = await loadCategoryDescription(state, state.activeCategory)
@@ -2245,6 +2367,7 @@ function resetEditorDom(state) {
   state.baseMtime = null
   state.textarea.disabled = true
   state.nameFieldEl.disabled = true
+  clearPinnedEditorLook(state) // M3: the pinned read-only look never outlives the pin
   setDirty(state, false)
 }
 
@@ -2337,6 +2460,7 @@ function populateEditor(state, text, mtime, name) {
   state.lastSavedText = text ?? ''
   state.baseMtime = typeof mtime === 'number' ? mtime : null
   state.textarea.disabled = false
+  clearPinnedEditorLook(state) // M3: a live entry is editable again
   if (name !== undefined) {
     if (!nameMidEdit) state.nameFieldEl.value = name ?? ''
     state.lastSavedName = (name ?? '').trim()
@@ -2481,6 +2605,7 @@ function selectRange(state, name) {
 /** Dispatches a resolved (non-drag) pointer gesture to the right selection
  * mode, mirroring standard list-box modifier conventions. */
 function handleEntryClick(state, name, modifiers) {
+  if (isPinned(state)) return // M3: the live selection (and the `entry` widget) is frozen while pinned -- keyboard flow included
   if (modifiers.shiftKey) selectRange(state, name)
   else if (modifiers.toggleKey) toggleEntry(state, name)
   else selectSingle(state, name)
@@ -2492,6 +2617,14 @@ function handleEntryClick(state, name, modifiers) {
  * messages never clobber it and vice versa. */
 function updateSelectionHint(state) {
   if (!state.statusHintEl) return
+  // M3: while pinned the node outputs the PINNED entries, so the fan-out
+  // hint counts those, not the (ignored) live selection.
+  if (isPinned(state)) {
+    const pinnedCount = state.pinned.entries.length
+    state.statusHintEl.textContent =
+      pinnedCount >= 2 ? `${pinnedCount} pinned prompts — queue runs once per prompt.` : ''
+    return
+  }
   const count = state.selection.length
   state.statusHintEl.textContent =
     count >= 2 ? `${count} prompts selected — queue runs once per prompt.` : ''
@@ -2549,6 +2682,14 @@ async function selectCategory(state, name) {
  * the editor is actually showing. */
 function updateModeHint(state) {
   if (!state.modeHintEl) return
+  if (isPinned(state)) {
+    // M3: the editor shows the OLD (pinned) text, read-only.
+    const name = pinnedActiveEntry(state)?.name
+    state.modeHintEl.textContent = name
+      ? `Pinned entry: ${name} — read-only, captured from the image. Unpin to edit the live notebook.`
+      : 'Pinned — read-only, captured from the image. Unpin to edit the live notebook.'
+    return
+  }
   if (state.activeCategory != null) {
     state.modeHintEl.textContent = `Editing category description: ${state.activeCategory}`
   } else if (state.activeName) {
@@ -2627,6 +2768,16 @@ function renderList(state) {
   const previousScrollTop = state.listEl.scrollTop
   state.listEl.replaceChildren()
   state.dragRows = []
+
+  // Provenance M3: while pinned the list shows the PINNED entries (what the
+  // node will actually output), read-only -- no live rows, no headers, no
+  // drag sources (dragRows stays empty, so drag-reorder is structurally
+  // inert), each row marked against the live library. See renderPinnedList.
+  if (isPinned(state)) {
+    renderPinnedList(state)
+    state.listEl.scrollTop = previousScrollTop
+    return
+  }
 
   // §7.2 search: with a query active, render a FILTERED VIEW -- matching
   // entries only, categories that retain at least one match, collapse
@@ -2877,6 +3028,7 @@ function restoreCategoryCollapseAfterDoubleClick(state, category) {
 
 function onEntryPointerDown(state, event, name) {
   if (event.button !== 0) return // primary button/touch only
+  if (isPinned(state)) return // M3: no selection change / drag start while pinned (live rows aren't rendered then; belt-and-braces)
   cancelDeleteConfirm(state)
 
   const drag = {
@@ -3198,6 +3350,7 @@ function isNoopMove(state, draggedName, target) {
  * in-memory ordering).
  */
 async function performMove(state, name, target, { force = false } = {}) {
+  if (pinnedRefuse(state)) return // M3
   if (writesBlocked(state)) {
     showLoadError(state)
     return
@@ -3266,6 +3419,7 @@ async function performMove(state, name, target, { force = false } = {}) {
  * the failed index with that one request's `base_mtime` check skipped.
  */
 async function performMoveRun(state, names, target, startIndex, { force = false } = {}) {
+  if (pinnedRefuse(state)) return // M3
   if (writesBlocked(state)) {
     showLoadError(state)
     return
@@ -3327,6 +3481,7 @@ async function performMoveRun(state, names, target, startIndex, { force = false 
  * need reconciling — names are untouched by a move, only their position.
  */
 async function performMoveCategory(state, category, target, { force = false } = {}) {
+  if (pinnedRefuse(state)) return // M3
   if (writesBlocked(state)) {
     showLoadError(state)
     return
@@ -3381,6 +3536,7 @@ async function performMoveCategory(state, category, target, { force = false } = 
  */
 function onCategoryPointerDown(state, event, category) {
   if (event.button !== 0) return // primary button/touch only
+  if (isPinned(state)) return // M3: no category tap/drag while pinned (headers aren't rendered then; belt-and-braces)
   cancelDeleteConfirm(state)
 
   // v0.68.1: note the collapse state as of the FIRST tap of a would-be
@@ -3505,6 +3661,7 @@ function focusNameField(state) {
 function onEntryDoubleClick(state, event, name) {
   event.preventDefault()
   event.stopPropagation()
+  if (pinnedRefuse(state)) return // M3: no rename while pinned
   // Belt-and-suspenders: a real drag can't produce a dblclick (a drag
   // commits via finishDrag()/pointerup, never a click), but a stray
   // in-flight drag object from some other pointer sequence should never
@@ -3534,6 +3691,7 @@ function inlineRenameRow(state, kind, name) {
  */
 function beginInlineRename(state, kind, name) {
   if (state.busy) return false
+  if (pinnedRefuse(state)) return false // M3: read-only while pinned
   const row = inlineRenameRow(state, kind, name)
   if (!row) return false
   // Committing the previous editor first (rather than cancelling it) keeps a
@@ -3629,6 +3787,11 @@ function cancelInlineRename(state) {
  * by what the user asked to be a rename.
  */
 async function commitInlineRename(state) {
+  if (pinnedRefuse(state)) {
+    state.inlineRename = null
+    renderList(state)
+    return
+  }
   if (writesBlocked(state)) {
     state.inlineRename = null
     renderList(state)
@@ -3849,7 +4012,16 @@ function renderFooter(state) {
       text: '🗑 Delete',
       attrs: { title: 'Delete the selected entry from the file. Click twice to confirm.' }
     })
+    // Provenance M3: the notebook is read-only while pinned -- both
+    // buttons are disabled AND their handlers gate (belt-and-braces), and
+    // the title says why so a dead button never reads as "broken".
+    if (isPinned(state)) {
+      newBtn.disabled = true
+      newBtn.title = 'Unavailable while pinned — Unpin (above) to edit the live notebook'
+      deleteBtn.title = 'Unavailable while pinned — Unpin (above) to edit the live notebook'
+    }
     newBtn.addEventListener('click', () => {
+      if (pinnedRefuse(state)) return
       if (writesBlocked(state)) {
         setStatus(state, 'Fix the notebook connection first (Retry above) -- nothing can be added while the file cannot be loaded.')
         showLoadError(state)
@@ -3858,6 +4030,7 @@ function renderFooter(state) {
       openNewEntryRow(state)
     })
     deleteBtn.addEventListener('click', () => {
+      if (pinnedRefuse(state)) return
       if (writesBlocked(state)) {
         showLoadError(state)
         return
@@ -3873,6 +4046,7 @@ function renderFooter(state) {
 
 function openNewEntryRow(state) {
   if (state.busy || state.creatingNew) return
+  if (pinnedRefuse(state)) return // M3
   cancelDeleteConfirm(state)
   state.creatingNew = true
   renderFooter(state)
@@ -3896,6 +4070,7 @@ function categoryNameFromInput(rawName) {
 }
 
 async function confirmNewEntry(state, rawName) {
+  if (pinnedRefuse(state)) return // M3
   if (writesBlocked(state)) {
     showLoadError(state)
     return
@@ -4015,6 +4190,7 @@ function onDeleteClick(state) {
   // (updateDeleteButtonEnabled()); this is belt-and-suspenders against any
   // path that could invoke the handler despite that (FORMAT.md §7.2
   // amendment).
+  if (pinnedRefuse(state)) return // M3
   if (!state.selection.length || state.busy || state.activeCategory != null) return
 
   if (!state.deleteConfirmActive) {
@@ -4147,6 +4323,7 @@ async function performSave(state, { force = false } = {}) {
   // may still name an entry underneath — see the file header). This is the
   // ONE branch point between the two; everything else about category-mode
   // saving lives in performSaveCategory() below.
+  if (pinnedRefuse(state)) return // M3: Save (button, Enter in the name field) is inert while pinned
   if (writesBlocked(state)) {
     // §7.2 error-state gate: a save during a broken connection would post
     // against a file the server cannot read (or, pre-2026-08-03, against
@@ -4395,15 +4572,430 @@ function updateSaveButtonEnabled(state) {
   // FORMAT.md §7.2 amendment: Save targets whichever of the two contextual
   // modes is active (category mode or entry mode — see performSave()).
   const hasTarget = state.activeCategory != null || Boolean(state.activeName)
-  state.saveBtn.disabled = state.busy || !hasTarget || !state.dirty
+  // M3: nothing can be saved while pinned (the editor shows the pinned text).
+  state.saveBtn.disabled = state.busy || !hasTarget || !state.dirty || isPinned(state)
 }
 
 function updateDeleteButtonEnabled(state) {
   if (!state.deleteBtn) return
   // Delete stays entry-only — disabled outright in category mode (FORMAT.md
-  // §7.2 amendment).
+  // §7.2 amendment), and outright while pinned (M3).
   state.deleteBtn.disabled =
-    state.busy || state.selection.length === 0 || state.activeCategory != null
+    state.busy || state.selection.length === 0 || state.activeCategory != null || isPinned(state)
+}
+
+// ---------------------------------------------------------------------------
+// Pinned values (FORMAT.md §6.1/§7.2, provenance M3) -- see the file header's
+// "Pinned values" paragraph. Pure helpers first (exported for
+// tests/test_m3_pinning_js.py), then the panel wiring. Nothing here ever
+// CREATES a pin: it arrives through configure() from a baked image's
+// workflow; this code shows it, compares it, and clears it.
+// ---------------------------------------------------------------------------
+
+/**
+ * Parse the `pinned` widget's raw value. `""` / non-string / unparseable /
+ * any shape without at least one `{name}` entry -> null (= live); otherwise
+ * `{format, entries: [{name, text}], source: {file, token, captured}}` with
+ * every field coerced to a string (missing -> ''). Lenient on purpose: the
+ * pin is the BACKEND's mechanism and this panel's job is to SHOW it -- so an
+ * unknown `format` still renders (`entries` is the stable core); only a
+ * value that cannot name a single entry reads as "no pin".
+ * @param {unknown} raw
+ * @returns {{format: number|null, entries: Array<{name: string, text: string}>, source: {file: string, token: string, captured: string}}|null}
+ */
+export function parsePinned(raw) {
+  if (typeof raw !== 'string' || raw.trim() === '') return null
+  let parsed
+  try {
+    parsed = JSON.parse(raw)
+  } catch {
+    return null
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null
+  if (!Array.isArray(parsed.entries)) return null
+  const entries = []
+  for (const item of parsed.entries) {
+    if (!item || typeof item !== 'object' || typeof item.name !== 'string') continue
+    entries.push({
+      name: item.name,
+      text: typeof item.text === 'string' ? item.text : String(item.text ?? '')
+    })
+  }
+  if (!entries.length) return null
+  const source = parsed.source && typeof parsed.source === 'object' ? parsed.source : {}
+  const str = (value) => (value == null ? '' : String(value))
+  return {
+    format: typeof parsed.format === 'number' ? parsed.format : null,
+    entries,
+    source: { file: str(source.file), token: str(source.token), captured: str(source.captured) }
+  }
+}
+
+/** Line-ending / trailing-whitespace-insensitive text for the drift compare
+ * (a CRLF notebook vs the LF the pin was captured with is not drift). */
+function normalizePinnedText(text) {
+  return String(text ?? '')
+    .replace(/\r\n?/g, '\n')
+    .replace(/[ \t]+$/gm, '')
+    .trimEnd()
+}
+
+/**
+ * Compare a parsed pin against the live library. `entryTextByName` is the
+ * panel's include_text map (name -> body); `libraryLoaded` false means
+ * there is nothing to compare against yet (pre-load, or a failed load) and
+ * every row is `unknown`. Returns `{status, rows}`: status `match` when
+ * every pinned entry still exists with identical text, `differs` when any
+ * text differs OR any name is gone ("not in the library anymore"),
+ * `unknown` when the library isn't loaded; `rows` carry
+ * `{name, kind: 'same'|'differs'|'missing'|'unknown', current}` in pin
+ * order (`current` = the live text, or null).
+ * @param {ReturnType<typeof parsePinned>} pin
+ * @param {Record<string, string>} entryTextByName
+ * @param {boolean} [libraryLoaded]
+ */
+export function pinnedDrift(pin, entryTextByName, libraryLoaded = true) {
+  const rows = []
+  let status = libraryLoaded ? 'match' : 'unknown'
+  const map = entryTextByName && typeof entryTextByName === 'object' ? entryTextByName : {}
+  for (const entry of pin?.entries ?? []) {
+    if (!libraryLoaded) {
+      rows.push({ name: entry.name, kind: 'unknown', current: null })
+      continue
+    }
+    if (!Object.prototype.hasOwnProperty.call(map, entry.name)) {
+      rows.push({ name: entry.name, kind: 'missing', current: null })
+      status = 'differs'
+      continue
+    }
+    const current = typeof map[entry.name] === 'string' ? map[entry.name] : ''
+    if (normalizePinnedText(current) !== normalizePinnedText(entry.text)) {
+      rows.push({ name: entry.name, kind: 'differs', current })
+      status = 'differs'
+    } else {
+      rows.push({ name: entry.name, kind: 'same', current })
+    }
+  }
+  return { status, rows }
+}
+
+/** The badge row's text for a pin + drift status. The three variants are a
+ * contract with tests/test_m3_pinning_js.py (and README/FORMAT §6.1). */
+export function pinnedBadgeText(pin, status) {
+  const token = pin?.source?.token
+  const origin = token ? `captured from image ${token}` : 'captured from a saved image'
+  const drift =
+    status === 'differs'
+      ? 'differs from current library'
+      : status === 'match'
+        ? 'matches library'
+        : 'library not loaded'
+  return `📌 Pinned — ${origin} — ${drift}`
+}
+
+/** First non-blank line of *text* (a drift marker's tooltip), capped. */
+function firstLineOf(text, max = 80) {
+  const line =
+    String(text ?? '')
+      .replace(/\r\n?/g, '\n')
+      .split('\n')
+      .find((candidate) => candidate.trim() !== '') ?? ''
+  return line.length > max ? `${line.slice(0, max - 1)}…` : line
+}
+
+function isPinned(state) {
+  return !!state?.pinned
+}
+
+/** The pinned entry the editor pane shows: the clicked one, else the first. */
+function pinnedActiveEntry(state) {
+  if (!isPinned(state)) return null
+  const entries = state.pinned.entries
+  return entries.find((entry) => entry.name === state.pinnedActive) ?? entries[0] ?? null
+}
+
+/** Both hide flags, exactly hideFileWidget()'s pair: canvas reads
+ * `widget.hidden`, Vue nodes read `options.hidden` (§7.5). No-op without
+ * the widget (a backend that predates M3). */
+function hidePinnedWidget(state) {
+  const widget = state.pinnedWidget
+  if (!widget) return
+  widget.hidden = true
+  widget.options = { ...(widget.options || {}), hidden: true }
+  state.node.graph?.setDirtyCanvas(true, true)
+}
+
+/** Chain the `pinned` widget's callback so a value arriving THROUGH the
+ * callback (a live link on the widget-input at queue time, an extension,
+ * our own unpin) reconciles the view. configure() bypasses callbacks and is
+ * covered by wireConfigureReload() instead. Wrapped, never replaced. */
+function wirePinnedWidget(state) {
+  const widget = state.pinnedWidget
+  if (!widget) return
+  const original = widget.callback
+  widget.callback = function (value, ...rest) {
+    let result
+    if (typeof original === 'function') {
+      try {
+        result = original.apply(this, [value, ...rest])
+      } catch (error) {
+        api.warn('original pinned widget callback threw', error)
+      }
+    }
+    try {
+      syncPinnedFromWidget(state)
+    } catch (error) {
+      api.warn('pinned widget sync threw', error)
+    }
+    return result
+  }
+}
+
+/**
+ * Reconcile the panel with the `pinned` widget's CURRENT value. Cheap and
+ * idempotent (raw-string compare first), so it is safe from every hook that
+ * might carry a pin: onConfigure (workflow load / paste / image drop), the
+ * widget callback, unpin. Returns true when the pin state changed.
+ */
+function syncPinnedFromWidget(state) {
+  const widget = state.pinnedWidget
+  if (!widget) return false
+  const raw = typeof widget.value === 'string' ? widget.value : ''
+  if (raw === state.pinnedRaw) return false
+  const wasPinned = isPinned(state)
+  state.pinnedRaw = raw
+  state.pinned = parsePinned(raw)
+  state.pinnedActive = state.pinned ? state.pinned.entries[0].name : null
+  if (state.pinned && !wasPinned) {
+    // Entering the pinned view: a mid-flight ＋ New row / delete-confirm /
+    // inline rename / drag would target a list that no longer renders.
+    cancelDeleteConfirm(state)
+    closeNewEntryRow(state)
+    state.inlineRename = null
+    state.drag?.cleanup?.()
+    state.drag = null
+  }
+  applyPinnedView(state)
+  return true
+}
+
+/**
+ * Repaint everything the pin touches: badge row, list, footer buttons,
+ * hints, editor pane, and the node's height (§7.2: the bar's row is given
+ * to the node once on pin and taken back on unpin, never below the floor).
+ * Leaving the pinned view hands the editor back to the live entry through
+ * reloadNow() -- the one path that restores selection text + mtime from
+ * the file -- when the panel has loaded before (a fresh, never-loaded node
+ * is still waiting on its deferred attach-time load, which lands alone).
+ */
+function applyPinnedView(state) {
+  renderPinBar(state)
+  renderList(state)
+  renderFooter(state)
+  updateDeleteButtonEnabled(state)
+  updateSelectionHint(state)
+  updateModeHint(state)
+  syncPinnedNodeHeight(state)
+  if (isPinned(state)) {
+    paintPinnedEditor(state)
+  } else if (state.file != null) {
+    reloadNow(state).catch((error) => api.warn('reload after unpin failed', error))
+  }
+}
+
+/** Lift the node by the badge row once when a pin appears; give it back on
+ * unpin. Never below litegraph's computed floor (getMinHeight already
+ * includes the bar while pinned), never touches width. `node.size` is a
+ * Float32Array on current frontends -- never Array.isArray it (§7.2). */
+function syncPinnedNodeHeight(state) {
+  const node = state.node
+  const pinned = isPinned(state)
+  if (pinned === state.pinGrown) return
+  state.pinGrown = pinned
+  if (!node?.size || typeof node.setSize !== 'function') return
+  const floor = typeof node.computeSize === 'function' ? node.computeSize()[1] : 0
+  const delta = pinned ? PIN_BAR_HEIGHT : -PIN_BAR_HEIGHT
+  node.setSize([node.size[0], Math.max(node.size[1] + delta, floor)])
+  node.graph?.setDirtyCanvas(true, true)
+}
+
+/** The badge row: drift-aware text + Unpin. Empties the row when not
+ * pinned (`.llnb-pinbar:empty` hides it). Re-run on every load so the
+ * verdict tracks the live library. */
+function renderPinBar(state) {
+  const bar = state.pinBarEl
+  if (!bar) return
+  if (!isPinned(state)) {
+    bar.replaceChildren()
+    return
+  }
+  const pin = state.pinned
+  const drift = pinnedDrift(pin, state.entryTextByName, state.file != null && !state.loadError)
+  const text = el('span', {
+    className:
+      'llnb-pinbar-text' +
+      (drift.status === 'differs'
+        ? ' llnb-pinbar-differs'
+        : drift.status === 'unknown'
+          ? ' llnb-pinbar-unknown'
+          : ''),
+    text: pinnedBadgeText(pin, drift.status)
+  })
+  const details = []
+  if (pin.source.captured) details.push(`Captured ${pin.source.captured}`)
+  if (pin.source.file) details.push(`from ${pin.source.file}`)
+  text.title =
+    (details.length ? `${details.join(' ')}.\n` : '') +
+    'The node outputs these pinned values (not the live notebook file) until you Unpin.'
+  const unpinBtn = el('button', {
+    className: 'llnb-btn llnb-btn-unpin',
+    text: 'Unpin',
+    attrs: { title: 'Go back to the live notebook — the node reads the current file again' }
+  })
+  unpinBtn.addEventListener('click', () => unpin(state))
+  bar.replaceChildren(text, unpinBtn)
+}
+
+/** renderList()'s pinned branch: every pinned entry, all reading as
+ * selected (the node outputs each one), the active one highlighted; click =
+ * show that entry's OLD text in the editor; no drag source, no rename, no
+ * modifiers; search still filters the view. Drifted rows carry a "≠"
+ * marker whose title shows the current library text's first line, or that
+ * the entry is not in the library anymore. */
+function renderPinnedList(state) {
+  const pin = state.pinned
+  const drift = pinnedDrift(pin, state.entryTextByName, state.file != null && !state.loadError)
+  const byName = new Map(drift.rows.map((row) => [row.name, row]))
+  const searchQuery = (state.searchQuery || '').trim()
+  const words = searchQuery ? searchWords(searchQuery) : null
+  let shown = 0
+  for (const entry of pin.entries) {
+    if (words && !entryMatchesSearch(searchHaystack(entry.name, entry.text), words)) continue
+    shown += 1
+    state.listEl.append(buildPinnedEntryRow(state, entry, byName.get(entry.name)))
+  }
+  if (!shown) {
+    state.listEl.append(
+      el('div', {
+        className: 'llnb-empty',
+        text: searchQuery ? `No pinned prompts match "${searchQuery}".` : 'No pinned entries.'
+      })
+    )
+  }
+}
+
+function buildPinnedEntryRow(state, entry, driftRow) {
+  const active = entry.name === pinnedActiveEntry(state)?.name
+  const classes = ['llnb-entry', 'llnb-entry-selected', 'llnb-entry-pinned', 'llnb-entry-drift']
+  if (active) classes.push('llnb-entry-active')
+  const kind = driftRow?.kind ?? 'unknown'
+  const children = [el('span', { className: 'llnb-entry-drift-name', text: entry.name })]
+  let title = `${entry.name} — pinned from the image`
+  if (kind === 'missing') {
+    title = `${entry.name} — not in the library anymore`
+    children.push(
+      el('span', {
+        className: 'llnb-drift',
+        text: '≠',
+        attrs: { title: 'Not in the library anymore — no entry by this name in the current notebook' }
+      })
+    )
+  } else if (kind === 'differs') {
+    title = `${entry.name} — pinned text differs from the current library`
+    children.push(
+      el('span', {
+        className: 'llnb-drift',
+        text: '≠',
+        attrs: {
+          title: `Differs from the current library.\nCurrent text starts: ${firstLineOf(driftRow.current) || '(empty)'}`
+        }
+      })
+    )
+  } else if (kind === 'same') {
+    title = `${entry.name} — pinned text matches the current library`
+  }
+  const row = el('div', { className: classes.join(' '), attrs: { tabindex: '0', title } }, children)
+  row.__llnbName = entry.name
+  const pick = () => selectPinnedEntry(state, entry.name)
+  row.addEventListener('click', pick)
+  row.addEventListener('keydown', (event) => {
+    if (event.key !== 'Enter' && event.key !== ' ') return
+    event.preventDefault()
+    event.stopPropagation()
+    pick()
+  })
+  return row
+}
+
+/** Show one pinned entry's OLD text in the editor (read-only). UI-only:
+ * never touches `selection`, the `entry` widget, or the file. */
+function selectPinnedEntry(state, name) {
+  if (!isPinned(state)) return
+  state.pinnedActive = name
+  renderList(state)
+  updateModeHint(state)
+  paintPinnedEditor(state)
+}
+
+/** Editor pane in the pinned view: the active pinned entry's name + text,
+ * READ-ONLY (readOnly, not disabled -- the owner's whole point is to SEE
+ * the old values, and a disabled textarea is half-transparent and can't be
+ * copied from). Baselines equal the shown text so dirty stays false and
+ * Save stays dark; performSave() is gated regardless. */
+function paintPinnedEditor(state) {
+  const entry = pinnedActiveEntry(state)
+  if (!entry) return
+  state.textarea.value = entry.text
+  state.lastSavedText = entry.text
+  state.nameFieldEl.value = entry.name
+  state.lastSavedName = entry.name.trim()
+  state.baseMtime = null
+  state.textarea.disabled = false
+  state.textarea.readOnly = true
+  state.textarea.classList.add('llnb-textarea-pinned')
+  state.textarea.title = 'Pinned text captured from the image — read-only. Unpin to edit the live notebook.'
+  state.nameFieldEl.disabled = false
+  state.nameFieldEl.readOnly = true
+  setDirty(state, false)
+  clearConflict(state)
+}
+
+/** Undo paintPinnedEditor()'s read-only look -- resetEditorDom() and
+ * populateEditor() both call it, so the look never outlives the pin. */
+function clearPinnedEditorLook(state) {
+  if (!state.textarea) return
+  state.textarea.readOnly = false
+  state.textarea.classList.remove('llnb-textarea-pinned')
+  state.textarea.removeAttribute('title')
+  if (state.nameFieldEl) state.nameFieldEl.readOnly = false
+}
+
+/** One-click back to the live notebook: write "" through the `pinned`
+ * widget's value + callback (the file's widget-write idiom --
+ * setFileWidgetValue()/syncEntryWidget()), toast, and let the callback
+ * chain (wirePinnedWidget -> syncPinnedFromWidget) repaint and reload the
+ * live view; a direct reconcile follows in case something upstream
+ * swallowed the callback (idempotent). */
+function unpin(state) {
+  const widget = state.pinnedWidget
+  if (!widget || !isPinned(state)) return
+  widget.value = ''
+  try {
+    widget.callback?.('')
+  } catch (error) {
+    api.warn('pinned widget callback threw', error)
+  }
+  syncPinnedFromWidget(state)
+  state.node.graph?.setDirtyCanvas(true, true)
+  toast('info', 'Unpinned — back to the live notebook', 'The node reads the current notebook file again.')
+}
+
+/** Mutation gate for the pinned view: true (and says why in the status
+ * line) when an edit was attempted while pinned. */
+function pinnedRefuse(state) {
+  if (!isPinned(state)) return false
+  setStatus(state, 'Read-only while pinned — click Unpin (above) to edit the live notebook.')
+  return true
 }
 
 // ---------------------------------------------------------------------------

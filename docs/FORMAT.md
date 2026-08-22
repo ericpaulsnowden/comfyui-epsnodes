@@ -393,6 +393,31 @@ execution — **the file is the truth; the UI is a view.**
 
 ### §6.1 `LoraLibraryNotebook` (display: "EPS Prompt Notebook")
 
+**`pinned` (STRING, optional, TAIL-appended per §8, default `""`, `multiline:
+false`, `"hidden": true` — provenance M3, v0.72.0).** Empty = live (the file
+is re-read every run). Non-empty = the pin JSON EPS Save Image (§6.14)
+captured when an image was made: `{"format": 1, "entries": [{"name":
+"<entry name>", "text": "<entry text>"}, …], "source": {"file": "<notebook
+file>", "token": "<run token or null>", "captured": "<ISO-8601 UTC>"}}`.
+When parseable with ≥1 entry, `read_entry` outputs the pinned entries'
+`text`/`name` lists IN PIN ORDER and never opens the file (it may have been
+edited, renamed or deleted — that is the point); a malformed pin or empty
+`entries` logs a warning and falls back to live. The live path's loud
+missing-file / missing-entry errors are unchanged. `IS_CHANGED` folds the
+pin value in. The frontend (§7.2) shows the pinned (old) text with a
+"📌 Pinned — captured from image" badge, says whether it matches or differs
+from the current library, and unpins in one click (= `""`); the §6.10
+estimator counts a pinned notebook as `len(entries)`. Helpers:
+`parse_pinned`, `make_pin`, `resolve_selection` (the shared live path). Frontend strings: badge `📌 Pinned — captured from image <token> —
+matches library | differs from current library | library not loaded`; a
+`≠` marker per drifted/missing entry (title: the current text's first line
+or "not in the library anymore"); the clicked entry's OLD text read-only
+(`readOnly`, not `disabled` — legible and copyable) in the editor; every
+mutation (New/Delete/Save/rename/drag/move, keyboard flows) refused with a
+status line while pinned; `entry`/`file` never written; **Unpin** writes
+`""` (value + callback) and toasts "Unpinned — back to the live notebook".
+Nothing in the UI creates a pin. Pins: `tests/test_m3_pinning_js.py`.
+
 **v0.68.1 audit round (perf/bugs):** (1) **one load per restore** — the
 attach-time reload is deferred one tick and stands down when `onConfigure`
 already reloaded (`configureReloaded`), so a restored node fetches its
@@ -450,6 +475,34 @@ collapse, and the rename then landed on a collapsed header).
   returns True (entry names are dynamic).
 
 ### §6.2 `LoraLibraryApplySet` (display: "EPS Apply LoRA Set")
+
+**`pinned_state` (STRING, optional, TAIL-appended after `set`/`strength_scale`/
+`loader_slot` and the model/clip sockets, default `""`, `multiline: false`,
+`"hidden": true` — provenance M3, v0.72.0).** Empty = live. Non-empty =
+`{"format": 1, "slug": "<slug>", "name": "<set name>", "set": {<the
+normalized §4 set dict exactly as sets_store.load_set returns it — format 1
+rows or a format 2 composite>}, "source": {"token", "captured"}}`.
+`apply()` runs the pinned `set` dict through `normalize_set` and the SAME
+`loader_slot`/resolve/apply path as a loaded file, never reading the sets
+folder; a pin wins even if the combo reads `None`. Malformed/invalid pin →
+warning + live. `IS_CHANGED` folds it in. **§8 hazard, handled by
+`sets.js`:** its frontend-appended `mirrors loader` combo stays AFTER
+`pinned_state`; a pre-M3 workflow carried the mirrors value in slot 3, so
+on configure a non-pin string found in `pinned_state` while `mirrors
+loader` is still default is MOVED to mirrors and `pinned_state` blanked
+(one-time, silent, console-logged). Frontend: a display-only `addDOMWidget` row
+appended LAST (after `mirrors loader` — litegraph's save leaves a hole at a
+`serialize:false` index and restore skips it, so the non-serialized row
+must follow every serialized widget), hidden (both flags) until a pin
+arrives: `📌 Pinned state: <name> — captured from image <token> — matches
+current state | differs from current state | state no longer exists (404) |
+current state unavailable | checking current state…` from one token-guarded
+`GET /lora_library/set?slug=`, a `stem strength` summary (`L0 … / L1 …` for
+format 2), **Unpin** (toast "Unpinned — back to the live state"); the `set`
+combo reads `set (ignored while pinned)` + disabled while pinned and is
+restored exactly on unpin. `migrateLegacyMirrorsValue` /
+`healLegacyWidgetShift` run inside the chained `onConfigure` before the
+pin sync.
 
 - Optional inputs: `model` (MODEL), `clip` (CLIP).
 - Widgets: `set` (COMBO of set names by slug + `"None"`), `strength_scale`
@@ -2140,7 +2193,10 @@ deletion:
 **`run_info` output (v0.70.0, provenance M2):** a ninth, TAIL-APPENDED
 output (§8) — one JSON per run, index-aligned with every other output:
 `{"format": 1, "token", "node" (this node's execution id), "run", "total",
-"steps", "pairs"}`. Wire it into §6.14 EPS Save Image's `run_info` and
+"steps", "pairs"}` — and since v0.72.0 (M3) `"name"` (this run's pair name;
+`null` when `name` is unwired), `"text"` (this run's text) and `"label"`
+(this run's sweep label; `null` when `label` is unwired) — EPS Save Image
+uses name/text to narrow a multi-select Prompt Notebook to THIS run's entry. Wire it into §6.14 EPS Save Image's `run_info` and
 every saved file carries a workflow pre-soloed to its run. It has no
 backing input, so it is never a dead output; the estimator ignores it.
 
@@ -2944,6 +3000,25 @@ onto comfyui and recreate just that image"). Shipped v0.70.0.
   load the full workflow as before. PNG metadata must survive (a re-encode,
   strip or JPEG conversion loses the chunks; the filename path needs the
   name intact).
+- **Full pinning (M3, v0.72.0).** With `run_info` wired, BEFORE baking,
+  `capture_pins` walks the hidden PROMPT for every `LoraLibraryNotebook` /
+  `LoraLibraryApplySet` node and builds pins FROM THE STORES (lazy
+  `lora_library` import inside `save`, the same helpers the nodes' run
+  paths use): Notebook → `resolve_selection(file, entry)` → `[{name,
+  text}]`; if exactly one entry's `name` == run_info.name OR `text` ==
+  run_info.text, only that entry is pinned (this run's), else the whole
+  selection (a notebook wired elsewhere, e.g. a negative prompt); Apply Set
+  → `load_set(slug)` → the normalized dict (`None`/missing/unloadable
+  skipped). A node whose pin widget is already non-empty is left alone
+  (re-saving a recreated run keeps its original capture); any store error
+  skips that node with a warning — pinning never fails the queue.
+  `bake_provenance(workflow, prompt, run_info, pins)` then sets each
+  pinned node's `widgets_values[widget_index(cls, widget)]` in the
+  workflow chunk (index DERIVED from INPUT_TYPES; short arrays padded with
+  defaults; root and `5:3` subgraph path ids via `find_node_in_workflow`)
+  and `inputs[<widget>]` in the prompt chunk, alongside the solo bake; the
+  `eps_run` chunk adds `"pinned": ["5", "7:2"]`. Deep copies as before.
+  Pins: `tests/test_m3_pinning.py`.
 - **Pins**: `tests/test_save_image.py` (parse, derived index, path-id
   lookup through definitions, baking both chunks, a real PNG round trip
   reading the chunks back, plain-save parity, missing multiplier →
@@ -2980,6 +3055,14 @@ remote read-only revert now EXEMPTS a value arriving via a live link on
 the `file` widget-input (workflow-authored host state, fired through
 `applyToGraph` at queue time — reverting it swapped in the stale
 baseline), while raw remote hand edits still revert.
+
+**§7.2 amendment — M3 pin badge rows (v0.72.0):** the Notebook's badge is a
+`flex: 0 0 auto` row inside its FILL widget; `getMinHeight` grows by 26 px
+while pinned and the node is lifted once on pin / given back on unpin
+(never below `computeSize()`); the Apply Set badge is a compact standalone
+DOM widget sized the §6.10 readout way (`computeSize` + `computedHeight` +
+explicit element height; reported height = text + 2·margin), zero-height
+and `display:none` until pinned.
 
 **§7.2 amendment — width floor (v0.68.1):** `LGraphNode.size` is a Proxy
 over a typed-array view on frontend ≥1.48 — never an Array — so every

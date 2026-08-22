@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+import logging
 import os
 from pathlib import Path
 
@@ -349,3 +351,148 @@ def test_module_never_imports_comfy_or_folder_paths() -> None:
     source = inspect.getsource(sys.modules[nodes_notebook.__name__])
     assert "import comfy" not in source
     assert "import folder_paths" not in source
+
+
+# ------------------------------------------------ M3 `pinned` (FORMAT.md §6.1)
+#
+# Provenance M3 (v0.71.0): a TAIL-appended hidden `pinned` STRING widget.
+# Empty = live; non-empty = the pin JSON EPS Save Image captured when an
+# image was made, and read_entry outputs THOSE entries without opening the
+# file. Malformed pin -> warning + live. IS_CHANGED folds the pin in.
+
+
+def _pin(entries: list[dict], file: str = "loras.md", token: str | None = "m1_p1") -> str:
+    return json.dumps(
+        nodes_notebook.make_pin(entries, file=file, token=token, captured="2026-08-22T00:00:00Z")
+    )
+
+
+class TestPinnedM3:
+    def test_widget_is_tail_appended_optional_hidden_string(self) -> None:
+        spec = nodes_notebook.LoraLibraryNotebook.INPUT_TYPES()
+        assert list(spec["required"]) == ["file", "entry"]
+        assert list(spec["optional"]) == ["pinned"]  # the tail -- FORMAT.md §8
+        kind, options = spec["optional"]["pinned"]
+        assert kind == "STRING"
+        assert options["default"] == ""
+        assert options["multiline"] is False
+        assert options["hidden"] is True  # Vue-nodes hide flag (§7.5)
+        assert nodes_notebook.PIN_WIDGET == "pinned"
+        assert nodes_notebook.PIN_FORMAT == 1
+
+    def test_pinned_outputs_the_pinned_lists_in_pin_order_without_the_file(self) -> None:
+        # No notebook on disk at all: the live path would raise "does not
+        # exist" -- the pinned path never opens it.
+        node = nodes_notebook.LoraLibraryNotebook()
+        pin = _pin([{"name": "B", "text": "old B"}, {"name": "A", "text": "old A"}])
+        assert node.read_entry(file="loras.md", entry="A\nB", pinned=pin) == (
+            ["old B", "old A"],
+            ["B", "A"],
+        )
+
+    def test_pinned_wins_over_an_edited_live_file_and_empty_reads_live(
+        self, library_dir: Path
+    ) -> None:
+        _write_notebook(library_dir, "loras.md", "## A\nedited since\n")
+        node = nodes_notebook.LoraLibraryNotebook()
+        pin = _pin([{"name": "A", "text": "as saved"}])
+        assert node.read_entry(file="loras.md", entry="A", pinned=pin) == (["as saved"], ["A"])
+        # unpin (the frontend's one click = "") and the live file is back
+        assert node.read_entry(file="loras.md", entry="A", pinned="") == (
+            ["edited since"],
+            ["A"],
+        )
+        assert node.read_entry(file="loras.md", entry="A") == (["edited since"], ["A"])
+
+    def test_pinned_needs_no_context(self) -> None:
+        nodes_notebook.set_context(None)
+        node = nodes_notebook.LoraLibraryNotebook()
+        pin = _pin([{"name": "A", "text": "t"}])
+        assert node.read_entry(file="loras.md", entry="A", pinned=pin) == (["t"], ["A"])
+
+    @pytest.mark.parametrize(
+        "bad",
+        [
+            "not json",
+            "[]",
+            "42",
+            "{}",
+            json.dumps({"entries": []}),
+            json.dumps({"entries": "A"}),
+            json.dumps({"entries": [{"name": "A"}]}),  # no text
+            json.dumps({"entries": [{"name": "A", "text": 7}]}),  # non-string text
+            json.dumps({"entries": [{"name": "A", "text": "ok"}, "junk"]}),
+        ],
+    )
+    def test_malformed_pin_warns_and_reads_live(
+        self, library_dir: Path, caplog: pytest.LogCaptureFixture, bad: str
+    ) -> None:
+        _write_notebook(library_dir, "loras.md", "## A\nlive\n")
+        node = nodes_notebook.LoraLibraryNotebook()
+        with caplog.at_level(logging.WARNING, logger="lora_library"):
+            assert node.read_entry(file="loras.md", entry="A", pinned=bad) == (["live"], ["A"])
+        assert any("reading the live file" in r.message for r in caplog.records)
+
+    def test_malformed_pin_keeps_the_live_paths_loud_errors(self) -> None:
+        node = nodes_notebook.LoraLibraryNotebook()
+        with pytest.raises(ValueError, match=r"loras\.md"):
+            node.read_entry(file="loras.md", entry="A", pinned="not json")
+
+    def test_parse_pinned_shapes(self) -> None:
+        assert nodes_notebook.parse_pinned("") is None
+        assert nodes_notebook.parse_pinned("   ") is None
+        assert nodes_notebook.parse_pinned(None) is None
+        pin = _pin([{"name": "X", "text": "tx", "extra": "dropped"}])
+        assert nodes_notebook.parse_pinned(pin) == [{"name": "X", "text": "tx"}]
+        # a missing/non-string name degrades to "" -- text is what matters
+        assert nodes_notebook.parse_pinned(json.dumps({"entries": [{"text": "only"}]})) == [
+            {"name": "", "text": "only"}
+        ]
+
+    def test_make_pin_shape_is_the_contract(self) -> None:
+        pin = nodes_notebook.make_pin(
+            [{"name": "A", "text": "ta", "category": "ignored"}],
+            file="loras.md",
+            token="m1_p1",
+            captured="2026-08-22T00:00:00Z",
+        )
+        assert pin == {
+            "format": 1,
+            "entries": [{"name": "A", "text": "ta"}],
+            "source": {"file": "loras.md", "token": "m1_p1", "captured": "2026-08-22T00:00:00Z"},
+        }
+        assert list(pin) == ["format", "entries", "source"]
+        # a None token (run_info without one) is carried as null, not dropped
+        assert nodes_notebook.make_pin([], file="f", token=None, captured="c")["source"] == {
+            "file": "f",
+            "token": None,
+            "captured": "c",
+        }
+
+    def test_is_changed_folds_the_pin_in(self, library_dir: Path) -> None:
+        _write_notebook(library_dir, "loras.md", "## A\nx\n")
+        cls = nodes_notebook.LoraLibraryNotebook
+        live = cls.IS_CHANGED(file="loras.md", entry="A")
+        assert live == cls.IS_CHANGED(file="loras.md", entry="A", pinned="")
+        pin_x = _pin([{"name": "A", "text": "x"}])
+        pin_y = _pin([{"name": "A", "text": "y"}])
+        pinned = cls.IS_CHANGED(file="loras.md", entry="A", pinned=pin_x)
+        assert pinned != live
+        other = cls.IS_CHANGED(file="loras.md", entry="A", pinned=pin_y)
+        assert other != pinned
+        assert cls.IS_CHANGED(file="loras.md", entry="A", pinned="") == live  # unpin = back to live
+
+    def test_resolve_selection_is_the_live_path_shared_with_save_image(
+        self, library_dir: Path, context: LibraryContext
+    ) -> None:
+        _write_notebook(library_dir, "loras.md", "## A\nbodyA\n## B\nbodyB\n")
+        assert nodes_notebook.resolve_selection(context, "loras.md", "B\nA") == (
+            ["bodyB", "bodyA"],
+            ["B", "A"],
+        )
+        with pytest.raises(ValueError, match="Ghost"):
+            nodes_notebook.resolve_selection(context, "loras.md", "Ghost")
+        with pytest.raises(ValueError, match=r"loras\.md"):
+            nodes_notebook.resolve_selection(context, "loras.md", "")
+        with pytest.raises(ValueError, match=r"other\.md"):
+            nodes_notebook.resolve_selection(context, "other.md", "A")

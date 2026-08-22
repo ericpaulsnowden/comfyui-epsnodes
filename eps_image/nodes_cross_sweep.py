@@ -152,6 +152,16 @@ def _safe_base(value: str) -> list[str]:
     return [c for c in (_safe_component(part) for part in value.split("/")) if c]
 
 
+def _json_text(value: Any) -> str | None:
+    """*value* as the string run_info carries for a text-ish slot (name /
+    text / label, v0.71.0 provenance M3): ``None`` stays ``None`` (the
+    slot's input is unwired or absent), a str passes through byte-exact,
+    anything else is stringified -- run_info must always json.dumps."""
+    if value is None:
+        return None
+    return value if isinstance(value, str) else str(value)
+
+
 def _unwrap_hidden(value: Any) -> Any:
     """Undo ``INPUT_IS_LIST``'s wrapping of a hidden input -- verbatim
     ``nodes_switcher._unwrap_hidden`` (see its docstring for the core
@@ -225,6 +235,8 @@ class EPSCrossSweep:
     # v0.70.0 (provenance M2, FORMAT §6.10/§6.14): `run_info` is TAIL-APPENDED
     # (§8 -- outputs are positional): one JSON per run, index-aligned with
     # every other output, for EPS Save Image to bake a pre-soloed workflow.
+    # v0.71.0 (provenance M3): the same JSON also carries name/text/label
+    # (null when unwired) -- no new output, the field set just grew.
     RETURN_TYPES = (
         "MODEL", "CLIP", "IMAGE", "STRING", "STRING", "STRING", "VAE", "MODEL", "STRING",
     )
@@ -256,8 +268,9 @@ class EPSCrossSweep:
         "Switcher's models_low). Blocks its consumers on runs where no "
         "low model was wired.",
 
-        "This run's provenance, as JSON: its token, this node's id and its "
-        "place in the set. Wire into EPS Save Image's run_info input and "
+        "This run's provenance, as JSON: its token, this node's id, its "
+        "place in the set, and this run's name/text/label. Wire into EPS "
+        "Save Image's run_info input and "
         "every saved file carries a workflow already soloed to the run that "
         "made it -- drop the image to recreate just that one.",
     )
@@ -562,6 +575,11 @@ class EPSCrossSweep:
         clip_wired = clip is not None
         label_wired = label is not None
         vae_wired = vae is not None
+        # M3 (v0.71.0): run_info carries this run's pair name only when the
+        # name input is actually wired -- an unwired name is null there, not
+        # the "" the save_prefix fallback uses (EPS Save Image tells the two
+        # apart when matching a Notebook's entry to THIS run).
+        name_wired = name is not None
         text_only = image is None
         sweep_wired = model_wired or model_low_wired or clip_wired or label_wired or vae_wired
 
@@ -906,6 +924,10 @@ class EPSCrossSweep:
                 else [*base_parts, label_component, pair_component]
             )
             out["save_prefix"].append("/".join(prefix_parts))
+            # v0.71.0 (provenance M3, FORMAT §6.10/§6.14): name / text /
+            # label ride along so EPS Save Image can match a multi-select
+            # Prompt Notebook's entry to THIS run and pin only that entry.
+            # null = that input is unwired (name/label) or absent (text).
             out["run_info"].append(
                 json.dumps(
                     {
@@ -916,6 +938,13 @@ class EPSCrossSweep:
                         "total": total,
                         "steps": steps,
                         "pairs": len(pair_rows),
+                        "name": _json_text(pair_name) if name_wired else None,
+                        "text": _json_text(pair_text),
+                        "label": (
+                            _json_text(labels[_sweep_index(len(labels), a1_idx)])
+                            if label_wired
+                            else None
+                        ),
                     }
                 )
             )

@@ -10,6 +10,7 @@ directly.
 
 from __future__ import annotations
 
+import copy
 import json
 import logging
 import sys
@@ -655,3 +656,208 @@ def test_loras_text_empty_when_nothing_applies(context: LibraryContext) -> None:
     node = nodes_sets.LoraLibraryApplySet()
     *_, loras_text = node.apply(set="None", strength_scale=1.0)
     assert loras_text == ""
+
+
+# ------------------------------------------ M3 `pinned_state` (FORMAT.md §6.2)
+#
+# Provenance M3 (v0.71.0): a TAIL-appended hidden `pinned_state` STRING
+# widget. Empty = live; non-empty = the pin JSON EPS Save Image captured when
+# an image was made (`set` = the normalized dict exactly as load_set returns
+# it), and apply() runs THAT dict through the same normalize/apply path
+# without reading the sets folder. Malformed pin -> warning + live.
+# IS_CHANGED folds the pin in.
+
+
+def _state_pin(set_data: dict, slug: str = "my-set", token: str | None = "m1_p1") -> str:
+    return json.dumps(
+        nodes_sets.make_pin(slug, set_data, token=token, captured="2026-08-22T00:00:00Z")
+    )
+
+
+def test_pinned_state_widget_is_tail_appended_optional_hidden_string() -> None:
+    spec = nodes_sets.LoraLibraryApplySet.INPUT_TYPES()
+    assert list(spec["required"]) == ["set"]
+    # after EVERY existing widget (and the sockets) -- the tail, FORMAT.md §8
+    assert list(spec["optional"]) == [
+        "strength_scale", "loader_slot", "model", "clip", "pinned_state",
+    ]
+    kind, options = spec["optional"]["pinned_state"]
+    assert kind == "STRING"
+    assert options["default"] == ""
+    assert options["multiline"] is False
+    assert options["hidden"] is True  # Vue-nodes hide flag (§7.5)
+    assert nodes_sets.PIN_WIDGET == "pinned_state"
+    assert nodes_sets.PIN_FORMAT == 1
+
+
+def test_pinned_state_applies_the_pinned_rows_not_the_edited_file(
+    context: LibraryContext, fake_comfy
+) -> None:
+    slug = _make_set(context)  # detailer 0.8 on, cinematic off, film_grain 0.4/0.6 on
+    pinned = sets_store.load_set(context, slug)
+    # Edit the file AFTER the capture: detailer off, film_grain strength up.
+    edited = copy.deepcopy(pinned)
+    edited["loras"][0]["on"] = False
+    edited["loras"][2]["strength"] = 0.9
+    sets_store.save_set(context, edited, slug)
+
+    node = nodes_sets.LoraLibraryApplySet()
+    _m, _c, stack, trigger_words, loras_text = node.apply(
+        set=slug, model=FakeModel(), clip=FakeClip(), pinned_state=_state_pin(pinned, slug)
+    )
+    assert stack == [
+        ("detailer.safetensors", 0.8, 0.8),
+        ("styles/film_grain.safetensors", 0.4, 0.6),
+    ]
+    assert loras_text == "detailer_0.8 film_grain_0.4_0.6"
+    assert trigger_words == "cinematic, detailed"
+    calls, _ = fake_comfy
+    assert calls_paths(calls) == ["detailer.safetensors", "styles/film_grain.safetensors"]
+    # unpinned ("" = the frontend's one click) the live edit shows again
+    _m, _c, stack_live, _t, _l = node.apply(set=slug, model=FakeModel(), clip=FakeClip())
+    assert stack_live == [("styles/film_grain.safetensors", 0.9, 0.6)]
+
+
+def test_pinned_state_works_when_the_set_file_is_gone_and_wins_over_none(
+    context: LibraryContext, fake_comfy
+) -> None:
+    slug = _make_set(context)
+    pinned = sets_store.load_set(context, slug)
+    assert sets_store.delete_set(context, slug) is True
+    node = nodes_sets.LoraLibraryApplySet()
+    _m, _c, stack, trigger_words, loras_text = node.apply(
+        set=slug, pinned_state=_state_pin(pinned, slug)
+    )
+    assert len(stack) == 2
+    assert loras_text == "detailer_0.8 film_grain_0.4_0.6"
+    assert trigger_words == "cinematic, detailed"
+    # the combo may even read None (set deleted, dropdown fell back): the
+    # pin is the value that made the image, so it still applies
+    _m, _c, stack2, _t, _l = node.apply(set="None", pinned_state=_state_pin(pinned, slug))
+    assert stack2 == stack
+    # live again: the file is gone -> passthrough, as always
+    assert node.apply(set=slug)[2] == []
+
+
+def test_pinned_state_format_2_respects_loader_slot(context: LibraryContext, fake_comfy) -> None:
+    slug = _make_composite_set(context)
+    pinned = sets_store.load_set(context, slug)
+    assert pinned["format"] == 2 and len(pinned["loaders"]) == 2
+    sets_store.delete_set(context, slug)
+    node = nodes_sets.LoraLibraryApplySet()
+    *_, text_slot_0 = node.apply(set=slug, loader_slot=0, pinned_state=_state_pin(pinned, slug))
+    *_, text_slot_1 = node.apply(set=slug, loader_slot=1, pinned_state=_state_pin(pinned, slug))
+    *_, text_slot_9 = node.apply(set=slug, loader_slot=9, pinned_state=_state_pin(pinned, slug))
+    assert text_slot_0 == "detailer_0.8"
+    assert text_slot_1 == "film_grain_0.3"
+    assert text_slot_9 == "film_grain_0.3"  # clamps, same as the live path
+
+
+def test_pinned_state_strength_scale_still_applies(context: LibraryContext, fake_comfy) -> None:
+    slug = _make_set(context)
+    pinned = sets_store.load_set(context, slug)
+    node = nodes_sets.LoraLibraryApplySet()
+    _m, _c, stack, _t, loras_text = node.apply(
+        set=slug, strength_scale=0.5, pinned_state=_state_pin(pinned, slug)
+    )
+    assert stack[0] == ("detailer.safetensors", 0.4, 0.4)
+    assert stack[1] == ("styles/film_grain.safetensors", 0.2, 0.3)
+    assert loras_text == "detailer_0.4 film_grain_0.2_0.3"
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        "not json",
+        "[]",
+        "42",
+        "(any)",  # an old frontend-only `mirrors loader` value that slid into this slot
+        json.dumps({"slug": "x"}),  # no set object
+        json.dumps({"set": "x"}),
+        json.dumps({"set": {"format": 99, "loras": []}}),  # newer than this pack
+        json.dumps({"set": {"loras": "nope"}}),
+        json.dumps({"set": {"loras": [{"file": 7}]}}),
+    ],
+)
+def test_malformed_pinned_state_warns_and_reads_live(
+    context: LibraryContext, fake_comfy, caplog: pytest.LogCaptureFixture, bad: str
+) -> None:
+    slug = _make_set(context)
+    node = nodes_sets.LoraLibraryApplySet()
+    with caplog.at_level(logging.WARNING, logger="lora_library"):
+        _m, _c, stack, trigger_words, _l = node.apply(set=slug, pinned_state=bad)
+    assert len(stack) == 2  # the live file's enabled rows
+    assert trigger_words == "cinematic, detailed"
+    assert any("reading the live set" in r.message for r in caplog.records)
+
+
+def test_malformed_pin_with_none_set_is_still_passthrough(fake_comfy) -> None:
+    node = nodes_sets.LoraLibraryApplySet()
+    assert node.apply(set="None", pinned_state="not json") == (None, None, [], "", "")
+    calls, _ = fake_comfy
+    assert calls == []
+
+
+def test_pinned_state_without_context_is_passthrough_like_live() -> None:
+    nodes_sets.set_context(None)
+    node = nodes_sets.LoraLibraryApplySet()
+    pin = _state_pin({"name": "N", "loras": [{"file": "detailer.safetensors", "on": True}]})
+    # lora RESOLUTION still needs the context (list_loras) -- same warning
+    # + passthrough posture as the live path, never a crash
+    assert node.apply(set="x", pinned_state=pin) == (None, None, [], "", "")
+
+
+def test_parse_pinned_state_normalizes_through_the_store() -> None:
+    assert nodes_sets.parse_pinned_state("") is None
+    assert nodes_sets.parse_pinned_state("  ") is None
+    assert nodes_sets.parse_pinned_state(None) is None
+    raw = {
+        "format": 1,
+        "slug": "s",
+        "name": "N",
+        "set": {"name": "N", "loras": [{"file": "a.safetensors", "on": True, "strength": 0.5}]},
+        "source": {"token": "t1", "captured": "x"},
+    }
+    pin = nodes_sets.parse_pinned_state(json.dumps(raw))
+    assert pin["slug"] == "s"
+    assert pin["name"] == "N"
+    assert pin["source"] == {"token": "t1", "captured": "x"}
+    assert pin["set"] == sets_store.normalize_set(raw["set"])  # the load_set shape
+    assert pin["set"]["format"] == 1
+    # slug/name/source absent -> "", the set's own name, {}
+    bare = nodes_sets.parse_pinned_state(json.dumps({"set": raw["set"]}))
+    assert (bare["slug"], bare["name"], bare["source"]) == ("", "N", {})
+
+
+def test_make_pin_shape_is_the_contract_and_round_trips(context: LibraryContext) -> None:
+    slug = _make_set(context)
+    data = sets_store.load_set(context, slug)
+    pin = nodes_sets.make_pin(slug, data, token="m2_p1", captured="2026-08-22T00:00:00Z")
+    assert list(pin) == ["format", "slug", "name", "set", "source"]
+    assert pin["format"] == 1
+    assert pin["slug"] == slug
+    assert pin["name"] == "Test Set"
+    assert pin["set"] == data
+    assert pin["set"] is not data  # deep-copied, never aliases the store's dict
+    assert pin["source"] == {"token": "m2_p1", "captured": "2026-08-22T00:00:00Z"}
+    assert nodes_sets.parse_pinned_state(json.dumps(pin))["set"] == data
+    # a composite set pins its WHOLE format-2 dict
+    cslug = _make_composite_set(context)
+    cdata = sets_store.load_set(context, cslug)
+    cpin = nodes_sets.make_pin(cslug, cdata, token=None, captured="c")
+    assert cpin["set"]["format"] == 2 and len(cpin["set"]["loaders"]) == 2
+    assert nodes_sets.parse_pinned_state(json.dumps(cpin))["set"] == cdata
+
+
+def test_is_changed_folds_the_pin_in(context: LibraryContext) -> None:
+    slug = _make_set(context)
+    data = sets_store.load_set(context, slug)
+    cls = nodes_sets.LoraLibraryApplySet
+    live = cls.IS_CHANGED(set=slug)
+    assert live == cls.IS_CHANGED(set=slug, pinned_state="")
+    pinned = cls.IS_CHANGED(set=slug, pinned_state=_state_pin(data, slug))
+    assert pinned != live
+    data2 = copy.deepcopy(data)
+    data2["loras"][0]["strength"] = 0.1
+    assert cls.IS_CHANGED(set=slug, pinned_state=_state_pin(data2, slug)) != pinned
+    assert cls.IS_CHANGED(set=slug, pinned_state="") == live  # unpin = back to live

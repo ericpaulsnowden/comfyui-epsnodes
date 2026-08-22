@@ -75,6 +75,18 @@ def _notebook(entry: str) -> dict:
     }
 
 
+def _pinned(*names: str) -> str:
+    """A provenance-M3 `pinned` widget value naming *names* (FORMAT.md §6.1:
+    `{format, entries: [{name, text}], source: {file, token, captured}}`)."""
+    return json.dumps(
+        {
+            "format": 1,
+            "entries": [{"name": n, "text": f"{n} body"} for n in names],
+            "source": {"file": "loras.md", "token": "m1_t1", "captured": "2026-08-21T10:00:00"},
+        }
+    )
+
+
 def _checkpoint_switcher(names: list[str]) -> dict:
     """§6.12: every output is `selection`-array length."""
     return {
@@ -522,6 +534,78 @@ ESTIMATE_CASES = [
         },
         "5",
         {"error": "EPS Prompt Notebook has no entry selected — the queue will fail"},
+    ),
+    (
+        # Provenance M3: a baked image's workflow pins the Notebook -- the
+        # backend outputs the PINNED entries (3 here) and ignores `entry`
+        # (2 lines), so the estimate must say 3, not 2.
+        "pinned_notebook_counts_the_pin_not_the_live_entry_lines",
+        {
+            "nodes": {
+                "90": {
+                    "classType": "LoraLibraryNotebook",
+                    "widgets": {
+                        "file": "loras.md",
+                        "entry": "First\nSecond",
+                        "pinned": _pinned("A", "B", "C"),
+                    },
+                    "inputs": {},
+                },
+                "5": {
+                    "classType": "EPSCrossSweep",
+                    "widgets": {"pair_mode": "paired", "sweep_mode": "aligned"},
+                    "inputs": {"text": _link("90", 0)},
+                },
+            }
+        },
+        "5",
+        {"total": 3, "atLeast": False, "steps": 1, "pairs": 3, "unknowns": [], "error": None},
+    ),
+    (
+        # Provenance M3: an EMPTY live selection under a valid pin is NOT the
+        # "no entry selected" queue-fail -- the pin is what executes.
+        "pinned_notebook_with_empty_entry_is_not_a_queue_fail",
+        {
+            "nodes": {
+                "90": {
+                    "classType": "LoraLibraryNotebook",
+                    "widgets": {"file": "loras.md", "entry": "", "pinned": _pinned("Only")},
+                    "inputs": {},
+                },
+                "5": {
+                    "classType": "EPSCrossSweep",
+                    "widgets": {"pair_mode": "paired", "sweep_mode": "aligned"},
+                    "inputs": {"text": _link("90", 1)},
+                },
+            }
+        },
+        "5",
+        {"total": 1, "atLeast": False, "steps": 1, "pairs": 1, "unknowns": [], "error": None},
+    ),
+    (
+        # Provenance M3: an unparseable `pinned` (e.g. "" after Unpin, or a
+        # stray non-pin string) falls back to the live entry lines exactly.
+        "unpinned_or_invalid_pin_falls_back_to_live_entry_lines",
+        {
+            "nodes": {
+                "90": {
+                    "classType": "LoraLibraryNotebook",
+                    "widgets": {
+                        "file": "loras.md",
+                        "entry": "First\nSecond",
+                        "pinned": "not a pin",
+                    },
+                    "inputs": {},
+                },
+                "5": {
+                    "classType": "EPSCrossSweep",
+                    "widgets": {"pair_mode": "paired", "sweep_mode": "aligned"},
+                    "inputs": {"text": _link("90", 0)},
+                },
+            }
+        },
+        "5",
+        {"total": 2, "atLeast": False, "steps": 1, "pairs": 2, "unknowns": [], "error": None},
     ),
     (
         # Round-3: a KNOWN-blocked inner multiplier never runs, so its
@@ -1348,6 +1432,29 @@ RESOLUTION_PRESET_CASES = [
     ("malformed_is_none", "not json", 0),
 ]
 
+#: (case name, raw `pinned` widget value, expected notebookPinnedCount) --
+#: mirrors notebook.js `parsePinned`'s acceptance rule: a JSON object whose
+#: `entries` holds >= 1 `{name: string}` item counts those items; anything
+#: else is null (= fall back to the live `entry` line count).
+NOTEBOOK_PINNED_CASES = [
+    ("empty_string_is_live", "", None),
+    ("whitespace_is_live", "  ", None),
+    ("not_json_is_live", "nope", None),
+    ("legacy_tag_string_is_live", "(any)", None),
+    ("array_is_live", "[1, 2]", None),
+    ("no_entries_key_is_live", json.dumps({"format": 1}), None),
+    ("empty_entries_is_live", json.dumps({"entries": []}), None),
+    ("nameless_entries_are_not_counted", json.dumps({"entries": [{"text": "x"}, 5, None]}), None),
+    ("one_entry", _pinned("A"), 1),
+    ("three_entries", _pinned("A", "B", "C"), 3),
+    (
+        "named_items_counted_nameless_skipped",
+        json.dumps({"entries": [{"name": "A"}, {"text": "no"}, {"name": "B", "text": "t"}]}),
+        2,
+    ),
+]
+
+
 PROBE_JS = """
 import * as m from './extensions/comfyui-epsnodes/eps_image/cross_sweep.js'
 
@@ -1363,6 +1470,7 @@ const out = {
     hasSwitcherEnabledCount: typeof m.switcherEnabledCount === 'function',
     hasCheckpointSelectionCount: typeof m.checkpointSelectionCount === 'function',
     hasNotebookEntryCount: typeof m.notebookEntryCount === 'function',
+    hasNotebookPinnedCount: typeof m.notebookPinnedCount === 'function',
     hasPickerEnabledRowCount: typeof m.pickerEnabledRowCount === 'function',
     hasIteratorValueCount: typeof m.iteratorValueCount === 'function',
     hasResolutionPresetCount: typeof m.resolutionPresetCount === 'function'
@@ -1385,7 +1493,8 @@ const out = {
     m.iteratorValueCount(-1.04, 0.01, 0.1)
   ],
   pickerCounts: %(picker_inputs)s.map((raw) => m.pickerEnabledRowCount(raw)),
-  resolutionPresetCounts: %(resolution_preset_inputs)s.map((raw) => m.resolutionPresetCount(raw))
+  resolutionPresetCounts: %(resolution_preset_inputs)s.map((raw) => m.resolutionPresetCount(raw)),
+  notebookPinnedCounts: %(notebook_pinned_inputs)s.map((raw) => m.notebookPinnedCount(raw))
 }
 
 process.stdout.write(JSON.stringify(out))
@@ -1426,6 +1535,7 @@ def cross_sweep_api(tmp_path_factory: pytest.TempPathFactory) -> dict:
             "resolution_preset_inputs": json.dumps(
                 [raw for _, raw, _ in RESOLUTION_PRESET_CASES]
             ),
+            "notebook_pinned_inputs": json.dumps([raw for _, raw, _ in NOTEBOOK_PINNED_CASES]),
         },
         encoding="utf-8",
     )
@@ -1482,6 +1592,7 @@ def test_module_exports_the_hooks_and_pure_helpers(cross_sweep_api: dict) -> Non
         "hasSwitcherEnabledCount": True,
         "hasCheckpointSelectionCount": True,
         "hasNotebookEntryCount": True,
+        "hasNotebookPinnedCount": True,
         "hasPickerEnabledRowCount": True,
         "hasIteratorValueCount": True,
         "hasResolutionPresetCount": True,
@@ -1577,6 +1688,29 @@ def test_resolution_preset_count_mirrors_parse_preset_names(cross_sweep_api: dic
         RESOLUTION_PRESET_CASES, cross_sweep_api["resolutionPresetCounts"], strict=True
     ):
         assert got == expected, f"{name}: got {got!r}, wanted {expected!r}"
+
+
+def test_notebook_pinned_count_mirrors_parse_pinned(cross_sweep_api: dict) -> None:
+    """Provenance M3: `notebookPinnedCount(raw)` -> the pin's named-entry
+    count, or null for anything that is not a valid pin (so the Notebook
+    branch falls back to `notebookEntryCount(entry)`); the acceptance rule
+    is notebook.js `parsePinned`'s, kept in sync by hand."""
+    for (name, _raw, expected), got in zip(
+        NOTEBOOK_PINNED_CASES, cross_sweep_api["notebookPinnedCounts"], strict=True
+    ):
+        assert got == expected, f"{name}: got {got!r}, wanted {expected!r}"
+
+
+def test_notebook_branch_prefers_the_pin_over_the_live_lines(source: str) -> None:
+    """Structural pin for the M3 Notebook branch: the pinned count wins when
+    present, the live `entry` line count otherwise, and the zero-lines
+    queue-fail paint stays downstream of that choice."""
+    body = _function_body(source, "sourceCount(snapshot, link, path)")
+    branch = body.split("if (type === 'LoraLibraryNotebook') {", 1)[1]
+    branch = branch.split("\n  if (type === ", 1)[0]
+    assert "const pinnedLines = notebookPinnedCount(node.widgets?.pinned)" in branch
+    assert "const lines = pinnedLines ?? notebookEntryCount(node.widgets?.entry)" in branch
+    assert branch.index("notebookPinnedCount(") < branch.index("if (lines === 0) {")
 
 
 def test_resolution_branch_is_mapped_not_flattened(source: str) -> None:

@@ -52,7 +52,9 @@
  * wired slots' upstream counts (execute() flattens each slot's list --
  * nodes_switcher.py INPUT_IS_LIST + `enabled_values.extend`), §6.12
  * Checkpoint Switcher (`selection` array length, intrinsic), §6.1
- * Notebook (`entry` non-empty line count, intrinsic), §6.6 Image Grid
+ * Notebook (`entry` non-empty line count, intrinsic -- or the `pinned`
+ * widget's entry count when a baked image's workflow pinned the node,
+ * provenance M3), §6.6 Image Grid
  * (Emit ⇒ buffer count as a FLOOR -- the injected `imageGridCount` is a
  * client-side echo of SERVER state; Collect ⇒ 0), §6.8 LoRA Iterator (its
  * own widget step math x the max of its mapped model/clip input counts --
@@ -314,6 +316,33 @@ export function resolutionPresetCount(raw) {
 export function notebookEntryCount(raw) {
   if (typeof raw !== 'string') return 0
   return raw.split('\n').filter((line) => line.trim() !== '').length
+}
+
+/**
+ * Provenance M3 (FORMAT.md §6.1): the Notebook's tail `pinned` widget. A
+ * valid pin -- JSON object whose `entries` array holds at least one
+ * `{name}` object -- makes the backend output THOSE entries (text + name,
+ * one element each) and ignore `entry`/`file` entirely, so its length IS
+ * the fan-out. Returns that count, or null when the value is not a valid
+ * pin ("" = live, unparseable, empty `entries`) so the caller falls back
+ * to the live `entry` line count. Same acceptance rule as notebook.js's
+ * `parsePinned` (kept in sync by hand; no cross-import).
+ * @param {unknown} raw @returns {number|null}
+ */
+export function notebookPinnedCount(raw) {
+  if (typeof raw !== 'string' || raw.trim() === '') return null
+  let parsed
+  try {
+    parsed = JSON.parse(raw)
+  } catch {
+    return null
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null
+  if (!Array.isArray(parsed.entries)) return null
+  const count = parsed.entries.filter(
+    (item) => item && typeof item === 'object' && typeof item.name === 'string'
+  ).length
+  return count > 0 ? count : null
 }
 
 /**
@@ -605,7 +634,11 @@ function sourceCount(snapshot, link, path) {
     // notebook's read_entry RAISES "no entry selected" the moment it
     // executes, so the real queue FAILS -- statically knowable from the
     // entry widget, painted as the error it is.
-    const lines = notebookEntryCount(node.widgets?.entry)
+    // Provenance M3: a valid `pinned` widget value (a baked image's
+    // workflow) makes the node output the PINNED entries and ignore
+    // `entry`, so the pin's entry count wins; "" / invalid -> live count.
+    const pinnedLines = notebookPinnedCount(node.widgets?.pinned)
+    const lines = pinnedLines ?? notebookEntryCount(node.widgets?.entry)
     if (lines === 0) {
       return {
         count: 0,

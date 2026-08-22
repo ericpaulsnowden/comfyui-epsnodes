@@ -108,6 +108,53 @@
  * independently. A fresh Apply node therefore shows NEITHER `strength_scale`
  * NOR `loader_slot`; revealing `Show loader slot` in the node's right-click
  * Properties shows only that one widget.
+ *
+ * Pinned state (FORMAT.md §6.2, provenance M3 — owner 2026-08-18/21: the
+ * captured OLD values must be visible, with a one-click clear). The backend
+ * declares a TAIL STRING widget `pinned_state` (hidden in both renderers:
+ * `options.hidden` from INPUT_TYPES + the canvas `widget.hidden` set here —
+ * `hidePinnedStateWidget()`). `""` = live; otherwise JSON `{format, slug,
+ * name, set: {<full §4 set dict>}, source: {token, captured}}` written by
+ * EPS Save Image into a baked per-image workflow; while pinned the backend
+ * applies the pinned set and ignores the `set` dropdown. NOTHING here
+ * creates a pin — it arrives through `configure()` (a dropped image / a
+ * saved pinned workflow) and the chained `onConfigure` reconcile
+ * (`wirePinConfigureSync` → `syncPinFromWidget`) paints it without a click.
+ * RENDERING CHOICE: a compact display-only `addDOMWidget` row
+ * (`attachPinBadge()`), cross_sweep.js's readout idiom verbatim — it is the
+ * only affordance this file can add that works under BOTH renderers (Vue
+ * nodes paint no canvas controls, §7.5) without a canvas draw hook, and it
+ * sizes itself by the §7.2 DOM-widget laws (`computeSize` + `computedHeight`
+ * + an explicit element height; every reported height = text + 2·margin
+ * because the overlay's visible box is computedHeight − 2·margin). It is
+ * appended LAST, after `mirrors loader` — litegraph's save leaves a HOLE at a
+ * `serialize:false` widget's index while restore walks a counter that SKIPS
+ * such widgets (controller.js's save/restore ordering citation), so a non-
+ * serialized widget must follow every serialized one — and hidden (both
+ * flags + zero height) until a pin arrives. Pinned, it shows "📌 Pinned
+ * state: <name> — captured from image <token> — <verdict>", a one-line
+ * summary of the pinned rows (`stem strength · stem strength`, or per-loader
+ * `L0 … / L1 …` for a §4.1 format-2 state) and an **Unpin** button; the
+ * verdict comes from ONE `GET /lora_library/set?slug=` (`fetchPinDrift`,
+ * token-guarded): "matches current state" / "differs from current state" /
+ * "state no longer exists" (404) / "current state unavailable" (other
+ * failure) / "checking current state…" while in flight. The `set` combo
+ * stays visible but is marked inactive while pinned (`markSetComboInactive`:
+ * label "set (ignored while pinned)", disabled, tooltip "ignored while
+ * pinned") and restored on unpin. Unpin writes `""` through the widget's
+ * value + callback, toasts "Unpinned — back to the live state", and the
+ * callback chain repaints. No window listeners, no canvas drawing. The pure
+ * halves (`parsePinnedState`, `pinnedRowsSummary`, `comparePinnedSet`,
+ * `pinnedStateBadgeText`) are exported for tests/test_m3_pinning_js.py.
+ * One more M3 consequence, healed here (`migrateLegacyMirrorsValue` pure +
+ * `healLegacyWidgetShift` on configure): the new Python widget lands BEFORE
+ * the frontend-appended `mirrors loader` in `node.widgets` (which MUST stay
+ * last), so a pre-M3 workflow's positional `widgets_values` put its mirrors
+ * value ("(any)", "12", "12:3", a "<title> #<id>" label) INTO `pinned_state`
+ * and left the tag at its default; on configure, a non-empty `pinned_state`
+ * that is not pin JSON, while the mirrors combo is still at its default, is
+ * moved into the combo (value + callback) and `pinned_state` is blanked --
+ * a one-time silent migration, logged once per node to console.info.
  */
 
 import { app } from '../../../scripts/app.js'
@@ -139,6 +186,26 @@ const PROP_SHOW_STRENGTH_SCALE = 'Show strength scale'
  * wiring, own property so the two widgets reveal independently. */
 const LOADER_SLOT_WIDGET_NAME = 'loader_slot'
 const PROP_SHOW_LOADER_SLOT = 'Show loader slot'
+
+/** FORMAT.md §6.2 (provenance M3): the backend's TAIL STRING widget holding
+ * the pinned state JSON, or "" for live (file header "Pinned state"). Looked
+ * up by NAME, so a backend that hasn't shipped it leaves every pin path a
+ * no-op. */
+const PINNED_STATE_WIDGET_NAME = 'pinned_state'
+/** The pin badge DOM widget (display-only, never serialized). */
+const PIN_WIDGET_NAME = 'eps_apply_set_pin'
+const PIN_WIDGET_TYPE = 'eps_apply_set_pin_badge'
+/** Text height of the two-line pin row. Every height REPORTED to litegraph
+ * is this + 2*margin -- the overlay's visible box is computedHeight minus
+ * 2*margin (cross_sweep.js's readout lesson, owner report 2026-08-14). */
+const PIN_ROW_HEIGHT = 36
+/** `BaseDOMWidgetImpl.DEFAULT_MARGIN` on the installed frontend; only used
+ * when the widget instance doesn't expose `margin`. */
+const DOM_WIDGET_MARGIN_FALLBACK = 10
+const PIN_STYLE_TAG_ID = 'eps-apply-set-pin-styles'
+/** The `set` combo's painted label/tooltip while pinned (restored on unpin). */
+const SET_COMBO_PINNED_LABEL = 'set (ignored while pinned)'
+const SET_COMBO_PINNED_TOOLTIP = 'ignored while pinned'
 
 /** §7.4 freshness beats thrift here, but don't hammer on every redraw. */
 const REFRESH_THROTTLE_MS = 2000
@@ -397,6 +464,585 @@ function applyLoaderSlotVisibility(node) {
   node.setDirtyCanvas(true, true)
 }
 
+// ---------------------------------------------------------------------------
+// Pinned state (FORMAT.md §6.2, provenance M3) -- see the file header's
+// "Pinned state" paragraph. Pure helpers first (exported for
+// tests/test_m3_pinning_js.py), then the badge row + wiring.
+// ---------------------------------------------------------------------------
+
+/**
+ * Parse the `pinned_state` widget's raw value. `""` / non-string /
+ * unparseable / anything without a `set` object carrying `loras` or
+ * `loaders` -> null (= live); otherwise `{format, slug, name, set, source:
+ * {token, captured}}` (strings coerced, missing -> ''; `name` falls back to
+ * the set's own name, then the slug). Lenient on the `format` number on
+ * purpose -- the UI's job is to SHOW whatever the backend pinned.
+ * @param {unknown} raw
+ */
+export function parsePinnedState(raw) {
+  if (typeof raw !== 'string' || raw.trim() === '') return null
+  let parsed
+  try {
+    parsed = JSON.parse(raw)
+  } catch {
+    return null
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null
+  const set = parsed.set
+  if (!set || typeof set !== 'object' || Array.isArray(set)) return null
+  if (!Array.isArray(set.loras) && !Array.isArray(set.loaders)) return null
+  const source = parsed.source && typeof parsed.source === 'object' ? parsed.source : {}
+  const str = (value) => (value == null ? '' : String(value))
+  return {
+    format: typeof parsed.format === 'number' ? parsed.format : null,
+    slug: str(parsed.slug),
+    name: str(parsed.name) || str(set.name) || str(parsed.slug),
+    set,
+    source: { token: str(source.token), captured: str(source.captured) }
+  }
+}
+
+/** Basename without extension across either separator -- the same stem
+ * `loras_text` uses (nodes_sets.py). */
+export function loraStem(file) {
+  const base = String(file ?? '').split(/[\\/]/).pop() ?? ''
+  return base.replace(/\.[^.]*$/, '')
+}
+
+/**
+ * One §4 `loras` list, normalized for display/compare: rows with a
+ * non-empty string `file`, in order, as `{file, on, strength,
+ * strength_clip}` -- `on` defaults true, `strength` to 1, `strength_clip`
+ * to null unless it is a finite number (§4: null = "use strength for
+ * both"). Separators are normalized to `/` so a set re-saved on another
+ * OS (§4 separator-insensitive resolve) does not read as drift.
+ * @param {unknown} loras
+ */
+export function normalizedRows(loras) {
+  const out = []
+  for (const row of Array.isArray(loras) ? loras : []) {
+    if (!row || typeof row !== 'object' || typeof row.file !== 'string' || !row.file) continue
+    const strengthRaw = row.strength
+    const strength =
+      strengthRaw == null || strengthRaw === '' || !Number.isFinite(Number(strengthRaw)) ? 1 : Number(strengthRaw)
+    const clipRaw = row.strength_clip
+    const strength_clip =
+      clipRaw == null || clipRaw === '' || !Number.isFinite(Number(clipRaw)) ? null : Number(clipRaw)
+    out.push({ file: row.file.replace(/\\/g, '/'), on: row.on === undefined ? true : !!row.on, strength, strength_clip })
+  }
+  return out
+}
+
+/** Per-loader row lists of a set: `loaders[i].loras` for a §4.1 format-2
+ * state, else the single `loras` list. */
+function loaderRowLists(set) {
+  if (Array.isArray(set?.loaders) && set.loaders.length) {
+    return set.loaders.map((loader) => normalizedRows(loader?.loras))
+  }
+  return [normalizedRows(set?.loras)]
+}
+
+/** `%g`-ish strength text: 0.8 -> "0.8", 1 -> "1", 0.33333 -> "0.3333". */
+function formatStrength(value) {
+  return String(Math.round(Number(value) * 10000) / 10000)
+}
+
+/**
+ * One-line summary of what a pinned set APPLIES: enabled rows in order as
+ * `stem strength` (a distinct clip strength appends `/clip`), joined by
+ * ` · `; a §4.1 format-2 state lists per loader as `L0 … / L1 …`; no
+ * enabled rows reads "no enabled loras".
+ * @param {unknown} set
+ */
+export function pinnedRowsSummary(set) {
+  const one = (rows) => {
+    const enabled = rows.filter((row) => row.on)
+    if (!enabled.length) return 'no enabled loras'
+    return enabled
+      .map((row) => {
+        const main = `${loraStem(row.file)} ${formatStrength(row.strength)}`
+        return row.strength_clip == null || row.strength_clip === row.strength
+          ? main
+          : `${main}/${formatStrength(row.strength_clip)}`
+      })
+      .join(' · ')
+  }
+  const lists = loaderRowLists(set)
+  if (Array.isArray(set?.loaders) && set.loaders.length) {
+    return lists.map((rows, index) => `L${index} ${one(rows)}`).join(' / ')
+  }
+  return one(lists[0])
+}
+
+/**
+ * Drift verdict between the pinned set dict and the CURRENT set (the
+ * `GET /lora_library/set` payload): 'match' when every loader's normalized
+ * rows (file, on, strength, strength_clip, in order) and the trigger words
+ * agree, else 'differs'. Name/notes are display-only and ignored; a
+ * missing/non-object current set is 'differs' (the route's 404 is handled
+ * by the caller as "state no longer exists").
+ */
+export function comparePinnedSet(pinnedSet, currentSet) {
+  if (!currentSet || typeof currentSet !== 'object') return 'differs'
+  const signature = (set) =>
+    JSON.stringify({ loaders: loaderRowLists(set), trigger: String(set?.trigger_words ?? '').trim() })
+  return signature(pinnedSet) === signature(currentSet) ? 'match' : 'differs'
+}
+
+/** The badge text for a pin + verdict. The variants are a contract with
+ * tests/test_m3_pinning_js.py (and README/FORMAT §6.2). */
+export function pinnedStateBadgeText(pin, status) {
+  const name = pin?.name || pin?.slug || 'state'
+  const token = pin?.source?.token
+  const origin = token ? `captured from image ${token}` : 'captured from a saved image'
+  const verdict =
+    status === 'match'
+      ? 'matches current state'
+      : status === 'differs'
+        ? 'differs from current state'
+        : status === 'missing'
+          ? 'state no longer exists'
+          : status === 'error'
+            ? 'current state unavailable'
+            : 'checking current state…'
+  return `📌 Pinned state: ${name} — ${origin} — ${verdict}`
+}
+
+const PIN_CSS_TEXT = `
+.eps-asp-root {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 2px;
+  width: 100%;
+  box-sizing: border-box;
+  padding: 2px 6px;
+  overflow: hidden;
+  border: 1px solid var(--border-color, #444);
+  border-radius: 4px;
+  background: var(--comfy-input-bg, #1e1e1e);
+  color: var(--input-text, #ccc);
+  font-family: inherit;
+  font-size: 11px;
+}
+.eps-asp-line { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.eps-asp-badge {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  font-weight: 600;
+}
+.eps-asp-badge-differs { color: var(--error-text, #ff9f43); }
+.eps-asp-badge-unknown { font-style: italic; }
+.eps-asp-rows {
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  color: var(--descrip-text, #999);
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 10px;
+}
+.eps-asp-btn {
+  flex: 0 0 auto;
+  background: var(--comfy-menu-bg, #262626);
+  border: 1px solid var(--border-color, #444);
+  color: var(--input-text, #ccc);
+  border-radius: 4px;
+  padding: 1px 8px;
+  font-size: 11px;
+  cursor: pointer;
+}
+.eps-asp-btn:hover { background: var(--content-hover-bg, #2a2a2a); }
+`
+
+let pinStylesInjected = false
+function injectPinStyles() {
+  if (pinStylesInjected) return
+  pinStylesInjected = true
+  if (document.getElementById(PIN_STYLE_TAG_ID)) return
+  const style = document.createElement('style')
+  style.id = PIN_STYLE_TAG_ID
+  style.textContent = PIN_CSS_TEXT
+  document.head.appendChild(style)
+}
+
+function findWidgetByName(node, name) {
+  return (node?.widgets ?? []).find((w) => w && w.name === name) || null
+}
+
+/** Best-effort toast (cross_sweep.js `toastInfo` idiom); never throws. */
+function toastInfo(summary, detail) {
+  try {
+    if (app.extensionManager?.toast?.add) {
+      app.extensionManager.toast.add({ severity: 'info', summary, detail, life: 5000 })
+      return
+    }
+  } catch (error) {
+    api.warn('toast failed', error)
+  }
+  api.log(`${summary}: ${detail}`)
+}
+
+/**
+ * Build the pin badge row ONCE per node (idempotent via `node.__epsSetsPin`)
+ * as a display-only DOM widget appended LAST -- see the file header for why
+ * last, and why a DOM widget at all. Hidden (both flags + zero height)
+ * until a pin arrives; `applyPinView()` shows/hides it.
+ * @param {object} node @returns {object|null} the pin state, or null when
+ *   this frontend has no addDOMWidget.
+ */
+function attachPinBadge(node) {
+  if (node.__epsSetsPin) return node.__epsSetsPin
+  if (typeof node.addDOMWidget !== 'function') return null
+  injectPinStyles()
+  const badgeEl = document.createElement('div')
+  badgeEl.className = 'eps-asp-badge'
+  const unpinBtn = document.createElement('button')
+  unpinBtn.className = 'eps-asp-btn'
+  unpinBtn.textContent = 'Unpin'
+  unpinBtn.title = 'Go back to the live dropdown — the node applies the selected state again'
+  const line = document.createElement('div')
+  line.className = 'eps-asp-line'
+  line.append(badgeEl, unpinBtn)
+  const rowsEl = document.createElement('div')
+  rowsEl.className = 'eps-asp-rows'
+  const root = document.createElement('div')
+  root.className = 'eps-asp-root'
+  root.append(line, rowsEl)
+  // The element is sized to the TEXT half only; the reported heights carry
+  // the 2*margin budget (see PIN_ROW_HEIGHT).
+  root.style.height = `${PIN_ROW_HEIGHT}px`
+  const state = {
+    node,
+    root,
+    badgeEl,
+    rowsEl,
+    unpinBtn,
+    domWidget: null,
+    visible: false,
+    outerHeight: PIN_ROW_HEIGHT + 2 * DOM_WIDGET_MARGIN_FALLBACK,
+    pinnedRaw: '',
+    pin: null,
+    driftStatus: 'pending',
+    driftCurrent: null,
+    driftToken: 0,
+    setWidgetOriginal: null,
+    grown: false
+  }
+  node.__epsSetsPin = state
+  const domWidget = node.addDOMWidget(PIN_WIDGET_NAME, PIN_WIDGET_TYPE, root, {
+    hideOnZoom: true,
+    serialize: false, // excludes from the API prompt (utils/executionUtil.ts)
+    getMinHeight: () => (state.visible ? state.outerHeight : 0),
+    getMaxHeight: () => (state.visible ? state.outerHeight : 0)
+  })
+  const margin = typeof domWidget.margin === 'number' ? domWidget.margin : DOM_WIDGET_MARGIN_FALLBACK
+  state.outerHeight = PIN_ROW_HEIGHT + 2 * margin
+  domWidget.computeSize = (width) => [width, state.visible ? state.outerHeight : 0]
+  domWidget.computedHeight = 0
+  // Excludes from the workflow JSON -- a DIFFERENT flag from options.serialize
+  // above (notebook.js's attachDomWidget() header explains why both exist).
+  domWidget.serialize = false
+  domWidget.serializeValue = () => undefined
+  state.domWidget = domWidget
+  unpinBtn.addEventListener('click', () => unpinState(state))
+  setPinRowVisible(state, false)
+  return state
+}
+
+/** Show/hide the badge row: BOTH hide flags (canvas `hidden`, Vue
+ * `options.hidden` -- §7.5) plus a zero reported height and `display:none`
+ * on the element, so a renderer that lays hidden DOM widgets out anyway
+ * still gives it no room. */
+function setPinRowVisible(state, visible) {
+  const widget = state.domWidget
+  state.visible = !!visible
+  state.root.style.display = visible ? '' : 'none'
+  if (!widget) return
+  widget.hidden = !visible
+  widget.options = { ...(widget.options || {}), hidden: !visible }
+  widget.computedHeight = visible ? state.outerHeight : 0
+}
+
+/** Both hide flags on the backend's `pinned_state` widget -- exactly the
+ * `strength_scale`/`loader_slot` pair above, minus the reveal property
+ * (a pin is shown by the badge row, never by this raw JSON). No-op when
+ * the backend hasn't shipped the widget. */
+function hidePinnedStateWidget(node) {
+  const widget = findWidgetByName(node, PINNED_STATE_WIDGET_NAME)
+  if (!widget) return
+  widget.hidden = true
+  widget.options = { ...(widget.options || {}), hidden: true }
+}
+
+/** Chain the `pinned_state` widget's callback so a value arriving THROUGH
+ * the callback (a live link at queue time, an extension, our own unpin)
+ * reconciles the view; configure() bypasses callbacks and is covered by
+ * wirePinConfigureSync(). Wrapped, never replaced. */
+function wirePinnedStateWidget(node, state) {
+  const widget = findWidgetByName(node, PINNED_STATE_WIDGET_NAME)
+  if (!widget) return
+  const original = widget.callback
+  widget.callback = function (value, ...rest) {
+    let result
+    if (typeof original === 'function') {
+      try {
+        result = original.apply(this, [value, ...rest])
+      } catch (error) {
+        api.warn('original pinned_state callback threw', error)
+      }
+    }
+    try {
+      syncPinFromWidget(state)
+    } catch (error) {
+      api.warn('pinned_state sync threw', error)
+    }
+    return result
+  }
+}
+
+/** `onConfigure` fires at the END of configure() -- the one hook that sees
+ * restored widgets_values, for a whole-workflow load (an image drop), a
+ * paste and a clone alike (notebook.js's wireConfigureReload lesson). Heals
+ * the pre-M3 positional shift first, then reconciles the pin. Chained. */
+function wirePinConfigureSync(node, state) {
+  const original = node.onConfigure
+  node.onConfigure = function (...args) {
+    let result
+    if (typeof original === 'function') {
+      try {
+        result = original.apply(this, args)
+      } catch (error) {
+        api.warn('original onConfigure threw', error)
+      }
+    }
+    try {
+      healLegacyWidgetShift(node)
+      syncPinFromWidget(state)
+    } catch (error) {
+      api.warn('pinned_state sync after configure failed', error)
+    }
+    return result
+  }
+}
+
+/**
+ * Pre-M3 positional shift, decided PURELY (exported for the Node probe in
+ * tests/test_m3_pinning_js.py). Pre-M3 workflows saved `widgets_values` =
+ * [set, strength_scale, loader_slot, <mirrors loader value>]; with the
+ * backend's `pinned_state` now sitting BEFORE the frontend-appended
+ * `mirrors loader` in `node.widgets`, litegraph's positional restore lands
+ * that old mirrors value ("(any)", a bare id "12", a path id "12:3", or a
+ * "<title> #<id>" label) IN `pinned_state` and leaves the tag at its
+ * default. A pin is always JSON carrying `format`/`set`, so a `pinned_state`
+ * that is non-empty and NOT pin JSON, while the mirrors combo is still at
+ * its default, is certainly the shifted value: move it into the mirrors
+ * slot and blank `pinned_state`. A non-default mirrors value means this
+ * node was already migrated (or hand-set) -- leave everything alone.
+ * @param {unknown} pinnedRaw the `pinned_state` widget's value
+ * @param {unknown} mirrorsValue the `mirrors loader` widget's value
+ * @returns {{pinned: string, mirrors: unknown, migrated: boolean}}
+ */
+export function migrateLegacyMirrorsValue(pinnedRaw, mirrorsValue) {
+  const untouched = { pinned: typeof pinnedRaw === 'string' ? pinnedRaw : '', mirrors: mirrorsValue, migrated: false }
+  if (typeof pinnedRaw !== 'string' || pinnedRaw === '') return untouched
+  if (mirrorsValue != null && mirrorsValue !== MIRRORS_ANY_VALUE) return untouched
+  if (parsePinnedState(pinnedRaw)) return untouched
+  let looksLikePinJson = false
+  try {
+    const parsed = JSON.parse(pinnedRaw)
+    looksLikePinJson =
+      !!parsed && typeof parsed === 'object' && !Array.isArray(parsed) && ('format' in parsed || 'set' in parsed)
+  } catch {
+    looksLikePinJson = false
+  }
+  if (looksLikePinJson) return untouched // a (malformed) pin is the backend's to reject, not ours to move
+  return { pinned: '', mirrors: pinnedRaw, migrated: true }
+}
+
+/** Apply `migrateLegacyMirrorsValue()` to the live widgets on configure:
+ * the mirrors combo is written through value + callback (the pack's
+ * widget-write idiom), `pinned_state` is blanked, and the migration is
+ * logged ONCE per node to console.info -- silent otherwise, no toast.
+ * Returns true when it migrated. */
+function healLegacyWidgetShift(node) {
+  const pinnedWidget = findWidgetByName(node, PINNED_STATE_WIDGET_NAME)
+  const mirrorsWidget = findWidgetByName(node, MIRRORS_WIDGET_NAME)
+  if (!pinnedWidget || !mirrorsWidget) return false
+  const verdict = migrateLegacyMirrorsValue(pinnedWidget.value, mirrorsWidget.value)
+  if (!verdict.migrated) return false
+  mirrorsWidget.value = verdict.mirrors
+  try {
+    mirrorsWidget.callback?.(verdict.mirrors)
+  } catch (error) {
+    api.warn('mirrors loader callback threw during the legacy migration', error)
+  }
+  pinnedWidget.value = verdict.pinned
+  if (!node.__epsSetsLegacyMigrated) {
+    node.__epsSetsLegacyMigrated = true
+    console.info(
+      '[lora_library] EPS Apply LoRA Set: moved a pre-M3 "mirrors loader" value',
+      verdict.mirrors,
+      'out of the new pinned_state widget (one-time positional migration, node',
+      node.id,
+      ')'
+    )
+  }
+  return true
+}
+
+/**
+ * Reconcile the badge with the `pinned_state` widget's CURRENT value --
+ * idempotent (raw-string compare first), so it is safe from every hook that
+ * can carry a pin: onConfigure, the widget callback, unpin, attach. A new
+ * pin kicks ONE drift fetch. Returns true when the pin state changed.
+ */
+function syncPinFromWidget(state) {
+  const widget = findWidgetByName(state.node, PINNED_STATE_WIDGET_NAME)
+  if (!widget) return false
+  const raw = typeof widget.value === 'string' ? widget.value : ''
+  if (raw === state.pinnedRaw) return false
+  state.pinnedRaw = raw
+  state.pin = parsePinnedState(raw)
+  state.driftStatus = 'pending'
+  state.driftCurrent = null
+  state.driftToken += 1 // an older fetch, if any, lands on nothing
+  applyPinView(state)
+  if (state.pin) {
+    fetchPinDrift(state).catch((error) => api.warn('pin drift check failed', error))
+  }
+  return true
+}
+
+/** Repaint the badge row from `state.pin` + `state.driftStatus`: show/hide,
+ * text, summary line (full text in the tooltip, the current state's rows
+ * alongside once fetched), the `set` combo's inactive look, and the node's
+ * height (lifted by the row once on pin, given back on unpin, never below
+ * litegraph's computed floor). */
+function applyPinView(state) {
+  const pinned = !!state.pin
+  setPinRowVisible(state, pinned)
+  markSetComboInactive(state, pinned)
+  if (pinned) {
+    const status = state.driftStatus
+    state.badgeEl.textContent = pinnedStateBadgeText(state.pin, status)
+    state.badgeEl.className =
+      'eps-asp-badge' +
+      (status === 'differs' || status === 'missing'
+        ? ' eps-asp-badge-differs'
+        : status === 'match'
+          ? ''
+          : ' eps-asp-badge-unknown')
+    const captured = state.pin.source.captured ? `Captured ${state.pin.source.captured}.\n` : ''
+    state.badgeEl.title =
+      `${captured}The node applies these pinned rows (not the dropdown's state) until you Unpin.`
+    const summary = pinnedRowsSummary(state.pin.set)
+    state.rowsEl.textContent = summary
+    state.rowsEl.title =
+      `Pinned rows (applied while pinned):\n${summary}` +
+      (state.driftCurrent ? `\nCurrent state:\n${pinnedRowsSummary(state.driftCurrent)}` : '')
+  }
+  syncPinNodeHeight(state, pinned)
+  state.node.graph?.setDirtyCanvas(true, true)
+}
+
+/** ONE `GET /lora_library/set?slug=` per pin (token-guarded against a newer
+ * pin / unpin landing first): 404 -> "state no longer exists", any other
+ * failure -> "current state unavailable" (logged), success -> compare. */
+async function fetchPinDrift(state) {
+  const token = state.driftToken
+  const slug = state.pin?.slug
+  if (!slug) {
+    state.driftStatus = 'error'
+    applyPinView(state)
+    return
+  }
+  try {
+    const data = await api.getJson('/lora_library/set', { slug })
+    if (token !== state.driftToken) return
+    state.driftCurrent = data
+    state.driftStatus = comparePinnedSet(state.pin.set, data)
+  } catch (error) {
+    if (token !== state.driftToken) return
+    state.driftStatus = error?.status === 404 ? 'missing' : 'error'
+    if (error?.status !== 404) api.warn('fetching the current set for the pin badge failed', error)
+  }
+  applyPinView(state)
+}
+
+/** The `set` combo stays visible but reads inactive while pinned -- label
+ * "set (ignored while pinned)", disabled (greyed, not clickable: its value
+ * would not execute anyway), tooltip "ignored while pinned"; everything is
+ * put back exactly on unpin. Label/disabled are litegraph widget fields the
+ * Vue renderer reads too; the combo's VALUE is never touched. */
+function markSetComboInactive(state, pinned) {
+  const widget = findWidgetByName(state.node, WIDGET_NAME)
+  if (!widget) return
+  if (pinned) {
+    if (!state.setWidgetOriginal) {
+      state.setWidgetOriginal = { label: widget.label, disabled: widget.disabled, tooltip: widget.tooltip }
+    }
+    widget.label = SET_COMBO_PINNED_LABEL
+    widget.disabled = true
+    widget.tooltip = SET_COMBO_PINNED_TOOLTIP
+  } else if (state.setWidgetOriginal) {
+    widget.label = state.setWidgetOriginal.label
+    widget.disabled = state.setWidgetOriginal.disabled
+    widget.tooltip = state.setWidgetOriginal.tooltip
+    state.setWidgetOriginal = null
+  }
+}
+
+/** Lift the node by the row once when a pin appears; give it back on unpin;
+ * never below `computeSize()`'s floor (which already counts the visible
+ * row). `node.size` is a Float32Array -- never Array.isArray it (§7.2). */
+function syncPinNodeHeight(state, pinned) {
+  if (pinned === state.grown) return
+  state.grown = pinned
+  const node = state.node
+  if (!node?.size || typeof node.setSize !== 'function') return
+  const floor = typeof node.computeSize === 'function' ? node.computeSize()[1] : 0
+  const delta = pinned ? state.outerHeight : -state.outerHeight
+  node.setSize([node.size[0], Math.max(node.size[1] + delta, floor)])
+  node.graph?.setDirtyCanvas(true, true)
+}
+
+/** One-click back to the live dropdown: write "" through the `pinned_state`
+ * widget's value + callback (the pack's widget-write idiom), let the
+ * callback chain reconcile (a direct, idempotent reconcile follows in case
+ * something upstream swallowed it), toast. */
+function unpinState(state) {
+  const widget = findWidgetByName(state.node, PINNED_STATE_WIDGET_NAME)
+  if (!widget || !state.pin) return
+  widget.value = ''
+  try {
+    widget.callback?.('')
+  } catch (error) {
+    api.warn('pinned_state callback threw', error)
+  }
+  syncPinFromWidget(state)
+  state.node.graph?.setDirtyCanvas(true, true)
+  toastInfo('Unpinned — back to the live state', 'The node applies the state selected in the dropdown again.')
+}
+
+/** Per-node M3 wiring (called from attachApplySetBehavior AFTER the
+ * `mirrors loader` tag so the DOM row lands last). Everything is a no-op on
+ * a backend without `pinned_state`. */
+function attachPinBehavior(node) {
+  if (!findWidgetByName(node, PINNED_STATE_WIDGET_NAME)) return
+  const state = attachPinBadge(node)
+  if (!state) return
+  hidePinnedStateWidget(node)
+  wirePinnedStateWidget(node, state)
+  wirePinConfigureSync(node, state)
+  // A fresh node holds "" (no-op); a restored node's value lands in
+  // configure() and the chained onConfigure above reconciles it.
+  syncPinFromWidget(state)
+}
+
 /**
  * Per-instance hook (called from lora_library.js `nodeCreated`); no-op for
  * every node type except LoraLibraryApplySet.
@@ -414,6 +1060,16 @@ export function attachApplySetBehavior(node) {
   // ComfyUI's own Python-declared widgets already exist, which is always
   // true by the time `nodeCreated` fires.
   attachMirrorsWidget(node)
+  // Provenance M3 (FORMAT.md §6.2): the pin badge row -- a display-only
+  // DOM widget that must land AFTER `mirrors loader` (file header: save
+  // leaves a hole at a serialize:false widget's index, restore skips it),
+  // hidden until a pin arrives via configure(). No-op without the backend's
+  // `pinned_state` widget.
+  try {
+    attachPinBehavior(node)
+  } catch (error) {
+    api.warn('pinned_state badge attach failed', error)
+  }
   // v0.68.1: the heal that used to ride on every draw now rides on node
   // removal, plus one deferred pass per created node -- `nodeCreated` runs
   // BEFORE `configure()` restores the tag value on a workflow load, so the

@@ -6,10 +6,23 @@ and everything about it that doesn't apply real weights — stays importable
 in a plain test environment without either installed (same convention as
 comfyui-photoshop-bridge's ``cpsb/nodes.py``; see its module docstring).
 ComfyUI always provides both to the node's real runtime.
+
+**Provenance M3 (v0.71.0, FORMAT.md §6.2 ``pinned_state``):** a
+TAIL-appended, hidden ``pinned_state`` STRING widget. Empty = live (the
+set file is re-read on every run, today's behavior). Non-empty = the pin
+JSON EPS Save Image (§6.14) captured when an image was made -- ``{"format":
+1, "slug", "name", "set": <the normalized §4/§4.1 set dict exactly as
+``sets_store.load_set`` returns it>, "source": {"token", "captured"}}`` --
+and ``apply`` runs THAT set dict through the same normalize/apply path as
+a loaded file (``loader_slot`` semantics unchanged) without reading the
+sets folder. A malformed pin logs a warning and falls back to live; the
+frontend shows the pinned rows on the node with a one-click unpin.
 """
 
 from __future__ import annotations
 
+import copy
+import json
 import logging
 from typing import Any
 
@@ -30,6 +43,82 @@ def set_context(context: LibraryContext | None) -> None:
     """
     global _context
     _context = context
+
+
+#: FORMAT.md §6.2 ``pinned_state`` widget: the pin JSON ``format`` this
+#: build writes (EPS Save Image, §6.14) and reads.
+PIN_FORMAT = 1
+
+#: The widget's name -- EPS Save Image bakes it into the workflow/prompt
+#: chunks by this name (FORMAT.md §6.14), the frontend reads it by this name.
+PIN_WIDGET = "pinned_state"
+
+
+def parse_pinned_state(raw: Any) -> dict[str, Any] | None:
+    """The pin a ``pinned_state`` widget value carries, or ``None`` for LIVE.
+
+    ``""`` / a non-string is live (no log -- the everyday state). Anything
+    else must be the §6.2 pin JSON: an object whose ``set`` is a §4/§4.1
+    set object -- it is run through :func:`sets_store.normalize_set`, the
+    SAME validation a loaded file gets, so the returned ``"set"`` is
+    exactly the shape ``load_set`` would have produced (format 1 rows or a
+    format 2 composite). Anything malformed (not JSON, not an object, no
+    ``set`` object, a set that fails validation) logs a warning and
+    returns ``None`` so the node reads the live file instead of failing
+    the queue. ``slug``/``name`` default to ``""``/the set's own name when
+    absent; ``source`` passes through as-is (``{}`` when absent).
+    """
+    if not isinstance(raw, str) or not raw.strip():
+        return None
+    try:
+        data = json.loads(raw)
+    except ValueError:
+        logger.warning(
+            "EPS Apply LoRA Set: pinned_state is not JSON (%r); reading the live set",
+            raw[:80],
+        )
+        return None
+    if not isinstance(data, dict) or not isinstance(data.get("set"), dict):
+        logger.warning(
+            "EPS Apply LoRA Set: pinned_state carries no set object; reading the live set"
+        )
+        return None
+    try:
+        set_data = sets_store.normalize_set(data["set"])
+    except sets_store.SetValidationError as exc:
+        logger.warning(
+            "EPS Apply LoRA Set: pinned_state set is invalid (%s); reading the live set", exc
+        )
+        return None
+    slug = data.get("slug")
+    name = data.get("name")
+    source = data.get("source")
+    return {
+        "format": data.get("format", PIN_FORMAT),
+        "slug": slug if isinstance(slug, str) else "",
+        "name": name if isinstance(name, str) else set_data["name"],
+        "set": set_data,
+        "source": source if isinstance(source, dict) else {},
+    }
+
+
+def make_pin(
+    slug: str, set_data: dict[str, Any], token: str | None, captured: str
+) -> dict[str, Any]:
+    """The §6.2 pin JSON (as a dict -- callers ``json.dumps`` it into the
+    widget) for the normalized *set_data* (exactly as ``load_set`` returned
+    it) behind *slug*, captured while saving run *token* at *captured*
+    (ISO-8601 UTC). Built by EPS Save Image (§6.14) at save time; parsed
+    back by :func:`parse_pinned_state` when the baked workflow is dropped
+    and queued. The set dict is deep-copied so the pin can never alias a
+    store's cached object."""
+    return {
+        "format": PIN_FORMAT,
+        "slug": slug,
+        "name": set_data.get("name", "") if isinstance(set_data, dict) else "",
+        "set": copy.deepcopy(set_data),
+        "source": {"token": token, "captured": captured},
+    }
 
 
 def _slug_options() -> list[str]:
@@ -228,6 +317,30 @@ class LoraLibraryApplySet:
                         ),
                     },
                 ),
+                # Provenance M3 (v0.71.0, FORMAT.md §6.2/§6.14/§8):
+                # `pinned_state` is TAIL-APPENDED -- after every existing
+                # widget (set, strength_scale, loader_slot), the only
+                # §8-safe place (widgets_values restores positionally).
+                # Optional with default "" so every saved workflow and
+                # hand-built /prompt that predates it reads LIVE, exactly
+                # as before. "hidden": True is the Vue-nodes hide flag
+                # (the frontend sets the canvas `widget.hidden`).
+                PIN_WIDGET: (
+                    "STRING",
+                    {
+                        "default": "",
+                        "multiline": False,
+                        "hidden": True,
+                        "tooltip": (
+                            "Filled in automatically when you drop an EPS "
+                            "Save Image file onto the canvas: the set's rows "
+                            "captured when that image was made, so the run "
+                            "recreates exactly even if the set was edited "
+                            "since. Empty = read the live set file. Use the "
+                            "node's unpin control to clear it."
+                        ),
+                    },
+                ),
             },
         }
 
@@ -246,11 +359,17 @@ class LoraLibraryApplySet:
         loader_slot: int = 0,
         model: Any = None,
         clip: Any = None,
+        pinned_state: str = "",
     ) -> str:
         # loader_slot is included so switching slots on the SAME composite
         # state (same file, same mtime/size) still re-executes — the file
-        # token alone can't see that (FORMAT.md §6.2/§4.1).
-        return f"{set}:{_set_file_token(_context, set)}:{strength_scale}:{loader_slot}"
+        # token alone can't see that (FORMAT.md §6.2/§4.1). The pin value
+        # (M3) is folded in verbatim: setting, changing or clearing a pin
+        # re-executes even when nothing else moved.
+        return (
+            f"{set}:{_set_file_token(_context, set)}:{strength_scale}:{loader_slot}"
+            f":{pinned_state}"
+        )
 
     def apply(
         self,
@@ -259,8 +378,17 @@ class LoraLibraryApplySet:
         loader_slot: int = 0,
         model: Any = None,
         clip: Any = None,
+        pinned_state: str = "",
     ) -> tuple[Any, Any, list[tuple[str, float, float]], str, str]:
-        if set in ("None", ""):
+        # Provenance M3 (FORMAT.md §6.2): a pin wins outright -- its set
+        # dict (already normalized by parse_pinned_state, the same
+        # validation a loaded file gets) goes through the identical
+        # loader_slot/resolve/apply path below, and the sets folder is
+        # never read (the file may have been edited or deleted since the
+        # image was saved; that is the whole point). A malformed pin
+        # already warned inside parse_pinned_state and reads live below.
+        pin = parse_pinned_state(pinned_state)
+        if pin is None and set in ("None", ""):
             return model, clip, [], "", ""
 
         context = _context
@@ -270,14 +398,22 @@ class LoraLibraryApplySet:
             )
             return model, clip, [], "", ""
 
-        try:
-            set_data = sets_store.load_set(context, set)
-        except sets_store.SetValidationError as exc:
-            logger.warning("EPSNodes: set %r could not be loaded (%s); passthrough", set, exc)
-            return model, clip, [], "", ""
-        if set_data is None:
-            logger.warning("EPSNodes: set %r has no file on disk; passthrough", set)
-            return model, clip, [], "", ""
+        if pin is not None:
+            set_data = pin["set"]
+            # Warnings below name the set; a pin names the slug it was
+            # captured from (falling back to the combo's own value).
+            set = pin["slug"] or set
+        else:
+            try:
+                set_data = sets_store.load_set(context, set)
+            except sets_store.SetValidationError as exc:
+                logger.warning(
+                    "EPSNodes: set %r could not be loaded (%s); passthrough", set, exc
+                )
+                return model, clip, [], "", ""
+            if set_data is None:
+                logger.warning("EPSNodes: set %r has no file on disk; passthrough", set)
+                return model, clip, [], "", ""
 
         # FORMAT.md §4.1/§6.2: picks the loader_slot-th loader's rows for a
         # composite (format-2) state; a plain format-1 state ignores
