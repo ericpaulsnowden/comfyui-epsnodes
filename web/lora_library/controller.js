@@ -2745,6 +2745,12 @@ export function registerControllerNode() {
         // list's scroll position mid-interaction.
         const focused = document.activeElement
         const focusedSlug = focused && listEl.contains(focused) ? focused.getAttribute('data-slug') : null
+        // v0.72.1 (owner report 2026-08-22: "clicking on an item ... scrolls
+        // the list ... you have to find it again"): replaceChildren() empties
+        // the scroller, which clamps scrollTop to 0 and nothing puts it back.
+        // Remember and restore it -- every rebuild (poll, layout edit, the
+        // selection fallback below) keeps the user's place.
+        const scrollTop = listEl.scrollTop
         listEl.replaceChildren()
         // Drag hit-testing reads THIS array, rebuilt every render — the
         // Notebook's `state.dragRows` twin.
@@ -2790,6 +2796,34 @@ export function registerControllerNode() {
           this._pane.dragRows.push({ kind: 'entry', slug: entry.slug, label: entry.label, el: row })
           if (focusedSlug && entry.slug === focusedSlug) row.focus({ preventScroll: true })
         }
+        if (scrollTop) listEl.scrollTop = scrollTop
+      }
+
+      /**
+       * Repaint ONLY the active-row highlight (v0.72.1): a click on a state
+       * used to rebuild every row (`_renderStateList`), which threw away the
+       * scroll position of a long list. Toggling the class on the rows
+       * already in the DOM leaves the scroller exactly where it was; the
+       * full rebuild remains the fallback when the selected row is not in
+       * the DOM (collapsed group, stale list) -- and that rebuild now
+       * restores scrollTop too.
+       */
+      _repaintSelection() {
+        const listEl = this._pane?.listEl
+        if (!listEl) return
+        const rows = listEl.querySelectorAll('.llsc-row[data-slug]')
+        if (!rows.length) {
+          this._renderStateList()
+          return
+        }
+        const selected = this._selectedSetEntry()
+        let seen = false
+        for (const row of rows) {
+          const active = !!selected && row.getAttribute('data-slug') === selected.slug
+          row.classList.toggle('llsc-row-active', active)
+          if (active) seen = true
+        }
+        if (selected && !seen) this._renderStateList()
       }
 
       /** One group header: collapse caret + name (+ count when collapsed),
@@ -3597,7 +3631,7 @@ export function registerControllerNode() {
       _setSetValueSilently(label) {
         if (!this._w.set) return
         this._w.set.value = label
-        this._renderStateList()
+        this._repaintSelection() // v0.72.1: highlight only -- the list keeps its scroll position
       }
 
       _toast(severity, summary, detail) {
@@ -3702,6 +3736,7 @@ export function registerControllerNode() {
         const name = categoryNameFromInput(this._w.name?.value)
         if (!name) {
           this._setStatusText('Enter a group name after the #.')
+          this._toast('warn', NODE_TITLE, 'Enter a group name after the # (e.g. "# Portraits").')
           return
         }
         // v0.68.1: never create on top of the unloaded (empty) default layout
@@ -3709,6 +3744,7 @@ export function registerControllerNode() {
         if (!(await this._ensureLayoutLoaded())) return
         if (this._layoutCache.categories.includes(name)) {
           this._setStatusText(`A group named "${name}" already exists.`)
+          this._toast('warn', NODE_TITLE, `A group named "${name}" already exists.`)
           return
         }
         this._layoutCache.categories.push(name)
@@ -3722,6 +3758,11 @@ export function registerControllerNode() {
         // callback + dirty, the file's established write idiom.
         this._clearNameField()
         this._setStatusText(`Group "${name}" created.`)
+        // v0.72.1 (owner report 2026-08-22 "# name isn't creating a section"):
+        // the status line is hidden by default, so creation used to be
+        // silent -- and on pre-v0.67.2 builds a 4 s poll landing right after
+        // could momentarily paint the group away. Say it out loud.
+        this._toast('info', NODE_TITLE, `Group "${name}" created — drag states onto it.`)
         await this._saveLayout()
       }
 

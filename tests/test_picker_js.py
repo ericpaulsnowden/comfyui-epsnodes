@@ -192,8 +192,62 @@ CLAMP_CASES = [
     (None, 1),
 ]
 
+#: (JS source for the raw `Auto-grow with selection` property value,
+#: expected autoGrowFromValue()). Raw JS, like RAW_VALUE_CASES, because
+#: `undefined` has no JSON spelling. Missing/blank reads ON (a pre-round
+#: workflow, a fresh node); the Properties panel writes real booleans; a
+#: hand-typed negative spelling is honoured; else plain truthiness.
+AUTO_GROW_VALUE_CASES = [
+    ("undefined", True),
+    ("null", True),
+    ("''", True),
+    ("true", True),
+    ("false", False),
+    ("'false'", False),
+    ("' FALSE '", False),
+    ("'0'", False),
+    ("'off'", False),
+    ("'No'", False),
+    ("'yes'", True),
+    ("'anything'", True),
+    ("1", True),
+    ("0", False),
+]
+
+#: ((autoGrow, count), expected selectedListFloorRows()) -- every row while
+#: ON, the constant FIXED_SELECTED_ROWS (2) while OFF, degenerate counts 0.
+FLOOR_ROWS_CASES = [
+    ((True, 0), 0),
+    ((True, 1), 1),
+    ((True, 7), 7),
+    ((True, 2.9), 2),
+    ((True, -3), 0),
+    ((True, None), 0),
+    ((True, "junk"), 0),
+    ((False, 0), 2),
+    ((False, 1), 2),
+    ((False, 50), 2),
+    ((False, None), 2),
+]
+
 PROBE_JS = """
 import * as m from './extensions/comfyui-epsnodes/lora_library/picker.js'
+
+// isManualResize scenarios -- node identity against a canvas stub's
+// `resizing_node` (what LGraphCanvas sets for the whole corner drag) and
+// the file's own programmatic flag. Built here, not in Python, because
+// the verdict is about OBJECT IDENTITY.
+const nodeA = { id: 1 }
+const nodeB = { id: 2 }
+const manualResizeCases = [
+  ['drag of this node', m.isManualResize(nodeA, { resizing_node: nodeA }, false)],
+  ['drag of another node', m.isManualResize(nodeA, { resizing_node: nodeB }, false)],
+  ['no drag in flight', m.isManualResize(nodeA, { resizing_node: null }, false)],
+  ['no canvas at all', m.isManualResize(nodeA, undefined, false)],
+  ['canvas without the field', m.isManualResize(nodeA, {}, false)],
+  ['our own setSize mid-drag', m.isManualResize(nodeA, { resizing_node: nodeA }, true)],
+  ['no node', m.isManualResize(null, { resizing_node: null }, false)]
+]
 
 const out = {
   exports: {
@@ -203,7 +257,11 @@ const out = {
     hasListFolder: typeof m.listFolder === 'function',
     hasClampStrength: typeof m.clampStrength === 'function',
     hasNormalizeLoraName: typeof m.normalizeLoraName === 'function',
-    hasDrillPathAfterReload: typeof m.drillPathAfterReload === 'function'
+    hasDrillPathAfterReload: typeof m.drillPathAfterReload === 'function',
+    hasAutoGrowFromValue: typeof m.autoGrowFromValue === 'function',
+    hasShouldAutoGrow: typeof m.shouldAutoGrow === 'function',
+    hasSelectedListFloorRows: typeof m.selectedListFloorRows === 'function',
+    hasIsManualResize: typeof m.isManualResize === 'function'
   },
   constants: {
     classId: m.CLASS_ID,
@@ -211,8 +269,22 @@ const out = {
     route: m.ROUTE,
     routeFavorite: m.ROUTE_FAVORITE,
     routeRecent: m.ROUTE_RECENT,
-    routeClearRecents: m.ROUTE_CLEAR_RECENTS
+    routeClearRecents: m.ROUTE_CLEAR_RECENTS,
+    propAutoGrow: m.PROP_AUTO_GROW,
+    fixedSelectedRows: m.FIXED_SELECTED_ROWS
   },
+  autoGrowFromValue: [%(auto_grow_values)s].map((v) => m.autoGrowFromValue(v)),
+  shouldAutoGrow: {
+    noNode: m.shouldAutoGrow(null),
+    noProperties: m.shouldAutoGrow({}),
+    unset: m.shouldAutoGrow({ properties: {} }),
+    on: m.shouldAutoGrow({ properties: { [m.PROP_AUTO_GROW]: true } }),
+    off: m.shouldAutoGrow({ properties: { [m.PROP_AUTO_GROW]: false } })
+  },
+  selectedListFloorRows: %(floor_rows_inputs)s.map(
+    ([autoGrow, count]) => m.selectedListFloorRows(autoGrow, count)
+  ),
+  isManualResize: manualResizeCases,
   selectionFromWidgetValue: [%(raw_values)s].map((v) => m.selectionFromWidgetValue(v)),
   serializeSelection: %(serialize_inputs)s.map((sel) => m.serializeSelection(sel)),
   listFolder: %(list_folder_inputs)s.map(([loras, folder]) => m.listFolder(loras, folder)),
@@ -262,6 +334,8 @@ def picker_api(tmp_path_factory: pytest.TempPathFactory) -> dict:
             "list_folder_inputs": json.dumps([list(args) for args, _ in LIST_FOLDER_CASES]),
             "clamp_inputs": json.dumps([value for value, _ in CLAMP_CASES]),
             "drill_inputs": json.dumps([args for args, _ in DRILL_PATH_CASES]),
+            "auto_grow_values": ", ".join(js for js, _ in AUTO_GROW_VALUE_CASES),
+            "floor_rows_inputs": json.dumps([list(args) for args, _ in FLOOR_ROWS_CASES]),
         },
         encoding="utf-8",
     )
@@ -319,6 +393,11 @@ def test_module_exports_the_entry_point_and_pure_helpers(picker_api: dict) -> No
         "hasClampStrength": True,
         "hasNormalizeLoraName": True,
         "hasDrillPathAfterReload": True,
+        # §6.13 height round (2026-08-22): the auto-grow decision helpers
+        "hasAutoGrowFromValue": True,
+        "hasShouldAutoGrow": True,
+        "hasSelectedListFloorRows": True,
+        "hasIsManualResize": True,
     }
 
 
@@ -1260,7 +1339,10 @@ class TestUiRound20260814:
     gone (clear-scope lives in the breadcrumb row), the standing lora
     total moved to the `library_loras` property + root-crumb tooltip
     (status bar collapses once loaded), and the Selected list always
-    shows every row -- the NODE grows instead of the list cropping."""
+    shows every row -- the NODE grows instead of the list cropping.
+    (Since the §6.13 height round, 2026-08-22, that growth rule holds while
+    `Auto-grow with selection` is ON -- see TestFixedHeightRound20260822
+    for the OFF half: fixed node, scrolling list.)"""
 
     @pytest.fixture(scope="class")
     def source(self) -> str:
@@ -1285,13 +1367,25 @@ class TestUiRound20260814:
         assert load is not None
 
     def test_selected_list_grows_the_node_instead_of_cropping(self, source: str) -> None:
+        """The ON half of the growth rule (the base list CSS never caps or
+        scrolls; the node grows by the row delta). The floor pin moved with
+        the §6.13 height round: it is now the mode-aware
+        `selectedListFloorRows(...)` term -- every row while ON -- instead
+        of the always-every-row `state.selection.loras.length` term."""
         assert "max-height: 132px" not in source
+        assert (
+            ".eps-lp-selected-list { flex: 0 0 auto; padding: 0 3px 4px; border-bottom:" in source
+        )
         grow = _function_body(source, "syncSelectedGrowth(state)")
         assert "(count - previous) * SELECTED_ROW_PX" in grow
         assert "Math.max(node.size[1] + delta, floor)" in grow
         assert "syncSelectedGrowth(state)" in _function_body(source, "renderSelected(state)")
         # the widget floor agrees, so a manual shrink can't crop either
-        assert "MIN_WIDGET_HEIGHT + state.selection.loras.length * SELECTED_ROW_PX" in source
+        assert (
+            "MIN_WIDGET_HEIGHT +\n      "
+            "selectedListFloorRows(shouldAutoGrow(state.node), state.selection.loras.length)"
+            " * SELECTED_ROW_PX" in source
+        )
 
     def test_send_row_says_it_is_optional(self, source: str) -> None:
         send = _function_body(source, "renderSend(state)")
@@ -1533,3 +1627,217 @@ class TestPerfRoundV0681:
         for path in (BRIDGE_JS, DASIWA_JS):
             bridge = path.read_text(encoding="utf-8")
             assert "UNUSED BY THE PICKER, marked for removal" in bridge, path.name
+
+
+class TestFixedHeightRound20260822:
+    """§6.13 height round (owner report 2026-08-22: "it should not change the
+    overall height of the node once a user sets it ... the top section
+    should scroll in those instances and split the height with the bottom
+    section"). A boolean node property, `Auto-grow with selection` (default
+    true), decides who owns the height: ON = the v0.61.1 grow-the-node rule;
+    OFF = the user's height is fixed, the Selected list scrolls inside a 50%
+    share and the browser takes the rest. A manual corner drag flips it off
+    (litegraph's `canvas.resizing_node === node` during the drag, our own
+    setSize calls excluded by `state.programmaticResize`); Properties turns
+    it back on. The pure decision helpers are probed under Node; the
+    node-touching half is pinned by source."""
+
+    @pytest.fixture(scope="class")
+    def source(self) -> str:
+        return PICKER_JS.read_text(encoding="utf-8")
+
+    # -- the pure helpers, driven under Node --------------------------------
+
+    def test_property_name_and_fixed_row_constant(self, picker_api: dict) -> None:
+        assert picker_api["constants"]["propAutoGrow"] == "Auto-grow with selection"
+        assert picker_api["constants"]["fixedSelectedRows"] == 2
+
+    def test_auto_grow_from_value_cases(self, picker_api: dict) -> None:
+        pairs = zip(AUTO_GROW_VALUE_CASES, picker_api["autoGrowFromValue"], strict=True)
+        for (raw, expected), actual in pairs:
+            assert actual is expected, f"autoGrowFromValue({raw}) -> {actual!r}, want {expected!r}"
+
+    def test_should_auto_grow_reads_the_node_property_and_defaults_on(
+        self, picker_api: dict
+    ) -> None:
+        """A node without the property (pre-round workflow, no `properties`
+        at all, or no node) is ON -- the behaviour every existing workflow
+        had; only an explicit false (or a negative spelling) is OFF."""
+        assert picker_api["shouldAutoGrow"] == {
+            "noNode": True,
+            "noProperties": True,
+            "unset": True,
+            "on": True,
+            "off": False,
+        }
+
+    def test_selected_list_floor_rows_cases(self, picker_api: dict) -> None:
+        pairs = zip(FLOOR_ROWS_CASES, picker_api["selectedListFloorRows"], strict=True)
+        for (args, expected), actual in pairs:
+            assert actual == expected, f"selectedListFloorRows{args} -> {actual}, want {expected}"
+
+    def test_is_manual_resize_verdicts(self, picker_api: dict) -> None:
+        """Manual exactly when THIS node is the canvas's `resizing_node` and
+        the call is not ours (programmatic flag) -- bundle evidence:
+        LGraphCanvas's resize gesture sets `this.resizing_node = n` in
+        onDragStart, calls `n.setSize(c.size)` per onDrag (setSize always
+        fires onResize), and clears it in `finally`."""
+        assert dict(picker_api["isManualResize"]) == {
+            "drag of this node": True,
+            "drag of another node": False,
+            "no drag in flight": False,
+            "no canvas at all": False,
+            "canvas without the field": False,
+            "our own setSize mid-drag": False,
+            "no node": False,
+        }
+
+    # -- registration / default -----------------------------------------------
+
+    def test_property_is_registered_true_at_attach(self, source: str) -> None:
+        assert "export const PROP_AUTO_GROW = 'Auto-grow with selection'" in source
+        assert "export const FIXED_SELECTED_ROWS = 2" in source
+        wire = _function_body(source, "wireAutoGrowProperty(state)")
+        assert "node.addProperty(PROP_AUTO_GROW, true, 'boolean')" in wire
+        attach = _function_body(source, "attachPickerPanel(node)")
+        assert "wireAutoGrowProperty(state)" in attach
+        # registered AFTER the existing library_loras property, same pattern
+        assert attach.index("node.addProperty('library_loras', 0, 'number')") < attach.index(
+            "wireAutoGrowProperty(state)"
+        )
+
+    # -- the manual-resize flip -------------------------------------------------
+
+    def test_manual_resize_detection_rule(self, source: str) -> None:
+        """The onResize chain: a NEW chained wrap (installMinWidth's stays
+        as it was) asks isManualResize with the live canvas and the
+        programmatic flag, and calls through to the original either way."""
+        watch = _function_body(source, "installManualResizeWatch(state)")
+        assert "const originalOnResize = node.onResize" in watch
+        assert "isManualResize(node, app.canvas, state.programmaticResize)" in watch
+        assert "noteManualResize(state)" in watch
+        assert "return originalOnResize?.call(this, size)" in watch
+        assert "node.__epsLpResizeWatchInstalled" in watch  # guard-flagged, the house pattern
+        assert "installManualResizeWatch(state)" in _function_body(source, "attachDomWidget(state)")
+        verdict = _function_body(source, "isManualResize(node, canvas, programmatic)")
+        assert "if (programmatic || !node) return false" in verdict
+        assert "return canvas?.resizing_node === node" in verdict
+
+    def test_manual_resize_flips_the_property_off_through_set_property(
+        self, source: str
+    ) -> None:
+        """setProperty fires onPropertyChanged (bundle: `setProperty(e,t){...
+        this.onPropertyChanged?.(e,t,n)...}`), so the class syncs the same
+        way a Properties flip does; already-off is a no-op (one flip, one
+        toast, per drag)."""
+        note = _function_body(source, "noteManualResize(state)")
+        assert "if (!shouldAutoGrow(node)) return" in note
+        assert "node.setProperty(PROP_AUTO_GROW, false)" in note
+        assert "node.properties[PROP_AUTO_GROW] = false" in note  # no-setProperty fallback
+        assert "syncFixedClass(state)" in note
+        assert "'LoRA Picker height is now fixed'" in note  # says so, names the way back
+        assert "Right-click → Properties" in note
+
+    def test_every_own_set_size_goes_through_the_programmatic_flag(self, source: str) -> None:
+            """Every setSize THIS file issues after the resize watch exists goes
+            through `programmaticSetSize` (the `.setSize(` inside it), so the
+            watch can tell growth/floor calls from the user's corner drag. The
+            ONE other raw call is `installMinWidth`'s width lift, which runs
+            BEFORE `installManualResizeWatch` is installed (v0.73.0: the old
+            `Array.isArray(node.size)` guard there was dead) -- pinned as such."""
+            assert source.count(".setSize(") == 2, "a raw node.setSize call escaped the flag"
+            width_lift = "node.setSize([minWidth, node.size[1]])"
+            assert width_lift in _function_body(source, "installMinWidth(node, minWidth)")
+            attach = _function_body(source, "attachDomWidget(state)")
+            assert attach.index("installMinWidth(state.node, MIN_NODE_WIDTH)") < attach.index(
+                "installManualResizeWatch(state)"
+            )
+
+    def test_sync_selected_growth_tracks_the_count_then_returns_when_fixed(
+        self, source: str
+    ) -> None:
+        """OFF: the node never moves on a selection change -- but the row
+        baseline is still updated FIRST, so flipping back ON can't replay a
+        stale delta."""
+        grow = _function_body(source, "syncSelectedGrowth(state)")
+        track = grow.index("state.lastSelectedCount = count")
+        fixed = grow.index("if (!shouldAutoGrow(state.node)) return")
+        unchanged = grow.index("if (previous === count) return")
+        assert track < fixed < unchanged
+
+    def test_get_min_height_has_two_floors(self, source: str) -> None:
+        """ON: header + every row + browser minimum (today's floor). OFF:
+        header + FIXED_SELECTED_ROWS rows + browser minimum, so the user can
+        actually shrink it -- never below MIN_WIDGET_HEIGHT either way."""
+        assert (
+            "getMinHeight: () =>\n      MIN_WIDGET_HEIGHT +\n      "
+            "selectedListFloorRows(shouldAutoGrow(state.node), state.selection.loras.length)"
+            " * SELECTED_ROW_PX" in source
+        )
+        rows = _function_body(source, "selectedListFloorRows(autoGrow, count)")
+        assert "if (!autoGrow) return FIXED_SELECTED_ROWS" in rows
+
+    def test_css_fixed_class_scrolls_the_list_and_splits_the_height(self, source: str) -> None:
+        """`.eps-lp-fixed` on the root: the Selected list becomes a shrinkable
+        item capped at half the panel with its own scrollbar and a
+        FIXED_SELECTED_ROWS-row minimum; the browser keeps `flex: 1 1 auto;
+        min-height: 0` and takes the rest. The base (ON) rule is untouched.
+        `max-height: 50%` resolves because `.eps-lp-root` is `height: 100%`
+        of the DOM-widget element, which litegraph sizes in px."""
+        assert (
+            ".eps-lp-fixed .eps-lp-selected-list { flex: 0 1 auto; "
+            "min-height: ${FIXED_SELECTED_ROWS * SELECTED_ROW_PX}px; max-height: 50%; "
+            "overflow-y: auto; overflow-x: hidden; }" in source
+        )
+        assert (
+            ".eps-lp-browser { flex: 1 1 auto; display: flex; flex-direction: column; "
+            "min-height: 0; overflow: hidden; }" in source
+        )
+        assert ".eps-lp-root { display: flex; flex-direction: column; width: 100%; height: 100%;" in source
+
+    def test_class_toggle_is_re_derived_everywhere_and_vue_safe(self, source: str) -> None:
+        """The mode surfaces as ONE root class toggle -- no canvas drawing,
+        no window listeners (§7.5) -- re-derived on every Selected repaint,
+        on the manual flip and on every property change, so a Properties
+        flip or a restore of a saved `false` can't leave it stale."""
+        sync = _function_body(source, "syncFixedClass(state)")
+        assert "state.root?.classList.toggle('eps-lp-fixed', !shouldAutoGrow(state.node))" in sync
+        assert "syncFixedClass(state)" in _function_body(source, "renderSelected(state)")
+        assert "syncFixedClass(state)" in _function_body(source, "noteManualResize(state)")
+        assert "syncFixedClass(state)" in _function_body(
+            source, "applyAutoGrowChange(state, value, prevValue)"
+        )
+        assert "onDrawForeground" not in source
+        assert "onDrawBackground" not in source
+        assert "window.addEventListener" not in source
+
+    def test_properties_flip_back_on_lifts_the_node_once(self, source: str) -> None:
+        """onPropertyChanged is CHAINED (never replaced); a real OFF -> ON
+        flip lifts to the full-list floor once, then growth resumes from the
+        tracked count. configure's property loop passes no prevValue -- it
+        reads as ON -- so a restored `true` never lifts a just-restored size
+        (bundle: `this.properties[t]=e.properties[t],this.onPropertyChanged?.
+        (t,e.properties[t])`)."""
+        wire = _function_body(source, "wireAutoGrowProperty(state)")
+        assert "const original = node.onPropertyChanged" in wire
+        assert "const result = original?.call(this, name, value, prevValue)" in wire
+        assert "if (name === PROP_AUTO_GROW)" in wire
+        assert "applyAutoGrowChange(state, value, prevValue)" in wire
+        apply = _function_body(source, "applyAutoGrowChange(state, value, prevValue)")
+        assert "if (autoGrowFromValue(value) && !autoGrowFromValue(prevValue)) liftToFloor(state)" in apply
+
+    def test_controller_apply_path_cannot_move_a_fixed_node(self, source: str) -> None:
+        """`node.__epsLpReload` -> reloadFromWidget -> render -> renderSelected
+        -> syncSelectedGrowth: the reload forgets the row baseline (v0.67.2,
+        kept) and touches no size itself; with auto-grow OFF the growth step
+        returns before any setSize, so an applied big state leaves the node
+        exactly as tall as the user made it. With it ON, today's behaviour."""
+        assert "node.__epsLpReload = () => reloadFromWidget(state)" in source
+        reload = _function_body(source, "reloadFromWidget(state)")
+        assert "state.lastSelectedCount = null" in reload
+        assert "render(state)" in reload
+        assert "setSize" not in reload
+        assert "programmaticSetSize" not in _function_body(source, "renderSelected(state)")
+        assert "if (!shouldAutoGrow(state.node)) return" in _function_body(
+            source, "syncSelectedGrowth(state)"
+        )

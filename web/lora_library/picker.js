@@ -41,6 +41,34 @@
  * is token-guarded (checkpoint_switcher.js's `loadToken` idiom) so a slow
  * LAN response can never double-render or clobber a newer state.
  *
+ * **Height policy (§6.13 height round, owner report 2026-08-22: "it should
+ * not change the overall height of the node once a user sets it ... the
+ * top section should scroll in those instances and split the height with
+ * the bottom section").** A boolean node property, `Auto-grow with
+ * selection` (`PROP_AUTO_GROW`, default true), decides who owns the
+ * height. ON = the v0.61.1 behaviour: the Selected list sizes to content
+ * and `syncSelectedGrowth` grows/shrinks the NODE per row. OFF = the user
+ * owns the height: the node never moves on a selection change (a
+ * controller apply included), the Selected list scrolls inside a
+ * `max-height: 50%` share (`.eps-lp-fixed`) and the browser takes the
+ * rest, and `getMinHeight` floors at header + FIXED_SELECTED_ROWS rows +
+ * browser minimum so the user can actually shrink it. The flip is
+ * AUTOMATIC on a manual corner drag -- `installManualResizeWatch` chains
+ * `onResize` and counts a resize as the user's exactly when litegraph's
+ * canvas drag is the caller (`app.canvas.resizing_node === node`, set for
+ * the whole drag by LGraphCanvas's resize `onDragStart`, cleared in its
+ * `finally`; every `onDrag` goes through `node.setSize` -> `onResize`) and
+ * the call is not one of ours (`state.programmaticResize`, raised by
+ * `programmaticSetSize` around every setSize this file issues). Core's
+ * post-load `setSize(max(saved, computed))`, `configure`'s size restore
+ * and every extension's `setSize` are therefore never mistaken for the
+ * user's hand. Properties turns it back on (`wireAutoGrowProperty`
+ * chains `onPropertyChanged`; a flip to ON lifts the node to the full-list
+ * floor once, then growth resumes). Vue-nodes mode: the Vue resize handle
+ * never sets `resizing_node`, so there the switch is the Properties
+ * toggle only (§7.5's known-degraded renderer) -- never a heuristic that
+ * could misread a load as a drag.
+ *
  * No window-level listeners: every interaction is a plain element-level
  * click/change/input, so §7.5's capture-phase requirement never comes up.
  * The M3 favorites drag included: pointerdown calls `setPointerCapture` on
@@ -85,6 +113,21 @@ const MIN_WIDGET_HEIGHT = 220
  * both syncSelectedGrowth's node-growth delta and getMinHeight's floor
  * use, so the two can never disagree about the room the list needs. */
 const SELECTED_ROW_PX = 26
+
+/** §6.13 height round (owner report 2026-08-22): the boolean node property
+ * that decides whether the Selected list may grow the node. Registered
+ * `true` at attach (`wireAutoGrowProperty`, the `library_loras`
+ * precedent); a manual corner drag flips it false (`noteManualResize`);
+ * right-click -> Properties flips it back. Serializes with the node, so a
+ * workflow saved fixed reloads fixed at its saved size. */
+export const PROP_AUTO_GROW = 'Auto-grow with selection'
+
+/** Rows the Selected list keeps room for while auto-grow is OFF -- the
+ * `getMinHeight` floor term (header + this many rows + browser minimum)
+ * AND the `.eps-lp-fixed` CSS min-height, one constant so they agree. A
+ * CONSTANT, not min(count, 2): the fixed floor must never rise above the
+ * height the user set when a later apply brings rows in. */
+export const FIXED_SELECTED_ROWS = 2
 
 /** ~360px floor (§6.13) -- same Linux-font-overflow rationale as every
  * DOM-widget node in this pack (FORMAT.md §7.2); self-contained
@@ -346,6 +389,7 @@ const CSS_TEXT = `
 .eps-lp-crumb-clear { margin-left: auto; }
 .eps-lp-section-header { flex: 0 0 auto; padding: 4px 6px 2px; font-size: 9.5px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; color: var(--descrip-text, #999); }
 .eps-lp-selected-list { flex: 0 0 auto; padding: 0 3px 4px; border-bottom: 1px solid var(--border-color, #444); }
+.eps-lp-fixed .eps-lp-selected-list { flex: 0 1 auto; min-height: ${FIXED_SELECTED_ROWS * SELECTED_ROW_PX}px; max-height: 50%; overflow-y: auto; overflow-x: hidden; }
 .eps-lp-send { flex: 0 0 auto; display: flex; align-items: center; gap: 6px; padding: 4px 6px; border-bottom: 1px solid var(--border-color, #444); }
 .eps-lp-send-label { flex: 0 0 auto; color: var(--descrip-text, #999); cursor: help; }
 .eps-lp-pll-select { flex: 1 1 auto; min-width: 0; background: var(--comfy-menu-bg, #262626); border: 1px solid var(--border-color, #444); color: var(--input-text, #ccc); border-radius: 3px; padding: 1px 3px; font-size: 11px; font-family: inherit; }
@@ -420,7 +464,65 @@ function installMinWidth(node, minWidth) {
     if (size && size[0] < minWidth) size[0] = minWidth
     return originalOnResize?.call(this, size)
   }
-  if (Array.isArray(node.size) && node.size[0] < minWidth) node.size[0] = minWidth
+  // v0.73.0: node.size is a Proxy over a typed array -- the old isArray guard was dead
+  // (§7.2 v0.68.1); lift through setSize so litegraph's size mirror runs.
+  if (node.size && node.size[0] < minWidth && typeof node.setSize === 'function') {
+    node.setSize([minWidth, node.size[1]])
+  }
+}
+
+// --- Node height policy -- the pure decision helpers (§6.13 height round,
+// file header "Height policy"); the node-touching half lives next to
+// syncSelectedGrowth. Exported so tests/test_picker_js.py can drive them
+// under Node without a litegraph stub. ---
+
+/**
+ * Reads one `PROP_AUTO_GROW` value as the boolean it means. Missing/blank
+ * (a pre-round workflow, a fresh node before addProperty) is ON; the
+ * Properties panel writes real booleans, but a hand-typed "false"/"0"/
+ * "off"/"no" (any case) is honoured too; anything else is plain truthiness.
+ * @param {unknown} value @returns {boolean}
+ */
+export function autoGrowFromValue(value) {
+  if (value == null || value === '') return true
+  if (typeof value === 'string') return !['false', '0', 'off', 'no'].includes(value.trim().toLowerCase())
+  return Boolean(value)
+}
+
+/** Whether THIS node's Selected list may grow the node (file header
+ * "Height policy"). @param {object} node @returns {boolean} */
+export function shouldAutoGrow(node) {
+  return autoGrowFromValue(node?.properties?.[PROP_AUTO_GROW])
+}
+
+/**
+ * How many Selected rows the `getMinHeight` floor reserves: every row
+ * while auto-grow is ON (the full list must stay visible), the constant
+ * FIXED_SELECTED_ROWS while OFF (the list scrolls; the floor must let the
+ * user shrink the node and must never climb above the height they set).
+ * @param {boolean} autoGrow @param {number} count @returns {number}
+ */
+export function selectedListFloorRows(autoGrow, count) {
+  if (!autoGrow) return FIXED_SELECTED_ROWS
+  const n = Number(count)
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : 0
+}
+
+/**
+ * The manual-resize verdict for one onResize call: the user's hand exactly
+ * when litegraph's canvas corner drag is the caller (`canvas.resizing_node
+ * === node` -- LGraphCanvas sets it in the resize gesture's onDragStart,
+ * clears it in its finally, and every onDrag calls `node.setSize`, which
+ * always fires onResize) AND the call is not one of ours (`programmatic`
+ * = `state.programmaticResize`, raised around every setSize this file
+ * issues). Anything else -- core's post-load floor, configure, another
+ * extension, the Vue layout mirror -- is not.
+ * @param {object} node @param {object} canvas @param {boolean} programmatic
+ * @returns {boolean}
+ */
+export function isManualResize(node, canvas, programmatic) {
+  if (programmatic || !node) return false
+  return canvas?.resizing_node === node
 }
 
 // --- State ---
@@ -451,6 +553,7 @@ function createState(node, widget) {
     favRowEls: [], // favorites-view row order (file+el) for the M3 drag -- rebuilt each render
     browserRowEls: new Map(), // file -> installed browser row el, rebuilt each render (v0.68.1 highlight toggle)
     lastSelectedCount: null, // last painted Selected row count -- drives the node-growth delta
+    programmaticResize: false, // true only inside programmaticSetSize -- the onResize wrap's "ours, not the user's" flag
     highlightedFile: null, // browser row click-to-highlight (v0.64.0); second click adds
     selectedHeaderEl: null,
     selectedListEl: null,
@@ -541,12 +644,18 @@ function buildUi(state) {
  */
 function attachDomWidget(state) {
   installMinWidth(state.node, MIN_NODE_WIDTH)
+  installManualResizeWatch(state)
   const domWidget = state.node.addDOMWidget(PANEL_WIDGET_NAME, PANEL_WIDGET_TYPE, state.root, {
     hideOnZoom: true,
     serialize: false, // excludes from the API prompt (utils/executionUtil.ts)
-    // The floor grows with the Selected list (owner ask 2026-08-14: the
-    // full list must always be visible) -- see syncSelectedGrowth.
-    getMinHeight: () => MIN_WIDGET_HEIGHT + state.selection.loras.length * SELECTED_ROW_PX
+    // Two floors (§6.13 height round): auto-grow ON keeps the v0.61.1 rule
+    // (header + EVERY row + browser minimum, so the full list stays
+    // visible -- see syncSelectedGrowth); OFF floors at header +
+    // FIXED_SELECTED_ROWS + browser minimum so the user can shrink the
+    // node and the list scrolls instead (selectedListFloorRows).
+    getMinHeight: () =>
+      MIN_WIDGET_HEIGHT +
+      selectedListFloorRows(shouldAutoGrow(state.node), state.selection.loras.length) * SELECTED_ROW_PX
   })
   // Excludes from the workflow JSON -- a DIFFERENT flag from options.serialize
   // above (notebook.js's attachDomWidget() header explains why both exist).
@@ -969,30 +1078,157 @@ function renderSelected(state) {
   } else {
     for (const row of rows) state.selectedListEl.append(buildSelectedRowEl(state, row))
   }
+  syncFixedClass(state) // re-derived every repaint, so a Properties flip or a restore can't leave it stale
   syncSelectedGrowth(state)
 }
 
 /**
- * Owner ask 2026-08-14: the Selected section always shows every row --
- * no crop, no inner scroll. The list itself sizes to content (CSS `flex:
- * 0 0 auto`, no max-height); THIS grows the node to make the room, by the
- * row-count delta, so the browser below keeps its share and a user's own
- * manual resize (extra height) is preserved. getMinHeight() includes the
- * same per-row term, so litegraph won't let a manual shrink crop the list
- * either.
+ * Owner ask 2026-08-14: while auto-grow is ON the Selected section always
+ * shows every row -- no crop, no inner scroll. The list itself sizes to
+ * content (CSS `flex: 0 0 auto`, no max-height); THIS grows the node to
+ * make the room, by the row-count delta, so the browser below keeps its
+ * share and a user's own manual resize (extra height) is preserved.
+ * getMinHeight() includes the same per-row term, so litegraph won't let a
+ * manual shrink crop the list either.
+ *
+ * §6.13 height round (owner report 2026-08-22): with auto-grow OFF this
+ * does NOTHING to the node -- the user owns the height; the list scrolls
+ * inside its `.eps-lp-fixed` share instead. The row-count baseline is
+ * still tracked either way, so flipping back ON never replays a stale
+ * delta (the flip itself lifts to the full-list floor once, see
+ * applyAutoGrowChange).
  */
 function syncSelectedGrowth(state) {
   const count = state.selection.loras.length
   const previous = state.lastSelectedCount
   state.lastSelectedCount = count
+  if (!shouldAutoGrow(state.node)) return
   if (previous === count) return
   const node = state.node
-  // node.size is a Float32Array in current frontends -- never Array.isArray it.
+  // node.size is a Float32Array/Proxy in current frontends -- never isArray-test it.
   if (!node?.size || typeof node.setSize !== 'function') return
   const floor = typeof node.computeSize === 'function' ? node.computeSize()[1] : 0
   const delta = previous == null ? 0 : (count - previous) * SELECTED_ROW_PX
-  node.setSize([node.size[0], Math.max(node.size[1] + delta, floor)])
+  programmaticSetSize(state, [node.size[0], Math.max(node.size[1] + delta, floor)])
   node.graph?.setDirtyCanvas(true, true)
+}
+
+// --- Node height policy (§6.13 height round, file header "Height policy") ---
+
+/**
+ * Every `setSize` THIS file issues goes through here, so the onResize wrap
+ * (`installManualResizeWatch`) can tell our own growth/floor calls from
+ * the user's corner drag even when the two coincide (a fetch or a
+ * controller apply landing mid-drag). Float32Array/Proxy-safe: the size is
+ * handed to `node.setSize`, never assigned into `node.size` by index.
+ */
+function programmaticSetSize(state, size) {
+  const node = state.node
+  if (!node || typeof node.setSize !== 'function') return
+  state.programmaticResize = true
+  try {
+    node.setSize(size)
+  } finally {
+    state.programmaticResize = false
+  }
+}
+
+/** Lift the node to its computed floor (never shrink) -- the one-shot
+ * "give the full list its room" step when auto-grow comes back ON. */
+function liftToFloor(state) {
+  const node = state.node
+  if (!node?.size || typeof node.setSize !== 'function') return
+  const floor = typeof node.computeSize === 'function' ? node.computeSize()[1] : 0
+  if (!(node.size[1] < floor)) return
+  programmaticSetSize(state, [node.size[0], floor])
+  node.graph?.setDirtyCanvas(true, true)
+}
+
+/** The `.eps-lp-fixed` root class carries the OFF-mode CSS (Selected list
+ * `max-height: 50%` + scroll, browser takes the rest). A class toggle
+ * only -- no canvas drawing, so it renders identically in Vue mode (§7.5). */
+function syncFixedClass(state) {
+  state.root?.classList.toggle('eps-lp-fixed', !shouldAutoGrow(state.node))
+}
+
+/**
+ * Chains `node.onResize` (after installMinWidth's wrap, before the DOM
+ * widget's own) to catch the user's corner drag: the verdict is
+ * `isManualResize` -- litegraph's canvas drag sets
+ * `app.canvas.resizing_node` to the node for the whole gesture and routes
+ * every move through `node.setSize` -> `onResize`, so that identity check
+ * is the manual signal, and `state.programmaticResize` excludes our own
+ * calls. Any other onResize (core's post-load `setSize(max(saved,
+ * computed))`, another extension, configure) is NOT the user's hand.
+ */
+function installManualResizeWatch(state) {
+  const node = state.node
+  if (!node || node.__epsLpResizeWatchInstalled) return
+  node.__epsLpResizeWatchInstalled = true
+  const originalOnResize = node.onResize
+  node.onResize = function (size) {
+    try {
+      if (isManualResize(node, app.canvas, state.programmaticResize)) noteManualResize(state)
+    } catch (error) {
+      api.warn('manual-resize watch failed', error)
+    }
+    return originalOnResize?.call(this, size)
+  }
+}
+
+/** The user just dragged the node's corner: the height is theirs now.
+ * Flips `PROP_AUTO_GROW` off through `setProperty` (fires
+ * onPropertyChanged -> applyAutoGrowChange, so the class syncs the same
+ * way a Properties flip does) and says so once, naming the way back. */
+function noteManualResize(state) {
+  const node = state.node
+  if (!shouldAutoGrow(node)) return
+  if (typeof node.setProperty === 'function') {
+    node.setProperty(PROP_AUTO_GROW, false)
+  } else {
+    node.properties = node.properties || {}
+    node.properties[PROP_AUTO_GROW] = false
+  }
+  syncFixedClass(state)
+  toast(
+    'info',
+    'LoRA Picker height is now fixed',
+    `The Selected list scrolls instead of growing the node. Right-click → Properties → "${PROP_AUTO_GROW}" turns growth back on.`
+  )
+}
+
+/**
+ * Registers the property (addProperty every attach -- the `library_loras`
+ * precedent: a saved value wins later via configure's property loop) and
+ * chains `onPropertyChanged` so a Properties flip -- or a restore of a
+ * saved `false` -- re-syncs the CSS class, and a flip back ON lifts the
+ * node to the full-list floor once (addProperty itself never fires the
+ * handler; cross_sweep.js's wireModeVisibility rationale).
+ */
+function wireAutoGrowProperty(state) {
+  const node = state.node
+  if (typeof node.addProperty === 'function') node.addProperty(PROP_AUTO_GROW, true, 'boolean')
+  const original = node.onPropertyChanged
+  node.onPropertyChanged = function (name, value, prevValue) {
+    const result = original?.call(this, name, value, prevValue)
+    if (name === PROP_AUTO_GROW) {
+      try {
+        applyAutoGrowChange(state, value, prevValue)
+      } catch (error) {
+        api.warn('auto-grow property change failed', error)
+      }
+    }
+    return result
+  }
+}
+
+/** onPropertyChanged body for PROP_AUTO_GROW: class first (both
+ * directions), then -- only on a real OFF -> ON flip -- the one-shot lift.
+ * configure's property loop passes no prevValue (reads as ON), so a
+ * restored `true` never lifts a just-restored size. */
+function applyAutoGrowChange(state, value, prevValue) {
+  syncFixedClass(state)
+  if (autoGrowFromValue(value) && !autoGrowFromValue(prevValue)) liftToFloor(state)
 }
 
 /** One Selected row -- rendered from the widget value alone (file header);
@@ -2058,6 +2294,9 @@ export function attachPickerPanel(node) {
     // from the feed on every load. addProperty every attach is the
     // resolution.js pattern -- a saved value wins later via configure.
     if (typeof node.addProperty === 'function') node.addProperty('library_loras', 0, 'number')
+    // §6.13 height round: `Auto-grow with selection` (default true) +
+    // the onPropertyChanged chain that keeps the CSS class honest.
+    wireAutoGrowProperty(state)
     hideSelectionWidget(state)
     buildUi(state)
     wireConfigureReload(state)

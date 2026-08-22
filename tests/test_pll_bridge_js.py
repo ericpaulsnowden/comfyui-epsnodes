@@ -827,3 +827,39 @@ def test_root_only_find_helper_is_marked_unused_by_the_picker(source: str) -> No
     picker = (REPO_ROOT / "web" / "lora_library" / "picker.js").read_text(encoding="utf-8")
     assert "pll.findPllNodes" not in picker
     assert "pll.probePll(null" not in picker
+
+
+# ------------------------------------------------- v0.72.1: click keeps scroll, # feedback
+
+
+def test_state_list_rebuild_restores_scroll_and_select_only_repaints(
+    controller_source: str,
+) -> None:
+    """Owner report 2026-08-22: clicking a state scrolled a long list away.
+    The rebuild remembers/restores scrollTop, and a plain selection no
+    longer rebuilds at all -- it toggles the active class on the rows in
+    the DOM (`_repaintSelection`), falling back to the rebuild only when
+    the selected row is not in the DOM."""
+    render = _method_body(controller_source, "_renderStateList()")
+    assert "const scrollTop = listEl.scrollTop" in render
+    save_at = render.index("const scrollTop = listEl.scrollTop")
+    assert save_at < render.index("listEl.replaceChildren()")
+    assert "if (scrollTop) listEl.scrollTop = scrollTop" in render
+    repaint = _method_body(controller_source, "_repaintSelection()")
+    assert "row.classList.toggle('llsc-row-active', active)" in repaint
+    assert "if (selected && !seen) this._renderStateList()" in repaint
+    silently = _method_body(controller_source, "_setSetValueSilently(label)")
+    assert "this._repaintSelection()" in silently
+    assert "this._renderStateList()" not in silently
+
+
+def test_new_group_is_announced_with_toasts(controller_source: str) -> None:
+    """`# name` creation, duplicate and missing-name outcomes all toast --
+    the status line is hidden by default, so the flow used to be silent."""
+    body = _method_body(controller_source, "async _doNewCategory()")
+    created = "this._toast('info', NODE_TITLE, `Group \"${name}\" created"
+    exists = "this._toast('warn', NODE_TITLE, `A group named \"${name}\" already exists.`)"
+    assert created in body
+    assert exists in body
+    assert "Enter a group name after the #" in body
+

@@ -863,7 +863,17 @@ queue. It drives a **genuine, untouched `Power Lora Loader (rgthree)`**:
   state follows, one `_saveLayout`; empty/duplicate names refused on the
   status line; the list never rebuilds under an open editor), and a row/
   group dropped back onto its own slot is a no-op — no render, no POST
-  (`_isNoopStateDrop`, the Notebook's `isNoopMove` twin). All existing behavior — apply-on-select, composite
+  (`_isNoopStateDrop`, the Notebook's `isNoopMove` twin).
+  **v0.73.0 (owner reports 2026-08-22):** (1) a click on a state no longer
+  rebuilds the list — `_setSetValueSilently` → `_repaintSelection` toggles
+  the active class on the rows already in the DOM (fallback to the rebuild
+  only when the selected row is not there), and `_renderStateList` itself
+  remembers/restores `listEl.scrollTop` across `replaceChildren()` (it used
+  to clamp to 0 on every rebuild — a long list scrolled away on every
+  click); (2) `# name` group creation, a duplicate name and a missing name
+  are announced with toasts (the status line is hidden by default, so the
+  flow was silent; on pre-v0.67.2 builds a poll landing right after could
+  also momentarily paint the new group away). All existing behavior — apply-on-select, composite
   capture/apply with target `All`, selective Push, `Show status`,
   serialize-based capture (v0.14.1), own-menu version-proof apply (v0.13.0) —
   is PRESERVED; only the state-selection UI changes from a dropdown to the
@@ -2732,6 +2742,36 @@ model/CLIP/VAE from one checkpoint must never drift out of alignment.
   machines.
 
 ## §6.13 `EPSLoraPicker` (display: "EPS LoRA Picker") — folder-scoped browse, favorites, recents → stack
+
+**Height policy (v0.73.0, owner report 2026-08-22: "it should not change
+the overall height of the node once a user sets it … the top section
+should scroll in those instances and split the height with the bottom
+section").** A boolean node property **`Auto-grow with selection`**
+(default `true`, serialized with the node) decides who owns the height.
+ON = the v0.61.1 behavior: the Selected list sizes to content and
+`syncSelectedGrowth` grows/shrinks the NODE per row. OFF = the user owns
+it: the node never moves on a selection change (a controller apply
+included), the Selected list scrolls inside a `max-height: 50%` share
+(`.eps-lp-fixed` root class) and the browser takes the rest, and
+`getMinHeight` floors at header + `FIXED_SELECTED_ROWS` (2) rows + browser
+minimum so the node can actually be shrunk. The flip to OFF is AUTOMATIC
+on a manual corner drag: `installManualResizeWatch` chains `onResize` and
+counts a resize as the user's exactly when litegraph's canvas drag is the
+caller (`app.canvas.resizing_node === node` — set for the whole gesture by
+LGraphCanvas's resize `onDragStart`, cleared in its `finally`; every
+`onDrag` goes through `node.setSize` → `onResize`) AND the call is not one
+of ours (`state.programmaticResize`, raised by `programmaticSetSize` around
+every setSize this file issues) — so core's post-load floor, `configure`'s
+size restore and other extensions' `setSize` are never mistaken for the
+user's hand. Properties turns it back ON (`onPropertyChanged` chained; an
+OFF→ON flip lifts the node to the full-list floor once, then growth
+resumes); a toast names the way back the moment it flips off. Vue-nodes
+mode: the Vue resize handle never sets `resizing_node`, so there the
+switch is the Properties toggle only (§7.5's known-degraded renderer) —
+never a heuristic that could misread a load as a drag. Rig-verified:
+grows on add (338→416), a simulated corner drag flips the property and
+holds the height through a full-library apply (376→376) with the Selected
+list scrolling, flipping the property back lifts to the floor (520).
 
 **v0.68.1 audit round:** (1) the `GET picker` feed fetch is SHARED across
 every picker node — one in-flight promise + a 3 s TTL (`fetchFeed`); every

@@ -172,7 +172,7 @@ the loader stays the loader, this node just moves whole configurations
   count). Hover a header for a ✕ that removes just the group — its states
   move back to the ungrouped list, nothing is deleted. Groups and order are
   saved in your shared library folder, so every machine sees the same
-  arrangement. **Double-click a group header to rename it** (since v0.68.1) — type the new name, Enter saves, Escape cancels; the group keeps its states and its open/collapsed state. Dropping a state back where it already was changes (and saves) nothing. Group changes show up in your other open State Controllers right away, and saving, renaming or deleting a state no longer triggers a full node-definition reload — the `/object_info` round trip and its two toasts are gone, so Save responds immediately.
+  arrangement. **Double-click a group header to rename it** (since v0.68.1) — type the new name, Enter saves, Escape cancels; the group keeps its states and its open/collapsed state. Dropping a state back where it already was changes (and saves) nothing. Creating a group toasts a confirmation, clicking a state keeps the list where you scrolled it (v0.73.0), and group changes show up in your other open State Controllers right away, and saving, renaming or deleting a state no longer triggers a full node-definition reload — the `/object_info` round trip and its two toasts are gone, so Save responds immediately.
 - **The Apply Set dropdown shows state names now** — a state named
   "State 1" reads as `State 1`, not its `state-1` file slug (what executes
   is unchanged).
@@ -247,6 +247,12 @@ favorites or recently-used anywhere in the ecosystem.
   — visible, never silently dropped. Your library's total lora count
   lives in right-click → Properties (`library_loras`) and the breadcrumb
   root's tooltip.
+- **Your height sticks (v0.73.0).** A fresh picker grows per selected row
+  as before; the moment you drag the node's corner yourself it stops
+  growing — the Selected list scrolls within about half the panel and the
+  browser keeps the rest, so a State Controller applying a big state never
+  stretches the node. Right-click → Properties → `Auto-grow with selection`
+  turns growth back on.
 - **Click a lora once to select it, again to load it** — the second click
   does exactly what ＋ Add does, and the just-added lora stays
   highlighted. Added loras always arrive enabled.
