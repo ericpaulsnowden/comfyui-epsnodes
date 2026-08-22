@@ -89,6 +89,7 @@ image) is treated as an opaque value, exactly like §6.4/§6.9.
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 from typing import Any
@@ -221,9 +222,16 @@ class EPSCrossSweep:
     # is the only §8-safe way to add one -- inserting next to `clip` would
     # silently repoint every saved workflow's image/text/save_prefix wires.
     # §8 tail-append law: model_low (v0.66.0, WAN pairing) lands LAST.
-    RETURN_TYPES = ("MODEL", "CLIP", "IMAGE", "STRING", "STRING", "STRING", "VAE", "MODEL")
-    RETURN_NAMES = ("model", "clip", "image", "text", "save_prefix", "label", "vae", "model_low")
-    OUTPUT_IS_LIST = (True, True, True, True, True, True, True, True)
+    # v0.70.0 (provenance M2, FORMAT §6.10/§6.14): `run_info` is TAIL-APPENDED
+    # (§8 -- outputs are positional): one JSON per run, index-aligned with
+    # every other output, for EPS Save Image to bake a pre-soloed workflow.
+    RETURN_TYPES = (
+        "MODEL", "CLIP", "IMAGE", "STRING", "STRING", "STRING", "VAE", "MODEL", "STRING",
+    )
+    RETURN_NAMES = (
+        "model", "clip", "image", "text", "save_prefix", "label", "vae", "model_low", "run_info",
+    )
+    OUTPUT_IS_LIST = (True,) * 9
     INPUT_IS_LIST = True
     OUTPUT_TOOLTIPS = (
         "This run's model -- only when the optional model input is wired; "
@@ -248,6 +256,10 @@ class EPSCrossSweep:
         "Switcher's models_low). Blocks its consumers on runs where no "
         "low model was wired.",
 
+        "This run's provenance, as JSON: its token, this node's id and its "
+        "place in the set. Wire into EPS Save Image's run_info input and "
+        "every saved file carries a workflow already soloed to the run that "
+        "made it -- drop the image to recreate just that one.",
     )
     FUNCTION = "run"
     DESCRIPTION = (
@@ -275,7 +287,9 @@ class EPSCrossSweep:
         "Every saved filename ends with a run token like m2_i1_t3 (sweep "
         "step 2, image 1, text 3); paste that token into solo_run to "
         "re-run exactly that one image out of the whole set -- clear it "
-        "to run everything again."
+        "to run everything again. Wire run_info into EPS Save Image and "
+        "every saved file carries its own pre-soloed workflow: drop the "
+        "image onto the canvas to recreate just that one."
     )
 
     @classmethod
@@ -892,6 +906,19 @@ class EPSCrossSweep:
                 else [*base_parts, label_component, pair_component]
             )
             out["save_prefix"].append("/".join(prefix_parts))
+            out["run_info"].append(
+                json.dumps(
+                    {
+                        "format": 1,
+                        "token": token,
+                        "node": str(_unwrap_hidden(unique_id)) if unique_id is not None else None,
+                        "run": len(out["run_info"]) + 1,
+                        "total": total,
+                        "steps": steps,
+                        "pairs": len(pair_rows),
+                    }
+                )
+            )
             out["vae"].append(
                 vaes[_sweep_index(len(vaes), v_idx)] if vae_wired else run_blocker
             )

@@ -4,6 +4,7 @@ Pure-Python contract tests: sweep/pair elements are opaque sentinels."""
 
 from __future__ import annotations
 
+import json
 import subprocess
 import sys
 from pathlib import Path
@@ -61,7 +62,7 @@ def run(**overrides):
 class TestCrossSweep:
     def test_strength_major_order_owner_decision(self) -> None:
         """Outer loop = sweep step: all pairs at step 0, then all at step 1."""
-        models, clips, images, texts, prefixes, labels, _vaes, _mlow1 = run()
+        models, clips, images, texts, prefixes, labels, _vaes, _mlow1, _run_info1 = run()
         assert models == ["m0", "m0", "m1", "m1"]
         assert clips == ["c0", "c0", "c1", "c1"]
         assert images == ["iA", "iB", "iA", "iB"]
@@ -74,7 +75,7 @@ class TestCrossSweep:
         ]
 
     def test_owner_scale_11_steps_x_8_pairs_is_88(self) -> None:
-        models, _clips, images, _texts, prefixes, _labels, _v, _mlow2 = run(
+        models, _clips, images, _texts, prefixes, _labels, _v, _mlow2, _run_info2 = run(
             model=[f"m{s}" for s in range(11)],
             clip=[f"c{s}" for s in range(11)],
             label=[f"lora_{s / 10:.1f}" for s in range(11)],
@@ -87,7 +88,7 @@ class TestCrossSweep:
         assert images[:8] == [f"i{p}" for p in range(8)]
 
     def test_names_and_base_folder_shape_the_save_prefix(self) -> None:
-        _m, _c, _i, _t, prefixes, _l, _v, _mlow3 = run(
+        _m, _c, _i, _t, prefixes, _l, _v, _mlow3, _run_info3 = run(
             name=["Portrait A", "Landscape B"],
             base_folder=["shoot42/tuesday"],
         )
@@ -99,7 +100,7 @@ class TestCrossSweep:
         ]
 
     def test_hostile_characters_are_sanitized_out_of_paths(self) -> None:
-        _m, _c, _i, _t, prefixes, _l, _v, _mlow4 = run(
+        _m, _c, _i, _t, prefixes, _l, _v, _mlow4, _run_info4 = run(
             label=['lo/ra:0*0', "ok"],
             name=['pa\\ir?"one', "x"],
             base_folder=["../weird/../base"],
@@ -110,7 +111,7 @@ class TestCrossSweep:
             assert bad not in first
 
     def test_empty_name_falls_back_to_stable_pair_number(self) -> None:
-        _m, _c, _i, _t, prefixes, _l, _v, _mlow5 = run(name=["", "RealName"])
+        _m, _c, _i, _t, prefixes, _l, _v, _mlow5, _run_info5 = run(name=["", "RealName"])
         assert prefixes[0].endswith("/pair_01_m1_p1")
         assert prefixes[1].endswith("/RealName_m1_p2")
 
@@ -126,7 +127,7 @@ class TestCrossSweep:
     def test_length_one_sweep_inputs_broadcast_across_steps(self) -> None:
         """A single constant VAE/label across an N-step sweep is legitimate:
         length-1 sweep inputs repeat for every step instead of clamping."""
-        models, _c, _i, _t, prefixes, labels, vaes, _mlow6 = run(
+        models, _c, _i, _t, prefixes, labels, vaes, _mlow6, _run_info6 = run(
             label=["shared"], vae=["v_shared"]
         )
         assert models == ["m0", "m0", "m1", "m1"]  # steps still 2
@@ -138,7 +139,7 @@ class TestCrossSweep:
         """The 2026-08-03 report's EXPECTED shape, pinned: only model wired
         sweep-side, multiply mode -> 4 x (2 x 2) = 16 runs, every model
         distinct in strength-major blocks of 4."""
-        models, _c, images, texts, _p, _l, _v, _mlx1 = EPSCrossSweep().run(
+        models, _c, images, texts, _p, _l, _v, _mlx1, _run_info7 = EPSCrossSweep().run(
             model=["m1", "m2", "m3", "m4"],
             image=["iA", "iB"], text=["p1", "p2"], pair_mode="multiply",
         )
@@ -148,7 +149,7 @@ class TestCrossSweep:
         assert texts[:4] == ["p1", "p2", "p1", "p2"]
 
     def test_mismatched_pair_side_uses_min_and_survives(self) -> None:
-        _m, _c, images, texts, _p, _l, _v, _mlow7 = run(image=["iA", "iB", "iC"])
+        _m, _c, images, texts, _p, _l, _v, _mlow7, _run_info8 = run(image=["iA", "iB", "iC"])
         assert images == ["iA", "iB", "iA", "iB"]
         assert texts == ["tA", "tB", "tA", "tB"]
 
@@ -174,11 +175,11 @@ class TestClassShape:
     def test_category_and_flags(self) -> None:
         assert EPSCrossSweep.CATEGORY == "EPSNodes"
         assert EPSCrossSweep.INPUT_IS_LIST is True
-        assert EPSCrossSweep.OUTPUT_IS_LIST == (True,) * 8
+        assert EPSCrossSweep.OUTPUT_IS_LIST == (True,) * 9
 
     def test_output_shape(self) -> None:
         assert EPSCrossSweep.RETURN_TYPES == (
-            "MODEL", "CLIP", "IMAGE", "STRING", "STRING", "STRING", "VAE", "MODEL"
+            "MODEL", "CLIP", "IMAGE", "STRING", "STRING", "STRING", "VAE", "MODEL", "STRING"
         )
         assert EPSCrossSweep.RETURN_NAMES == (
             "model",
@@ -189,6 +190,7 @@ class TestClassShape:
             "label",
             "vae",
             "model_low",
+            "run_info",
         )
 
     def test_inputs(self) -> None:
@@ -199,8 +201,8 @@ class TestClassShape:
         # multiplier), and `pair_mode` was added -- all additive, §8-safe.
         assert set(spec["required"]) == {"text"}
         assert set(spec["optional"]) == {
-            "model", "model_low", "clip", "label", "name", "base_folder", "image", "vae", "pair_mode",
-            "sweep_mode", "solo_run",
+            "model", "model_low", "clip", "label", "name", "base_folder", "image", "vae",
+            "pair_mode", "sweep_mode", "solo_run",
         }
         assert spec["optional"]["label"][1]["forceInput"] is True
         assert spec["required"]["text"][1]["forceInput"] is True
@@ -240,7 +242,7 @@ class TestVaePassthrough:
     wired from EPS Checkpoint Switcher's vae output."""
 
     def test_wired_vae_rides_index_aligned_with_its_step(self) -> None:
-        _m, _c, _i, _t, _p, labels, vaes, _mlow8 = run(vae=["v0", "v1"])
+        _m, _c, _i, _t, _p, labels, vaes, _mlow8, _run_info9 = run(vae=["v0", "v1"])
         # strength-major: two pairs at step 0, then two at step 1
         assert vaes == ["v0", "v0", "v1", "v1"]
         assert labels == ["lora_0.0", "lora_0.0", "lora_0.5", "lora_0.5"]
@@ -248,7 +250,7 @@ class TestVaePassthrough:
     def test_unwired_vae_emits_one_blocker_per_run(
         self, fake_execution_blocker: type
     ) -> None:
-        _m, _c, _i, _t, _p, _l, vaes, _mlow9 = run()
+        _m, _c, _i, _t, _p, _l, vaes, _mlow9, _run_info10 = run()
         assert len(vaes) == 4
         assert all(isinstance(v, fake_execution_blocker) for v in vaes)
         assert all(v.message is None for v in vaes)  # silent skip, no error event
@@ -258,7 +260,7 @@ class TestVaePassthrough:
         across an N-step sweep is the legitimate common case (a lora sweep
         doesn't change the VAE), so length-1 broadcasts instead of
         clamping the whole sweep to one step."""
-        models, _c, _i, _t, _p, _l, vaes, _mlow10 = run(vae=["v0"])  # 1 vae, 2 steps
+        models, _c, _i, _t, _p, _l, vaes, _mlow10, _run_info11 = run(vae=["v0"])  # 1 vae, 2 steps
         assert models == ["m0", "m0", "m1", "m1"]  # steps stay 2
         assert vaes == ["v0"] * 4
 
@@ -282,7 +284,9 @@ class TestTextOnlyPairs:
     multi-select Prompt Notebook, no input images anywhere)."""
 
     def test_pairs_are_the_texts_alone(self) -> None:
-        models, _c, _i, texts, prefixes, _l, _v, _mlow11 = run(image=None, text=["t0", "t1", "t2"])
+        (models, _c, _i, texts, prefixes, _l, _v, _mlow11, _run_info12) = (
+            run(image=None, text=["t0", "t1", "t2"])
+        )
         assert len(models) == 6  # 2 steps x 3 texts
         assert texts == ["t0", "t1", "t2", "t0", "t1", "t2"]
         assert len(prefixes) == 6
@@ -290,7 +294,9 @@ class TestTextOnlyPairs:
     def test_image_output_blocks_per_run_not_whole_node(
         self, fake_execution_blocker: type
     ) -> None:
-        models, _c, images, texts, _p, _l, _v, _mlow12 = run(image=None, text=["t0", "t1"])
+        (models, _c, images, texts, _p, _l, _v, _mlow12, _run_info13) = (
+            run(image=None, text=["t0", "t1"])
+        )
         assert models == ["m0", "m0", "m1", "m1"]  # real values still flow
         assert all(isinstance(i, fake_execution_blocker) for i in images)
         assert len(images) == len(texts) == 4  # index alignment preserved
@@ -298,7 +304,7 @@ class TestTextOnlyPairs:
     def test_text_only_with_wired_vae_composes(self) -> None:
         # the headline flow: Checkpoint Switcher (model+clip+vae+label) x
         # Notebook texts, no images
-        models, _clips, _i, _texts, prefixes, _labels, vaes, _mlow13 = run(
+        models, _clips, _i, _texts, prefixes, _labels, vaes, _mlow13, _run_info14 = run(
             model=["mA", "mB"],
             clip=["cA", "cB"],
             vae=["vA", "vB"],
@@ -313,7 +319,9 @@ class TestTextOnlyPairs:
         assert prefixes[3] == "ckptB/Landscape_m2_t2"
 
     def test_names_still_shape_save_prefix_in_text_only_mode(self) -> None:
-        _m, _c, _i, _t, prefixes, _l, _v, _mlow14 = run(image=None, text=["x"], name=[])
+        (_m, _c, _i, _t, prefixes, _l, _v, _mlow14, _run_info15) = (
+            run(image=None, text=["x"], name=[])
+        )
         assert prefixes == ["lora_0.0/pair_01_m1_t1", "lora_0.5/pair_01_m2_t1"]
 
 
@@ -332,7 +340,9 @@ class TestNoSweepPureMultiplier:
         cp_images = ["i1", "i1", "i1", "i2", "i2", "i2"]
         cp_texts = ["tA", "tB", "tC", "tA", "tB", "tC"]
         cp_names = ["A", "B", "", "A", "B", ""]
-        models, clips, out_images, out_texts, prefixes, labels, vaes, _mlx2 = EPSCrossSweep().run(
+        (models, clips, out_images, out_texts, prefixes, labels, vaes, _mlx2, _run_info16) = (
+            EPSCrossSweep().run(
+        )
             text=texts, image=images, name=names, pair_mode="multiply"
         )
         assert out_images == cp_images
@@ -354,13 +364,13 @@ class TestNoSweepPureMultiplier:
         assert all(isinstance(v, fake_execution_blocker) for v in vaes)
 
     def test_no_sweep_save_prefix_has_no_step_level(self) -> None:
-        _m, _c, _i, _t, prefixes, _l, _v, _mlx3 = EPSCrossSweep().run(
+        _m, _c, _i, _t, prefixes, _l, _v, _mlx3, _run_info17 = EPSCrossSweep().run(
             text=["tA"], image=["i1"], base_folder=["shoot"], pair_mode="multiply"
         )
         assert prefixes == ["shoot/pair_01_i1_t1"]
 
     def test_no_sweep_paired_zips_like_before(self) -> None:
-        _m, _c, images, texts, prefixes, _l, _v, _mlx4 = EPSCrossSweep().run(
+        _m, _c, images, texts, prefixes, _l, _v, _mlx4, _run_info18 = EPSCrossSweep().run(
             text=["tA", "tB"], image=["i1", "i2"], pair_mode="paired"
         )
         assert images == ["i1", "i2"]
@@ -378,7 +388,7 @@ class TestMultiplyWithSweep:
     """v0.49.0's new capability: sweep x images x texts in ONE node."""
 
     def test_three_axis_counts_and_order(self) -> None:
-        models, _clips, images, texts, _prefixes, _labels, _v, _mlow15 = run(
+        models, _clips, images, texts, _prefixes, _labels, _v, _mlow15, _run_info19 = run(
             image=["i1", "i2"], text=["tA", "tB", "tC"], pair_mode="multiply"
         )
         # 2 steps x (2 images x 3 texts) = 12 runs, strength-major outer,
@@ -390,7 +400,7 @@ class TestMultiplyWithSweep:
         assert images[6:] == images[:6]
 
     def test_multiply_names_align_per_text_not_per_pair(self) -> None:
-        _m, _c, _i, _t, prefixes, _l, _v, _mlow16 = run(
+        _m, _c, _i, _t, prefixes, _l, _v, _mlow16, _run_info20 = run(
             image=["i1", "i2"], text=["tA", "tB"], name=["portrait", "landscape"],
             pair_mode="multiply",
         )
@@ -403,7 +413,7 @@ class TestMultiplyWithSweep:
     def test_default_pair_mode_is_paired(self) -> None:
         """Omitting pair_mode (every workflow saved before v0.49.0) keeps
         the zip semantics -- 2x2 stays 2 pairs, not 4."""
-        _m, _c, images, _texts, _p, _l, _v, _mlow17 = run()
+        _m, _c, images, _texts, _p, _l, _v, _mlow17, _run_info21 = run()
         assert len(images) == 4  # 2 steps x 2 PAIRS
 
 
@@ -411,7 +421,7 @@ class TestPartialSweepGroup:
     """v0.49.0: each unwired sweep member blocks its own output only."""
 
     def test_label_unwired_falls_back_to_step_numbers(self, fake_execution_blocker) -> None:
-        models, _clips, _i, _t, prefixes, labels, _v, _mlow18 = run(label=None)
+        models, _clips, _i, _t, prefixes, labels, _v, _mlow18, _run_info22 = run(label=None)
         assert models == ["m0", "m0", "m1", "m1"]  # steps from model/clip alone
         assert all(isinstance(lb, fake_execution_blocker) for lb in labels)
         assert [p.split("/")[0] for p in prefixes] == [
@@ -419,7 +429,7 @@ class TestPartialSweepGroup:
         ]
 
     def test_model_unwired_blocks_model_output_only(self, fake_execution_blocker) -> None:
-        models, clips, _i, _t, _prefixes, labels, _v, _mlow19 = run(model=None)
+        models, clips, _i, _t, _prefixes, labels, _v, _mlow19, _run_info23 = run(model=None)
         assert all(isinstance(m, fake_execution_blocker) for m in models)
         assert clips == ["c0", "c0", "c1", "c1"]
         assert labels == ["lora_0.0", "lora_0.0", "lora_0.5", "lora_0.5"]
@@ -457,11 +467,11 @@ class TestConsumedButUnwiredGuard:
     def test_unwired_but_unconsumed_keeps_blocker_behavior(self, fake_execution_blocker) -> None:
         # vae unwired, only the IMAGE output (slot 2, which IS wired via the
         # image input) is consumed -> no error, vae emits blockers as before.
-        *_, vaes = run(prompt=[self._prompt_consuming(2)], unique_id=["7"])
+        *_, vaes, _mlow, _run_info = run(prompt=[self._prompt_consuming(2)], unique_id=["7"])
         assert all(isinstance(v, fake_execution_blocker) for v in vaes)
 
     def test_no_prompt_available_stays_out_of_the_way(self, fake_execution_blocker) -> None:
-        *_, vaes = run()  # direct call, no prompt/unique_id -- exactly the old behavior
+        *_, vaes, _mlow, _run_info = run()  # direct call, no prompt/unique_id -- exactly the old behavior
         assert all(isinstance(v, fake_execution_blocker) for v in vaes)
 
 
@@ -831,3 +841,32 @@ class TestSoloRunV0670:
         assert "m9_p9" in msg
         assert "4 runs" in msg          # steps x pairs of the helper set
         assert "m1_p1" in msg           # a real token to copy from
+
+
+class TestRunInfoV0700:
+    """v0.70.0 provenance M2: `run_info` is a ninth, tail-appended output --
+    one JSON per run, index-aligned with save_prefix -- for EPS Save Image
+    to bake a pre-soloed workflow (FORMAT §6.10/§6.14)."""
+
+    def test_is_the_tail_output_and_json_per_run(self) -> None:
+        assert EPSCrossSweep.RETURN_NAMES[-1] == "run_info"
+        assert EPSCrossSweep.RETURN_TYPES[-1] == "STRING"
+        out = run()
+        infos = [json.loads(raw) for raw in out[8]]
+        assert len(infos) == len(out[4]) == 4
+        for k, (info, prefix) in enumerate(zip(infos, out[4], strict=True)):
+            assert info["format"] == 1
+            assert prefix.endswith("_" + info["token"])
+            assert info["run"] == k + 1 and info["total"] == 4
+            assert info["steps"] == 2 and info["pairs"] == 2
+
+    def test_node_is_the_execution_id_when_known(self) -> None:
+        out = run(unique_id="5:3")
+        assert json.loads(out[8][0])["node"] == "5:3"
+        assert json.loads(run()[8][0])["node"] is None
+
+    def test_solo_emits_one_run_info(self) -> None:
+        out = run(solo_run="m2_p1")
+        assert len(out[8]) == 1
+        info = json.loads(out[8][0])
+        assert info["token"] == "m2_p1" and info["total"] == 1

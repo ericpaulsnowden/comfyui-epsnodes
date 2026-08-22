@@ -16,6 +16,7 @@ import * as frameSaver from './eps_image/frame_saver.js'
 import * as distributor from './eps_image/distributor.js'
 import * as checkpointSwitcher from './eps_image/checkpoint_switcher.js'
 import * as crossSweep from './eps_image/cross_sweep.js'
+import * as saveImage from './eps_image/save_image.js'
 
 const PREFIX = '[eps_image]'
 const REPO_URL = 'https://github.com/ericpaulsnowden/comfyui-epsnodes'
@@ -117,6 +118,7 @@ app.registerExtension({
     safely('distributor.init', () => distributor.init?.())
     safely('checkpointSwitcher.init', () => checkpointSwitcher.init?.())
     safely('crossSweep.init', () => crossSweep.init?.())
+    safely('saveImage.init', () => saveImage.init?.()) // §6.14: filename-token solo on drop
   },
 
   /** Fires once per node instance; each attach is a no-op for other types. */

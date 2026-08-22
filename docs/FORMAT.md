@@ -2136,6 +2136,13 @@ deletion:
 
 ### §6.10 `EPSCrossSweep` (display: "EPS Run Multiplier") — sweep × pairs, organized
 
+**`run_info` output (v0.70.0, provenance M2):** a ninth, TAIL-APPENDED
+output (§8) — one JSON per run, index-aligned with every other output:
+`{"format": 1, "token", "node" (this node's execution id), "run", "total",
+"steps", "pairs"}`. Wire it into §6.14 EPS Save Image's `run_info` and
+every saved file carries a workflow pre-soloed to its run. It has no
+backing input, so it is never a dead output; the estimator ignores it.
+
 **v0.68.1 audit round:** the estimator's graph watch is re-verified on every
 recompute (§7.5: core's subgraph enter/exit restores `graph.onNodeAdded/
 onNodeRemoved` and silently dropped the one-shot wrapper) and a multiplier
@@ -2867,6 +2874,64 @@ apply/text helpers, so it drops in anywhere Apply LoRA Set does.
   (`POST /lora_library/picker/favorites_order {"files"}` — full-list
   replace, unknown names ignored, missing-from-list favorites appended
   at the end so two machines' concurrent edits can't drop stars).
+
+## §6.14 `EPSSaveImage` (display: "EPS Save Image") — Save Image with provenance baked in
+
+NON-lora node in `eps_image/`, category "EPSNodes", class id `EPSSaveImage`
+frozen once shipped (§8). Provenance roadmap M2 (`docs/ROADMAP-run-
+provenance.md`; owner goal 2026-08-18: "drop a single image from a set
+onto comfyui and recreate just that image"). Shipped v0.70.0.
+
+- **Signature = core `SaveImage`** — `images` (IMAGE), `filename_prefix`
+  (STRING, default `EPS`), hidden `prompt`/`extra_pnginfo`; `OUTPUT_NODE`,
+  one `images` passthrough output, `ui.images` results, counter naming via
+  `folder_paths.get_save_image_path`. With `run_info` UNWIRED it IS Save
+  Image: the standard `prompt` + `workflow` chunks, nothing baked — a
+  drop-in replacement.
+- **`run_info` (STRING, optional, forceInput)** — the Run Multiplier's new
+  tail output (§6.10 v0.70.0): one JSON per run, index-aligned with
+  `save_prefix`; core maps this node per run so each file gets ITS run's
+  info. Shape: `{"format": 1, "token", "node" (the multiplier's execution
+  id — `"5"` at the root, `"5:3"` inside a subgraph), "run", "total",
+  "steps", "pairs"}`.
+- **Baking (`bake_solo`)**: the multiplier node is found in the `workflow`
+  chunk by path id (`find_node_in_workflow`: root `nodes`, then
+  `definitions.subgraphs[uuid].nodes` per `:` segment — a subgraph instance
+  node's `type` is its definition's uuid; editing the DEFINITION soloes
+  every instance, the right answer for "recreate this one image") and its
+  `widgets_values[solo_run index]` is set to the token — the index is
+  DERIVED from `EPSCrossSweep.INPUT_TYPES` (`solo_widget_index`, every
+  non-forceInput widget in declaration order = 3 today), a short saved
+  array is padded with the widget defaults first; the `prompt` chunk's
+  `inputs.solo_run` is set too; an `eps_run` text chunk carries the
+  run_info verbatim plus `"baked": true|false`. Both chunk dicts are
+  DEEP-COPIED — the queue's shared `extra_pnginfo` is never mutated (every
+  mapped run bakes its own). A multiplier missing from both chunks logs a
+  warning and saves the standard chunks (`baked: false`), never fails the
+  queue. No torch/PIL/ComfyUI import at module scope.
+- **Drop-to-recreate**: ComfyUI's own loader does everything for a baked
+  file — the `workflow` chunk loads with `solo_run` already set, the
+  readout shows `Solo <token> — 1 of N runs`, queue → that one image.
+- **Filename fallback (`web/eps_image/save_image.js`, owner question
+  2026-08-21 "will that new node work on existing images?")** — for files
+  that predate M2 but carry the M1 token in their name (every
+  `save_prefix`-named file since v0.67.0): `init()` wraps `app.handleFile`
+  ONCE (§7.5: chained, never replaced); after the frontend has loaded an
+  IMAGE file's workflow, `tokenFromFileName` reads the trailing
+  `<token>_NNNNN_` grammar (`m{N}` (+`_v{M}`) then `p{N}` | `i{N}_t{N}` |
+  `t{N}`) and `decideFilenameSolo` picks: `baked` (a multiplier already
+  carries that token — leave it), `apply` (exactly one multiplier with an
+  empty `solo_run` — set it via value + callback so the readout recomputes,
+  toast), `ambiguous` (several unsoloed — toast the token to paste by hand,
+  never a guess), `none`. Pre-v0.67.0 files have no per-run identity and
+  load the full workflow as before. PNG metadata must survive (a re-encode,
+  strip or JPEG conversion loses the chunks; the filename path needs the
+  name intact).
+- **Pins**: `tests/test_save_image.py` (parse, derived index, path-id
+  lookup through definitions, baking both chunks, a real PNG round trip
+  reading the chunks back, plain-save parity, missing multiplier →
+  `baked: false`), `tests/test_save_image_js.py` (token grammar, verdicts,
+  the chained `handleFile` wrap).
 
 ## §7 Frontend surfaces
 

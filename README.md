@@ -5,7 +5,7 @@ live in **plain files you own**. Everything appears under **EPSNodes** in
 the node browser and Settings. It started as a LoRA family and has grown
 beyond it — image-flow utilities now live here too.
 
-## The fifteen nodes
+## The sixteen nodes
 
 No third-party packs required — every node here runs on ComfyUI alone;
 the Lora Loader State Controller is built to extend rgthree-comfy, but only
@@ -29,12 +29,13 @@ section further down; this is the map.
 | [**EPS Resolution**](#eps-resolution-shipped) | Image-first resize + size in one node: target size (with a drag pad), four resize modes, and the original image + both sets of dimensions passed through. Named size presets are shared across your machines — tick several and one Run resizes once per preset. Wire in extra images and they all come out at the same target size in one Run. | Nothing — drag-and-drop with core nodes. |
 | [**EPS Image Grid**](#eps-image-grid-shipped) | Collects images across separate Runs into a buffer that survives restarts, shows them as a thumbnail grid, and fans the whole set out on demand. Add whole batches at once — a multiselect picker, a folder importer, or one big drag. | Nothing — drag-and-drop with core nodes. |
 | [**EPS Run Multiplier**](#eps-run-multiplier-shipped) | Multiplies whatever you wire in: a sweep group (LoRA Iterator, or Checkpoint Switcher with its VAEs) × images × texts, in one node — or just images × texts with no sweep at all — with per-run save paths so big runs land in tidy folders. | Any of: EPS LoRA Iterator / EPS Checkpoint Switcher / EPS Model + VAE Switchers (`models`→`model`, `models_low`→`model_low`, `vaes`→`vae`) on the sweep side; an Image Grid or Image Switcher plus a multi-select Prompt Notebook on the pair side. |
+| [**EPS Save Image**](#eps-save-image-shipped) | Save Image with provenance baked in: wire the Run Multiplier's `run_info` and every saved file carries a workflow already soloed to the run that made it — drop the image onto the canvas to recreate just that one. Without `run_info` it is exactly Save Image. | Nothing — a drop-in for the core Save Image node; `run_info` from EPS Run Multiplier unlocks the recreate-one-image drop. |
 | [**EPS Frame Saver**](#eps-frame-saver-shipped) | Loads a video by path — or takes one from a wire — lets you scrub or play to a frame, and outputs that frame as an image. | A video file on the ComfyUI machine, or any `VIDEO` output in the workflow. |
 
 > **Status: pre-release.** Contracts live in
 > [docs/FORMAT.md](docs/FORMAT.md). Want to see the nodes working? Every
 > workflow in [examples/](examples/) is annotated on the canvas and ready
-> to load — nine example files between them cover fourteen of the fifteen
+> to load — nine example files between them cover fifteen of the sixteen
 > nodes (the new LoRA Picker's example is still to come), some
 > sharing a graph. Most just want a Run; the LoRA trio (Apply LoRA Set,
 > LoRA Iterator, and the rgthree-dependent Lora Loader State Controller) only
@@ -837,6 +838,33 @@ always a mistake; the same rule covers `model`/`clip`/`image`/`label`).
   queue — deliberate-use / overnight territory, exactly as intended. A
   fixed seed repeats across every run, so strength and pair are the only
   variables moving.
+
+
+## EPS Save Image (shipped)
+
+`EPSNodes → EPS Save Image`: a drop-in for the core **Save Image** node —
+same `images` + `filename_prefix`, same files, same counter — that bakes
+**provenance** into every PNG. Wire **EPS Run Multiplier's `run_info`
+output** into its `run_info` input (and `save_prefix` into
+`filename_prefix`, as before) and each saved file carries its own copy of
+the workflow with `solo_run` **already set to the run that made it**. Drop
+the image onto the canvas: the whole workflow loads, the Run Multiplier's
+readout reads `Solo m2_i1_t3 — 1 of 24 runs`, and queueing recreates
+exactly that one image (the multiplier is found even inside a subgraph).
+Leave `run_info` unwired and it behaves exactly like Save Image.
+
+- **Existing images** (saved through the core Save Image since v0.67.0, so
+  their names carry the run token): dropping one still helps — the pack
+  reads the token off the file name and, when the loaded workflow has one
+  Run Multiplier with an empty `solo_run`, fills it in with a toast (with
+  several multipliers it tells you the token to paste instead of guessing).
+  Images from before the token update have no per-run identity and load
+  the full workflow as always.
+- **Caveat:** the file must keep its PNG metadata (re-encoding, stripping
+  or converting to JPEG loses it), and the filename fallback needs the name
+  intact. What gets recreated is the run **with your library as it is
+  now** — the next provenance milestone (M3, pinning) records the values
+  themselves.
 
 ## EPS Frame Saver (shipped)
 

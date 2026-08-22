@@ -2,7 +2,7 @@
   "id": "00000000-0000-0000-0000-000000000000",
   "revision": 0,
   "last_node_id": 10,
-  "last_link_id": 7,
+  "last_link_id": 8,
   "nodes": [
     {
       "id": 1,
@@ -323,6 +323,20 @@
           "name": "vae",
           "type": "VAE",
           "links": null
+        },
+        {
+          "name": "model_low",
+          "type": "MODEL",
+          "links": null,
+          "shape": 6
+        },
+        {
+          "name": "run_info",
+          "type": "STRING",
+          "links": [
+            8
+          ],
+          "shape": 6
         }
       ],
       "properties": {
@@ -338,7 +352,7 @@
     },
     {
       "id": 6,
-      "type": "SaveImage",
+      "type": "EPSSaveImage",
       "pos": [
         120,
         380
@@ -365,6 +379,11 @@
             "name": "filename_prefix"
           },
           "link": 7
+        },
+        {
+          "name": "run_info",
+          "type": "STRING",
+          "link": 8
         }
       ],
       "outputs": [
@@ -376,7 +395,9 @@
         }
       ],
       "title": "Saves 8 - filenames prove the pairing",
-      "properties": {},
+      "properties": {
+        "Node name for S&R": "EPSSaveImage"
+      },
       "widgets_values": [
         "ComfyUI"
       ]
@@ -468,7 +489,7 @@
       "outputs": [],
       "properties": {},
       "widgets_values": [
-        "## The multiply\n\nWith nothing on the sweep side, every image runs with every prompt - that is `pair_mode: multiply`, the default (the dropdown stays hidden until you flip the `Show mode options` property): 2 x 4 = **8**. The `save_prefix` output carries each prompt's title through, which is what names the files below."
+        "## The multiply\n\nWith nothing on the sweep side, every image runs with every prompt - that is `pair_mode: multiply`, the default (the dropdown stays hidden until you flip the `Show mode options` property): 2 x 4 = **8**. The `save_prefix` output carries each prompt's title through, which is what names the files below.\n\nThe saver is **EPS Save Image** (a drop-in for Save Image) with the multiplier's `run_info` wired in: every saved file carries a workflow already soloed to the run that made it -- drop one of the 8 images back onto the canvas and the workflow loads ready to recreate just that image (v0.70.0)."
       ],
       "color": "#432",
       "bgcolor": "#653"
@@ -529,6 +550,14 @@
       4,
       6,
       1,
+      "STRING"
+    ],
+    [
+      8,
+      5,
+      8,
+      6,
+      2,
       "STRING"
     ]
   ],

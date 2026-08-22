@@ -95,7 +95,7 @@ Core's own `prompt` chunk stays for compatibility.
 - Manual recreate already works here: read the token off a filename, type
   it into solo.
 
-### M2 — EPS Save Image + baked workflows (drop-to-recreate, current values)
+### M2 — EPS Save Image + baked workflows (drop-to-recreate, current values) — SHIPPED v0.70.0 (2026-08-21; plus the filename-token drop fallback for pre-M2 files)
 - `run_info` output on the multiplier (STRING list, one JSON per run).
 - EPS Save Image node: SaveImage-compatible signature + optional
   `run_info`; writes token-named files, `eps_run` chunk, and the baked
