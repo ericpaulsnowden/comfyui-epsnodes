@@ -43,13 +43,20 @@
  * against the server widgets.
  *
  * Self-healing staleness ("tolerates the id disappearing", FORMAT.md §6.2):
- * the widget's `options.values` function is itself the refresh point — it
- * is a live, litegraph-invoked function (called on every draw via
- * `ComboWidget._displayValue`'s `t()` call, same as the `refreshSetsCache`
- * idiom above and controller.js's own dynamic combos), so it doubles as a
- * validity check: if the tagged PLL id no longer resolves to a live node,
- * it resets the widget to "(any)" right there — no separate heartbeat or
- * `onDrawForeground` hook needed.
+ * if the tagged PLL id no longer resolves to a live node, the widget resets
+ * to "(any)". Until v0.68.0 that check lived INSIDE the widget's
+ * `options.values` function, which litegraph evaluated on EVERY canvas draw
+ * (`ComboWidget._displayValue` calls `values()` whenever no
+ * `options.getOptionLabel` is installed -- read from the installed bundle)
+ * -- so every Apply node walked the whole workflow per frame, and wrote a
+ * widget value from inside a getter. v0.68.1: `values()` is PURE and only
+ * runs on dropdown open (both renderers; the Vue select re-evaluates
+ * `options.values()` in its open handler), an identity `getOptionLabel`
+ * keeps the per-draw display off the graph walk, and the heal moved to
+ * `healMirrorsTags()`, driven by a chained, install-once `onNodeRemoved`
+ * watch on every graph (`installMirrorsGraphWatch()`, controller.js's
+ * `installGraphNodeWatch` idiom by hand) plus one deferred pass after each
+ * `nodeCreated` (a workflow load restores the tag value AFTER this hook).
  *
  * 2026-07-20 addition: FORMAT.md §6.2's `strength_scale` hide-by-default
  * (owner: "this should be turned off by default ... by default the
@@ -146,17 +153,39 @@ let cachedValues = ['None']
  * source, ComboWidget.ts `_displayValue`/`onClick`). */
 let cachedNames = new Map()
 let lastFetchStarted = 0
-let fetchInFlight = false
+/** The in-flight GET's promise, or null (v0.68.1: was a boolean). */
+let fetchInFlight = null
+/** v0.68.1: a FORCED refresh arrived while a fetch was in flight -- that
+ * fetch may predate the CRUD it is meant to reflect, so one more runs. */
+let refetchQueued = false
 
 /** One-shot guard for `wrapComfyComboRefresh()`. */
 let comboRefreshWrapped = false
 
 async function refreshSetsCache(force = false) {
-  const now = Date.now()
-  if (fetchInFlight) return
-  if (!force && now - lastFetchStarted < REFRESH_THROTTLE_MS) return
-  lastFetchStarted = now
-  fetchInFlight = true
+  if (fetchInFlight) {
+    // v0.68.1: `if (fetchInFlight) return` used to come BEFORE `force` was
+    // honored, so the CRUD event's forced refresh could no-op against a
+    // throttled open-time refetch that was already in flight (and already
+    // stale) -- `valuesIncluding`/`installSetValues` then kept serving the
+    // old list. A forced caller now waits for that fetch and queues exactly
+    // one more; an unforced caller still just leaves.
+    if (!force) return
+    refetchQueued = true
+    return fetchInFlight
+  }
+  if (!force && Date.now() - lastFetchStarted < REFRESH_THROTTLE_MS) return
+  do {
+    refetchQueued = false
+    lastFetchStarted = Date.now()
+    fetchInFlight = fetchSetsOnce()
+    await fetchInFlight
+    fetchInFlight = null
+  } while (refetchQueued)
+}
+
+/** One GET of `/lora_library/sets` into the module cache; never throws. */
+async function fetchSetsOnce() {
   try {
     const data = await api.getJson('/lora_library/sets')
     const slugs = (data.sets ?? []).map((row) => row.slug)
@@ -164,8 +193,6 @@ async function refreshSetsCache(force = false) {
     cachedNames = new Map((data.sets ?? []).map((row) => [row.slug, row.name || row.slug]))
   } catch (error) {
     api.warn('refreshing set list failed (keeping previous combo values)', error)
-  } finally {
-    fetchInFlight = false
   }
 }
 
@@ -260,13 +287,70 @@ function attachMirrorsWidget(node) {
   const widget = node.addWidget('combo', MIRRORS_WIDGET_NAME, MIRRORS_ANY_VALUE, () => {}, {
     values: [MIRRORS_ANY_VALUE] // placeholder; replaced below once `widget` exists — same two-step idiom attachApplySetBehavior() already uses for the `set` combo.
   })
-  widget.options.values = () => {
-    const candidates = findPllCandidates()
+  // v0.68.1: PURE -- rebuilt on dropdown open (both renderers), no writes.
+  // The vanished-loader self-heal that used to live here moved to
+  // `healMirrorsTags()` (file header): a values() that wrote `widget.value`
+  // ran on every canvas draw, because...
+  widget.options.values = () => [MIRRORS_ANY_VALUE, ...findPllCandidates().map((c) => c.label)]
+  // ...ComboWidget's `_displayValue` evaluates `values()` per draw when no
+  // `getOptionLabel` is installed (installed bundle, read 2026-08-21). The
+  // value IS the label here, so an identity mapper keeps the per-draw
+  // display O(1) and leaves the graph walk to the open path only.
+  widget.options.getOptionLabel = (value) => (value == null ? '' : String(value))
+}
+
+/** v0.68.1: the `mirrors loader` self-heal (FORMAT.md §6.2 "tolerates the
+ * id disappearing") -- every Apply node whose tag names a loader that no
+ * longer resolves falls back to "(any)". One workflow walk for ALL Apply
+ * nodes, run from the graph watch below, never from a draw. */
+function healMirrorsTags() {
+  const liveIds = new Set(findPllCandidates().map((c) => String(c.id)))
+  for (const node of applySetNodes()) {
+    const widget = (node.widgets ?? []).find((w) => w.name === MIRRORS_WIDGET_NAME)
+    if (!widget) continue
     const id = pllIdFromLabel(widget.value)
-    if (id != null && !candidates.some((c) => String(c.id) === id)) {
-      widget.value = MIRRORS_ANY_VALUE // tagged PLL vanished — fall back to "(any)" (FORMAT.md §6.2)
+    if (id != null && !liveIds.has(id)) widget.value = MIRRORS_ANY_VALUE
+  }
+}
+
+/** One-tick coalescer for `healMirrorsTags()` -- `onNodeRemoved` fires once
+ * per node, and a workflow switch removes every node of the old graph. */
+let mirrorsHealQueued = false
+function scheduleMirrorsHeal() {
+  if (mirrorsHealQueued) return
+  mirrorsHealQueued = true
+  setTimeout(() => {
+    mirrorsHealQueued = false
+    try {
+      if (app.graph) healMirrorsTags()
+    } catch (error) {
+      api.warn('mirrors-tag heal failed', error)
     }
-    return [MIRRORS_ANY_VALUE, ...candidates.map((c) => c.label)]
+  }, 0)
+}
+
+/** Chained, install-once `onNodeRemoved` wrap on every graph in the
+ * workflow (subgraphs included -- their add/remove hooks fire only on the
+ * subgraph itself). controller.js's `installGraphNodeWatch` technique,
+ * duplicated by hand per this file's no-cross-import rule; its own flag so
+ * the two never collide. Re-armed from every `nodeCreated` so a subgraph
+ * created later is watched before a loader inside it can vanish. */
+function installMirrorsGraphWatch() {
+  if (!app.graph || typeof api.walkGraphs !== 'function') return
+  for (const graph of api.walkGraphs(app.graph)) {
+    if (!graph || graph.__epsSetsMirrorsWatch) continue
+    graph.__epsSetsMirrorsWatch = true
+    const original = graph.onNodeRemoved
+    graph.onNodeRemoved = function (...args) {
+      let result
+      try {
+        result = original?.apply(this, args)
+      } catch (error) {
+        api.warn('original onNodeRemoved threw', error)
+      }
+      scheduleMirrorsHeal()
+      return result
+    }
   }
 }
 
@@ -330,6 +414,16 @@ export function attachApplySetBehavior(node) {
   // ComfyUI's own Python-declared widgets already exist, which is always
   // true by the time `nodeCreated` fires.
   attachMirrorsWidget(node)
+  // v0.68.1: the heal that used to ride on every draw now rides on node
+  // removal, plus one deferred pass per created node -- `nodeCreated` runs
+  // BEFORE `configure()` restores the tag value on a workflow load, so the
+  // tick lands after the whole (synchronous) load, loaders included.
+  try {
+    installMirrorsGraphWatch()
+    scheduleMirrorsHeal()
+  } catch (error) {
+    api.warn('mirrors-tag watch install failed', error)
+  }
 
   // FORMAT.md §6.2 (2026-07-20): `Show strength scale` node property, default
   // false — right-click Properties reveals the widget. addProperty() alone
@@ -366,28 +460,28 @@ export function attachApplySetBehavior(node) {
  * machine editing the shared library, curl, etc.). */
 export function initSetsFreshness() {
   window.addEventListener('lora_library:sets-changed', async () => {
+    // v0.68.1 (owner: "saving a state is slow / non-responsive"): this
+    // handler used to ALSO await `app.refreshComboInNodes()` -- which on the
+    // installed frontend (1.48.7, `reloadNodeDefs`) re-fetches /object_info
+    // (every pack's INPUT_TYPES re-run server-side), re-registers EVERY node
+    // def, rewrites every combo of every node, rebuilds the Vue node-def
+    // store and raises two toasts -- on the main thread, right after Save.
+    // Its premise ("the Vue renderer builds its selects from the node
+    // DEFINITIONS") is false on this frontend: the Vue select evaluates
+    // `widget.options.values()` on open (WidgetSelect `handleOpenChange` ->
+    // `refreshOptions` -> `resolveRawValues`), i.e. THIS module's function
+    // and THIS cache. The forced cache refresh below is the whole job.
     await refreshSetsCache(true)
-    // ComfyUI's own refresh is the AUTHORITATIVE path: it refetches
-    // /object_info (our INPUT_TYPES re-reads the sets dir on every call, so
-    // the list comes back current) and rewrites every combo in every node
-    // AND the node definitions the Vue renderer builds its selects from.
-    // Our module cache alone cannot reach that second half.
-    await refreshCombosEverywhere()
   })
+  // `app.graph` exists by `setup()`; arm the mirrors-tag watch on the root
+  // (and any subgraphs already present) before any node can be removed.
+  try {
+    installMirrorsGraphWatch()
+  } catch (error) {
+    api.warn('mirrors-tag watch install failed', error)
+  }
   wrapComfyComboRefresh()
   refreshSetsCache(true)
-}
-
-/** `app.refreshComboInNodes()`, guarded — it is async, it can throw on a
- * flaky /object_info, and it must never take the CRUD path down with it.
- * Re-installs our values functions afterwards (see `installSetValues`). */
-async function refreshCombosEverywhere() {
-  try {
-    if (typeof app.refreshComboInNodes === 'function') await app.refreshComboInNodes()
-  } catch (error) {
-    api.warn('refreshComboInNodes failed (combo may lag until the next open)', error)
-  }
-  for (const node of applySetNodes()) installSetValues(node)
 }
 
 /**

@@ -233,8 +233,10 @@ class EPSCrossSweep:
         "This run's image.",
         "This run's text.",
         "A ready-to-wire Save Image filename_prefix for this run: "
-        "base_folder/<sweep label>/<pair name> (no sweep wired: "
-        "base_folder/<pair name>).",
+        "base_folder/<sweep label>/<pair name>_<run token> (no sweep "
+        "wired: base_folder/<pair name>_<run token>). The run token "
+        "(v0.67.0, e.g. m2_i1_t3) names this exact run and is what "
+        "solo_run accepts.",
         "This run's label, unchanged from the sweep side -- only when the "
         "optional label input is wired; unwired, this output blocks "
         "whatever consumes it.",
@@ -287,10 +289,11 @@ class EPSCrossSweep:
                         "tooltip": (
                             "The texts to run -- wire a multi-select EPS "
                             "Prompt Notebook's text output straight in; "
-                            "set pair_mode to multiply to cross them "
-                            "with the images, or keep paired when image "
-                            "and text are already index-aligned. "
-                            "Wire-only."
+                            "they are crossed with the images by default "
+                            "(pair_mode multiply). Reveal pair_mode via "
+                            "the Show mode options property to pick "
+                            "paired when image and text are already "
+                            "index-aligned. Wire-only."
                         ),
                     },
                 ),
@@ -570,6 +573,11 @@ class EPSCrossSweep:
             dead_outputs.append("label (wire a label source into the label input)")
         if 6 in consumed and not vae_wired:
             dead_outputs.append("vae (wire a VAE source into the vae input)")
+        if 7 in consumed and not model_low_wired:
+            # Audit 2026-08-21: slot 7 (v0.66.0) was missing from this guard.
+            dead_outputs.append(
+                "model_low (wire EPS Model Switcher's models_low into the model_low input)"
+            )
         if dead_outputs:
             raise ValueError(
                 "EPS Run Multiplier: these outputs are wired downstream but their "
@@ -763,7 +771,13 @@ class EPSCrossSweep:
         # output; a None would crash them and an empty list breaks
         # slice_dict (§6.9). Imported lazily, once, only when needed.
         run_blocker = None
-        if text_only or not (model_wired and clip_wired and label_wired and vae_wired):
+        # model_low_wired included (audit 2026-08-21): with the four classic
+        # sweep inputs all wired and only model_low unwired, no blocker was
+        # built and the model_low output emitted bare None per run -- the
+        # exact crash-a-consumer shape this block exists to prevent.
+        if text_only or not (
+            model_wired and model_low_wired and clip_wired and label_wired and vae_wired
+        ):
             from comfy_execution.graph import ExecutionBlocker
 
             run_blocker = ExecutionBlocker(None)

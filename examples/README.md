@@ -29,7 +29,7 @@ Two files here are **not** workflows — don't drag them onto the canvas:
 | [`eps-test-model-clip-vae-switchers.json`](eps-test-model-clip-vae-switchers.json) | Model / CLIP / VAE switchers as three independent axes | checkpoint | no — the two loaders ship with nothing chosen |
 | [`eps-test-run-multiplier.json`](eps-test-run-multiplier.json) | 2 images × 4 prompts = 8 runs | none | yes — copy `eps-cross-test-prompts.md` into your library first |
 | [`eps-test-cross-sweep.json`](eps-test-cross-sweep.json) | 3 lora strengths × 8 image/prompt pairs = 24 runs, foldered by strength | checkpoint, LoRA | no — pick a checkpoint and a saved lora state |
-| [`eps-full-pipeline.json`](eps-full-pipeline.json) | Ten of the fourteen nodes stitched into one graph — the full tour | checkpoint, LoRA, rgthree | no — pick a checkpoint, images, a video path, prompts, and a lora state |
+| [`eps-full-pipeline.json`](eps-full-pipeline.json) | Ten of the fifteen nodes stitched into one graph — the full tour | checkpoint, LoRA, rgthree | no — pick a checkpoint, images, a video path, prompts, and a lora state |
 
 ---
 
@@ -42,7 +42,10 @@ Frame Saver → Preview Image. Click **Browse…**, pick a video, scrub with the
 transport strip under the preview (start / −5 / −1 / play / +1 / +5, or type a
 frame number), press Run, and that exact frame comes out as an image.
 Browse works only in a browser on the ComfyUI machine; from another computer,
-select the node and paste the full path instead.
+select the node and paste the full path (Ctrl/Cmd+V) instead — the path bar
+itself is read-only. Since v0.60.0 the node also has an optional `video`
+input: wire any `VIDEO` output (Load Video, a generated clip) into it and the
+wire wins over the path.
 
 The path ships **empty** on purpose — a path off someone else's machine is
 useless, and this node never copies your video into ComfyUI's `input` folder
@@ -167,18 +170,20 @@ files.
 **Needs:** [`eps-cross-test-prompts.md`](eps-cross-test-prompts.md) copied into
 your library folder. No checkpoint.
 
-Proves **2 images × 4 prompts = 8** (EPS Run Multiplier, `pair_mode: multiply`, nothing on its sweep side): two Load Image nodes → EPS Image Switcher →
+Proves **2 images × 4 prompts = 8** (EPS Run Multiplier in its default `pair_mode: multiply` — the dropdown is hidden behind the `Show mode options` property — with nothing on its sweep side): two Load Image nodes → EPS Image Switcher →
 EPS Run Multiplier → Save Image, with the crossed `name` output driving
 `filename_prefix` so the filenames themselves show the pairing.
 
 Expected output — 8 files, each prompt appearing exactly twice:
 
 ```
-Neon City_00001_.png   Golden Hour_00001_.png   Ink Sketch_00001_.png   Pastel Studio_00001_.png
-Neon City_00002_.png   Golden Hour_00002_.png   Ink Sketch_00002_.png   Pastel Studio_00002_.png
+Neon City_i1_t1_00001_.png   Golden Hour_i1_t2_00001_.png   Ink Sketch_i1_t3_00001_.png   Pastel Studio_i1_t4_00001_.png
+Neon City_i2_t1_00001_.png   Golden Hour_i2_t2_00001_.png   Ink Sketch_i2_t3_00001_.png   Pastel Studio_i2_t4_00001_.png
 ```
 
-`_00001_` = the first image, `_00002_` = the second. Without EPS Run
+The run token in each name says which image: `_i1_` = the first, `_i2_` =
+the second (`tN` = the prompt). Since v0.67.0 every file carries its own
+token, so the `_00001_` counter no longer tells the two apart. Without EPS Run
 Multiplier ComfyUI would zip the two lists and give you 4 files, three of
 them reusing the last picture. No checkpoint, lora, or sampling involved —
 it just moves images around, so it runs anywhere in seconds.
@@ -200,7 +205,7 @@ Expected output:
 
 ```
 output/eps_sweeptest/
-  <loraname>_0.0/   Neon City_00001_.png  Golden Hour_00001_.png  … (8 files)
+  <loraname>_0.0/   Neon City_m1_i1_t1_00001_.png  Golden Hour_m1_i1_t2_00001_.png  … (8 files)
   <loraname>_0.5/   … (8 files)
   <loraname>_1.0/   … (8 files)
 ```
@@ -221,7 +226,7 @@ lora state are the only things standing between this file and a real run.
 lora state, and [rgthree-comfy](https://github.com/rgthree/rgthree-comfy) for
 the state-controller corner.
 
-Ten of the fourteen nodes stitched into one complex workflow. This is the
+Ten of the fifteen nodes stitched into one complex workflow. This is the
 tour, not the starting point — if you want to understand one node, the small
 `eps-test-*.json` files above are far quicker. The four switcher nodes
 (Checkpoint / Model / CLIP / VAE) don't appear here at all; they have their
@@ -245,8 +250,9 @@ The graph, stage by stage (numbered groups + notes on the canvas):
 5. **Multiply & Generate** — EPS Run Multiplier multiplies sweep steps ×
    pairs (strength-major), then img2img sampling (fixed seed 42, denoise
    0.6) saves via `save_prefix` into
-   `output/eps_demo/<lora>_<strength>/<PromptName>_00001_.png` — one folder
-   per strength.
+   `output/eps_demo/<lora>_<strength>/<PromptName>_m1_i1_t1_00001_.png` — one
+   folder per strength, every file stamped with its run token (sweep step /
+   image / text).
 6. **Distributor → branches** — the decoded result fans out through an EPS
    Distributor: `out_1` to the Save Image (still using the Run Multiplier's folder
    path), `out_2` to a preview, `out_3` spare. Switch a socket off to drop

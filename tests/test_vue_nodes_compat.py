@@ -142,6 +142,12 @@ def test_vue_mode_warning_is_wired_and_once_only() -> None:
     assert "=== true" in body, "an absent settings store must read as OFF"
     for node_type in ("EPSDistributor", "EPSResolution"):
         assert node_type in body, f"{node_type} draws its controls; must be covered"
+    # v0.68.1 wording: EPS Resolution's pad/readout is an addDOMWidget canvas
+    # (renders under Vue); its real Vue gaps are the canvas-only cosmetic
+    # passthrough-output hide (drawSlots) and the modifier-click multi-preset
+    # ContextMenu -- the toast must not claim its readout is hand-drawn.
+    assert "size readouts" not in body
+    assert "canvas-only hooks" in body
     # The switcher family (EPSSwitcher + the Model/CLIP/VAE siblings, which
     # share switcher.js's hand-drawn toggles) must be DERIVED from that
     # module's registry, never re-listed here: the hand-written list missed

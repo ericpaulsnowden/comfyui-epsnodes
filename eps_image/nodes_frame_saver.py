@@ -31,6 +31,7 @@ from __future__ import annotations
 import contextlib
 import logging
 import os
+from pathlib import Path
 from typing import Any
 
 # Plain module name, not the old `as video` alias: run()'s new `video`
@@ -140,6 +141,29 @@ class EPSFrameSaver:
                 ),
             },
         }
+
+    @classmethod
+    def IS_CHANGED(cls, video_path: str = "", frame: int = 0, video: Any = None) -> Any:
+        """Cache key (audit 2026-08-21): this node had NO IS_CHANGED, so with
+        an unchanged `video_path`/`frame` core served run 1's frame forever
+        even after the file on disk was re-rendered -- the class docstring's
+        "re-opens and re-decodes on every execution" only held for the first
+        one. Core's own LoadVideo fingerprints the file's mtime; the pack's
+        Notebook uses mtime+size (`_file_token`) for the same reason. A wired
+        `video` input is a tensor whose own upstream cache key already
+        covers it (path mode is ignored then, mirroring run()), so NaN keeps
+        the default never-cache posture core applies to unfingerprinted
+        inputs only when nothing path-like is in play."""
+        if video is not None:
+            return float("nan")
+        path = str(video_path or "").strip()
+        if not path:
+            return "missing"
+        try:
+            stat = Path(path).stat()
+        except OSError:
+            return "missing"
+        return f"{stat.st_mtime}:{stat.st_size}:{frame}"
 
     def run(self, video_path: str, frame: int = 0, video: Any = None) -> tuple[Any, int, int]:
         # WIRED WINS (FORMAT.md §6.7 v0.60.0): an explicit wire beats a

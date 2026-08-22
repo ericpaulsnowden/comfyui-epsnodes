@@ -681,6 +681,74 @@
  * checks) -- a delete's manifest rewrite racing a batch's own unlocked
  * read-modify-write is the identical atomicity hazard the busy-guard
  * already exists to prevent between two adds.
+ *
+ * ---- 2026-08-21 perf round: stable per-frame cache keys, real thumbnails,
+ * one /list per run, no phantom prompt inputs (owner: "big performance
+ * issues" on large buffers; read-only audit against the rig's core v0.31.1
+ * + frontend 1.48.7) ----
+ *
+ * Four findings, four fixes, all display-side (the node's widgets/outputs
+ * order, the buffer format and `ui.images` are untouched):
+ *  1. **Every Collect run re-downloaded and re-encoded every UNCHANGED
+ *     frame.** `imageUrlForRef` keyed each thumbnail URL on `generation` =
+ *     the MANIFEST mtime, which moves on every append/remove/clone -- so N
+ *     buffered frames got N brand-new URLs per run, and core's
+ *     `/view?preview=` answered each with a FULL-resolution PIL
+ *     `Image.open` + `img.save(webp)` (NO resize -- `server.py`). Fix:
+ *     every ref-returning route (`/list`/`/add`/`/remove`/`/clone`) now
+ *     carries a per-frame `mtime` (`image_grid_store.with_frame_mtimes`,
+ *     int ms like `generation`), and `cacheKeyForRef` prefers it for `v=`
+ *     -- a frame's URL changes only when THAT file is rewritten (a
+ *     post-Clear re-add that reuses its name -- the exact case `generation`
+ *     existed for -- still gets a fresh key). `generation` stays the
+ *     fallback for refs without one (core's own `ui.images` in the
+ *     `executed` merge; an older backend). `setNodeImagesFromRefs` REUSES
+ *     an existing `Image` whose URL is unchanged instead of rebuilding every
+ *     `<img>` when refs differ, and ADOPTS a newly-learned key in place
+ *     (same `node.images` array -- the store identity, see
+ *     `syncCoreOutputStore`) so a frame first shown keyless via the
+ *     `executed` merge is never re-fetched when the forced `/list` brings
+ *     its mtime. A changed mtime for a same-named frame (a Clear + re-add
+ *     from another browser) is a content change and rebuilds that image.
+ *  2. **Every repaint drew N full-resolution images.** Core's grid renderer
+ *     (`useImagePreviewWidget.ts` `renderPreview`) `drawImage`s every
+ *     `node.imgs[i]` per frame while the node is visible, and
+ *     `/view?preview=` never resizes. Fix: the pack's own
+ *     `GET /eps_image_grid/frame?uuid=&filename=&preview=webp;80&v=`
+ *     (`thumbUrlForRef`) serves a DOWNSCALED (256 px long edge) disk-cached
+ *     webp (`image_grid_store.thumbnail_path`, built off the event loop;
+ *     `Cache-Control: immutable` because the URL carries the key). The
+ *     `preview` toggle mirrors core's `/view` ON PURPOSE: core's own
+ *     Open/Save/Copy Image menu items take `img.src`, DELETE `preview`, and
+ *     re-fetch (`litegraphService.ts` `getExtraMenuOptions`) -- without
+ *     `preview` the frame route hands back the full PNG, so all three keep
+ *     working at full resolution. Core's single-image view never scales UP
+ *     (`Math.min(scaleX, scaleY, 1)`), so a focused 256 px thumb would draw
+ *     tiny: `installFocusedFullResSwap` wraps `onDrawBackground` (called
+ *     every draw, BEFORE the preview widget paints -- `LGraphCanvas.ts`
+ *     `drawNodeShape` vs `drawNodeWidgets`) and swaps a LOADED full-res
+ *     `Image` into `node.imgs[imageIndex]` IN PLACE while a tile is
+ *     focused, putting the thumb back the moment focus leaves (so
+ *     `is_all_same_aspect_ratio`'s compact-mode decision sees a homogeneous
+ *     grid again). A thumb that 404s (older backend; a frame PIL can't
+ *     thumbnail) degrades ONCE via `onerror` to core's `/view?preview=`
+ *     URL. `refFromImageSrc` parses the frame-route shape too, so clipspace
+ *     ref-reuse keeps working off a thumb's `.src`.
+ *  3. **Two `/list` fetches per finished run** -- `warnIfEmptyAfterRun`
+ *     did its own GET beside the forced reconcile. It now reads
+ *     `node.images` after that reconcile lands (`scheduleRefresh` resolves
+ *     `true` when a `/list` was applied). And `installExecutedMerge` no
+ *     longer schedules a forced `/list` of its own: core sends `executed`
+ *     BEFORE `finish_progress` for the same node (`execution.py`), so the
+ *     `progress_state` listener's forced reconcile always follows the merge
+ *     -- the merge's copy was a guaranteed duplicate (`pendingForce`
+ *     re-fetches rather than riding). One `/list` per finished run.
+ *  4. **Phantom prompt inputs.** `graphToPrompt` (`executionUtil.ts`)
+ *     skips a widget only on `options.serialize === false`; the three
+ *     buttons set only the INSTANCE flag (the `widgets_values` one), so
+ *     every queued prompt carried `"Clear": null, "Add images…": null,
+ *     "Add folder…": null`. Both flags now (the `resolution.js`
+ *     Save/Delete precedent, rig-caught 2026-08-14).
  */
 
 import { api } from '../../../scripts/api.js'
@@ -981,8 +1049,17 @@ async function onClearClicked(node) {
 
 function addClearButton(node) {
   if (findWidget(node, CLEAR_BUTTON_LABEL)) return
-  const widget = node.addWidget('button', CLEAR_BUTTON_LABEL, null, () => onClearClicked(node), {})
-  // See file header "Clear button" -- the top-level flag, not options.serialize.
+  // `options.serialize: false` keeps this button out of the API PROMPT
+  // (`graphToPrompt`, `executionUtil.ts`, checks ONLY that flag) -- a
+  // DIFFERENT flag from `widget.serialize` below, which keeps it out of the
+  // workflow FILE's `widgets_values` (`LGraphNode.ts`). Both are needed:
+  // with only the instance flag every queued prompt carried phantom
+  // `"Clear": null` (+ the two Add buttons) inputs for this node -- the
+  // exact `resolution.js` Save/Delete finding, rig-caught 2026-08-14.
+  const widget = node.addWidget('button', CLEAR_BUTTON_LABEL, null, () => onClearClicked(node), {
+    serialize: false
+  })
+  // See file header "Clear button" -- the top-level flag, for widgets_values.
   widget.serialize = false
   // Hover text for a frontend-added widget: `NodeTooltip.vue` prefers a
   // canvas widget's own `.tooltip` over the node def's, which is the only
@@ -1202,15 +1279,15 @@ function onAddFolderClicked(node) {
 
 function addAddImagesButton(node) {
   if (findWidget(node, ADD_IMAGES_BUTTON_LABEL)) return
-  // Copies `addClearButton` above exactly, including `widget.serialize`
-  // set on the INSTANCE (see its own citation just above -- the options-bag
-  // form sets a different flag on this fork).
+  // Copies `addClearButton` above exactly: BOTH serialize flags -- the
+  // options-bag one keeps it out of the API prompt, the instance one out
+  // of `widgets_values` (see the citation there).
   const widget = node.addWidget(
     'button',
     ADD_IMAGES_BUTTON_LABEL,
     null,
     () => onAddImagesClicked(node),
-    {}
+    { serialize: false }
   )
   widget.serialize = false
   widget.tooltip =
@@ -1288,13 +1365,14 @@ async function startFolderBatch(node, files) {
 
 function addAddFolderButton(node) {
   if (findWidget(node, ADD_FOLDER_BUTTON_LABEL)) return
-  // Same widget conventions as `addAddImagesButton`/`addClearButton`.
+  // Same widget conventions as `addAddImagesButton`/`addClearButton`
+  // (both serialize flags -- see `addClearButton`).
   const widget = node.addWidget(
     'button',
     ADD_FOLDER_BUTTON_LABEL,
     null,
     () => onAddFolderClicked(node),
-    {}
+    { serialize: false }
   )
   widget.serialize = false
   widget.tooltip =
@@ -1348,6 +1426,21 @@ function installFileInputCleanup(node) {
 
 const UPLOAD_ROUTE = '/upload/image'
 const ADD_ROUTE = '/eps_image_grid/add'
+//: 2026-08-21 perf round: the pack's own frame route (`routes_image_grid.py`
+//: `GET /eps_image_grid/frame`) -- `preview=` -> a real, DOWNSCALED, disk-
+//: cached webp thumbnail; no `preview` -> the full PNG frame. The same
+//: `preview` toggle core's `/view` uses, ON PURPOSE: core's own Open/Save/
+//: Copy Image menu items take `img.src`, DELETE `preview`, and re-fetch --
+//: so they land on the full frame, exactly as they did against `/view`.
+const FRAME_ROUTE = '/eps_image_grid/frame'
+//: The `preview=` value both URL shapes carry -- core's `Comfy.PreviewFormat`
+//: spelling. `/view` honors it as format;quality (no resize); the frame route
+//: treats ANY `preview` value as "the thumbnail".
+const PREVIEW_PARAM = 'webp;80'
+//: Every buffer ref's `subfolder` is `eps_image_grid/<grid_uuid>`
+//: (`image_grid_store.py`'s `_refs_for`) -- `uuidFromRef` peels the uuid
+//: back out to address the frame route.
+const REF_SUBFOLDER_PREFIX = 'eps_image_grid/'
 
 /**
  * node -> the last server-reported `generation` (a cache token for the
@@ -1411,8 +1504,15 @@ function noteBufferGeneration(node, data) {
  *    cacheable -- for any two calls describing the SAME buffer contents;
  *    different the moment a Clear could have replaced what a given
  *    filename points to. Defaults to `0`; see `getBufferGeneration`.
+ *    **2026-08-21:** `epoch` is now only the FALLBACK key -- a ref that
+ *    carries its own per-frame `mtime` (every `/list`/`/add`/`/remove`/
+ *    `/clone` response, `with_frame_mtimes`) is keyed on that instead
+ *    (`cacheKeyForRef`), so an UNCHANGED frame keeps its URL across
+ *    appends; the buffer-wide generation re-keyed all N frames per run.
  *
- * Exported for tests.
+ * Exported for tests. DISPLAY thumbnails no longer come from here at all
+ * -- `thumbUrlForRef` (the frame route) is the grid's image source;
+ * `preview: true` here survives as the degrade target when a thumb 404s.
  */
 export function imageUrlForRef(ref, { preview = false, epoch = 0 } = {}) {
   const params = new URLSearchParams({
@@ -1420,9 +1520,74 @@ export function imageUrlForRef(ref, { preview = false, epoch = 0 } = {}) {
     subfolder: ref.subfolder || '',
     type: ref.type || 'output'
   })
-  if (preview) params.set('preview', 'webp;80')
-  params.set('v', String(epoch))
+  if (preview) params.set('preview', PREVIEW_PARAM)
+  params.set('v', String(cacheKeyForRef(ref, epoch)))
   return api.apiURL(`/view?${params.toString()}`)
+}
+
+/**
+ * The per-frame mtime a ref carries (int ms -- `/list`/`/add`/`/remove`/
+ * `/clone` responses since the 2026-08-21 perf round, `image_grid_store.
+ * with_frame_mtimes`), or `0` when it has none: core's own `ui.images` refs
+ * (the `executed` merge), an older backend, or a frame the server couldn't
+ * stat. Pure.
+ */
+function refMtime(ref) {
+  const value = ref && ref.mtime
+  return typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : 0
+}
+
+/**
+ * The `v=` cache key for one ref: that FILE's own mtime when the ref
+ * carries it, else the buffer-wide *epoch* (`generation`) exactly as
+ * before. Per-frame first because a frame file's mtime moves only when THAT
+ * file is (re)written -- a fresh append, or a post-Clear re-add reusing its
+ * name -- while the generation moved on EVERY append and re-keyed all N
+ * unchanged frames per run (the re-download + re-encode storm the owner
+ * hit on large buffers). Pure.
+ */
+function cacheKeyForRef(ref, epoch) {
+  return refMtime(ref) || epoch || 0
+}
+
+/**
+ * The grid uuid a buffer ref belongs to, read back out of its `subfolder`
+ * (`eps_image_grid/<uuid>`, `type: output` -- `image_grid_store.py`'s
+ * `_refs_for`), or `null` for anything that isn't one of this store's own
+ * refs (a foreign `ui.images` ref, a stale shape). The uuid is validated
+ * with the same regex the backend applies, so the frame route only ever
+ * sees an addressable id. Pure.
+ */
+function uuidFromRef(ref) {
+  const subfolder = String((ref && ref.subfolder) || '')
+  if (!subfolder.startsWith(REF_SUBFOLDER_PREFIX)) return null
+  if (((ref && ref.type) || 'output') !== 'output') return null
+  const uuid = subfolder.slice(REF_SUBFOLDER_PREFIX.length)
+  return GRID_UUID_RE.test(uuid) ? uuid : null
+}
+
+/**
+ * The DISPLAY url for one buffer ref (2026-08-21 perf round): the pack's
+ * own frame route, `/eps_image_grid/frame?uuid=&filename=&preview=webp;80&
+ * v=<key>` -- a genuinely DOWNSCALED, disk-cached webp thumbnail
+ * (`image_grid_store.thumbnail_path`), served with a long `immutable`
+ * cache lifetime because the `v=` key (`cacheKeyForRef`: the frame's own
+ * mtime, else *epoch*) names one exact set of bytes. Param order is fixed
+ * (uuid, filename, preview, v); `refFromImageSrc` parses this shape back
+ * into a `{name, subfolder, type}` ref, and core's own Open/Save/Copy Image
+ * items (which delete `preview` from `img.src` and re-fetch) land on the
+ * same route's full-PNG branch. Falls back to `imageUrlForRef(ref,
+ * {preview: true})` -- core's `/view` -- for a ref this store doesn't own
+ * (`uuidFromRef` null), which is also what `createThumbImage`'s `onerror`
+ * degrades to when the frame route answers 404. Exported for tests.
+ */
+export function thumbUrlForRef(ref, { epoch = 0 } = {}) {
+  const uuid = uuidFromRef(ref)
+  if (!uuid || !ref.filename) return imageUrlForRef(ref, { preview: true, epoch })
+  const params = new URLSearchParams({ uuid, filename: ref.filename })
+  params.set('preview', PREVIEW_PARAM)
+  params.set('v', String(cacheKeyForRef(ref, epoch)))
+  return api.apiURL(`${FRAME_ROUTE}?${params.toString()}`)
 }
 
 /**
@@ -1590,30 +1755,60 @@ export function setNodeImagesFromRefs(node, refs) {
   // enlarged or grid, exactly where the user put it. Only taken when
   // `node.imgs` is a matching real array -- a fresh/restored node (imgs
   // not yet built) must still fall through and build them.
-  if (
+  //
+  // 2026-08-21: "content-identical" now also means no frame FILE changed
+  // behind its name -- a ref whose per-frame `mtime` differs from the one
+  // shown (a Clear + re-add from another browser reusing `0001.png`) is a
+  // real content change and falls through to the rebuild; a ref that
+  // merely LEARNED its mtime (first shown keyless via the `executed`
+  // merge, now keyed by the forced `/list`) adopts the key in place,
+  // without a reload -- `adoptFrameKeys`.
+  const aligned =
     Array.isArray(node.images) &&
     Array.isArray(node.imgs) &&
+    node.images.length === node.imgs.length
+  if (
+    aligned &&
     node.images.length === refs.length &&
-    node.imgs.length === refs.length &&
-    refs.every((ref, i) => refKey(ref) === refKey(node.images[i]))
+    refs.every((ref, i) => refKey(ref) === refKey(node.images[i])) &&
+    !refs.some((ref, i) => {
+      const incoming = refMtime(ref)
+      const shown = refMtime(node.images[i])
+      return incoming && shown && incoming !== shown
+    })
   ) {
+    adoptFrameKeys(node, refs)
     syncCoreOutputStore(node, node.images)
     return
   }
-  // M2: a compressed thumbnail (`preview=webp;80`), never the full-res
-  // fetch `imageUrlForRef`'s default gives -- pixel-consuming paths (Copy
-  // image, clipspace add) derive their own full-res URL from a REF
-  // instead of trusting this `.src` (see `fullResImageUrl`).
+  // Thumbnails only here (the frame route, `thumbUrlForRef`) -- never the
+  // full-res fetch `imageUrlForRef`'s default gives. Pixel-consuming paths
+  // (Copy image, clipspace add) derive their own full-res URL from a REF
+  // instead of trusting this `.src` (see `fullResImageUrl`), and the
+  // focused single-image view swaps the full frame in on its own
+  // (`installFocusedFullResSwap`).
+  //
+  // 2026-08-21: an `Image` whose url is UNCHANGED is reused as-is (same
+  // element, already decoded, no request) -- rebuilding every <img> for
+  // every ref whenever the list differed meant N new loads per append even
+  // with cacheable urls. Keyed by `refKey`; a reused element's `__epsRef`
+  // is refreshed so the focus swap always sees the current ref.
   const epoch = getBufferGeneration(node)
+  const reusable = new Map()
+  if (aligned) {
+    node.images.forEach((ref, i) => {
+      const img = node.imgs[i]
+      if (img) reusable.set(refKey(ref), img.__epsThumbOf || img)
+    })
+  }
   const imgs = refs.map((ref) => {
-    const img = new Image()
-    // Listeners attached BEFORE `.src` (belt-and-suspenders -- image loads
-    // are always async in every real browser, so ordering can't actually
-    // matter, but this matches the safer convention).
-    img.onload = () => node.setDirtyCanvas(true, true)
-    img.onerror = () => console.warn(PREFIX, `image failed to load: ${ref.filename}`)
-    img.src = imageUrlForRef(ref, { preview: true, epoch })
-    return img
+    const url = thumbUrlForRef(ref, { epoch })
+    const previous = reusable.get(refKey(ref))
+    if (previous && previous.__epsUrl === url) {
+      previous.__epsRef = ref
+      return previous
+    }
+    return createThumbImage(node, ref, url)
   })
   node.imgs = imgs
   // SAME array instance on both sides of updatePreviews' identity check --
@@ -1621,6 +1816,150 @@ export function setNodeImagesFromRefs(node, refs) {
   node.images = refs
   node.imageIndex = null
   syncCoreOutputStore(node, refs)
+}
+
+/**
+ * One thumbnail `<img>` for *ref* at *url* (`thumbUrlForRef`). Tagged with
+ * the ref and url it was built from (`__epsRef`/`__epsUrl` -- what
+ * `setNodeImagesFromRefs`' reuse and `adoptFrameKeys` key on, and what
+ * `ensureFocusedFullRes` reads to fetch the full frame). `onerror`
+ * degrades ONCE to core's `/view?preview=` for this frame -- an older
+ * backend without the frame route, or a frame PIL couldn't thumbnail
+ * (`thumbnail_path` -> 404) -- then warns if that fails too. Listeners
+ * attached BEFORE `.src` (belt-and-suspenders -- image loads are always
+ * async in every real browser, so ordering can't actually matter, but this
+ * matches the safer convention).
+ */
+function createThumbImage(node, ref, url) {
+  const img = new Image()
+  img.__epsRef = ref
+  img.__epsUrl = url
+  img.onload = () => node.setDirtyCanvas(true, true)
+  img.onerror = () => {
+    if (!img.__epsDegraded) {
+      img.__epsDegraded = true
+      img.src = imageUrlForRef(ref, { preview: true, epoch: getBufferGeneration(node) })
+      return
+    }
+    console.warn(PREFIX, `image failed to load: ${ref.filename}`)
+  }
+  img.src = url
+  return img
+}
+
+/**
+ * In-place key adoption for the unchanged-content short-circuit (2026-08-21):
+ * for every position where the INCOMING ref carries a per-frame `mtime` the
+ * SHOWN one lacks, swap the ref into `node.images[i]` (the SAME array --
+ * its identity is the store identity, `syncCoreOutputStore`; only the
+ * element changes) and re-tag the displayed thumbnail with the url it
+ * would now be built from, WITHOUT touching `.src`. The bytes are the same
+ * file either way -- a keyless ref only ever comes from core's `ui.images`
+ * in the `executed` merge, and the forced `/list` that keys it follows
+ * within the same run -- so the next rebuild reuses the element instead of
+ * re-fetching a frame that was loaded moments ago. Never downgrades: a
+ * shown ref that already has an mtime keeps it (a DIFFERENT mtime never
+ * reaches here -- the caller treats that as a content change).
+ */
+function adoptFrameKeys(node, refs) {
+  const epoch = getBufferGeneration(node)
+  for (let i = 0; i < refs.length; i++) {
+    const incoming = refs[i]
+    if (!refMtime(incoming) || refMtime(node.images[i])) continue
+    node.images[i] = incoming
+    const img = node.imgs[i]
+    const thumb = img && (img.__epsThumbOf || img)
+    if (thumb && thumb.__epsUrl) {
+      thumb.__epsRef = incoming
+      thumb.__epsUrl = thumbUrlForRef(incoming, { epoch })
+    }
+  }
+}
+
+//: node -> `{index, thumb, full}` while a full-resolution `Image` stands in
+//: for the thumbnail at `node.imgs[index]` (`ensureFocusedFullRes`).
+const focusSwapByNode = new WeakMap()
+
+/**
+ * Keeps the FOCUSED tile full-resolution while every other cell stays a
+ * thumbnail (2026-08-21 perf round; file header point 2). Core's single-
+ * image view (`useImagePreviewWidget.ts` `renderPreview`, "Draw
+ * individual") draws `node.imgs[imageIndex]` at `Math.min(dw / w, dh / h,
+ * 1)` -- it never scales UP -- so a 256 px thumb focused in a 600 px node
+ * would paint a postage stamp. Called from the `onDrawBackground` wrap
+ * (`installFocusedFullResSwap`) on every draw, BEFORE the preview widget
+ * paints that frame:
+ *  - a focused tile whose element is one of our thumbs starts (once) a
+ *    full-res load (`imageUrlForRef(ref)`, cached on the thumb as
+ *    `__epsFull`) and keeps drawing the thumb until it has LOADED -- an
+ *    unloaded `Image` has `naturalWidth === 0`, which core would draw as
+ *    nothing -- then swaps the loaded element into `node.imgs[imageIndex]`
+ *    IN PLACE (same `imgs` array; `node.images` -- the store identity -- is
+ *    never touched);
+ *  - the moment focus moves (another index, Escape/`x`, a rebuild that
+ *    replaced `node.imgs`) the thumb goes back where the full stood, so the
+ *    grid view is homogeneous again (`is_all_same_aspect_ratio`'s compact-
+ *    mode decision compares `naturalWidth/naturalHeight` exactly; one
+ *    full-res element among thumbs could flip it).
+ * Re-focusing a tile whose full frame already loaded swaps instantly.
+ * Idempotent and cheap: a handful of property reads per draw. Exported for
+ * tests (a pure function of the node's own state plus the `Image` it
+ * creates).
+ */
+export function ensureFocusedFullRes(node) {
+  const imgs = node.imgs
+  const index = node.imageIndex
+  const swap = focusSwapByNode.get(node)
+  if (swap && (index !== swap.index || !Array.isArray(imgs) || imgs[swap.index] !== swap.full)) {
+    if (Array.isArray(imgs) && imgs[swap.index] === swap.full) imgs[swap.index] = swap.thumb
+    focusSwapByNode.delete(node)
+  }
+  if (index == null || !Array.isArray(imgs)) return
+  const current = imgs[index]
+  if (!current || !current.__epsUrl || current.__epsThumbOf) return
+  const ref = current.__epsRef
+  if (!ref || !ref.filename) return
+  let full = current.__epsFull
+  if (!full) {
+    full = new Image()
+    full.__epsThumbOf = current
+    full.onload = () => {
+      full.__epsLoaded = true
+      node.setDirtyCanvas?.(true, true) // the next draw performs the swap
+    }
+    full.onerror = () => {
+      current.__epsFull = null // give up quietly; the thumb keeps drawing
+    }
+    full.src = imageUrlForRef(ref, { epoch: getBufferGeneration(node) })
+    current.__epsFull = full
+  }
+  if (!full.__epsLoaded) return
+  imgs[index] = full
+  focusSwapByNode.set(node, { index, thumb: current, full })
+}
+
+/**
+ * Wraps (never replaces) *node*'s `onDrawBackground` -- core's prototype
+ * hook (`litegraphService.ts` `addDrawBackgroundHandler`, the
+ * `updatePreviews` call) stays first-class; `ensureFocusedFullRes` runs
+ * just before it. `LGraphCanvas.drawNodeShape` calls `onDrawBackground`
+ * every draw, ahead of `drawNodeWidgets` (where the image preview widget
+ * paints), so a swap takes effect in the same frame. Vue nodes (§7.5)
+ * never call it -- and never read `node.imgs` either, so nothing is lost
+ * there. Guarded per instance, mirroring the other `install*` wrappers.
+ */
+function installFocusedFullResSwap(node) {
+  if (node.__epsGridFocusSwapInstalled) return
+  node.__epsGridFocusSwapInstalled = true
+  const original = node.onDrawBackground
+  node.onDrawBackground = function (...args) {
+    try {
+      ensureFocusedFullRes(this)
+    } catch (error) {
+      console.warn(PREFIX, 'focused full-res swap failed', error)
+    }
+    return typeof original === 'function' ? original.apply(this, args) : undefined
+  }
 }
 
 /**
@@ -2193,9 +2532,10 @@ function currentMenuSelection(node) {
  *     non-ComfyUI-native image (e.g. a stray `data:`/`blob:` url) that
  *     carries no `filename` param at all; degraded only in the sense that
  *     there is nothing else this function could possibly return.
- * Always includes the current buffer generation (`getBufferGeneration`) as
- * `v=` -- correctness matters even more here than for the display path,
- * and the epoch gives both (see `imageUrlForRef`'s docstring).
+ * Always carries a `v=` cache key (the ref's own frame mtime when it has
+ * one, else the current buffer generation -- `cacheKeyForRef`) --
+ * correctness matters even more here than for the display path (see
+ * `imageUrlForRef`'s docstring).
  */
 function fullResImageUrl(node, img, ref) {
   if (ref && ref.filename) {
@@ -2578,6 +2918,15 @@ export function refFromImageSrc(src) {
     const url = new URL(src)
     const filename = url.searchParams.get('filename')
     if (!filename) return null
+    // The pack's own frame route (`thumbUrlForRef`, 2026-08-21): the uuid
+    // param IS the subfolder -- rebuild the same `{name, subfolder, type}`
+    // the `/view` shape below yields, so ref-reuse keeps working off a
+    // thumbnail's `.src`.
+    if (url.pathname.endsWith(FRAME_ROUTE)) {
+      const uuid = url.searchParams.get('uuid') || ''
+      if (!GRID_UUID_RE.test(uuid)) return null
+      return { name: filename, subfolder: `${REF_SUBFOLDER_PREFIX}${uuid}`, type: 'output' }
+    }
     return {
       name: filename,
       subfolder: url.searchParams.get('subfolder') || '',
@@ -2727,20 +3076,22 @@ const CLONE_ROUTE = '/eps_image_grid/clone'
  */
 async function refreshFromBuffer(node) {
   const uuid = currentUuid(node)
-  if (!GRID_UUID_RE.test(uuid)) return
+  if (!GRID_UUID_RE.test(uuid)) return false
   try {
     const response = await api.fetchApi(`${LIST_ROUTE}?uuid=${encodeURIComponent(uuid)}`)
     if (!response.ok) {
       console.warn(PREFIX, `refreshFromBuffer: HTTP ${response.status} for uuid ${uuid}`)
-      return
+      return false
     }
     const data = await response.json()
-    if (!data || data.ok !== true || !Array.isArray(data.refs)) return
+    if (!data || data.ok !== true || !Array.isArray(data.refs)) return false
     noteBufferGeneration(node, data) // M2 cache-token -- see imageUrlForRef's docstring.
     setNodeImagesFromRefs(node, data.refs)
     node.setDirtyCanvas(true, true)
+    return true // 2026-08-21: `true` = a `/list` was APPLIED (warnIfEmptyAfterRun reads it)
   } catch (error) {
     console.warn(PREFIX, 'refreshFromBuffer failed', error)
+    return false
   }
 }
 
@@ -2789,20 +3140,25 @@ function scheduleRefresh(node, opts) {
     return state.promise
   }
   if (!force && state && Date.now() - state.settledAt < REFRESH_SETTLE_MS) {
-    return Promise.resolve()
+    return Promise.resolve(false)
   }
   state = { promise: null, pendingForce: false, settledAt: 0 }
   refreshState.set(node, state)
   state.promise = (async () => {
+    // Resolves to whether the LAST `/list` of this run was applied
+    // (2026-08-21) -- a forced caller that rode the promise gets the answer
+    // for the fetch that started after its own event, by the loop above.
+    let refreshed = false
     try {
       do {
         state.pendingForce = false
-        await refreshFromBuffer(node)
+        refreshed = await refreshFromBuffer(node)
       } while (state.pendingForce)
     } finally {
       state.promise = null
       state.settledAt = Date.now()
     }
+    return refreshed
   })()
   return state.promise
 }
@@ -2968,16 +3324,20 @@ function scheduleSettledCollisionSweep() {
  * the silence visible: right after such a run, a warning toast names the
  * node. Advisory only -- every failure path here is swallowed.
  */
-async function warnIfEmptyAfterRun(node) {
+function warnIfEmptyAfterRun(node, refreshed) {
   try {
+    // 2026-08-21: no `/list` of its own any more -- this runs right after
+    // the forced post-run reconcile (`scheduleRefresh(node, {force: true})`
+    // in `installExecutionRefreshListener`) and reads what that fetch put
+    // on `node.images`. *refreshed* is that promise's result; anything but
+    // a real applied list (network error, older backend) means there is no
+    // fresh truth to warn from, so stay quiet rather than guess.
+    if (refreshed !== true) return
     const uuid = currentUuid(node)
     if (!GRID_UUID_RE.test(uuid)) return
     const imageInput = (node.inputs || []).find((input) => input.name === 'image')
     if (imageInput && imageInput.link != null) return // live input -> flow-through ran
-    const response = await api.fetchApi(`${LIST_ROUTE}?uuid=${encodeURIComponent(uuid)}`)
-    if (!response.ok) return
-    const body = await response.json()
-    if ((body.refs || []).length) return
+    if (Array.isArray(node.images) && node.images.length) return
     app.extensionManager?.toast?.add?.({
       severity: 'warn',
       summary: 'EPS Image Grid',
@@ -3042,8 +3402,11 @@ function installExecutionRefreshListener() {
         // re-fired on EVERY repaint via updatePreviews' identity check),
         // and is superseded by the real fix, `syncCoreOutputStore` +
         // `installExecutedMerge` (their docstrings have the mechanism).
-        void scheduleRefresh(node, { force: true })
-        void warnIfEmptyAfterRun(node) // see its docstring (2026-07-24)
+        // ONE `/list` per finished run (2026-08-21): the empty-buffer warning
+        // reads the reconcile's result instead of fetching again.
+        void scheduleRefresh(node, { force: true }).then((refreshed) =>
+          warnIfEmptyAfterRun(node, refreshed) // see its docstring (2026-07-24)
+        )
       }
     }
   })
@@ -3075,9 +3438,15 @@ function installExecutionRefreshListener() {
  *    image. `mergeBufferRefs` returning the SAME array identity for this
  *    case is what makes the heal invisible to `updatePreviews`.
  *
- * The forced `/list` afterwards reconciles authoritatively (true buffer
+ * The forced `/list` that follows reconciles authoritatively (true buffer
  * order, appends from another machine, evictions) -- display correctness
- * never depends on it arriving, or arriving in order.
+ * never depends on it arriving, or arriving in order. Since 2026-08-21 it
+ * is the `progress_state` listener's reconcile alone: core sends
+ * `executed` BEFORE `finish_progress` for the same node (`execution.py`:
+ * `send_sync("executed")` inside `execute()`, `finish_progress` right
+ * after it returns), so that forced fetch always follows this merge -- a
+ * second forced `scheduleRefresh` here was a guaranteed duplicate
+ * (`pendingForce` re-fetches rather than riding). One `/list` per run.
  */
 function installExecutedMerge(node) {
   const originalOnExecuted = node.onExecuted
@@ -3092,7 +3461,6 @@ function installExecutedMerge(node) {
       const { refs, added } = mergeBufferRefs(existing, incoming)
       if (added > 0) setNodeImagesFromRefs(this, refs)
       else syncCoreOutputStore(this, refs)
-      void scheduleRefresh(this, { force: true })
     } catch (error) {
       console.warn(PREFIX, 'onExecuted merge failed', error)
     }
@@ -3192,6 +3560,7 @@ export function attach(node) {
     node.previewMediaType = 'image'
     installUuidSerializeGuard(node) // 2026-07-24 identity hardening -- see its block comment
     installExecutedMerge(node) // 2026-07-27 focus-clobber root fix -- see its docstring
+    installFocusedFullResSwap(node) // 2026-08-21 thumbnails: focused tile stays full-res
 
     // Deferred one tick -- the paste-collision path. See file header
     // point 1 for exactly why this can't run synchronously here. Awaiting

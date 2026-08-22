@@ -210,7 +210,7 @@
       "title": "Note",
       "properties": {},
       "widgets_values": [
-        "## Collect vs Emit\n\n**Collect** - this run's picture goes downstream, *and* into the pile.\n\n**Emit** - the whole pile goes downstream, this run's picture last.\n\nEverything else on the node is buffer housekeeping: the thumbnails, **Clear**,\nand the two bulk **Add** buttons. Click a thumbnail to see it big; a\nthumbnail has its own little remove button.\n"
+        "## Collect vs Emit\n\n**Collect** - this run's picture goes downstream, *and* into the pile.\n\n**Emit** - the whole pile goes downstream, this run's picture last.\n\nEverything else on the node is buffer housekeeping: the thumbnails, **Clear**,\nand the two bulk **Add** buttons. Click a thumbnail to see it big;\nright-click one -> **Delete this image** to remove just that tile.\n"
       ],
       "color": "#432",
       "bgcolor": "#653"

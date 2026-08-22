@@ -310,8 +310,16 @@ def load_set(context: LibraryContext, slug: str) -> dict | None:
         return None
     except OSError as exc:
         raise SetValidationError(f"could not read set {slug!r}: {exc}") from exc
-    except json.JSONDecodeError as exc:
-        raise SetValidationError(f"set {slug!r} is not valid JSON: {exc}") from exc
+    # ValueError, not just JSONDecodeError (audit 2026-08-21): a set file
+    # saved as UTF-16/CP-1252 raises UnicodeDecodeError -- a plain
+    # ValueError -- which escaped this guard AND nodes_sets.apply()'s
+    # SetValidationError catch, crashing the whole run (and, via
+    # list_sets, collapsing the Apply-Set dropdown to ["None"]). The
+    # picker store and context.load_config were already patched for the
+    # same class of failure; JSONDecodeError is a ValueError subclass, so
+    # nothing is lost.
+    except ValueError as exc:
+        raise SetValidationError(f"set {slug!r} could not be read: {exc}") from exc
     return normalize_set(raw)
 
 
@@ -526,7 +534,8 @@ def healed_layout(context: LibraryContext, raw: object) -> dict:
     machine (or by an older build that never writes layouts) always shows
     up rather than silently vanishing from the pane."""
     layout = normalize_layout(raw)
-    existing = {entry["slug"] for entry in list_sets(context)}
+    entries = list_sets(context)  # ONE scan (audit 2026-08-21: it was two per call)
+    existing = {entry["slug"] for entry in entries}
     seen: set[str] = set()
     for name in [UNCATEGORIZED, *layout["categories"]]:
         kept = []
@@ -536,7 +545,7 @@ def healed_layout(context: LibraryContext, raw: object) -> dict:
             seen.add(slug)
             kept.append(slug)
         layout["order"][name] = kept
-    missing = [e["slug"] for e in list_sets(context) if e["slug"] not in seen]
+    missing = [e["slug"] for e in entries if e["slug"] not in seen]
     layout["order"][UNCATEGORIZED].extend(missing)
     return layout
 

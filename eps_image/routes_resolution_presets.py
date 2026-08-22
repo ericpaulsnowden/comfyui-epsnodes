@@ -95,7 +95,11 @@ def _validate_values(raw: object) -> tuple[dict | None, str | None]:
 
 def _base_mtime_from_body(body: dict) -> tuple[float | None, web.Response | None]:
     base_mtime = body.get("base_mtime")
-    if base_mtime is not None and not isinstance(base_mtime, (int, float)):
+    if base_mtime is not None and (
+        isinstance(base_mtime, bool) or not isinstance(base_mtime, (int, float))
+    ):
+        # bool is an int subclass; `true` would flow into abs(mtime - True)
+        # and 409 spuriously (audit 2026-08-21; the store rejects bools too).
         return None, error_response(400, "'base_mtime' must be a number")
     return base_mtime, None
 

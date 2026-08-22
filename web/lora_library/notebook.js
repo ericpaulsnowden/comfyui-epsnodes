@@ -370,6 +370,12 @@ const DELETE_CONFIRM_MS = 4000
 /** Debounce for reloading after the `file` widget's value changes. */
 const FILE_CHANGE_DEBOUNCE_MS = 250
 
+/** v0.68.1 (perf round): the §7.2 search field repaints on a short debounce
+ * instead of per keystroke -- every keystroke used to rebuild the whole list
+ * after matching every entry. Escape/clear stays instant (it cancels the
+ * pending repaint). Same value as picker.js's SEARCH_DEBOUNCE_MS. */
+const SEARCH_DEBOUNCE_MS = 120
+
 /**
  * Pointer-movement distance (px) before a row pointerdown "becomes" a drag
  * instead of a click (owner ask: "~4px"). Below this, pointerup resolves as
@@ -377,6 +383,14 @@ const FILE_CHANGE_DEBOUNCE_MS = 250
  * and the click never fires — see onEntryPointerDown().
  */
 const DRAG_THRESHOLD_PX = 4
+
+/** v0.68.1: how long the note taken on a category header's FIRST tap stays
+ * the note for a following tap on the same header -- i.e. "these two taps
+ * are one double-click". Covers every OS double-click setting that can
+ * still produce a `dblclick` (Windows caps at 900ms); a slower pair simply
+ * re-notes on the second tap, which degrades to "expanded" -- the common
+ * case -- never to the hidden-entries bug. See onCategoryPointerDown(). */
+const CATEGORY_DBLCLICK_WINDOW_MS = 1000
 
 /** STANDARD-fs-browse.md's `fs/list` sentinel for "the top level" — this
  * pack's own default library dir (labeled) + Home, then every Windows drive
@@ -933,7 +947,23 @@ export function attachNotebookWidget(node) {
     // module scope — see "Remote gating" below) to gate the file panel's
     // buttons and the `file` widget's edit-guard.
     refreshRemoteGating(state).catch((error) => api.warn('initial config load failed', error))
-    reloadNow(state).catch((error) => api.warn('initial notebook load failed', error))
+    // v0.68.1 (perf round): the attach-time load is DEFERRED one tick and
+    // SKIPPED when onConfigure already reloaded. `nodeCreated` fires from
+    // the node's constructor, before `configure()` restores
+    // `widgets_values`, so on every workflow load / tab switch a RESTORED
+    // node fetched the backend-DEFAULT notebook with full text here and
+    // then the saved one again from wireConfigureReload -- the first was
+    // discarded by `loadToken` but fully paid (the server parsed the whole
+    // file; one LAN round trip per node, doubled). litegraph creates AND
+    // configures every node of a load (or a paste) synchronously, so by the
+    // time this timer fires a restored node's onConfigure has run and set
+    // `configureReloaded`; a fresh in-session node has no configure and
+    // loads here, once. Cleared in teardown().
+    state.attachLoadTimer = setTimeout(() => {
+      state.attachLoadTimer = null
+      if (state.configureReloaded) return
+      reloadNow(state).catch((error) => api.warn('initial notebook load failed', error))
+    }, 0)
   } catch (error) {
     api.warn('attachNotebookWidget failed', error)
   }
@@ -965,6 +995,11 @@ function createState(node, fileWidget, entryWidget) {
     // selection, widgets, or the file.
     searchQuery: '',
     entryTextByName: {},
+    // v0.68.1: name -> lowercased `name\nbody` haystack, built once per load
+    // (buildSearchCorpus) so a keystroke doesn't re-lowercase every body;
+    // and the pending debounced search repaint (scheduleSearchRender).
+    searchCorpus: new Map(),
+    searchTimer: null,
     searchInputEl: null,
     exists: true,
     entries: [],
@@ -988,6 +1023,10 @@ function createState(node, fileWidget, entryWidget) {
     // on reload of the page (not on reloadNow()/renderList(), which read it
     // fresh every call — see toggleCategoryCollapse()).
     collapsedCategories: new Set(),
+    // v0.68.1: the collapse state of a category header as of the FIRST tap
+    // of a would-be double-click pair -- {category, collapsed, at}; see
+    // onCategoryPointerDown() and the header's dblclick handler.
+    categoryTapMemo: null,
     // Selection model (§6.1/§7.2): `selection` is the ordered list of
     // selected entry names — exactly what gets newline-joined into the
     // `entry` widget. `activeName` is the most-recently-clicked selected
@@ -1005,6 +1044,11 @@ function createState(node, fileWidget, entryWidget) {
     busy: false,
     loadToken: 0,
     selectToken: 0,
+    // v0.68.1: set by wireConfigureReload when a configure-driven reload
+    // ran, so the deferred attach-time load stands down (attachNotebookWidget);
+    // the timer handle lives here so teardown() can cancel it.
+    configureReloaded: false,
+    attachLoadTimer: null,
     creatingNew: false,
     deleteConfirmActive: false,
     deleteConfirmTimer: null,
@@ -1089,12 +1133,14 @@ function buildUi(state) {
   })
   state.searchInputEl.addEventListener('input', () => {
     state.searchQuery = state.searchInputEl.value
-    renderList(state)
+    scheduleSearchRender(state) // v0.68.1: debounced -- see SEARCH_DEBOUNCE_MS
   })
   state.searchInputEl.addEventListener('keydown', (event) => {
     event.stopPropagation()
     if (event.key === 'Escape') {
       event.preventDefault()
+      clearTimeout(state.searchTimer) // v0.68.1: clear is instant; no pending repaint may follow it
+      state.searchTimer = null
       state.searchInputEl.value = ''
       state.searchQuery = ''
       renderList(state)
@@ -1394,6 +1440,7 @@ function wireConfigureReload(state) {
       // `|| state.loadError`: a failed load must be re-attempted on the
       // next configure even when the widget value didn't change (2026-08-03).
       if (restored !== state.file || state.loadError) {
+        state.configureReloaded = true // v0.68.1: the deferred attach-time load stands down
         reloadNow(state).catch((error) =>
           api.warn('notebook reload after configure failed', error)
         )
@@ -1412,6 +1459,16 @@ function onFileWidgetChanged(state) {
     if (state.fileWidget.value === state.file) return
     reloadNow(state).catch((error) => api.warn('notebook reload after file change failed', error))
   }, FILE_CHANGE_DEBOUNCE_MS)
+}
+
+/** v0.68.1: the debounced §7.2 search repaint -- see SEARCH_DEBOUNCE_MS.
+ * Only the `input` listener schedules; Escape repaints at once. */
+function scheduleSearchRender(state) {
+  clearTimeout(state.searchTimer)
+  state.searchTimer = setTimeout(() => {
+    state.searchTimer = null
+    renderList(state)
+  }, SEARCH_DEBOUNCE_MS)
 }
 
 function wireNodeCleanup(state) {
@@ -1438,6 +1495,8 @@ function wireNodeCleanup(state) {
 function teardown(state) {
   if (state.deleteConfirmTimer) clearTimeout(state.deleteConfirmTimer)
   if (state.fileChangeDebounceTimer) clearTimeout(state.fileChangeDebounceTimer)
+  if (state.attachLoadTimer) clearTimeout(state.attachLoadTimer) // v0.68.1
+  if (state.searchTimer) clearTimeout(state.searchTimer) // v0.68.1
   // File panel rework (FORMAT.md §7.2 amendment) — see updateFilePanelPath().
   state.filePanelResizeObserver?.disconnect()
   // A node removal mid-drag (e.g. undo, right-click delete) would otherwise
@@ -2049,6 +2108,7 @@ async function reloadNow(state) {
   state.entryTextByName = Object.fromEntries(
     state.entries.map((entry) => [entry.name, typeof entry.text === 'string' ? entry.text : ''])
   )
+  buildSearchCorpus(state) // v0.68.1: lowercase once per load, not per keystroke
   // FORMAT.md §5/§7.2: named categories in file order, incl. empty ones —
   // see renderList()'s merge of this against `entries`.
   state.categories = Array.isArray(data.categories) ? data.categories : []
@@ -2519,14 +2579,40 @@ function updateModeHint(state) {
  * whitespace-separated query word must appear somewhere in the entry's
  * NAME or BODY. Multi-word queries therefore narrow (AND), matching how
  * the Checkpoint Switcher's filter box already behaves.
+ *
+ * v0.68.1 (perf round): split into its three pure parts so the expensive
+ * one runs once per LOAD, not once per entry per keystroke --
+ * searchHaystack() lowercases one entry's `name\nbody`, buildSearchCorpus()
+ * does that for every entry when the include_text payload lands,
+ * searchWords() splits the query once per render, and entryMatchesSearch()
+ * is the AND over a prebuilt haystack. Semantics are byte-identical to the
+ * old per-call entryMatchesSearch(name, text, query).
  */
-function entryMatchesSearch(name, text, query) {
-  const haystack = `${name}\n${text || ''}`.toLowerCase()
+function entryMatchesSearch(haystack, words) {
+  return words.every((word) => haystack.includes(word))
+}
+
+/** One entry's lowercase haystack: `name\nbody`. */
+function searchHaystack(name, text) {
+  return `${name}\n${text || ''}`.toLowerCase()
+}
+
+/** The query's lowercase words (AND across them); `[]` matches everything. */
+function searchWords(query) {
   return query
     .toLowerCase()
     .split(/\s+/)
     .filter(Boolean)
-    .every((word) => haystack.includes(word))
+}
+
+/** Rebuilt by reloadNow() right after `entryTextByName` -- the two always
+ * describe the same load. Keyed by name; a name the map doesn't know (an
+ * entry renamed/created since the load) is computed on the fly from
+ * `entryTextByName` in renderList(), exactly what the old matcher saw. */
+function buildSearchCorpus(state) {
+  state.searchCorpus = new Map(
+    state.entries.map((entry) => [entry.name, searchHaystack(entry.name, state.entryTextByName[entry.name])])
+  )
 }
 
 function renderList(state) {
@@ -2555,8 +2641,12 @@ function renderList(state) {
   let categories = Array.isArray(state.categories) ? state.categories : []
   let entries = state.entries
   if (filtering) {
+    const words = searchWords(searchQuery) // once per render (v0.68.1)
     entries = entries.filter((entry) =>
-      entryMatchesSearch(entry.name, state.entryTextByName[entry.name], searchQuery)
+      entryMatchesSearch(
+        state.searchCorpus.get(entry.name) ?? searchHaystack(entry.name, state.entryTextByName[entry.name]),
+        words
+      )
     )
     const categoriesWithMatches = new Set(entries.map((entry) => entry.category || ''))
     categories = categories.filter((category) => categoriesWithMatches.has(category))
@@ -2691,8 +2781,15 @@ function buildCategoryHeaderRow(state, category) {
     state.drag?.cleanup?.()
     state.drag = null
     // Rename in place (owner ask 2026-07-29) — same gesture as an entry row.
-    // A header's two preceding taps have each toggled collapse, so the
-    // category is back in whatever state it started in by the time this runs.
+    // v0.68.1: the two taps that precede this do NOT net to zero on a header
+    // that wasn't active yet -- since the 2026-07-29 rule the first tap only
+    // selects/expands and the SECOND toggles, so the rename editor opened on
+    // a freshly COLLAPSED header: every entry vanished, the very symptom
+    // that rule exists to prevent (the old comment here assumed the pre-rule
+    // toggle/toggle pair). Put the collapse state back to what it was before
+    // the first tap (noted in onCategoryPointerDown), then open the editor
+    // on the freshly rendered row.
+    restoreCategoryCollapseAfterDoubleClick(state, category)
     if (!beginInlineRename(state, 'category', category)) focusNameField(state)
   })
   headerEl.addEventListener('keydown', (event) => {
@@ -2734,6 +2831,23 @@ function toggleCategoryCollapse(state, category) {
   } else {
     state.collapsedCategories.add(category)
   }
+  renderList(state)
+}
+
+/**
+ * v0.68.1 -- see the header's dblclick handler. The memo is the collapse
+ * state as of the pair's FIRST pointerdown (onCategoryPointerDown); this
+ * puts it back and repaints so beginInlineRename() mounts on the fresh row.
+ * No memo for this header (keyboard taps, a stale note from another
+ * header) means nothing to restore.
+ */
+function restoreCategoryCollapseAfterDoubleClick(state, category) {
+  const memo = state.categoryTapMemo
+  state.categoryTapMemo = null
+  if (!memo || memo.category !== category) return
+  if (state.collapsedCategories.has(category) === memo.collapsed) return
+  if (memo.collapsed) state.collapsedCategories.add(category)
+  else state.collapsedCategories.delete(category)
   renderList(state)
 }
 
@@ -3268,6 +3382,16 @@ async function performMoveCategory(state, category, target, { force = false } = 
 function onCategoryPointerDown(state, event, category) {
   if (event.button !== 0) return // primary button/touch only
   cancelDeleteConfirm(state)
+
+  // v0.68.1: note the collapse state as of the FIRST tap of a would-be
+  // double-click pair -- the header's dblclick handler restores it. A second
+  // pointerdown on the same header inside CATEGORY_DBLCLICK_WINDOW_MS keeps
+  // the first tap's note; anything else starts a fresh one.
+  const now = Date.now()
+  const prior = state.categoryTapMemo
+  if (!prior || prior.category !== category || now - prior.at > CATEGORY_DBLCLICK_WINDOW_MS) {
+    state.categoryTapMemo = { category, collapsed: state.collapsedCategories.has(category), at: now }
+  }
 
   const drag = {
     kind: 'category',

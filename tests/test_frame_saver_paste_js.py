@@ -647,3 +647,89 @@ class TestWiredVideoInput:
     def test_path_bar_names_the_wire_not_the_stale_path(self, frame_saver_source: str) -> None:
         body = _function_body(frame_saver_source, "updatePathBarText(state)")
         assert "⇐ wired:" in body
+
+
+# ------------------------------------------------------------ v0.68.1 pins
+
+
+class TestV0681ResyncIsChangeGuarded:
+    """v0.68.1 (2026-08-21): fullResync used to reload the <video> and
+    re-probe UNCONDITIONALLY from every restore hook and every
+    onConnectionsChange (output-side rewires included), and configure()'s
+    per-link replay fired it once per saved link. Source pins, since all of
+    it runs against a real litegraph node (this file's convention)."""
+
+    def test_full_resync_compares_the_source_key_before_reloading(
+        self, frame_saver_source: str
+    ) -> None:
+        body = _function_body(frame_saver_source, "fullResync(state)")
+        # wire first (unchanged), then the compare, then the reload path
+        assert body.index("state.wired = resolveWiredVideo(state.node)") < body.index(
+            "sourceKeyOf(state, state.pathWidget.value) === state.sourceKey"
+        )
+        assert body.index("=== state.sourceKey") < body.index(
+            "onPathChanged(state, state.pathWidget.value)"
+        )
+        # the no-change branch still re-syncs the path bar, and only that:
+        # no direct refreshVideoSource call anywhere in fullResync (the only
+        # reload path is onPathChanged, behind the early return).
+        assert "updatePathBarText(state)" in body
+        assert "refreshVideoSource(" not in body
+
+    def test_source_key_covers_everything_refresh_video_source_branches_on(
+        self, frame_saver_source: str
+    ) -> None:
+        key = _function_body(frame_saver_source, "sourceKeyOf(state, rawPath)")
+        assert "state.wired?.kind ?? null" in key
+        assert "state.wired?.ref ?? null" in key
+        assert "String(rawPath || '').trim()" in key
+        assert "state.isLocal === false" in key
+        refresh = _function_body(frame_saver_source, "refreshVideoSource(state)")
+        assert "state.sourceKey = sourceKeyOf(state, state.path)" in refresh
+        # the stale-probe discard is untouched
+        assert "state.probeToken += 1" in refresh
+
+    def test_gating_flip_reloads_only_when_the_verdict_changes_the_picture(
+        self, frame_saver_source: str
+    ) -> None:
+        body = _function_body(frame_saver_source, "applyGating(state)")
+        assert "if (sourceKeyOf(state, state.path) !== state.sourceKey) refreshVideoSource(state)" in body
+
+    def test_a_deliberate_pick_is_not_guarded(self, frame_saver_source: str) -> None:
+        """§7.2's equal-value re-pick lesson: Browse/paste of the SAME file
+        must still reload -- chooseVideoPath goes straight to onPathChanged,
+        which stays unconditional."""
+        pick = _function_body(frame_saver_source, "chooseVideoPath(state, path)")
+        assert "onPathChanged(state, path)" in pick
+        changed = _function_body(frame_saver_source, "onPathChanged(state, rawPath)")
+        assert "refreshVideoSource(state)" in changed
+        assert "sourceKey" not in changed
+
+    def test_configure_replay_is_skipped_via_a_restoring_flag(
+        self, frame_saver_source: str
+    ) -> None:
+        wire = _function_body(frame_saver_source, "wireConfigureResync(state)")
+        assert "const originalConfigure = node.configure" in wire
+        assert "state.restoring = true" in wire
+        assert "state.restoring = false" in wire
+        assert wire.index("try {") < wire.index("} finally {")
+        attach = _function_body(frame_saver_source, "attach(node)")
+        assert "if (!state.restoring) fullResync(state)" in attach
+        # both fields are declared on the state, with the rest of it
+        state = _function_body(frame_saver_source, "createState(node, pathWidget, frameWidget)")
+        assert "sourceKey: null" in state
+        assert "restoring: false" in state
+
+
+def test_width_floor_lifts_through_set_size_not_a_dead_is_array_guard(
+    frame_saver_source: str,
+) -> None:
+    """v0.68.1: `LGraphNode.size` is a Proxy over a typed-array view on the
+    installed frontend (1.48.7), never an Array, so installMinWidth's old
+    `Array.isArray(node.size)` lift never ran (FORMAT.md §7.2's "lifts the
+    CURRENT width" half); only the onResize wrap ever floored anything. The
+    lift goes through setSize() (litegraph's `_sizeUpdated` + onResize)."""
+    assert "Array.isArray(node.size)" not in frame_saver_source
+    body = _function_body(frame_saver_source, "installMinWidth(node, minWidth)")
+    assert "if (node.size && node.size[0] < minWidth)" in body
+    assert "node.setSize([minWidth, node.size[1]])" in body

@@ -48,7 +48,9 @@ import pytest
 
 pytest.importorskip("PIL")
 
+import io
 import sys
+import time
 import types
 
 from aiohttp import web
@@ -152,7 +154,10 @@ class TestAddRouteHappyPath:
         assert len(body["images"]) == 1  # grew by one, from the 0 confirmed above
 
         [ref] = body["images"]
-        assert set(ref.keys()) == {"filename", "subfolder", "type"}
+        # `mtime` joined the HTTP ref shape 2026-08-21 (perf round: the
+        # per-frame cache key, `store.with_frame_mtimes`); the store's own
+        # `ui.images` triple is unchanged -- see TestRefsCarryPerFrameMtime.
+        assert set(ref.keys()) == {"filename", "subfolder", "type", "mtime"}
         assert ref["filename"] == "0001.png"
         assert ref["subfolder"] == f"{store.DIRNAME}/{VALID_UUID}"
         # NB, easy to conflate: the REQUEST's "type" (above) is the SOURCE
@@ -435,3 +440,212 @@ class TestRemoveRoute:
     async def test_missing_filename_is_400(self, client) -> None:
         response = await client.post("/eps_image_grid/remove", json={"uuid": VALID_UUID})
         assert response.status == 400
+
+
+# ---------------------------------------------- per-frame mtime (2026-08-21)
+
+OTHER_VALID_UUID = "11111111-2222-3333-4444-555555555555"
+
+
+class TestRefsCarryPerFrameMtime:
+    """2026-08-21 perf round: every ref-returning route decorates its refs
+    with that frame FILE's own mtime (int ms -- ``store.with_frame_mtimes``),
+    the frontend's stable per-image cache key. Before this, thumbnails were
+    keyed on ``generation`` (the MANIFEST mtime), which moves on every
+    append -- so every Collect run re-downloaded and re-encoded every
+    UNCHANGED frame. The bare ``ui.images`` triple stays the STORE's
+    return value (core's shape); the extra key is added at the HTTP edge."""
+
+    async def _add(self, client, fake_input_dir: Path, name: str) -> dict:
+        _write_fake_upload(fake_input_dir, name)
+        response = await client.post(
+            "/eps_image_grid/add", json={"uuid": VALID_UUID, "filename": name}
+        )
+        assert response.status == 200
+        return await response.json()
+
+    async def test_add_images_carry_a_positive_int_mtime(self, client, fake_input_dir) -> None:
+        [ref] = (await self._add(client, fake_input_dir, "a.png"))["images"]
+        assert isinstance(ref["mtime"], int) and ref["mtime"] > 0
+
+    async def test_list_refs_carry_mtime_stable_across_reads(self, client, fake_input_dir) -> None:
+        await self._add(client, fake_input_dir, "a.png")
+        first = await (await client.get("/eps_image_grid/list", params={"uuid": VALID_UUID})).json()
+        again = await (await client.get("/eps_image_grid/list", params={"uuid": VALID_UUID})).json()
+        assert first["refs"][0]["mtime"] > 0
+        assert first["refs"][0]["mtime"] == again["refs"][0]["mtime"]
+
+    async def test_an_unchanged_frame_keeps_its_key_across_an_append(
+        self, client, fake_input_dir
+    ) -> None:
+        # THE fix: frame 1's key survives frame 2's append, while the old
+        # buffer-wide `generation` key (manifest mtime) moves -- which is
+        # exactly why keying on it re-fetched every unchanged frame per run.
+        list_params = {"uuid": VALID_UUID}
+        await self._add(client, fake_input_dir, "a.png")
+        before = await (await client.get("/eps_image_grid/list", params=list_params)).json()
+        time.sleep(0.002)  # ms-precision keys
+        await self._add(client, fake_input_dir, "b.png")
+        after = await (await client.get("/eps_image_grid/list", params=list_params)).json()
+        assert after["refs"][0]["mtime"] == before["refs"][0]["mtime"]
+        assert after["generation"] != before["generation"]
+
+    async def test_remove_images_carry_mtime(self, client, fake_input_dir) -> None:
+        await self._add(client, fake_input_dir, "a.png")
+        refs = (await self._add(client, fake_input_dir, "b.png"))["images"]
+        response = await client.post(
+            "/eps_image_grid/remove", json={"uuid": VALID_UUID, "filename": refs[0]["filename"]}
+        )
+        [remaining] = (await response.json())["images"]
+        assert remaining["mtime"] == refs[1]["mtime"] > 0
+
+    async def test_clone_refs_carry_the_destination_frames_mtime(
+        self, client, fake_input_dir
+    ) -> None:
+        await self._add(client, fake_input_dir, "a.png")
+        response = await client.post(
+            "/eps_image_grid/clone", json={"from": VALID_UUID, "to": OTHER_VALID_UUID}
+        )
+        [ref] = (await response.json())["refs"]
+        assert ref["subfolder"].endswith(OTHER_VALID_UUID)
+        assert isinstance(ref["mtime"], int) and ref["mtime"] > 0
+
+
+# ------------------------------------------------ GET /eps_image_grid/frame
+
+
+class TestFrameRoute:
+    """``GET /eps_image_grid/frame`` (2026-08-21 perf round): with
+    ``preview`` a genuinely DOWNSCALED, disk-cached webp thumbnail
+    (``store.thumbnail_path`` -- core's ``/view?preview=`` re-encodes the
+    FULL-resolution frame, no resize); without it the full PNG frame (what
+    core's Open/Save/Copy Image menu items reach after deleting ``preview``
+    from ``img.src``). Validation is ``store.frame_path``'s: manifest-listed
+    bare names only."""
+
+    async def _seed(self, client, fake_input_dir: Path, *, size=(640, 400)) -> dict:
+        _write_fake_upload(fake_input_dir, "big.png", size=size)
+        response = await client.post(
+            "/eps_image_grid/add", json={"uuid": VALID_UUID, "filename": "big.png"}
+        )
+        [ref] = (await response.json())["images"]
+        return ref
+
+    async def _get(self, client, ref: dict, *, preview: bool = True, keyed: bool = True, **extra):
+        params = {"uuid": VALID_UUID, "filename": ref["filename"]}
+        if preview:
+            params["preview"] = "webp;80"
+        if keyed:
+            params["v"] = str(ref["mtime"])
+        return await client.get("/eps_image_grid/frame", params=params, **extra)
+
+    async def test_preview_serves_a_downscaled_webp_keeping_aspect(
+        self, client, fake_input_dir
+    ) -> None:
+        ref = await self._seed(client, fake_input_dir)
+        response = await self._get(client, ref)
+        assert response.status == 200
+        assert response.headers["Content-Type"].startswith("image/webp")
+        with Image.open(io.BytesIO(await response.read())) as img:
+            assert img.format == "WEBP"
+            assert max(img.size) == store.THUMB_MAX_EDGE == 256
+            assert img.size == (256, 160)  # 640x400, long edge bound, aspect kept
+
+    async def test_without_preview_serves_the_full_png_frame_bytes(
+        self, client, fake_input_dir
+    ) -> None:
+        ref = await self._seed(client, fake_input_dir)
+        response = await self._get(client, ref, preview=False)
+        assert response.status == 200
+        assert response.headers["Content-Type"].startswith("image/png")
+        body = await response.read()
+        assert body == (store.buffer_dir(VALID_UUID) / ref["filename"]).read_bytes()
+        with Image.open(io.BytesIO(body)) as img:
+            assert img.size == (640, 400)
+
+    async def test_keyed_url_is_immutable_unkeyed_revalidates(self, client, fake_input_dir) -> None:
+        ref = await self._seed(client, fake_input_dir)
+        keyed = await self._get(client, ref)
+        assert keyed.headers["Cache-Control"] == "public, max-age=31536000, immutable"
+        assert keyed.headers.get("ETag")
+        unkeyed = await self._get(client, ref, keyed=False)
+        assert unkeyed.headers["Cache-Control"] == "no-cache"
+        assert unkeyed.headers.get("ETag")
+        # Core's Open/Save Image delete only `preview`, so `v` survives
+        # there too -- but a hand-typed keyless full-frame URL must
+        # revalidate as well.
+        full_unkeyed = await self._get(client, ref, preview=False, keyed=False)
+        assert full_unkeyed.headers["Cache-Control"] == "no-cache"
+
+    async def test_etag_revalidation_answers_304(self, client, fake_input_dir) -> None:
+        ref = await self._seed(client, fake_input_dir)
+        first = await self._get(client, ref)
+        etag = first.headers["ETag"]
+        again = await self._get(client, ref, headers={"If-None-Match": etag})
+        assert again.status == 304
+
+    async def test_thumbnail_is_cached_on_disk_next_to_the_buffer(
+        self, client, fake_input_dir
+    ) -> None:
+        ref = await self._seed(client, fake_input_dir)
+        thumb = store.buffer_dir(VALID_UUID) / store.THUMBS_DIRNAME / f"{ref['filename']}.webp"
+        assert not thumb.exists()
+        await self._get(client, ref)
+        assert thumb.is_file()
+        stamp = thumb.stat().st_mtime_ns
+        await self._get(client, ref)  # a second request reuses it (no rewrite)
+        assert thumb.stat().st_mtime_ns == stamp
+
+    async def test_unlisted_name_is_404_even_if_a_file_exists(self, client, fake_input_dir) -> None:
+        ref = await self._seed(client, fake_input_dir)
+        stray = store.buffer_dir(VALID_UUID) / "stray.png"
+        stray.write_bytes((store.buffer_dir(VALID_UUID) / ref["filename"]).read_bytes())
+        for name in ("9999.png", "stray.png", store.MANIFEST_FILENAME):
+            response = await client.get(
+                "/eps_image_grid/frame",
+                params={"uuid": VALID_UUID, "filename": name, "preview": "webp;80"},
+            )
+            assert response.status == 404, name
+            response = await client.get(
+                "/eps_image_grid/frame", params={"uuid": VALID_UUID, "filename": name}
+            )
+            assert response.status == 404, name
+
+    async def test_traversal_and_dotfiles_are_404(self, client, fake_input_dir) -> None:
+        await self._seed(client, fake_input_dir)
+        for name in ("../manifest.json", "..", ".", "sub/0001.png", "sub\\0001.png", ".thumbs"):
+            response = await client.get(
+                "/eps_image_grid/frame", params={"uuid": VALID_UUID, "filename": name}
+            )
+            assert response.status == 404, name
+
+    async def test_invalid_uuid_is_400_and_missing_filename_is_400(self, client) -> None:
+        response = await client.get(
+            "/eps_image_grid/frame", params={"uuid": "nope!", "filename": "0001.png"}
+        )
+        assert response.status == 400
+        response = await client.get("/eps_image_grid/frame", params={"uuid": VALID_UUID})
+        assert response.status == 400
+
+    async def test_frame_file_gone_from_disk_is_404_never_500(self, client, fake_input_dir) -> None:
+        ref = await self._seed(client, fake_input_dir)
+        (store.buffer_dir(VALID_UUID) / ref["filename"]).unlink()  # manifest still lists it
+        assert (await self._get(client, ref)).status == 404
+        assert (await self._get(client, ref, preview=False)).status == 404
+
+    async def test_remove_deletes_the_cached_thumbnail(self, client, fake_input_dir) -> None:
+        ref = await self._seed(client, fake_input_dir)
+        await self._get(client, ref)
+        thumb = store.buffer_dir(VALID_UUID) / store.THUMBS_DIRNAME / f"{ref['filename']}.webp"
+        assert thumb.is_file()
+        await client.post(
+            "/eps_image_grid/remove", json={"uuid": VALID_UUID, "filename": ref["filename"]}
+        )
+        assert not thumb.exists()
+
+    async def test_clear_wipes_thumbnails_with_the_buffer(self, client, fake_input_dir) -> None:
+        ref = await self._seed(client, fake_input_dir)
+        await self._get(client, ref)
+        assert (store.buffer_dir(VALID_UUID) / store.THUMBS_DIRNAME).is_dir()
+        await client.post("/eps_image_grid/clear", json={"uuid": VALID_UUID})
+        assert not store.buffer_dir(VALID_UUID).exists()

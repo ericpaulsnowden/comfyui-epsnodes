@@ -592,10 +592,16 @@ def _make_switcher_ns(
             # §6.4 pairing (v0.66.0): a row's LOW slot follows its row's one
             # toggle (keyed by the HIGH name) -- a disabled row skips both
             # upstreams, so a toggled-off WAN pair loads neither model.
+            # ...and only when the HIGH itself is wanted (audit 2026-08-21):
+            # a high fed by a statically-all-off sibling switcher is in
+            # `skip` and never arrives, so requesting its low alone ran the
+            # low's upstream for nothing and then failed the 0-high/1-low
+            # pairing check in execute().
+            wanted_highs = set(wanted)
             wanted.extend(
                 f"{prefix}_{index}_low"
                 for index in _connected_slot_indices(kwargs, low_pattern)
-                if toggle_map.get(f"{prefix}_{index}", True) is not False
+                if f"{prefix}_{index}" in wanted_highs
             )
         return wanted
 
@@ -645,6 +651,11 @@ def _make_switcher_ns(
             if toggle_map.get(key, True) is False:
                 continue
             highs = _flatten(kwargs[key])
+            if not highs:
+                # A skipped/blocked high (lazy skip set, None upstream) has
+                # nothing to pair or emit -- never a 0-vs-N pairing error
+                # (audit 2026-08-21).
+                continue
             enabled_values.extend(highs)
             if low_pattern is None:
                 continue

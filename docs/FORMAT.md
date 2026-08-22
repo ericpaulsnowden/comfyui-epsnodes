@@ -32,6 +32,9 @@ One directory holds everything a user shares between machines:
   loras.md          # default notebook file (§3) — users may add more .md files
   sets/             # one JSON file per saved LoRA set (§4)
     <slug>.json
+  lora_sets_layout.json     # §4.2 sets layout: groups + display order (v0.65.0)
+  lora_picker.json          # §6.13 LoRA Picker favorites/recents
+  resolution_presets.json   # §6.5 M3 EPS Resolution size presets
 ```
 
 - `library_dir` is persisted server-side in `<comfyui user dir>/lora_library/
@@ -324,8 +327,11 @@ every listing):
 
 ## §5 HTTP routes
 
-All under `/lora_library/`, JSON in/out; errors are `{"error": "<human
-message>"}` with a 4xx status. `mtime` values are float POSIX seconds.
+Mostly under `/lora_library/`; the `eps_image/` node families register their
+own prefixes (`/eps_ckpt/`, `/eps_image_grid/`, `/eps_frame_saver/`,
+`/eps_resolution/`, `/eps/` — summarized at the foot of the table, each
+documented in full in its §6.x section). JSON in/out; errors are `{"error":
+"<human message>"}` with a 4xx status. `mtime` values are float POSIX seconds.
 
 | Route | → |
 |---|---|
@@ -358,6 +364,12 @@ message>"}` with a 4xx status. `mtime` values are float POSIX seconds.
 | `GET /lora_library/picker/preview?file=` | §6.13 M3 thumbnails: resolves the lora NAME (§4-lenient, then `resolve_lora_path`) and serves a sibling image — `<stem>.png/.jpg/.jpeg/.webp` or `<stem>.preview.<ext>`, that priority order — via `FileResponse`. 404 unresolvable name / no sibling; 400 blank `file`. NO loopback gate: the value never becomes a path directly — it resolves only through `folder_paths`' allow-listed lora dirs (traversal-probed in review), and LAN browsers must load thumbnails |
 | `GET /lora_library/picker/info?file=` | `{"trigger_words": "<sidecar .txt text or empty>"}` — same resolution + reuses the node's own sidecar reader. 404/400 as preview |
 | `POST /lora_library/picker/favorites_order` `{"files": [..]}` | §6.13 M3 drag-reorder: full-list replace — unknown names ignored (never invents a favorite), current favorites missing from the list appended at the end in their existing relative order (two machines' concurrent edits can't drop stars). → `{"ok","favorites","mtime"}` |
+| `GET /eps_ckpt/checkpoints` | §6.12: `{"checkpoints": [...]}` — the Checkpoint Switcher panel's list, `folder_paths` spelling |
+| `POST /eps_image_grid/clear` `{uuid}` · `POST /eps_image_grid/add` · `POST /eps_image_grid/remove` · `POST /eps_image_grid/clone` `{from,to}` · `GET /eps_image_grid/list?uuid=` | §6.6 grid buffer: wipe, append one uploaded image, delete one tile, clone on paste/duplicate, list the buffer (attach/restore refresh) — each documented at its §6.6 bullet |
+| `GET /eps_image_grid/list?uuid=` / `POST /eps_image_grid/add` / `POST /eps_image_grid/remove` / `POST /eps_image_grid/clone` | **v0.69.0:** every ref these return carries `"mtime"` — that frame FILE's mtime in integer **milliseconds** (the `generation` unit, NOT this table's float-seconds convention), `0` when un-stat-able. The frontend's stable per-image cache key (`v=`); `generation` stays on `/list`/`/add`/`/remove` as the fallback key. The node's own `ui.images` refs are unchanged (core's triple). |
+| `GET /eps_image_grid/frame?uuid=&filename=[&preview=…][&v=…]` | **v0.69.0:** ONE manifest-listed frame. With `preview` (any value; the frontend sends core's `webp;80` spelling) → a genuinely DOWNSCALED disk-cached webp thumbnail (`<buffer>/.thumbs/<frame>.webp`, long edge ≤ 256, q80, built off the event loop, stamped with the source's `mtime_ns` and reused only while equal); without `preview` → the full PNG. The `preview` toggle mirrors core `/view` ON PURPOSE: core's Open/Save/Copy Image items delete `preview` from `img.src` and re-fetch, so they land on the full frame. `Cache-Control: public, max-age=31536000, immutable` when `v` present, else `no-cache` (ETag → 304). 400 bad uuid / missing `filename`; 404 unlisted/traversal/missing file/un-thumbnailable (the frontend degrades that image to `/view?preview=`). No loopback gate — same posture as `/list`; the value only resolves through the manifest, never to a path. |
+| `GET /eps_frame_saver/probe?path=` · `GET /eps_frame_saver/stream?path=` | §6.7: probe a video's `{fps, frame_count, …}` / stream it to the on-node preview (`FileResponse`) |
+| `GET /eps_resolution/presets` · `POST /eps_resolution/presets/save` `{name, values{5}, base_mtime?}` · `POST /eps_resolution/presets/delete` `{name, base_mtime?}` | §6.5 M3 size-preset store (`resolution_presets.json` in `library_dir`; no loopback gate — §6.5 explains why) |
 
 Route paths are FROZEN once shipped (§8).
 
@@ -379,6 +391,19 @@ Class ids are FROZEN once shipped. Both nodes re-read their files at every
 execution — **the file is the truth; the UI is a view.**
 
 ### §6.1 `LoraLibraryNotebook` (display: "EPS Prompt Notebook")
+
+**v0.68.1 audit round (perf/bugs):** (1) **one load per restore** — the
+attach-time reload is deferred one tick and stands down when `onConfigure`
+already reloaded (`configureReloaded`), so a restored node fetches its
+notebook once and a fresh node once (it used to fetch twice, full text,
+on every workflow load / tab switch); (2) **search** builds a lowercase
+corpus once per load (`buildSearchCorpus`, right after the `include_text`
+payload) and repaints on a 120 ms debounce — Escape clears instantly,
+semantics unchanged; (3) **header rename**: the dblclick-rename path
+restores the header's collapse state from before the first tap of the
+pair (`categoryTapMemo`), so renaming a not-yet-active category never
+hides its entries (the first tap selects/expands, the second used to
+collapse, and the rename then landed on a collapsed header).
 
 - **A `scheme://` `file` value is REJECTED, loudly (2026-07-26 fix).**
   `Path("smb://host/share/x.md")` collapses the double slash to
@@ -747,14 +772,54 @@ queue. It drives a **genuine, untouched `Power Lora Loader (rgthree)`**:
   a canvas redraw every second per controller; (4) `# name` → group
   clears the name field through `_clearNameField` (value + callback +
   dirty — the Vue input only follows the callback; rig-verified under
-  both renderers) and opens the group, the Notebook's behaviour. All existing behavior — apply-on-select, composite
+  both renderers) and opens the group, the Notebook's behaviour.
+  **v0.68.1 (2026-08-21, owner: "saving a state is slow / non-responsive"):**
+  (1) the per-node 4 s sets/layout poll that rode on `_heartbeat()` is gone
+  — it was draw-driven (2N requests per tick with N controllers on a busy
+  canvas, NONE under the Vue renderer) and nobody listened to the
+  `lora_library:sets-changed` event controllers dispatch. Controllers now
+  SUBSCRIBE to it (per node, removed in `onRemoved`) so a capture/save/
+  delete anywhere reaches every controller at once in both renderers, and
+  ONE module-level shared poller (`registerController`/`runSharedSetsFetch`:
+  a single `setInterval` at `SETS_POLL_MS` = 15 s, one in-flight fetch pair
+  feeding every live controller, paused while `document.hidden`, a catch-up
+  refresh when the tab is shown again, stopped with the last controller)
+  covers out-of-band edits; each receiver applies the v0.67.2 token/
+  save-in-flight guards in `_applyLayoutResponse`. A successful layout POST
+  fans its healed response out to the other live controllers in memory, so
+  a group edit shows in every controller immediately. `_refreshSetsCache()`
+  survives only for the explicit refetch after a failed layout save. (2) The
+  `target` combo's `values` (a whole-workflow walk) no longer runs per draw:
+  ComboWidget's `_displayValue` evaluates `values()` only when no
+  `options.getOptionLabel` is installed (installed bundle), so the combo
+  carries an identity mapper; `values` stays a function and rebuilds on
+  open. (3) DATA-LOSS fix: `_layoutLoaded` (true after the first successful
+  layout GET or POST) gates every layout edit — drag, `#` group, group
+  delete, rename. Before it the local layout is the EMPTY default, and an
+  edit used to POST that as a full replace and wipe every shared group; now
+  an edit on an unloaded layout first awaits one GET (applied, the edit
+  lands on top), and a failed GET REFUSES the edit with a status line +
+  toast ("Group layout not loaded yet — try again") instead of posting. (4)
+  `onRemoved` tears down an in-flight row drag's capture-phase window
+  listeners (`drag.cleanup`), the sets-changed subscription and the poller
+  membership, and `_removed` keeps late responses from painting a detached
+  pane (tab switch). (5) Notebook parity: double-click a group header to
+  RENAME it in place (inline `<input>` — Enter/blur commits, Escape cancels;
+  `layout.order` key and `layout.categories` entry move together, collapse
+  state follows, one `_saveLayout`; empty/duplicate names refused on the
+  status line; the list never rebuilds under an open editor), and a row/
+  group dropped back onto its own slot is a no-op — no render, no POST
+  (`_isNoopStateDrop`, the Notebook's `isNoopMove` twin). All existing behavior — apply-on-select, composite
   capture/apply with target `All`, selective Push, `Show status`,
   serialize-based capture (v0.14.1), own-menu version-proof apply (v0.13.0) —
   is PRESERVED; only the state-selection UI changes from a dropdown to the
   left list.
-- Multi-target semantics: with `All…` selected, APPLY writes the set to
-  every PLL in the graph; CAPTURE reads from the lowest-node-id PLL (a
-  deterministic, documented choice — capture needs one source of truth).
+- Multi-target semantics: with `All…` selected, CAPTURE reads EVERY
+  loader's rows (ascending node id) into a §4.1 format-2 composite state
+  and APPLY writes `loaders[i]` back to the i-th loader — the composite
+  bullets above (2026-07-20); a format-1 state through `All` still applies
+  its one config to every loader. (The original lowest-node-id capture is
+  gone — it is what the composite fix replaced.)
 - A read-only `status` line exists for debugging but is HIDDEN by default;
   the node property `Show status` (boolean, default false, in the node's
   right-click Properties) reveals it. Fail-soft states (§ below) must
@@ -776,6 +841,23 @@ queue. It drives a **genuine, untouched `Power Lora Loader (rgthree)`**:
   users).
 
 ## §6.4 `EPSSwitcher` (display: "EPS Image Switcher") — image toggle + fan-out
+
+**v0.68.1 audit round (backend, high/low pairs):** `check_lazy_status`
+requests a row's `_low` only when that row's HIGH is itself wanted
+(connected, toggled on, not in the lazy skip set) — a high fed by a
+statically-all-off sibling switcher is skipped, and requesting its low
+alone ran the low's upstream for nothing and then hit a misleading
+"0 high model(s) with 1 low model(s)" pairing error; `execute` skips a
+row whose high arrived empty instead of pairing it.
+
+**v0.68.1 audit round:** the graph-wide checkbox-column walk (§6.4 v0.62.0,
+`sharedColumnX`) is memoized per canvas frame per graph
+(`graphColumnBounds`, WeakMap keyed by graph, stamped with
+`LGraphCanvas.frame`, which steps once per `draw()` — same-frame by
+construction, never stale across frames); draw passes parse `toggles`
+ONCE (`isEnabledIn` over a parsed map; it was ~3 `JSON.parse` per row per
+frame). The at-load width floor now goes through `node.setSize` (the
+`Array.isArray(node.size)` guard was dead — see §7.2).
 
 Display name renamed from "EPS Switcher" in v0.49.2 (owner ask 2026-08-03:
 every sibling switcher carries a qualifier). Display-only — class id
@@ -967,7 +1049,7 @@ only the prefix and IO type substituted:
 
 | class | display | inputs | type | output |
 | --- | --- | --- | --- | --- |
-| `EPSModelSwitcher` | EPS Model Switcher | `model_N` | MODEL | `models` |
+| `EPSModelSwitcher` | EPS Model Switcher | `model_N` | MODEL | `models` (+ `models_low` TAIL output via the `High/low pairs` property, v0.66.0 — §6.4's bullet) |
 | `EPSClipSwitcher` | EPS CLIP Switcher | `clip_N` | CLIP | `clips` |
 | `EPSVaeSwitcher` | EPS VAE Switcher | `vae_N` | VAE | `vaes` |
 
@@ -989,7 +1071,8 @@ only the prefix and IO type substituted:
   (MODEL/CLIP `.clone()`; VAE has none) — never this node's concern.
 - **The zip trap still applies ACROSS switchers** (§6.9's founding bug): two
   switchers wired into one sampler pair index-by-index (3 models × 2 VAEs =
-  3 runs, not 6). One switcher = one axis; crossing axes needs §6.9/§6.10.
+  3 runs, not 6). One switcher = one axis; crossing axes needs §6.10 (§6.9
+  is a tombstone).
   README documents this loudly for users.
 - Live-verified on the rig (2026-08-01): typed socket growth per class,
   litegraph refusing MODEL→IMAGE while accepting MODEL→KSampler,
@@ -1000,8 +1083,22 @@ only the prefix and IO type substituted:
 
 ## §6.5 `EPSResolution` (display: "EPS Resolution") — M1 core
 
+**v0.68.1 audit round (backend):** in MULTI-image mode the shared target is
+the BOX — a 0 axis derived from the FIRST wired image's aspect,
+`multiple_of` applied — probed with `stretch`, and each image is then
+resized with the real method INTO that box; `width`/`height` report the
+box. `keep aspect (fit)` used to take the first image's FITTED size as
+everyone's box (1024×1024 box, a 2:1 `image` + a 1:1 `image_2` made
+`resized_2` 512×512, and the result flipped with wiring order).
+
+**v0.68.1 audit round:** `renderGrid` coalesces to one `requestAnimationFrame`
+paint per node (`paintGrid`; a drag tick used to do three layout reads +
+three redraws), the source-size probe arms only while `image` is actually
+linked, and the pad's title names the readout BELOW it. `OUTPUT_TOOLTIPS`
+covers all 13 outputs (`resized_2..8` + the blocker notes).
+
 Roadmap: `research/roadmap-eps-resolution.md` (M1 = this section; grid=M2,
-NAS presets=M3, list multi-image=M4 come later). NON-lora node in `eps_image/`,
+NAS presets=M3, list multi-image=M4 — all since shipped, see below). NON-lora node in `eps_image/`,
 category "EPSNodes". Class id `EPSResolution` frozen once shipped (§8). Owner
 framing: an elegant, IMAGE-first (not latent) all-in-one resolution node — M1
 is the functional core WITHOUT the grid.
@@ -1084,8 +1181,9 @@ is the functional core WITHOUT the grid.
   pair (hidden-by-removal) get it re-APPENDED at its canonical slots
   4-5 on attach — append-only, never a reorder, so existing links'
   indices are untouched.
-- **Inputs:** `image` (IMAGE, optional — a single image for M1; list/multi is
-  M4), widgets `width` (INT) and `height` (INT) (easy-to-edit target size;
+- **Inputs:** `image` (IMAGE, optional — the first image; `image_2..image_8`
+  grow by name in MULTI-IMAGE mode, v0.61.0 bullet above), widgets `width`
+  (INT) and `height` (INT) (easy-to-edit target size;
   `0` on an axis = derive it from the other axis + the input image's aspect),
   plus the thin-resize controls: `resize_method` (COMBO: `stretch`,
   `keep aspect (fit)`, `crop to fill`, `pad`), `interpolation` (COMBO:
@@ -1110,13 +1208,15 @@ is the functional core WITHOUT the grid.
   `configure()`), NOT a global settings group — output visibility is inherently per-node, and the JS
   file that would own a settings registration is the shared entry, not this
   node's module. NOTE: litegraph has no output-slot `hidden` flag (only widget
-  INPUT slots have one), so the hide uses two mechanisms: `Show original size`
-  really `removeOutput`/`addOutput`s the trailing `original_width`/
-  `original_height` pair (safe because they are the TAIL of `RETURN_TYPES` —
-  removing a non-tail output would repoint later wires, since ComfyUI resolves
-  a link's source by positional index against the fixed backend tuple);
-  `Show passthrough image` is a cosmetic draw-suppression of the leading
-  `image` output's dot/label (removing it for real would corrupt the links of
+  INPUT slots have one), so BOTH hides are cosmetic draw-suppression of the
+  output's dot/label (since v0.61.0 — see the `Show original size` bullet
+  above). `Show original size` ORIGINALLY `removeOutput`/`addOutput`ed the
+  trailing `original_width`/`original_height` pair — safe only while they
+  were the TAIL of `RETURN_TYPES` (removing a non-tail output repoints later
+  wires, since ComfyUI resolves a link's source by positional index against
+  the fixed backend tuple), which `resized_2..8` landing behind them ended;
+  `Show passthrough image` was always cosmetic for the leading `image`
+  output (removing it for real would corrupt the links of
   `resized_image`/`width`/`height` after it). Both refuse to hide an output
   that is currently wired (revert + toast) rather than leave a dangling wire.
   "Wired" means what the frontend itself means by it — `LGraphCanvas`'s
@@ -1268,12 +1368,14 @@ is the functional core WITHOUT the grid.
     presets editable from the Mac against the PC/Linux box. Do not add one.
   - **Node semantics:** a hidden `presets` STRING widget (JSON array of
     preset NAMES in selection order, default `"[]"`; `options.hidden` in
-    INPUT_TYPES is the §7.5 Vue-mode hide flag). All six outputs became
+    INPUT_TYPES is the §7.5 Vue-mode hide flag). All outputs (six at the
+    time; 13 since v0.61.0's `resized_2..8`) became
     `OUTPUT_IS_LIST` — an empty/absent/malformed selection wraps the
     UNCHANGED M1 computation in length-1 lists (downstream-indistinguishable
     from scalars; the Notebook's long-standing precedent), and K selected
     names resolve against the store AT EXECUTE TIME (server-authoritative,
-    like Notebook entries) into six K-length index-aligned lists — one full
+    like Notebook entries) into K-length index-aligned lists (one per
+    output) — one full
     resize of the SAME wired image per preset, the node's own five widget
     fields ignored entirely — which is exactly why, since v0.67.1, a MANUAL
     edit of any of those five fields CLEARS the selection on the frontend
@@ -1362,9 +1464,36 @@ is the functional core WITHOUT the grid.
     600 ms latency wrap (§7.5's test condition): mid-flight the sole name
     already labels ` (missing)`, and the store's answer relabels or
     confirms it.
-- **Deferred (M4):** multi-image list fan-out. Do NOT build it yet.
+- **M4 (multi-image) — SHIPPED v0.61.0** as the MULTI-IMAGE mode bullet
+  above (`image_2..8` inputs → `resized_2..8` tail outputs); the earlier
+  "Deferred (M4) … do NOT build it yet" note no longer applies.
 
 ## §6.6 `EPSImageGrid` (display: "EPS Image Grid") — accumulate + fan out
+
+**v0.69.0 perf round (owner: "big performance issues" on large buffers):**
+(1) thumbnail URLs are keyed per FRAME (`ref.mtime`, `cacheKeyForRef`) —
+the buffer-wide `generation` moved on every append, so each Collect run
+re-downloaded + re-encoded every UNCHANGED frame; `generation` is now only
+the fallback for keyless refs (core's `ui.images` in the `executed`
+merge), which adopt their key in place from the forced `/list`
+(`adoptFrameKeys`, same `node.images` array) with no reload; a changed
+mtime under a reused name (Clear + re-add) rebuilds that image only;
+`setNodeImagesFromRefs` reuses unchanged `Image` elements. (2) `node.imgs`
+are 256 px thumbnails from `GET /eps_image_grid/frame?preview=` (core's
+`renderPreview` `drawImage`s every `node.imgs[i]` per repaint); core's
+single view never scales UP, so `installFocusedFullResSwap` (an
+`onDrawBackground` wrap) swaps a LOADED full-res `Image` into
+`node.imgs[imageIndex]` in place while focused and restores the thumb on
+unfocus. Vue mode unaffected (never reads `node.imgs`). (3) ONE `/list`
+per finished run: `warnIfEmptyAfterRun` reads `node.images` after the
+forced reconcile (`scheduleRefresh` resolves `true` when applied) instead
+of fetching; the `installExecutedMerge` forced `/list` is gone (core sends
+`executed` before `finish_progress`, `execution.py`). (4) The three
+buttons pass `{serialize:false}` in the options bag too — `graphToPrompt`
+checks only `options.serialize`, so prompts carried phantom `"Clear"/"Add
+images…"/"Add folder…": null` inputs (the §6.5 Save/Delete precedent).
+Pinned in `tests/test_image_grid_js.py`, `test_routes_image_grid.py`,
+`test_image_grid_store.py`.
 
 **Collect-mode dead-wire warning (v0.51.1 shipped this as a HARD queue
 error; v0.52.0 demoted it to NON-BLOCKING at the owner's direction — a
@@ -1628,7 +1757,7 @@ add; single batch-aware IMAGE input; disk-backed, survive-restart, NO cap.
     within a generation, fresh across anything that can reuse a name.
   - **Compressed thumbnails without degrading Copy:**
     `imageUrlForRef(ref, {preview, epoch})` appends `preview=webp;80`
-    (server-side resize, `server.py`'s `/view` handler) for DISPLAY only.
+    (core's `/view?preview=` re-encodes the FULL-resolution frame — `Image.open` + `img.save(webp)`, NO resize — so since v0.69.0 display thumbnails come from `GET /eps_image_grid/frame?preview=` instead; `imageUrlForRef(…, {preview:true})` survives only as the one-shot degrade target) for DISPLAY only.
     Pixel-consuming paths (Copy image, clipspace) derive a FULL-RES URL
     from the REF (`node.images[index]`, index-aligned with `imgs`), never
     from an on-screen `.src` — a preview `.src` would otherwise silently
@@ -1695,10 +1824,26 @@ add; single batch-aware IMAGE input; disk-backed, survive-restart, NO cap.
     correct paint. Correct for any client; only a slow/remote one shows the bug.
 - **Milestones:** M1 = collect/emit + buffer + fan-out + free grid + Clear +
   identity/dedup; M2 = copy/paste (both targets) + Ctrl+V add; M3 = buffer
-  management (per-image remove, count, reorder, batch-count guard). No cap in
+  management (per-image remove — SHIPPED as "Delete one tile" above,
+  2026-07-29; count, reorder, batch-count guard still open). No cap in
   v1. No module-scope torch/ComfyUI import (lazy inside functions).
 
 ## §6.7 `EPSFrameSaver` (display: "EPS Frame Saver") — video frame picker
+
+**v0.68.1 audit round:** `fullResync` is change-guarded — `sourceKeyOf`
+(wire kind/ref, trimmed path, remote verdict) must differ before the
+`<video>` is reloaded and the file re-probed (it used to reload + probe on
+EVERY connection event, output rewires included, every configure, attach
+and gating flip — K links = K+4 probes per workflow load); `configure()`'s
+per-link replay is skipped via `state.restoring`; `applyGating` reloads only
+when the verdict changes the picture; a deliberate Browse/paste pick still
+reloads (the §7.2 re-pick rule). Backend: `IS_CHANGED` = the file's
+mtime+size+frame (the node had none — with an unchanged path core served
+run 1's frame forever after the file was re-rendered; NaN when a `video`
+tensor is wired); `/eps_frame_saver/probe` runs `probe()` in a worker
+thread (its worst tier decodes the whole file and blocked every other
+route) and both routes check the loopback gate BEFORE resolving or
+stat'ing a caller-supplied path.
 
 Owner ask 2026-07-21 ("a load-video node; pick a frame by play/pause/step/
 type; output that frame + w/h; see total frames"). Research:
@@ -1824,6 +1969,13 @@ single-frame output (NOT a list); "close-enough preview, EXACT on output".
   frame. No module-scope torch/av/ComfyUI import.
 
 ### §6.8 `LoraLibrarySweep` (display: "EPS LoRA Iterator") — strength iterator
+
+**v0.68.1 audit round:** one lora file load per file per `sweep()` —
+`_apply_stack` takes an optional per-call `lora_cache` (path → state
+dict) and the Iterator passes one dict across its whole plan; it used to
+`load_torch_file` every row of every plan entry (N loras × S steps × N
+rows = N²·S loads for a plan that needs N). Callers that pass no cache
+keep the one-shot behavior (Apply Set / Picker apply once anyway).
 
 Display name renamed from "EPS LoRA Sweep" in v0.48.4 (owner ask
 2026-08-02: the two sweep-named nodes do different jobs — this one
@@ -1984,6 +2136,19 @@ deletion:
 
 ### §6.10 `EPSCrossSweep` (display: "EPS Run Multiplier") — sweep × pairs, organized
 
+**v0.68.1 audit round:** the estimator's graph watch is re-verified on every
+recompute (§7.5: core's subgraph enter/exit restores `graph.onNodeAdded/
+onNodeRemoved` and silently dropped the one-shot wrapper) and a multiplier
+inside a subgraph arms its OWN graph from the deferred first recompute;
+triggers are onDrawForeground (canvas), onConnectionsChange, the THREE
+widget callbacks (`pair_mode`, `sweep_mode`, `solo_run`) and the graph
+watch; `estimateRuns` also returns `solo/soloOf/soloOfAtLeast`. Backend:
+the `model_low` output is a per-run ExecutionBlocker whenever `model_low`
+is unwired — it emitted bare `None` in the most common wiring (the four
+classic sweep inputs all wired, only `model_low` unwired: the run_blocker
+was never built), the exact crash-a-consumer shape §6.9 forbids — and the
+v0.51.0 consumed-but-unwired guard now covers slot 7 (`model_low`) too.
+
 **Run tokens + `solo_run` (v0.67.0, provenance M1 — roadmap
 `docs/ROADMAP-run-provenance.md`, owner goal: "drop a single image
 from a set onto comfyui and recreate just that image"):** every
@@ -2070,7 +2235,8 @@ label, so two chained Cross Products cannot express it.
   = one "null step": the node is then a pure pair multiplier (§6.9's
   job) and `save_prefix` drops the sweep-label level. Pair side: `image`
   optional (unwired = text-only mode) + a `pair_mode` widget (v0.49.0,
-  values `paired`/`multiply`, default `paired` — APPENDED after
+  values `paired`/`multiply`, default `paired` until v0.66.1 — `multiply`
+  since, see the head of this section — APPENDED after
   `base_folder`, never before: widgets_values restores positionally).
   `paired` = the original contract: image/text arrive index-ALIGNED
   (min-clamped, warned), `name` aligns per PAIR — Cross Product's
@@ -2090,13 +2256,15 @@ label, so two chained Cross Products cannot express it.
   points at `sweep_mode: multiply` — a disagreement between fanned sweep
   lists is always a miswire, never something to clamp. Pair-side
   mismatches (paired mode) still warn and use the min. Either side empty
-  → the §6.4 `[ExecutionBlocker(None)]` pattern on all seven outputs.
+  → the §6.4 `[ExecutionBlocker(None)]` pattern on all eight outputs
+  (model/clip/image/text/save_prefix/label/vae/model_low).
 - **`sweep_mode` (v0.57.0, owner ask 2026-08-09 — "You actually want 4
   models × 2 VAEs (8 runs); each slot corresponding to the same slot is
   not what I'm looking for", straight from hitting the v0.49.1 error with
   a 4-model Model Switcher + 2-VAE VAE Switcher).** A combo appended
-  AFTER `pair_mode` (the tail-append law): `aligned` (DEFAULT —
-  byte-identical to every workflow saved before it existed) keeps the
+  AFTER `pair_mode` (the tail-append law): `aligned` (the DEFAULT until
+  v0.66.1 — byte-identical to every workflow saved before it existed;
+  `multiply` is the default since, see the head of this section) keeps the
   one-axis zip above; `multiply` splits the sweep side into TWO axes —
   `model`/`clip`/`label` stay one aligned axis (an Iterator's or
   Checkpoint Switcher's members belong together, their >1 lengths must
@@ -2181,7 +2349,8 @@ label, so two chained Cross Products cannot express it.
   silent per-run blockers — they poison nobody. Direct callers/tests that
   pass no prompt get the pre-v0.51.0 behavior unchanged.
 - **Outputs (all `OUTPUT_IS_LIST`, length steps×pairs):** `model`, `clip`,
-  `image`, `text`, `save_prefix`, `label` — **STRENGTH-MAJOR** (owner
+  `image`, `text`, `save_prefix`, `label`, then the tail-appended `vae`
+  (v0.46.0) and `model_low` (v0.66.0) — **STRENGTH-MAJOR** (owner
   decision 2026-07-23b: outer loop = sweep step, so each strength's
   results land together; 11 steps × 8 pairs = 88, and the run count
   multiplies again per lora in the sweep's independent mode — surface the
@@ -2218,6 +2387,11 @@ label, so two chained Cross Products cannot express it.
     and §6.9 documents why `[]` and `None` both crash consumers.
 
 ### §6.11 `EPSDistributor` (display: "EPS Distributor") — one in, N gated out
+
+**v0.68.1 audit round:** draw passes parse `toggles` once (`isSlotEnabled`
+over a parsed map); the at-load width floor goes through `node.setSize`
+(§7.2); `DESCRIPTION` interpolates `MAX_OUTPUTS` instead of hand-typing
+"sixteen".
 
 NON-lora node in `eps_image/`, category "EPSNodes". Class id `EPSDistributor`
 frozen once shipped (§8). **§6.4's Switcher pointed backwards**: Switcher is
@@ -2479,6 +2653,23 @@ model/CLIP/VAE from one checkpoint must never drift out of alignment.
 
 ## §6.13 `EPSLoraPicker` (display: "EPS LoRA Picker") — folder-scoped browse, favorites, recents → stack
 
+**v0.68.1 audit round:** (1) the `GET picker` feed fetch is SHARED across
+every picker node — one in-flight promise + a 3 s TTL (`fetchFeed`); every
+mutation success stale-marks it through `invalidateInFlightLoad`, each
+node keeps its own `loadToken` (a tab switch re-created N pickers and
+fired N identical fetches); server-side the previews sweep (one stat per
+lora) runs in a worker thread and is reused for 20 s while the lora list
+is byte-identical; (2) search is debounced 120 ms and the flat search
+view caps at 200 rows plus an "…N more — keep typing" row; (3) one Add =
+one browser repaint (owned by `recordRecent`, response repaint
+change-gated by `sameFileOrder`), the first-click highlight is a class
+toggle (`setHighlightedFile`), the Send-row candidate walk is memoized per
+synchronous run; `scheduleSendRowRefresh` coalesces on the root graph and
+walks the whole workflow; (4) the send-adapter registry surface is
+`{label, probe, write}` — the per-family `find` key was dead since v0.64.0
+and is gone; the bridges' root-only `findPllNodes`/`findDasiwaNodes` are
+marked unused (kept for their test pins, to be removed together).
+
 The answer to the owner's three LoRA-navigation pains (research round
 2026-08-09, roadmap `docs/ROADMAP-lora-picker.md`): the flat lora list,
 no per-workflow "one folder + its subfolders" scope, and no favorites or
@@ -2537,6 +2728,9 @@ apply/text helpers, so it drops in anywhere Apply LoRA Set does.
   `addDOMWidget`, hidden `selection`, restore-safe via the §7.2
   `wireConfigureReload` shared-reload pattern, keydown
   `stopPropagation`, no window-level listeners, ~360px width floor).
+  *(Layout amended in v0.61.1 — see the **Layout round** note further
+  down this bullet: the scope chip row is gone, search sits under the
+  breadcrumb. The original layout, as first shipped, follows.)*
   Top→bottom: **scope chip** (`Whole library`, or `📁 <scope>` + ✕
   clear); **Selected (N)** rows — on-toggle, basename (full path in
   `title`), strength number input (−10..10, step 0.05), ✕ remove —
@@ -2704,6 +2898,27 @@ remote read-only revert now EXEMPTS a value arriving via a live link on
 the `file` widget-input (workflow-authored host state, fired through
 `applyToGraph` at queue time — reverting it swapped in the stale
 baseline), while raw remote hand edits still revert.
+
+**§7.2 amendment — width floor (v0.68.1):** `LGraphNode.size` is a Proxy
+over a typed-array view on frontend ≥1.48 — never an Array — so every
+module's `Array.isArray(node.size)` guard was dead and the "lift the
+current width on load" floor never fired (only the onResize wrap floored
+live drags). The lift now goes through `node.setSize([floor, node.size[1]])`,
+which runs litegraph's `_sizeUpdated` (the Vue layout mirror) and the
+onResize wrap. Whole-workflow loads are also floored by core's post-load
+`node.setSize(max(saved, computed))`.
+
+**§7.5 amendment — graph-level hooks are not ours to keep (v0.68.1):**
+`useGraphNodeManager`'s cleanup and `installErrorClearingHooks`'s disposer
+restore `graph.onNodeAdded/onNodeRemoved` to the values captured at THEIR
+install on every subgraph enter/exit, dropping any later wrapper — a
+one-shot "installed" flag goes deaf after one round trip. Store the
+installed wrapper per hook, re-verify `graph[hook] === stored` from a
+draw-free trigger and re-wrap the current value when not; install where
+`node.graph` is the real (sub)graph (it is null at `nodeCreated`).
+`onAfterChange` is not restored. Per-frame memo rule: `LGraphCanvas.frame`
+steps once per `draw()`, so a cache keyed on it is same-frame by
+construction.
 
 **§7.2 amendment — the search field (v0.53.0, owner ask 2026-08-08:
 "a search field at the top of the left row that matches search words with
@@ -2918,11 +3133,27 @@ hotkeys). Zero matches renders a "No prompts match" row.
     combo could never see a newly created set again, in EITHER renderer.
     `sets.js` therefore WRAPS that method once and re-installs its values
     function afterwards; the function is durable state, not one-shot
-    wiring. The CRUD event ALSO calls `refreshComboInNodes()` deliberately:
-    it is the only path that reaches the node DEFINITIONS the Vue renderer
-    builds its selects from (it refetches `/object_info`, and
-    `_slug_options()` re-reads the sets dir per call), which a module-level
-    cache cannot touch.
+    wiring. **The CRUD event no longer calls `refreshComboInNodes()` (v0.68.1, owner
+report "saving a state is slow / non-responsive").** On the installed
+frontend (1.48.7) that call is `reloadNodeDefs()`: GET `/object_info`
+(every pack's `INPUT_TYPES` re-run server-side), `registerNodeDef` for
+EVERY node type, every combo of every node rewritten, the Vue node-def
+store rebuilt, two toasts — on the main thread right after Save. Its
+premise (that the Vue renderer builds its selects from the node
+DEFINITIONS) is false there: the Vue select evaluates
+`widget.options.values()` when it opens (`WidgetSelect` `handleOpenChange`
+→ `refreshOptions` → `resolveRawValues`), i.e. sets.js's own function and
+module cache — the same path canvas uses. The event therefore only forces
+the module cache (`refreshSetsCache(true)`), which now honors `force`
+while a fetch is in flight (waits for it and runs exactly one more instead
+of returning early with the stale list). The wrap around
+`refreshComboInNodes` stays for the frontend's own "R" refresh. The
+`mirrors loader` combo also carries an identity `options.getOptionLabel`
+and a PURE `values`: ComboWidget's per-draw `_displayValue` otherwise
+evaluates `values()` — a whole-workflow walk — on every frame; the
+vanished-loader fallback to "(any)" runs from a chained `onNodeRemoved`
+watch (`healMirrorsTags`) plus one deferred pass per `nodeCreated`, never
+from a draw.
   - **A combo can only display a value that is one of its options.** The
     values function therefore always INCLUDES the widget's current value
     (`valuesIncluding`), and `controller.js`'s Push seeds the slug into a

@@ -747,6 +747,36 @@ class TestModelHighLowPairsV0660:
         assert "model_1" not in wanted and "model_1_low" not in wanted
         assert "model_2" in wanted and "model_2_low" in wanted
 
+    def test_low_is_requested_only_when_its_high_is_wanted(
+        self, fake_execution_blocker
+    ) -> None:
+        """Audit 2026-08-21: a low whose high is not connected (or is in the
+        lazy skip set -- fed by a statically-all-off sibling) must not be
+        requested on its own: its upstream ran for nothing and execute()
+        then hit the 0-high/1-low pairing error."""
+        node = self._node()
+        wanted = node.check_lazy_status(toggles=["{}"], model_1_low=[None])
+        assert "model_1_low" not in wanted
+        wanted = node.check_lazy_status(toggles=["{}"], model_1=[None], model_1_low=[None])
+        assert "model_1" in wanted and "model_1_low" in wanted
+
+    def test_skipped_high_with_a_wired_low_is_skipped_not_an_error(
+        self, fake_execution_blocker
+    ) -> None:
+        """Audit 2026-08-21: a row whose high arrived as None (lazy-skipped
+        upstream) pairs nothing -- it is skipped, never the misleading
+        "0 high model(s) with 1 low model(s)" ValueError."""
+        node = self._node()
+        highs, lows = node.execute(
+            toggles=["{}"],
+            model_1=[None],
+            model_1_low=["low-A"],
+            model_2=["high-B"],
+            model_2_low=["low-B"],
+        )
+        assert highs == ["high-B"]
+        assert lows == ["low-B"]
+
     def test_missing_low_blocks_only_the_low_output(self, fake_execution_blocker) -> None:
         from comfy_execution.graph import ExecutionBlocker
 

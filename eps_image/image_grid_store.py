@@ -57,6 +57,21 @@ now ALSO the backend half of the "display reflects the buffer on load" fix,
 served fresh over the new ``GET /eps_image_grid/list`` route
 (``routes_image_grid.py``) so the frontend can populate `node.imgs` on
 attach/reload/undo without waiting for a Run.
+
+**2026-08-21 perf round (owner: "big performance issues" on large
+buffers):** two additions, both display-only -- the buffer format, every
+existing function's contract and the node's ``ui.images`` shape are
+untouched. :func:`with_frame_mtimes` decorates refs with each frame
+FILE's own mtime so the frontend can key thumbnail URLs per frame instead
+of on :func:`buffer_generation` (the MANIFEST mtime, which moved on every
+append and so re-downloaded + re-encoded every UNCHANGED frame after
+every Collect run). :func:`thumbnail_path` builds and caches a genuinely
+DOWNSCALED ``.webp`` per frame under ``<buffer>/.thumbs/`` for the new
+``GET /eps_image_grid/frame?preview=`` route -- core's ``/view?preview=``
+re-encodes the FULL-resolution frame (``server.py``: ``Image.open`` +
+``img.save``, no resize), so a 100-frame grid was 100 full-res images
+drawn per repaint. :func:`frame_path` is the shared manifest-listed-only
+gate in front of both.
 """
 
 from __future__ import annotations
@@ -418,6 +433,11 @@ def remove_frame(grid_uuid: str, filename: str) -> list[dict]:
             "eps_image_grid: frame file %s could not be deleted (manifest entry removed)",
             filename,
         )
+    # Its cached thumbnail goes too (2026-08-21) -- best-effort, same as the
+    # frame: a stale thumb is unreachable anyway (`thumbnail_path` refuses
+    # anything the manifest no longer lists) and `clear` rmtrees the lot.
+    with contextlib.suppress(OSError):
+        _thumb_path_for(directory / filename).unlink()
     return _refs_for(grid_uuid, manifest["frames"])
 
 
@@ -453,6 +473,170 @@ def buffer_generation(grid_uuid: str) -> int:
         return int(_manifest_path(directory).stat().st_mtime * 1000)
     except OSError:
         return 0
+
+
+# ------------------------------------------- frame files + thumbnails
+# (2026-08-21 perf round -- see the module docstring's dated section and
+# ``routes_image_grid.py``'s ``GET /eps_image_grid/frame``.)
+
+#: Where a buffer keeps its downscaled display copies: ``<buffer>/.thumbs/
+#: <frame filename>.webp``. Dot-prefixed so it can never collide with a
+#: frame name (:func:`_next_frame_filename` only ever mints ``NNNN.png``),
+#: and invisible to everything else here by construction -- ``list_refs``,
+#: ``clone_buffer``, ``read_all_as_tensors`` and ``_next_frame_filename``
+#: all walk the MANIFEST, never the directory; ``clear`` is an ``rmtree``
+#: (thumbs go with the frames); ``clone_buffer`` copies manifest frames
+#: only (a clone regenerates its own thumbs lazily, on first view).
+THUMBS_DIRNAME = ".thumbs"
+#: Long-edge bound of a thumbnail, in pixels. The on-node grid draws every
+#: buffered frame into a cell a few dozen to a couple of hundred px wide
+#: (core's ``renderPreview``, ``useImagePreviewWidget.ts``), so 256 keeps a
+#: 100-frame grid at ~100 x 65k px of draw work per repaint instead of
+#: ~100 x 1-4M. Core's SINGLE-image view never scales UP (``Math.min(scaleX,
+#: scaleY, 1)`` there), which is why the frontend swaps the full frame back
+#: in for a focused tile rather than this being larger.
+THUMB_MAX_EDGE = 256
+THUMB_QUALITY = 80
+
+
+def _is_bare_frame_name(filename: Any) -> bool:
+    """Whether *filename* is a plain single path segment -- the only shape a
+    manifest frame name ever has (``NNNN.png``). Anything with a separator,
+    a ``.``/``..`` segment, a NUL, or a leading dot (``.thumbs`` itself, a
+    temp file) is refused before any path is built from it."""
+    if not isinstance(filename, str) or not filename:
+        return False
+    if "/" in filename or "\\" in filename or "\x00" in filename:
+        return False
+    return filename not in (".", "..") and not filename.startswith(".")
+
+
+def frame_path(grid_uuid: str, filename: str) -> Path | None:
+    """The on-disk path of ONE manifest-listed frame, or ``None``.
+
+    The single gate in front of every route that serves a frame's bytes
+    (``GET /eps_image_grid/frame``, ``routes_image_grid.py``): the uuid
+    must pass :func:`is_valid_grid_uuid` (via :func:`buffer_dir`), the name
+    must be a bare single segment (:func:`_is_bare_frame_name`) AND be
+    listed in the manifest -- the same "manifest-listed names only" rule
+    :func:`remove_frame` applies -- and the file must exist. So a hostile or
+    merely stale ``filename`` can never name anything outside the buffer
+    dir, nor anything inside it the manifest doesn't own. Never raises.
+    """
+    directory = buffer_dir(grid_uuid)
+    if directory is None or not _is_bare_frame_name(filename):
+        return None
+    if filename not in _load_manifest(directory)["frames"]:
+        return None
+    path = directory / filename
+    try:
+        if not path.is_file():
+            return None
+    except OSError:
+        return None
+    return path
+
+
+def _frame_mtime_ms(path: Path) -> int:
+    try:
+        return path.stat().st_mtime_ns // 1_000_000
+    except OSError:
+        return 0
+
+
+def with_frame_mtimes(grid_uuid: str, refs: list[dict]) -> list[dict]:
+    """*refs* (the ``ui.images`` triples :func:`_refs_for` builds) with a
+    per-frame ``"mtime"`` added -- that frame FILE's mtime in integer
+    milliseconds (``0`` when it can't be stat'ed), the same unit
+    :func:`buffer_generation` uses. New dicts; *refs* is never mutated.
+
+    Why (2026-08-21 perf round): the frontend keyed every thumbnail URL on
+    :func:`buffer_generation` -- the MANIFEST mtime, which moves on every
+    append/remove/clone -- so after each Collect run all N UNCHANGED frames
+    got a brand-new URL: N re-downloads + N full-resolution re-encodes
+    (core's ``/view?preview=`` does not resize) per run, scaling with
+    buffer size. A frame file's own mtime changes only when THAT file is
+    (re)written -- a fresh append, or a post-Clear re-add that reuses its
+    name (the very case the generation token existed for) -- so keying on
+    it keeps unchanged frames' URLs stable across appends and the browser
+    cache serves them. Rides every route that returns refs (``/list``,
+    ``/add``, ``/remove``, ``/clone``); NOT the node's ``ui.images`` (core's
+    shape, untouched) -- the frontend adopts the key from the next
+    ``/list`` without a reload.
+    """
+    directory = buffer_dir(grid_uuid)
+    decorated: list[dict] = []
+    for ref in refs:
+        mtime = 0
+        name = ref.get("filename") if isinstance(ref, dict) else None
+        if directory is not None and _is_bare_frame_name(name):
+            mtime = _frame_mtime_ms(directory / name)
+        decorated.append({**ref, "mtime": mtime})
+    return decorated
+
+
+def _thumb_path_for(frame: Path) -> Path:
+    return frame.parent / THUMBS_DIRNAME / f"{frame.name}.webp"
+
+
+def thumbnail_path(
+    grid_uuid: str, filename: str, *, max_edge: int = THUMB_MAX_EDGE
+) -> Path | None:
+    """The cached DOWNSCALED copy of one manifest-listed frame --
+    ``<buffer>/.thumbs/<frame>.webp``, long edge at most *max_edge* px
+    (aspect kept), webp quality :data:`THUMB_QUALITY` -- generated (or
+    regenerated) on demand. ``None`` when the frame can't be resolved
+    (:func:`frame_path`'s rules) or the thumbnail can't be produced (PIL
+    missing/failing, an unreadable frame, a read-only dir) -- the route then
+    404s and the frontend degrades to core's ``/view?preview=`` for that
+    one frame. Never raises.
+
+    Staleness: the thumb is stamped with the SOURCE frame's exact
+    ``mtime_ns`` (``os.utime``) and reused only while the two still match.
+    Equality, not "thumb newer than source", on purpose -- a post-Clear
+    re-add reuses the frame NAME with new pixels (:func:`_next_frame_filename`
+    restarts from the highest existing frame), and a future-dated source
+    (clock skew on a synced/NAS output dir) would otherwise regenerate on
+    every single request. Written with the same temp + ``os.replace`` as
+    every other file here, so two concurrent first requests for one frame
+    simply both produce the same bytes. CPU work -- the route runs this off
+    the event loop (``asyncio.to_thread``).
+    """
+    source = frame_path(grid_uuid, filename)
+    if source is None:
+        return None
+    try:
+        src_stat = source.stat()
+    except OSError:
+        return None
+    thumb = _thumb_path_for(source)
+    try:
+        thumb_stat = thumb.stat()
+        if thumb_stat.st_size > 0 and thumb_stat.st_mtime_ns == src_stat.st_mtime_ns:
+            return thumb
+    except OSError:
+        pass  # no cached thumb yet (or unreadable) -- build it below
+
+    try:
+        import io
+
+        from PIL import Image
+
+        with Image.open(source) as raw:
+            image = raw.convert("RGB")
+            image.thumbnail((max_edge, max_edge))
+            buffer = io.BytesIO()
+            image.save(buffer, format="WEBP", quality=THUMB_QUALITY)
+        _atomic_write_bytes(thumb, buffer.getvalue())
+        os.utime(thumb, ns=(src_stat.st_atime_ns, src_stat.st_mtime_ns))
+    except Exception as exc:  # broad on purpose -- display-only; the route must never 500
+        # Broad on purpose (unlike the sibling PIL catches): a thumbnail is a
+        # pure display optimization with a documented fallback, so ANY
+        # failure here -- PIL absent, no webp codec, a corrupt frame, a
+        # read-only dir -- must degrade, never surface.
+        logger.warning("eps_image_grid: could not build thumbnail for %s (%s)", source, exc)
+        return None
+    return thumb
 
 
 def read_all_as_tensors(grid_uuid: str) -> list:

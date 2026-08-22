@@ -1830,12 +1830,34 @@ def test_run_count_refreshes_on_graph_changes_not_only_draws(source: str) -> Non
     leave a stale number behind."""
     assert "function installGraphNodeWatch(graph)" in source
     watch = _function_body(source, "installGraphNodeWatch(graph)")
-    assert "graph.__epsRcNodeWatch" in watch, "install once per graph"
+    assert "graph.__epsRcNodeWatch" in watch, "per-graph record of the installed wrappers"
     assert "'onNodeAdded', 'onNodeRemoved', 'onAfterChange'" in watch
     assert "original?.apply(this, args)" in watch, "chained, never replaced"
     # State hangs off the node, so a deleted node takes its state with it.
     assert "node.__epsRcState = state" in source
     assert "installGraphNodeWatch(node.graph || app.graph)" in source
+    # v0.68.1: NOT a one-shot boolean. Core's useGraphNodeManager cleanup and
+    # installErrorClearingHooks disposer (1.48.7 source maps) RESTORE
+    # graph.onNodeAdded/onNodeRemoved to the values captured at THEIR
+    # install on every subgraph enter/exit -- dropping a later wrapper -- so
+    # the installed wrapper is stored per hook and re-verified on every call
+    # (re-wrapping the CURRENT value when it is no longer ours), a surviving
+    # older wrapper of ours is adopted (bounded chain), and the graph is the
+    # closure's, not `this` (a core wrapper may chain to us receiver-less).
+    assert "graph.__epsRcNodeWatch = true" not in source, "the one-shot flag is gone"
+    assert "if (current && current === stored[hook]) continue" in watch
+    assert "if (current && current.__epsRcNodeWatch) {" in watch
+    assert "wrapper.__epsRcNodeWatch = true" in watch
+    assert "scheduleGraphRecompute(graph)" in watch
+    assert "scheduleGraphRecompute(this)" not in watch
+    # ...re-verified from every recompute pass, which is also what arms a
+    # SUBGRAPH's own graph: node.graph is null at nodeCreated (attach falls
+    # back to app.graph, the root) and the deferred first recompute sees it.
+    recompute = _function_body(source, "recompute(state)")
+    assert "installGraphNodeWatch(graph)" in recompute
+    assert recompute.index("installGraphNodeWatch(graph)") < recompute.index(
+        "estimateRuns(snapshotFromGraph(graph)"
+    )
 
 
 def test_model_low_is_a_welded_axis_member_in_the_estimator(source: str) -> None:

@@ -60,7 +60,23 @@ class LibraryContext:
 
         Missing or unreadable config is not an error — it simply means
         defaults (a fresh install, or a hand-deleted file).
+
+        Cached on the file's mtime+size (audit 2026-08-21): ``library_dir()``
+        re-parsed ``config.json`` on EVERY call, and ``list_sets`` resolves
+        the dir once per set file -- N JSON parses per ``/object_info``.
+        One ``stat`` now answers the common unchanged case; an edit (or a
+        ``save_config`` write) changes the mtime and re-reads. A shallow
+        copy is returned so a caller that mutates its dict before
+        ``save_config`` can never poison the cache for another caller.
         """
+        try:
+            stat = self._config_path.stat()
+            key = (stat.st_mtime_ns, stat.st_size)
+        except OSError:
+            key = None
+        cached = getattr(self, "_config_cache", None)
+        if key is not None and cached is not None and cached[0] == key:
+            return dict(cached[1])
         try:
             with open(self._config_path, encoding="utf-8") as fh:
                 data = json.load(fh)
@@ -76,7 +92,10 @@ class LibraryContext:
                 "EPSNodes: unreadable %s (%s); using defaults", self._config_path, exc
             )
             return {}
-        return data if isinstance(data, dict) else {}
+        data = data if isinstance(data, dict) else {}
+        if key is not None:
+            self._config_cache = (key, dict(data))
+        return data
 
     def save_config(self, config: dict) -> None:
         """Atomically persist *config* (FORMAT.md §1)."""

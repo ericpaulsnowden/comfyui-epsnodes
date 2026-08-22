@@ -509,3 +509,46 @@ class TestCopyFromImageV0630:
         assert "originalOnSerialize?.apply(this, arguments)" in body
         # `i in values` distinguishes a HOLE from a genuinely stored null.
         assert "values.filter((_, i) => i in values)" in body
+
+
+# ------------------------------------------------------------ v0.68.1 pins
+
+
+def test_repaint_is_coalesced_to_one_frame_per_node() -> None:
+    """v0.68.1: a drag tick used to paint three times (writeSize -> the
+    width AND height callback wraps -> its own call), each a layout read +
+    full redraw. renderGrid() now schedules ONE requestAnimationFrame per
+    node and paintGrid() does the work; a node removal cancels the pending
+    frame; no-rAF environments (the Node probe) paint synchronously."""
+    render = _function_body(_SOURCE, "renderGrid(node)")
+    assert "if (state.renderRaf != null) return" in render
+    assert "state.renderRaf = requestAnimationFrame(() => {" in render
+    assert "paintGrid(node)" in render
+    assert "typeof requestAnimationFrame !== 'function'" in render
+    paint = _function_body(_SOURCE, "paintGrid(node)")
+    assert "drawGrid(node, ctx, cssW)" in paint
+    assert "getBoundingClientRect()" in paint
+    # every other caller still goes through renderGrid (never paintGrid)
+    assert _SOURCE.count("paintGrid(node)") == 3  # def + rAF body + sync fallback
+    assert "renderRaf: null" in _SOURCE
+    assert "cancelAnimationFrame(node._epsGrid.renderRaf)" in _SOURCE
+    # the v0.67.1 manual-edit-clears-preset wrap is untouched by this
+    assert "function wireManualEditClearsSelection(node, state)" in _SOURCE
+    assert "if (clearsPresetOnManualEdit(state)) commitSelection(node, [])" in _SOURCE
+
+
+def test_source_probe_only_arms_when_the_image_input_is_wired() -> None:
+    """v0.68.1: an UNWIRED node repainted (drag tick, resize, configure)
+    used to arm the 12 x 250 ms source-size poll every time, for a size that
+    cannot appear. The probe now returns at once unless the `image` input
+    carries a link; the wired slow-decode case is unchanged."""
+    probe = _function_body(_SOURCE, "scheduleSourceProbe(node)")
+    assert "if (node.inputs?.[imageInputSlot(node)]?.link == null) return" in probe
+    assert probe.index("?.link == null) return") < probe.index("const tick = () => {")
+
+
+def test_pad_title_points_at_the_readout_below_it() -> None:
+    """Docs-in-code fix (v0.68.1): the readout strip is drawn BELOW the
+    plot square (drawGrid's line baselines are plotY + side + ...)."""
+    assert "The readout above" not in _SOURCE
+    assert "The readout below the pad" in _SOURCE

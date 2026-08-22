@@ -418,3 +418,14 @@ def test_filter_input_keydown_stops_propagation(source: str) -> None:
 def test_min_node_width_floor_is_present(source: str) -> None:
     assert "const MIN_NODE_WIDTH = 320" in source
     assert "installMinWidth(state.node, MIN_NODE_WIDTH)" in source
+
+
+def test_width_floor_lifts_through_set_size_not_a_dead_is_array_guard(source: str) -> None:
+    """v0.68.1: `LGraphNode.size` is a Proxy over a typed-array view on the
+    installed frontend (1.48.7), never an Array, so installMinWidth's old
+    `Array.isArray(node.size)` lift never ran; the lift goes through
+    setSize() (litegraph's `_sizeUpdated` + the onResize wrap)."""
+    assert "Array.isArray(node.size)" not in source
+    body = _function_body(source, "installMinWidth(node, minWidth)")
+    assert "if (node.size && node.size[0] < minWidth)" in body
+    assert "node.setSize([minWidth, node.size[1]])" in body

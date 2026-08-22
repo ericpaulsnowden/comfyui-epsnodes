@@ -271,8 +271,14 @@ def _resolve_run(
         return base + (blocker,) * 7
 
     first = image if image is not None else extra_images[min(extra_images)]
+    # The shared target is the BOX -- a 0 axis derived from the FIRST
+    # image's aspect, multiple_of applied -- probed with "stretch" so a
+    # "keep aspect (fit)" run never takes the first image's FITTED size as
+    # everyone's box (audit 2026-08-21: box 1024x1024, image 2:1 + image_2
+    # 1:1 made resized_2 512x512 and flipped with wiring order). Each image
+    # is then resized with the REAL method into that one box.
     _, _, target_w, target_h, _, _ = _resolve_one(
-        width, height, resize_method, interpolation, multiple_of, first
+        width, height, "stretch", interpolation, multiple_of, first
     )
 
     def _resized(img: Any) -> Any:
@@ -284,7 +290,7 @@ def _resolve_run(
 
     blocker = _execution_blocker()
     tail = tuple(_resized(extra_images.get(index)) for index in range(2, 9))
-    return (blocker, _resized(image), target_w, target_h, blocker, blocker) + tail
+    return (blocker, _resized(image), target_w, target_h, blocker, blocker, *tail)
 
 
 def _execution_blocker() -> Any:
@@ -448,7 +454,7 @@ class EPSResolution:
     # TAIL-APPENDED (§8) -- outputs are positional, so 8 images total is
     # the hard ceiling (the §6.11 Distributor precedent). The frontend
     # reveals them up to the highest wired image_N.
-    RETURN_TYPES = ("IMAGE", "IMAGE", "INT", "INT", "INT", "INT") + ("IMAGE",) * 7
+    RETURN_TYPES = ("IMAGE", "IMAGE", "INT", "INT", "INT", "INT", *("IMAGE",) * 7)
     RETURN_NAMES = (
         "image",
         "resized_image",
@@ -456,12 +462,15 @@ class EPSResolution:
         "height",
         "original_width",
         "original_height",
-    ) + tuple(f"resized_{n}" for n in range(2, 9))
+        *(f"resized_{n}" for n in range(2, 9)),
+    )
     OUTPUT_IS_LIST = (True,) * 13
     OUTPUT_TOOLTIPS = (
         "The input image, unchanged. None if nothing is wired. With more "
         "than one size preset selected, this is a list, one element per "
-        "preset, in selection order.",
+        "preset, in selection order. In multi-image mode (any image_N "
+        "wired) this output blocks whatever consumes it -- with several "
+        "inputs there is no one passthrough.",
         "The resized image. None if nothing is wired, since there's "
         "nothing to resize. With more than one size preset selected, this "
         "is a list, one element per preset, in selection order.",
@@ -474,11 +483,23 @@ class EPSResolution:
         "The input image's width before resizing. 0 if nothing is wired. "
         "With more than one size preset selected, this is a list, one "
         "element per preset (the same value repeated -- it's the same "
-        "input image every time).",
+        "input image every time). In multi-image mode this output blocks "
+        "whatever consumes it (no single original).",
         "The input image's height before resizing. 0 if nothing is wired. "
         "With more than one size preset selected, this is a list, one "
         "element per preset (the same value repeated -- it's the same "
-        "input image every time).",
+        "input image every time). In multi-image mode this output blocks "
+        "whatever consumes it (no single original).",
+        # v0.61.0 multi-image mode (FORMAT.md §6.5): one tail output per
+        # extra image input, same target and settings as resized_image.
+        *(
+            f"image_{n} resized to the same target and settings as "
+            "resized_image (multi-image mode, v0.61.0). Blocks whatever "
+            f"consumes it when image_{n} is not wired. With more than one "
+            "size preset selected, this is a list, one element per preset, "
+            "in selection order."
+            for n in range(2, 9)
+        ),
     )
     FUNCTION = "resolve"
     DESCRIPTION = (

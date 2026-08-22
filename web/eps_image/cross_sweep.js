@@ -19,13 +19,14 @@
  *    disagreement or a multiply-mode same-origin vae paints the line as the
  *    ERROR it will become at queue time, BEFORE the queue. Refresh follows
  *    the §6.3 controller idiom through ONE `READOUT_MIN_INTERVAL_MS`
- *    throttle riding three chained triggers (`wrapWithRecompute`): the
+ *    throttle riding the chained triggers (`wrapWithRecompute`): the
  *    `onDrawForeground` wrap as the litegraph catch-all -- which NEVER
  *    fires under the Vue ("New node design") renderer, where the project
- *    rule is no canvas drawing at all -- plus two triggers that exist in
- *    BOTH renderers, a chained `onConnectionsChange` wrap and the two mode
- *    widgets' own callbacks. No polling timers of this file's own, no
- *    window listeners (§7.5).
+ *    rule is no canvas drawing at all -- plus triggers that exist in BOTH
+ *    renderers: a chained `onConnectionsChange` wrap and THREE widget
+ *    callbacks (`pair_mode`, `sweep_mode`, `solo_run`), and the graph-level
+ *    add/remove watch (`installGraphNodeWatch`). No polling timers of this
+ *    file's own, no window listeners (§7.5).
  *
  * 2. **Execution toast (the TRUTH).** `run()` `send_sync`s
  *    `eps-run-multiplier-count` `{node, steps, pairs, total}` the moment it
@@ -860,7 +861,11 @@ function plural(count, noun) {
  * @param {string|number} nodeId
  * @returns {{total: number, atLeast: boolean, steps: number,
  *   stepsAtLeast: boolean, pairs: number, pairsAtLeast: boolean,
- *   unknowns: string[], error: string|null, breakdown: string}}
+ *   unknowns: string[], error: string|null, breakdown: string,
+ *   solo: string|null, soloOf: number, soloOfAtLeast: boolean}} --
+ *   `solo` is the normalized `solo_run` token when one-of-N re-run mode is
+ *   active (else null), `soloOf`/`soloOfAtLeast` the full set size it picks
+ *   from (the readout's "1 of N"); `total` is then 1.
  */
 export function estimateRuns(snapshot, nodeId) {
   return estimateInner(snapshot, String(nodeId), new Set([String(nodeId)]))
@@ -1299,6 +1304,10 @@ function nodeClassOf(node) {
 function recompute(state) {
   const graph = state.node.graph || app.graph
   if (!graph) return
+  // v0.68.1: re-verify the graph-level watch on every pass (cheap) -- core
+  // restores graph.onNodeAdded/onNodeRemoved on subgraph enter/exit, and
+  // this is also what arms a SUBGRAPH's own graph (null at nodeCreated).
+  installGraphNodeWatch(graph)
   const est = estimateRuns(snapshotFromGraph(graph), String(state.node.id))
   const view = formatReadout(est)
   if (view.text === state.lastText && view.cls === state.lastCls) {
@@ -1437,20 +1446,46 @@ function scheduleGraphRecompute(graph) {
  * nothing.
  */
 function installGraphNodeWatch(graph) {
-  if (!graph || graph.__epsRcNodeWatch) return
-  graph.__epsRcNodeWatch = true
+  if (!graph) return
+  // v0.68.1 (2026-08-21): NOT a one-shot flag any more. Core's own graph
+  // hooks -- `useGraphNodeManager`'s cleanup and `installErrorClearingHooks`'s
+  // disposer (both verified in the 1.48.7 source maps) -- RESTORE
+  // `graph.onNodeAdded`/`onNodeRemoved` to the values they captured at THEIR
+  // install whenever the active graph changes (every subgraph enter/exit),
+  // which drops any wrapper installed after them; a boolean flag then refused
+  // to re-install and every multiplier in that graph went deaf to upstream
+  // adds/removes under Vue. So the installed wrapper is STORED per hook and
+  // every call re-verifies that each hook still IS ours, re-wrapping the
+  // CURRENT value when not. A surviving older wrapper of ours (core wrapped
+  // it, then restored it) is adopted rather than re-wrapped, so the chain
+  // stays bounded. Three compares per call -- recompute() runs this on every
+  // pass, which is also what lands the watch on a SUBGRAPH's own graph: at
+  // nodeCreated `node.graph` is still null (attach() falls back to app.graph,
+  // the root) and the deferred first recompute sees the real graph.
+  const stored = graph.__epsRcNodeWatch || (graph.__epsRcNodeWatch = {})
   for (const hook of ['onNodeAdded', 'onNodeRemoved', 'onAfterChange']) {
-    const original = graph[hook]
-    graph[hook] = function (...args) {
+    const current = graph[hook]
+    if (current && current === stored[hook]) continue
+    if (current && current.__epsRcNodeWatch) {
+      stored[hook] = current
+      continue
+    }
+    const original = current
+    const wrapper = function (...args) {
       let result
       try {
         result = original?.apply(this, args)
       } catch (error) {
         console.warn(PREFIX, `original ${hook} threw`, error)
       }
-      scheduleGraphRecompute(this)
+      // The closure's graph, not `this`: a core wrapper that chains to us
+      // may call without a receiver.
+      scheduleGraphRecompute(graph)
       return result
     }
+    wrapper.__epsRcNodeWatch = true
+    stored[hook] = wrapper
+    graph[hook] = wrapper
   }
 }
 
@@ -1568,14 +1603,14 @@ export function attach(node) {
     // Refresh triggers (§6.3's controller idiom -- wrap, never replace,
     // never throw out of the caller; ONE shared throttle via
     // wrapWithRecompute -> maybeRecompute). No timers of this file's own,
-    // no window listeners (§7.5). THREE triggers because the renderers
+    // no window listeners (§7.5). Several triggers because the renderers
     // differ: onDrawForeground is the litegraph catch-all (a graph edit
     // dirties the canvas, the repaint lands here) but NEVER fires under
     // the Vue "New node design" renderer (project rule: no canvas drawing
-    // there), so two triggers that exist in BOTH renderers ride along --
+    // there), so triggers that exist in BOTH renderers ride along --
     // onConnectionsChange (a rewire is exactly what changes the count)
-    // and the two mode widgets' own callbacks (pair_mode/sweep_mode flips
-    // change the math with no rewire at all).
+    // and THREE widget callbacks: pair_mode/sweep_mode flips and a
+    // solo_run token paste all change the math with no rewire at all.
     node.onDrawForeground = wrapWithRecompute(node.onDrawForeground, state)
     node.onConnectionsChange = wrapWithRecompute(node.onConnectionsChange, state)
     for (const name of ['pair_mode', 'sweep_mode', 'solo_run']) {

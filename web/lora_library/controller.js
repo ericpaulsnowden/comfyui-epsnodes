@@ -5,6 +5,27 @@
  * core's MarkdownNote/NoteNode) — never executes, never appears in the API
  * prompt.
  *
+ * v0.68.1 (2026-08-21, perf + bug round on the owner's "saving a state is
+ * slow / non-responsive" report): (1) the per-node 4 s sets/layout poll
+ * that rode on `_heartbeat()` (draw-driven, so 2N requests per tick with N
+ * controllers on a busy canvas and NONE under the Vue renderer) is replaced
+ * by ONE module-level shared poller (`registerController` et al.: one
+ * interval at SETS_POLL_MS, one in-flight fetch pair feeding every live
+ * controller, paused while the tab is hidden, stopped with the last
+ * controller) plus a per-node `lora_library:sets-changed` subscription, so
+ * CRUD is instant in both renderers; (2) the `target` combo's
+ * function-valued `values` no longer walks the whole workflow on every
+ * draw -- an identity `options.getOptionLabel` keeps ComboWidget's per-draw
+ * `_displayValue` off `values()` (installed bundle: it only calls
+ * `values()` when no mapper is set); (3) `_layoutLoaded` gates every
+ * layout edit -- a drag/`#` group/group delete made before the first
+ * successful layout GET used to POST the EMPTY default layout as a full
+ * replace and wipe every shared group; (4) `onRemoved` tears down an
+ * in-flight row drag's capture-phase window listeners, the sets-changed
+ * subscription and the poller membership, and `_removed` keeps late
+ * responses out of a detached pane; (5) group headers rename in place on
+ * double-click (the Notebook's gesture) and a no-op drop skips its POST.
+ *
  * Renamed a THIRD time 2026-07-22 (owner: every node's display name
  * must start with "EPS" so a gallery search for "EPS" surfaces the
  * whole pack): "Lora Loader State Controller" -> "EPS Lora Loader
@@ -826,7 +847,12 @@ const DELETE_ARMED_TEXT_COLOR = '#ffffff'
 
 /** onDrawForeground fires on every canvas redraw; throttle our own work. */
 const HEARTBEAT_MIN_MS = 1000
-const SETS_POLL_MS = 4000
+// v0.68.1: was 4000 per controller from the draw-driven heartbeat; now ONE
+// shared timer (see registerController) and CRUD is event-driven, so this
+// only has to catch out-of-band edits (another machine, curl).
+const SETS_POLL_MS = 15000
+//: v0.68.1 layout-loaded gate -- status + toast when a group edit is refused.
+const MSG_LAYOUT_NOT_LOADED = 'Group layout not loaded yet — try again.'
 /** Belt-and-suspenders cap so a future rgthree shape change can never spin us forever. */
 const MAX_ROW_ADJUST_STEPS = 500
 
@@ -901,6 +927,109 @@ function categoryOfSlug(layout, slug) {
     if (slugs.includes(slug)) return key
   }
   return UNCATEGORIZED
+}
+
+// ------------------------------------------------ shared sets poller (v0.68.1)
+// Every live controller used to run its OWN 4 s poll of /lora_library/sets +
+// /lora_library/sets_layout from `_heartbeat()` -- draw-driven, so N
+// controllers meant 2N requests per tick on a busy canvas and ZERO under the
+// Vue renderer (it never calls onDrawForeground), and nobody LISTENED to the
+// `lora_library:sets-changed` event controllers themselves dispatch. Now:
+// CRUD is event-driven (each controller subscribes in onAdded, see
+// `_subscribeSetsChanged`), and ONE module-level interval refreshes every
+// live controller from one fetch pair, shares a single in-flight promise,
+// pauses while the tab is hidden, and stops when the last controller leaves.
+
+const liveControllers = new Set()
+let sharedPollTimer = null
+let sharedFetch = null
+let sharedRefetchQueued = false
+let sharedRefreshScheduled = false
+
+function registerController(node) {
+  liveControllers.add(node)
+  if (!sharedPollTimer) {
+    sharedPollTimer = setInterval(() => {
+      if (document.hidden) return
+      sharedSetsRefresh().catch(() => {})
+    }, SETS_POLL_MS)
+    document.addEventListener('visibilitychange', onSharedVisibilityChange)
+  }
+  scheduleSharedSetsRefresh()
+}
+
+function unregisterController(node) {
+  liveControllers.delete(node)
+  if (liveControllers.size || !sharedPollTimer) return
+  clearInterval(sharedPollTimer)
+  sharedPollTimer = null
+  document.removeEventListener('visibilitychange', onSharedVisibilityChange)
+}
+
+function onSharedVisibilityChange() {
+  if (!document.hidden) scheduleSharedSetsRefresh()
+}
+
+/** One-tick coalescer: N controllers reacting to one CRUD event (or one
+ * workflow load adding N of them) produce ONE forced refresh. */
+function scheduleSharedSetsRefresh() {
+  if (sharedRefreshScheduled) return
+  sharedRefreshScheduled = true
+  setTimeout(() => {
+    sharedRefreshScheduled = false
+    sharedSetsRefresh({ force: true }).catch(() => {})
+  }, 0)
+}
+
+/** The shared fetch pair. Unforced (the interval) just skips when one is
+ * already in flight; forced (CRUD, add, tab shown) queues exactly one more,
+ * since the in-flight one may predate the change it is meant to show. */
+function sharedSetsRefresh({ force = false } = {}) {
+  if (sharedFetch) {
+    if (force) sharedRefetchQueued = true
+    return sharedFetch
+  }
+  sharedFetch = runSharedSetsFetch().finally(() => {
+    sharedFetch = null
+    if (!sharedRefetchQueued) return
+    sharedRefetchQueued = false
+    if (liveControllers.size) sharedSetsRefresh({ force: true }).catch(() => {})
+  })
+  return sharedFetch
+}
+
+/** GET sets once, feed every live controller; GET the layout once, feed
+ * every controller whose v0.67.2 guards allow it -- each node's layout token
+ * is snapshotted BEFORE any await and re-checked by `_applyLayoutResponse`,
+ * exactly as the per-node `_refreshSetsCache` does. */
+async function runSharedSetsFetch() {
+  const live = () => [...liveControllers].filter((node) => !node._removed)
+  if (!live().length) return
+  const tokens = new Map(live().map((node) => [node, node._layoutToken]))
+  let setsData = null
+  try {
+    setsData = await api.getJson('/lora_library/sets')
+  } catch (error) {
+    api.warn(`${NODE_TITLE}: GET /lora_library/sets failed (backend sets routes may not be deployed yet)`, error)
+  }
+  if (setsData) {
+    for (const node of live()) node._guarded('sets poll apply', () => node._applySetsResponse(setsData))
+  }
+  const wantLayout = live().filter(
+    (node) => tokens.has(node) && !node._layoutSaveInFlight && tokens.get(node) === node._layoutToken
+  )
+  if (!wantLayout.length) return
+  let layoutData
+  try {
+    layoutData = await api.getJson(LAYOUT_ROUTE)
+  } catch (error) {
+    // Older backend without §4.2: the panes simply stay flat.
+    api.warn(`${NODE_TITLE}: GET ${LAYOUT_ROUTE} failed (flat list until it succeeds)`, error)
+    return
+  }
+  for (const node of wantLayout) {
+    node._guarded('layout poll apply', () => node._applyLayoutResponse(layoutData, tokens.get(node)))
+  }
 }
 
 // ------------------------------------------------------- pure graph helpers
@@ -1914,6 +2043,17 @@ const STATE_PANE_CSS_TEXT = `
 }
 .llsc-category:hover .llsc-category-delete { visibility: visible; }
 .llsc-category-delete-armed { color: #ff6b6b; visibility: visible; }
+.llsc-inline-rename-host { padding: 2px 4px; cursor: text; }
+.llsc-inline-rename {
+  /* v0.68.1: rename a group where the user is looking (the Notebook's
+     llnb-inline-rename twin). Headers are uppercase; the editor is not. */
+  width: 100%; box-sizing: border-box; min-width: 0;
+  font: inherit; font-size: 11px; font-weight: 400;
+  text-transform: none; letter-spacing: normal;
+  background: var(--comfy-input-bg, #1e1e1e); color: var(--input-text, #ccc);
+  border: 1px solid rgba(66, 133, 244, 0.9); border-radius: 3px;
+  padding: 1px 4px; outline: none;
+}
 .llsc-row-dragging { opacity: 0.4; }
 .llsc-drag-marker {
   height: 2px;
@@ -2135,11 +2275,22 @@ export function registerControllerNode() {
         this._setsSignature = ''
         this._layoutSignature = ''
         this._renderAfterDrag = false
+        // v0.68.1: true after the FIRST successful layout GET or POST
+        // response -- every layout edit is gated on it (see
+        // `_withLoadedLayout`): before it, `_layoutCache` is the EMPTY
+        // default, and a drag/`#` group/group delete used to POST that as a
+        // full replace and wipe every shared group.
+        this._layoutLoaded = false
+        // v0.68.1: set in onRemoved; late responses and repaints bail on it
+        // instead of rendering into a detached pane (tab switch).
+        this._removed = false
+        this._onSetsChanged = null
+        // v0.68.1: the open group-rename editor, or null ({category, inputEl}).
+        this._categoryRename = null
         this._lastProbeKey = ''
         this._lastProbe = null
         this._lastStatusMessage = ''
         this._lastHeartbeat = 0
-        this._lastSetsPoll = 0
         // 2026-07-18c delete-bug fix: the last SLUG (stable) a label lookup
         // in _selectedSetEntry() resolved to — a durable fallback for when
         // _setsCache gets rebuilt (heartbeat-driven _refreshSetsCache) with a
@@ -2223,20 +2374,50 @@ export function registerControllerNode() {
 
       onAdded() {
         this._guarded('onAdded', () => {
+          this._removed = false
           // Watch the graph this node just joined, so a loader dropped in
           // LATER is noticed without waiting for a draw-driven heartbeat
           // (owner report 2026-08-14 -- see installGraphNodeWatch).
           for (const graph of api.walkGraphs(app.graph)) installGraphNodeWatch(graph)
           this._refreshTargetCombo()
           this._probeAndUpdateStatus()
-          this._refreshSetsCache()
+          // v0.68.1: CRUD anywhere (another controller, this one) lands here
+          // by event -- instant in both renderers -- and the shared poller
+          // (one fetch pair for every live controller, coalesced per tick)
+          // replaces the per-node `_refreshSetsCache()` this used to call.
+          this._subscribeSetsChanged()
+          registerController(this)
         })
       }
 
+      /** v0.68.1: only the delete-arm timer used to be cleared here. An
+       * in-flight row drag's three CAPTURE-phase window listeners leaked,
+       * and a sets/layout response arriving after a tab switch rendered
+       * into the detached pane. */
       onRemoved() {
         this._guarded('onRemoved', () => {
+          this._removed = true
           clearTimeout(this._w.deleteBtn?._armTimer)
+          this._stateDrag?.cleanup?.()
+          this._stateDrag = null
+          this._categoryRename = null
+          this._unsubscribeSetsChanged()
+          unregisterController(this)
         })
+      }
+
+      _subscribeSetsChanged() {
+        if (this._onSetsChanged) return
+        this._onSetsChanged = () => scheduleSharedSetsRefresh()
+        // Capture-phase, with a matching removal (§7.5 posture for every
+        // window listener this pack installs).
+        window.addEventListener('lora_library:sets-changed', this._onSetsChanged, { capture: true })
+      }
+
+      _unsubscribeSetsChanged() {
+        if (!this._onSetsChanged) return
+        window.removeEventListener('lora_library:sets-changed', this._onSetsChanged, { capture: true })
+        this._onSetsChanged = null
       }
 
       onDrawForeground() {
@@ -2282,7 +2463,15 @@ export function registerControllerNode() {
           'target',
           '',
           () => this._guarded('target changed', () => this._probeAndUpdateStatus()),
-          { values: () => this._targetComboValues() }
+          {
+            values: () => this._targetComboValues(),
+            // v0.68.1: ComboWidget's per-draw `_displayValue` evaluates
+            // `values()` -- a whole-workflow walk -- whenever no
+            // `getOptionLabel` is installed (installed bundle, 2026-08-21).
+            // The value IS the label, so an identity mapper keeps every draw
+            // O(1); `values` stays a function and still rebuilds on open.
+            getOptionLabel: (value) => (value == null ? '' : String(value))
+          }
         )
         // Canvas-widget hover text. This node is frontend-only, so it has no
         // backend def to hang input tooltips on; `NodeTooltip.vue` reads a
@@ -2529,11 +2718,18 @@ export function registerControllerNode() {
       _renderStateList() {
         const listEl = this._pane?.listEl
         if (!listEl) return
+        if (this._removed) return // v0.68.1: never paint a detached pane
         // v0.67.2: never rebuild the rows UNDER an active drag -- the
         // dragged element (and its pointer capture) would be replaced mid-
         // gesture, which is exactly how a poll landing mid-drag made a
         // reorder visibly snap back. The pointerup/cancel paths flush.
         if (this._stateDrag?.active) {
+          this._renderAfterDrag = true
+          return
+        }
+        // v0.68.1: same rule for an open group-rename editor -- a poll
+        // landing mid-typing would replace the input; commit/cancel repaint.
+        if (this._categoryRename) {
           this._renderAfterDrag = true
           return
         }
@@ -2641,12 +2837,116 @@ export function registerControllerNode() {
           if (event.target === deleteBtn) return
           this._onStateRowPointerDown(event, { kind: 'header', category, el: header })
         })
+        // v0.68.1 (owner: groups "as identical as possible" to the Notebook):
+        // double-click = rename in place, the Notebook's header gesture. Its
+        // two preceding taps each toggled collapse (and re-rendered), so the
+        // editor mounts on the CURRENT header element, found by name.
+        header.addEventListener('dblclick', (event) => {
+          event.preventDefault()
+          event.stopPropagation()
+          this._stateDrag?.cleanup?.()
+          this._stateDrag = null
+          this._guarded('group rename', () => this._beginCategoryRename(category))
+        })
         header.addEventListener('keydown', (event) => {
           if (event.key !== 'Enter' && event.key !== ' ') return
           event.preventDefault()
           this._toggleCategoryCollapsed(category)
         })
         return header
+      }
+
+      /** v0.68.1: inline `<input>` over the header label (the Notebook's
+       * beginInlineRename/mountInlineRename by hand). Enter commits, Escape
+       * cancels, blur commits; a rename = the key in `layout.order` + the
+       * entry in `layout.categories`, collapse state follows, one
+       * `_saveLayout`; empty/duplicate names are refused on the status line. */
+      _beginCategoryRename(category) {
+        if (this._removed) return
+        // Committing the previous editor (not cancelling it) keeps a typed
+        // rename from being lost by moving on -- the Notebook's rule.
+        if (this._categoryRename && this._categoryRename.category !== category) this._commitCategoryRename()
+        const header = this._headerElOf(category)
+        if (!header) return
+        const input = el('input', {
+          className: 'llsc-inline-rename',
+          attrs: { type: 'text', spellcheck: 'false', 'aria-label': 'Rename group' }
+        })
+        input.value = category
+        const rename = { category, inputEl: input }
+        this._categoryRename = rename
+        header.replaceChildren(input)
+        header.classList.add('llsc-inline-rename-host')
+        input.addEventListener('keydown', (event) => {
+          // Every key stops here: the canvas has global shortcuts (Delete
+          // removes the selected NODE) and the header's own Enter/space
+          // collapse handler sits one level up.
+          event.stopPropagation()
+          if (event.key === 'Enter') {
+            event.preventDefault()
+            this._guarded('group rename commit', () => this._commitCategoryRename())
+          } else if (event.key === 'Escape') {
+            event.preventDefault()
+            this._guarded('group rename cancel', () => this._cancelCategoryRename())
+          }
+        })
+        // A press inside the input must not reach the header's pointerdown
+        // (which would arm a drag or toggle collapse mid-edit).
+        for (const type of ['pointerdown', 'mousedown', 'dblclick', 'click']) {
+          input.addEventListener(type, (event) => event.stopPropagation())
+        }
+        input.addEventListener('blur', () => {
+          if (this._categoryRename !== rename) return
+          this._guarded('group rename commit', () => this._commitCategoryRename())
+        })
+        input.focus()
+        input.select()
+      }
+
+      _cancelCategoryRename() {
+        if (!this._categoryRename) return
+        this._categoryRename = null
+        this._renderStateList()
+      }
+
+      _commitCategoryRename() {
+        const rename = this._categoryRename
+        if (!rename) return
+        // Close FIRST: the repaints below detach the input, and a blur from
+        // that must not re-enter here.
+        this._categoryRename = null
+        const from = rename.category
+        const to = (rename.inputEl.value || '').trim()
+        if (!to) {
+          this._setStatusText('Enter a name for this group.')
+          this._renderStateList()
+          return
+        }
+        if (to === from) {
+          this._renderStateList()
+          return
+        }
+        this._withLoadedLayout('group rename', () => {
+          const layout = this._layoutCache
+          if (!layout.categories.includes(from)) {
+            this._setStatusText(`Group "${from}" no longer exists.`)
+            this._renderStateList()
+            return
+          }
+          if (layout.categories.includes(to)) {
+            this._setStatusText(`A group named "${to}" already exists.`)
+            this._renderStateList()
+            return
+          }
+          layout.categories = layout.categories.map((c) => (c === from ? to : c))
+          layout.order[to] = layout.order[from] || []
+          delete layout.order[from]
+          // Collapse is tracked by NAME, so the key moves with the rename.
+          if (this._collapsedCategories.delete(from)) this._collapsedCategories.add(to)
+          this._setStatusText(`Group "${from}" renamed to "${to}".`)
+          this._renderStateList()
+          this._saveLayout().catch((error) => api.warn(`${NODE_TITLE}: group rename save failed`, error))
+        })
       }
 
       _toggleCategoryCollapsed(category) {
@@ -2656,14 +2956,18 @@ export function registerControllerNode() {
       }
 
       _deleteCategory(category) {
-        const layout = this._layoutCache
-        const orphans = layout.order[category] || []
-        layout.order[UNCATEGORIZED] = [...(layout.order[UNCATEGORIZED] || []), ...orphans]
-        delete layout.order[category]
-        layout.categories = layout.categories.filter((c) => c !== category)
-        this._collapsedCategories.delete(category)
-        this._setStatusText(`Group "${category}" removed — its states are ungrouped.`)
-        this._saveLayout().catch((error) => api.warn(`${NODE_TITLE}: group delete failed`, error))
+        // v0.68.1: a layout edit on the unloaded (empty) default layout
+        // posted that default as a full replace -- load first, then edit.
+        this._withLoadedLayout('delete group', () => {
+          const layout = this._layoutCache
+          const orphans = layout.order[category] || []
+          layout.order[UNCATEGORIZED] = [...(layout.order[UNCATEGORIZED] || []), ...orphans]
+          delete layout.order[category]
+          layout.categories = layout.categories.filter((c) => c !== category)
+          this._collapsedCategories.delete(category)
+          this._setStatusText(`Group "${category}" removed — its states are ungrouped.`)
+          this._saveLayout().catch((error) => api.warn(`${NODE_TITLE}: group delete failed`, error))
+        })
       }
 
       /**
@@ -2869,31 +3173,71 @@ export function registerControllerNode() {
       _finishStateDrag(drag) {
         const target = drag.target
         if (!target) return
-        const layout = this._layoutCache
-        if (drag.kind === 'header') {
-          const cats = layout.categories.filter((c) => c !== drag.category)
-          if (target.kind === 'before' && target.before) {
-            const at = cats.indexOf(target.before)
-            cats.splice(at === -1 ? cats.length : at, 0, drag.category)
+        // v0.68.1: (a) edit only a LOADED layout -- a drop before the first
+        // layout GET used to POST the empty default and wipe every group;
+        // (b) a row (or group) dropped back onto its own slot is not an
+        // edit: no render, no POST (the Notebook's isNoopMove twin).
+        this._withLoadedLayout('state drag drop', () => {
+          if (this._isNoopStateDrop(drag)) return
+          const layout = this._layoutCache
+          if (drag.kind === 'header') {
+            const cats = layout.categories.filter((c) => c !== drag.category)
+            if (target.kind === 'before' && target.before) {
+              const at = cats.indexOf(target.before)
+              cats.splice(at === -1 ? cats.length : at, 0, drag.category)
+            } else {
+              cats.push(drag.category)
+            }
+            layout.categories = cats
+          } else if (target.kind === 'before') {
+            if (target.before === drag.slug) return
+            pullSlugFromLayout(layout, drag.slug)
+            const holder = categoryOfSlug(layout, target.before)
+            const list = layout.order[holder] || (layout.order[holder] = [])
+            const at = list.indexOf(target.before)
+            list.splice(at === -1 ? list.length : at, 0, drag.slug)
           } else {
-            cats.push(drag.category)
+            pullSlugFromLayout(layout, drag.slug)
+            const list = layout.order[target.category] || (layout.order[target.category] = [])
+            if (!list.includes(drag.slug)) list.push(drag.slug)
+            this._collapsedCategories.delete(target.category) // show where it landed
           }
-          layout.categories = cats
-        } else if (target.kind === 'before') {
-          if (target.before === drag.slug) return
-          pullSlugFromLayout(layout, drag.slug)
-          const holder = categoryOfSlug(layout, target.before)
-          const list = layout.order[holder] || (layout.order[holder] = [])
-          const at = list.indexOf(target.before)
-          list.splice(at === -1 ? list.length : at, 0, drag.slug)
-        } else {
-          pullSlugFromLayout(layout, drag.slug)
-          const list = layout.order[target.category] || (layout.order[target.category] = [])
-          if (!list.includes(drag.slug)) list.push(drag.slug)
-          this._collapsedCategories.delete(target.category) // show where it landed
+          this._renderStateList()
+          this._saveLayout().catch((error) => api.warn(`${NODE_TITLE}: reorder save failed`, error))
+        })
+      }
+
+      /** v0.68.1: true when *drag*'s target describes the position it is
+       * already in -- notebook.js's isNoopMove/isNoopCategoryMove by hand,
+       * read off the render plan (`_groupedRows`): for a row, "before" its
+       * own next sibling, or "append to" its own group while it is already
+       * that group's last rendered row; for a header, "before" the next
+       * group or "end" while it is already last. */
+      _isNoopStateDrop(drag) {
+        const target = drag.target
+        if (!target) return true
+        if (drag.kind === 'header') {
+          const cats = this._layoutCache.categories
+          const idx = cats.indexOf(drag.category)
+          if (idx === -1) return false
+          const next = cats[idx + 1] ?? null
+          return target.kind === 'before' && target.before ? next === target.before : next == null
         }
-        this._renderStateList()
-        this._saveLayout().catch((error) => api.warn(`${NODE_TITLE}: reorder save failed`, error))
+        const plan = this._groupedRows()
+        const idx = plan.findIndex((row) => row.kind === 'entry' && row.entry.slug === drag.slug)
+        if (idx === -1) return false
+        const after = plan[idx + 1]
+        const next = after && after.kind === 'entry' ? after.entry.slug : null
+        if (target.kind === 'before') return target.before === drag.slug || (!!next && next === target.before)
+        if (target.kind !== 'category') return false
+        let category = UNCATEGORIZED
+        for (let i = idx; i >= 0; i--) {
+          if (plan[i].kind === 'header') {
+            category = plan[i].category
+            break
+          }
+        }
+        return target.category === category && next == null
       }
 
       /**
@@ -2980,10 +3324,9 @@ export function registerControllerNode() {
         this._lastHeartbeat = now
         this._refreshTargetCombo()
         this._probeAndUpdateStatus()
-        if (now - this._lastSetsPoll >= SETS_POLL_MS) {
-          this._lastSetsPoll = now
-          this._guarded('sets poll', () => this._refreshSetsCache())
-        }
+        // v0.68.1: the sets/layout poll LEFT the heartbeat -- it is shared,
+        // timer- and event-driven now (registerController), so it also runs
+        // under the Vue renderer, where onDrawForeground never fires.
       }
 
       // --------------------------------------------------------- sets cache
@@ -3006,16 +3349,67 @@ export function registerControllerNode() {
         try {
           const layoutData = await api.getJson(LAYOUT_ROUTE)
           if (this._layoutSaveInFlight || token !== this._layoutToken) return
-          const next = normalizeLayoutClient(layoutData?.layout)
-          const signature = JSON.stringify(next)
-          if (signature === this._layoutSignature) return // unchanged: no rebuild
-          this._layoutCache = next
-          this._layoutSignature = signature
-          this._renderStateList()
+          this._applyLayoutResponse(layoutData, token) // v0.68.1: shared with the poller
         } catch (error) {
           // Older backend without §4.2: the pane simply stays flat.
           api.warn(`${NODE_TITLE}: GET ${LAYOUT_ROUTE} failed (flat list until it succeeds)`, error)
         }
+      }
+
+      /** v0.68.1: one layout GET response -> this node, under the v0.67.2
+       * guards (*token* was snapshotted before the GET was issued: a local
+       * edit that outran it, or a save in flight, wins). Marks the layout
+       * LOADED -- the gate every layout edit checks -- and repaints only on a
+       * real change. Fed by `_refreshSetsCache`, the shared poller and
+       * `_ensureLayoutLoaded`. */
+      _applyLayoutResponse(layoutData, token) {
+        if (this._removed) return
+        if (this._layoutSaveInFlight || token !== this._layoutToken) return
+        const next = normalizeLayoutClient(layoutData?.layout)
+        this._layoutLoaded = true
+        const signature = JSON.stringify(next)
+        if (signature === this._layoutSignature) return // unchanged: no rebuild
+        this._layoutCache = next
+        this._layoutSignature = signature
+        this._renderStateList()
+      }
+
+      /** v0.68.1 (data-loss fix): resolve true once the §4.2 layout has been
+       * loaded from the server at least once (GET here, or any earlier
+       * GET/POST response). Before that, `_layoutCache` is the EMPTY default
+       * and posting an edit made on top of it wipes every shared group. On a
+       * failed GET the edit is REFUSED -- status line + toast -- never posted. */
+      async _ensureLayoutLoaded() {
+        if (this._layoutLoaded) return true
+        const token = this._layoutToken
+        try {
+          const layoutData = await api.getJson(LAYOUT_ROUTE)
+          if (this._removed) return false
+          this._applyLayoutResponse(layoutData, token)
+        } catch (error) {
+          api.warn(`${NODE_TITLE}: GET ${LAYOUT_ROUTE} failed (group edit refused)`, error)
+        }
+        if (this._layoutLoaded) return true
+        this._setStatusText(MSG_LAYOUT_NOT_LOADED)
+        this._toast('warn', NODE_TITLE, MSG_LAYOUT_NOT_LOADED)
+        this._renderStateList() // a drag's rows are still in place; any deferred paint flushes
+        return false
+      }
+
+      /** Run *edit* (a synchronous `_layoutCache` mutation + save) on a
+       * LOADED layout: immediately when it already is, else after one GET
+       * -- applied first, so the edit lands on top of stored truth -- and
+       * not at all when that GET fails. */
+      _withLoadedLayout(label, edit) {
+        if (this._layoutLoaded) {
+          edit()
+          return
+        }
+        this._ensureLayoutLoaded()
+          .then((ok) => {
+            if (ok && !this._removed) this._guarded(label, edit)
+          })
+          .catch((error) => api.warn(`${NODE_TITLE}: ${label} failed`, error))
       }
 
       /** POST the whole layout (full replace, §4.2); the response is the
@@ -3042,10 +3436,20 @@ export function registerControllerNode() {
             const token = this._layoutToken
             try {
               const data = await api.postJson(LAYOUT_ROUTE, { layout: this._layoutCache })
+              this._layoutLoaded = true // v0.68.1: the healed response IS stored truth
               if (token === this._layoutToken) {
                 this._layoutCache = normalizeLayoutClient(data?.layout)
                 this._layoutSignature = JSON.stringify(this._layoutCache)
                 this._renderStateList()
+              }
+              // v0.68.1: layout edits are never announced (no CRUD event),
+              // so OTHER live controllers used to learn of a group edit on
+              // the next poll -- 4 s then, 15 s now. Fan the healed response
+              // out in memory (no network); each receiver's own v0.67.2
+              // guards (save in flight) still apply.
+              for (const other of liveControllers) {
+                if (other === this || other._removed) continue
+                other._guarded('layout fan-out', () => other._applyLayoutResponse(data, other._layoutToken))
               }
             } catch (error) {
               api.warn(`${NODE_TITLE}: saving the sets layout failed`, error)
@@ -3062,6 +3466,7 @@ export function registerControllerNode() {
       }
 
       _applySetsResponse(data) {
+        if (this._removed) return // v0.68.1: a late response must not paint a detached pane
         const list = Array.isArray(data?.sets) ? data.sets : []
         const seenLabels = new Set()
         this._setsCache = list.map((s) => {
@@ -3071,8 +3476,9 @@ export function registerControllerNode() {
           return { slug: s.slug, name: s.name, count: s.count, label }
         })
         // FORMAT.md §6.3 (2026-07-21): keep the two-pane list in sync with
-        // the cache on every rebuild — a capture/update/delete response, or
-        // the periodic sets-poll (`_heartbeat()`/`_refreshSetsCache()`).
+        // the cache on every rebuild — a capture/update/delete response, the
+        // sets-changed event, or the shared poll (`runSharedSetsFetch()`,
+        // v0.68.1 — `_refreshSetsCache()` only for the explicit refetches).
         // v0.67.2: ...but only when the list actually CHANGED -- the poll
         // used to rebuild every row (and dirty the canvas) every 4s for
         // nothing; a capture/delete response differs by construction.
@@ -3298,6 +3704,9 @@ export function registerControllerNode() {
           this._setStatusText('Enter a group name after the #.')
           return
         }
+        // v0.68.1: never create on top of the unloaded (empty) default layout
+        // -- the POST would replace every stored group with just this one.
+        if (!(await this._ensureLayoutLoaded())) return
         if (this._layoutCache.categories.includes(name)) {
           this._setStatusText(`A group named "${name}" already exists.`)
           return

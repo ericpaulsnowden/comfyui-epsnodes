@@ -819,3 +819,35 @@ class TestMultiImage:
         assert [tuple(x.shape) for x in result[1]] == [(1, 20, 40, 3), (1, 30, 10, 3)]
         assert [tuple(x.shape) for x in result[6]] == [(1, 20, 40, 3), (1, 30, 10, 3)]
         assert result[2] == [40, 10] and result[3] == [20, 30]
+
+
+class TestMultiImageFitBoxV0681:
+    """Audit 2026-08-21: in multi-image mode the shared target is the BOX
+    (0 axis derived from the first image, multiple_of applied) -- "keep
+    aspect (fit)" used to take the FIRST image's fitted size as everyone's
+    box, so a 2:1 first image shrank a 1:1 second one to half the box and
+    the result flipped with wiring order."""
+
+    def test_fit_target_is_the_box_regardless_of_first_image_aspect(
+        self, fake_execution_blocker: type
+    ) -> None:
+        wide = _make_image(height=100, width=200)   # 2:1
+        square = _make_image(height=100, width=100)  # 1:1
+        node = _node()
+        result = node.resolve(
+            width=1024, height=1024, resize_method="keep aspect (fit)",
+            image=wide, image_2=square,
+        )
+        # width/height report the BOX
+        assert result[2][0] == 1024 and result[3][0] == 1024
+        # the square fits the whole box; the wide one fits its width
+        assert tuple(result[6][0].shape) == (1, 1024, 1024, 3)
+        assert tuple(result[1][0].shape) == (1, 512, 1024, 3)
+        # and swapping the wiring order changes nothing about the box
+        swapped = node.resolve(
+            width=1024, height=1024, resize_method="keep aspect (fit)",
+            image=square, image_2=wide,
+        )
+        assert swapped[2][0] == 1024 and swapped[3][0] == 1024
+        assert tuple(swapped[1][0].shape) == (1, 1024, 1024, 3)
+        assert tuple(swapped[6][0].shape) == (1, 512, 1024, 3)

@@ -54,7 +54,10 @@ whatever is wired downstream is silently skipped. A selection that names
 SOME files that still exist and SOME that don't loads the ones that do and
 just skips the missing ones (logged, not fatal) -- one stale tick (a
 checkpoint deleted off disk after the workflow was saved) shouldn't sink
-every other model in the sweep.
+every other model in the sweep. A skipped file SHORTENS the emitted lists:
+nothing holds its slot, so every later checkpoint shifts up one index (the
+four outputs stay aligned with each other, just one element shorter per
+missing file). Documented behavior, not a bug.
 
 **Queue-time validation is a courtesy, not the enforcement layer.**
 ``VALIDATE_INPUTS`` below re-checks every selected name against
@@ -261,9 +264,11 @@ class EPSCheckpointSwitcher:
         "producing fan-out, like EPS Image Switcher) -- the same prompt, tried "
         "across N models in one queue. model/clip/vae/label are index-"
         "aligned: element i of every output came from the same checkpoint. "
-        "Ticking nothing, or ticking only checkpoints that have since been "
-        "removed from disk, is a valid state: the queue still succeeds and "
-        "the downstream branch simply doesn't run."
+        "A ticked file that is missing on disk is skipped and SHORTENS the "
+        "lists (later checkpoints shift up one index; nothing holds its "
+        "slot). Ticking nothing, or ticking only checkpoints that have since "
+        "been removed from disk, is a valid state: the queue still succeeds "
+        "and the downstream branch simply doesn't run."
     )
 
     @classmethod

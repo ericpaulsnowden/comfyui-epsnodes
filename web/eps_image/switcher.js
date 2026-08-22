@@ -337,9 +337,17 @@ function writeToggles(node, map) {
   widget.value = JSON.stringify(map)
 }
 
+/** Enabled unless *toggles* explicitly records `false` for *name* -- the
+ * backend's own rule over an ALREADY-PARSED map (v0.68.1: the draw paths
+ * parse `toggles` once per pass and read rows through this, instead of one
+ * JSON.parse per row per frame -- distributor.js's `isSlotEnabled` twin). */
+function isEnabledIn(toggles, name) {
+  return toggles[name] !== false
+}
+
 /** Enabled unless explicitly recorded `false` -- mirrors the backend default. */
 function isRowEnabled(node, name) {
-  return readToggles(node)[name] !== false
+  return isEnabledIn(readToggles(node), name)
 }
 
 function setRowEnabled(node, name, enabled) {
@@ -817,14 +825,15 @@ function connectedImageEntries(node) {
   return imageInputEntries(node).filter((entry) => entry.connected)
 }
 
-/** @returns {true|false|null} true=all on, false=all off (or none connected), null=mixed */
-function allRowsState(node) {
+/** @returns {true|false|null} true=all on, false=all off (or none connected), null=mixed
+ * *toggles* (v0.68.1): an already-parsed map, so a draw pass parses once. */
+function allRowsState(node, toggles = readToggles(node)) {
   const entries = connectedImageEntries(node)
   if (entries.length === 0) return false
   let allOn = true
   let allOff = true
   for (const entry of entries) {
-    const on = isRowEnabled(node, entry.name)
+    const on = isEnabledIn(toggles, entry.name)
     allOn = allOn && on
     allOff = allOff && !on
   }
@@ -893,7 +902,8 @@ function outputSafeColumnX(node) {
     if (text.length > widestLabel) widestLabel = text.length
   }
   const reserve = OUTPUT_SOCKET_RESERVE + widestLabel * OUTPUT_LABEL_CHAR_W
-  const width = Array.isArray(node.size) || node.size ? node.size[0] : 0
+  // v0.68.1: `node.size` is a Proxy over a typed array here, never an Array.
+  const width = node.size ? node.size[0] : 0
   return Math.max(ROW_MIN_X, width - ROW_BOX - reserve)
 }
 
@@ -948,15 +958,54 @@ function columnNeedOf(node) {
  *    for its width therefore still puts its box past its right edge, exactly
  *    as before this change: that node needs widening, and forcing its box
  *    inward would only make it unclickable.
+ *
+ * v0.68.1 (2026-08-21): the graph walk itself lives in `graphColumnBounds`
+ * and runs ONCE per canvas frame per graph -- it used to run inside every
+ * visible switcher's onDrawForeground, i.e. (switchers x all nodes) per
+ * frame. The result is node-independent (including the calling node in
+ * the max/min is idempotent), so this function is now just the two clamps.
  * @param {object} node @param {number} ownRequiredX @returns {number}
  */
 function sharedColumnX(node, ownRequiredX) {
-  let need = ownRequiredX
-  let ceiling = outputSafeColumnX(node)
-  const siblings = node.graph?._nodes
+  const bounds = graphColumnBounds(node.graph)
+  const need = Math.max(ownRequiredX, bounds.need)
+  const ceiling = Math.min(outputSafeColumnX(node), bounds.ceiling)
+  return Math.max(ownRequiredX, Math.min(need, ceiling))
+}
+
+/** graph -> {frame, need, ceiling}: the walk below, memoized for the frame
+ * it ran in (v0.68.1). A WeakMap, not a property on litegraph's graph. */
+const columnBoundsCache = new WeakMap()
+
+/**
+ * The graph-wide column inputs: the MAX `columnNeedOf` and the MIN
+ * `outputSafeColumnX` over every switcher in *graph* that draws boxes
+ * (need 0 = no wired rows = neither raises nor constrains). Pure over
+ * labels + wiring, so off-screen switchers count (the shared-column
+ * invariant above).
+ *
+ * Memoized per CANVAS FRAME: litegraph's `LGraphCanvas.frame` counter
+ * steps once per draw() (1.48.7, LGraphCanvas.ts), and every
+ * onDrawForeground in one pass sees the same value, so a hit here is by
+ * construction the SAME frame's answer -- never cross-frame state (the
+ * offscreen-switchers test's stale-state rule). Rename/rewire/add/remove
+ * all land between frames and the next pass recomputes. No frame counter
+ * (another frontend) = no memo, the pre-v0.68.1 per-call walk.
+ * @param {object|null|undefined} graph @returns {{need: number, ceiling: number}}
+ */
+function graphColumnBounds(graph) {
+  const frame = app?.canvas?.frame
+  const canMemo = graph != null && typeof frame === 'number'
+  if (canMemo) {
+    const cached = columnBoundsCache.get(graph)
+    if (cached && cached.frame === frame) return cached
+  }
+  let need = 0
+  let ceiling = Infinity
+  const siblings = graph?._nodes
   if (Array.isArray(siblings)) {
     for (const other of siblings) {
-      if (other === node || !switcherSpecOf(other)) continue
+      if (!switcherSpecOf(other)) continue
       const otherNeed = columnNeedOf(other)
       if (otherNeed === 0) continue // no boxes: neither raises nor constrains
       if (otherNeed > need) need = otherNeed
@@ -964,7 +1013,9 @@ function sharedColumnX(node, ownRequiredX) {
       if (otherCeiling < ceiling) ceiling = otherCeiling
     }
   }
-  return Math.max(ownRequiredX, Math.min(need, ceiling))
+  const bounds = { frame, need, ceiling }
+  if (canMemo) columnBoundsCache.set(graph, bounds)
+  return bounds
 }
 
 /**
@@ -1023,10 +1074,11 @@ function drawRowToggles(node, ctx) {
   }
   const boxX = sharedColumnX(node, ownRequiredX)
 
+  const toggles = readToggles(node) // v0.68.1: one parse per draw pass, not per row
   const rects = []
   for (const row of drawn) {
     const boxY = row.localY - ROW_BOX / 2
-    drawToggleBox(ctx, boxX, boxY, ROW_BOX, isRowEnabled(node, row.entry.name), false)
+    drawToggleBox(ctx, boxX, boxY, ROW_BOX, isEnabledIn(toggles, row.entry.name), false)
     rects.push({ name: row.entry.name, x: boxX, y: boxY, w: ROW_BOX, h: ROW_BOX })
   }
   node.__epsSwitcherRowRects = rects
@@ -1110,7 +1162,8 @@ function addHeaderWidget(node) {
     },
     draw(ctx, drawNode, widgetWidth, y, height) {
       const entries = connectedImageEntries(drawNode)
-      const state = allRowsState(drawNode)
+      const toggles = readToggles(drawNode) // v0.68.1: one parse per draw pass
+      const state = allRowsState(drawNode, toggles)
       const boxX = 8
       const boxY = y + (height - HEADER_BOX) / 2
       drawToggleBox(ctx, boxX, boxY, HEADER_BOX, state === true, state === null)
@@ -1122,7 +1175,7 @@ function addHeaderWidget(node) {
       ctx.font = '11px sans-serif'
       ctx.textAlign = 'left'
       ctx.textBaseline = 'middle'
-      const enabledCount = entries.filter((entry) => isRowEnabled(drawNode, entry.name)).length
+      const enabledCount = entries.filter((entry) => isEnabledIn(toggles, entry.name)).length
       const label =
         entries.length === 0
           ? `Toggle All (no ${noun} connected)`
@@ -1306,8 +1359,12 @@ function wireRowRename(node) {
 // ---------------------------------------------------------------------------
 
 function ensureMinNodeWidth(node) {
-  if (Array.isArray(node.size) && node.size[0] < MIN_NODE_WIDTH) {
-    node.size[0] = MIN_NODE_WIDTH
+  // v0.68.1 (2026-08-21): `node.size` is a Proxy over a typed-array view
+  // (never an Array) on this frontend, so the old `Array.isArray` guard
+  // silently skipped this lift; setSize() runs `_sizeUpdated` + onResize.
+  if (node.size && node.size[0] < MIN_NODE_WIDTH) {
+    if (typeof node.setSize === 'function') node.setSize([MIN_NODE_WIDTH, node.size[1]])
+    else node.size[0] = MIN_NODE_WIDTH
   }
   const originalComputeSize = node.computeSize
   node.computeSize = function (...args) {
@@ -1315,7 +1372,9 @@ function ensureMinNodeWidth(node) {
       typeof originalComputeSize === 'function'
         ? originalComputeSize.apply(this, args)
         : [MIN_NODE_WIDTH, 60]
-    if (Array.isArray(size)) size[0] = Math.max(size[0], MIN_NODE_WIDTH)
+    // computeSize() hands back `out ?? [0, 0]` -- a caller-supplied typed
+    // array is as valid as the plain default, so no Array test (v0.68.1).
+    if (size) size[0] = Math.max(size[0], MIN_NODE_WIDTH)
     return size
   }
 }

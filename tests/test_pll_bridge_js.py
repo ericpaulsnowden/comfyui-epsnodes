@@ -588,7 +588,13 @@ def test_layout_token_bumps_in_save_and_guards_the_poll(controller_source: str) 
         "await api.getJson('/lora_library/sets')"
     )
     assert refresh.count("if (this._layoutSaveInFlight || token !== this._layoutToken) return") == 2
-    assert "if (signature === this._layoutSignature) return" in refresh
+    # v0.68.1: the change-gated apply moved into `_applyLayoutResponse` so
+    # the shared poller and the per-node refetch share ONE guarded path;
+    # the behavior (token re-check + signature gate) is unchanged.
+    assert "this._applyLayoutResponse(layoutData, token)" in refresh
+    apply_layout = _method_body(controller_source, "_applyLayoutResponse(layoutData, token)")
+    assert "if (this._layoutSaveInFlight || token !== this._layoutToken) return" in apply_layout
+    assert "if (signature === this._layoutSignature) return" in apply_layout
 
 
 def test_state_list_never_rebuilds_under_an_active_drag(controller_source: str) -> None:
@@ -639,3 +645,185 @@ def test_name_field_clears_through_the_widget_callback(controller_source: str) -
     assert "this._clearNameField()" in new_cat
     assert "this._collapsedCategories.delete(name)" in new_cat
 
+
+
+# ------------------------------------------ v0.68.1: perf + bug round (2026-08-21)
+
+
+def test_shared_poller_replaces_the_per_node_heartbeat_poll(controller_source: str) -> None:
+    """N controllers each polled sets + layout every 4 s from `_heartbeat()`
+    -- draw-driven (2N requests per tick on a busy canvas, NONE under the Vue
+    renderer), no shared cache. Now ONE module-level interval, one in-flight
+    fetch pair for every live controller, paused while hidden, stopped with
+    the last controller; CRUD is event-driven so the poll lengthened."""
+    assert "const SETS_POLL_MS = 15000" in controller_source
+    heartbeat = _method_body(controller_source, "_heartbeat()")
+    assert "_refreshSetsCache" not in heartbeat
+    assert "SETS_POLL_MS" not in heartbeat
+    assert controller_source.count("setInterval(") == 1
+    register = _function_body(controller_source, "registerController(node)")
+    assert "liveControllers.add(node)" in register
+    assert "if (!sharedPollTimer) {" in register
+    assert "if (document.hidden) return" in register
+    assert "scheduleSharedSetsRefresh()" in register
+    unregister = _function_body(controller_source, "unregisterController(node)")
+    assert "clearInterval(sharedPollTimer)" in unregister
+    shared = _function_body(controller_source, "sharedSetsRefresh({ force = false } = {})")
+    assert "if (sharedFetch) {" in shared  # one in-flight promise shared by everyone
+    assert "if (force) sharedRefetchQueued = true" in shared
+    run = _function_body(controller_source, "runSharedSetsFetch()".replace("async ", ""))
+    # the v0.67.2 guards, per node: tokens snapshotted BEFORE any await
+    assert run.index("const tokens = new Map(live().map((node) => [node, node._layoutToken]))") < run.index(
+        "await api.getJson('/lora_library/sets')"
+    )
+    assert run.count("await api.getJson(") == 2  # sets once, layout once
+    assert "node._applySetsResponse(setsData)" in run
+    assert "node._applyLayoutResponse(layoutData, tokens.get(node))" in run
+    assert "tokens.get(node) === node._layoutToken" in run
+    # explicit refetch paths still have the per-node method
+    assert "async _refreshSetsCache()" in controller_source
+    save = _method_body(controller_source, "async _saveLayout()")
+    assert "this._refreshSetsCache().catch(() => {})" in save
+
+
+def test_controllers_subscribe_to_sets_changed_and_unsubscribe_on_remove(
+    controller_source: str,
+) -> None:
+    """Controllers only DISPATCHED `lora_library:sets-changed`; nobody
+    listened, so a capture in one controller reached the others on the next
+    poll at best (never, under Vue). Per-node, capture-phase, removed in
+    onRemoved, coalesced into the shared refresh."""
+    sub = _method_body(controller_source, "_subscribeSetsChanged()")
+    assert "if (this._onSetsChanged) return" in sub  # once per node
+    assert "window.addEventListener('lora_library:sets-changed', this._onSetsChanged, { capture: true })" in sub
+    assert "scheduleSharedSetsRefresh()" in sub
+    unsub = _method_body(controller_source, "_unsubscribeSetsChanged()")
+    assert "window.removeEventListener('lora_library:sets-changed', this._onSetsChanged, { capture: true })" in unsub
+    added = _method_body(controller_source, "onAdded()")
+    assert "this._subscribeSetsChanged()" in added
+    assert "registerController(this)" in added
+    assert "this._refreshSetsCache()" not in added
+    assert "this._removed = false" in added
+
+
+def test_on_removed_tears_down_drag_listeners_subscription_and_poller(controller_source: str) -> None:
+    """`onRemoved` only cleared the delete-arm timer: an in-flight row drag's
+    three capture-phase window listeners leaked, and late sets/layout
+    responses rendered into the detached pane after a tab switch."""
+    removed = _method_body(controller_source, "onRemoved()")
+    assert "this._removed = true" in removed
+    assert "this._stateDrag?.cleanup?.()" in removed
+    assert "this._stateDrag = null" in removed
+    assert "this._unsubscribeSetsChanged()" in removed
+    assert "unregisterController(this)" in removed
+    assert "clearTimeout(this._w.deleteBtn?._armTimer)" in removed  # the old cleanup survives
+    apply_sets = _method_body(controller_source, "_applySetsResponse(data)")
+    assert apply_sets.lstrip().startswith("if (this._removed) return")
+    render = _method_body(controller_source, "_renderStateList()")
+    assert "if (this._removed) return" in render
+    apply_layout = _method_body(controller_source, "_applyLayoutResponse(layoutData, token)")
+    assert apply_layout.lstrip().startswith("if (this._removed) return")
+
+
+def test_target_combo_display_never_walks_the_graph(controller_source: str) -> None:
+    """ComboWidget's per-draw `_displayValue` calls `options.values()` when
+    no `options.getOptionLabel` is set (installed bundle) -- for the target
+    combo that was `findTargetCandidates()` -> `api.walkLiveNodes` on EVERY
+    draw. The value IS the label, so an identity mapper makes each draw O(1)
+    while `values` stays a function (rebuilt on open, both renderers)."""
+    build = _method_body(controller_source, "_buildWidgets()")
+    target = build.split("this._w.target = this.addWidget(", 1)[1].split("\n        )\n", 1)[0]
+    assert "values: () => this._targetComboValues()" in target
+    assert "getOptionLabel: (value) => (value == null ? '' : String(value))" in target
+
+
+def test_layout_edits_are_gated_on_a_loaded_layout(controller_source: str) -> None:
+    """DATA LOSS: a drag / `#` group / group delete made before the first
+    successful layout GET (or after a failed one) POSTed the EMPTY default
+    layout (`normalizeLayoutClient(null)`) as a full replace and wiped every
+    shared group. `_layoutLoaded` flips on a successful GET or POST
+    response; an edit on an unloaded layout first awaits a fresh GET and
+    applies it, then edits on top; a failed GET REFUSES the edit."""
+    assert "this._layoutLoaded = false" in _method_body(controller_source, "constructor(title = NODE_TITLE)")
+    apply_layout = _method_body(controller_source, "_applyLayoutResponse(layoutData, token)")
+    assert "this._layoutLoaded = true" in apply_layout
+    save = _method_body(controller_source, "async _saveLayout()")
+    assert "this._layoutLoaded = true" in save
+    ensure = _method_body(controller_source, "async _ensureLayoutLoaded()")
+    assert ensure.lstrip().startswith("if (this._layoutLoaded) return true")
+    assert "await api.getJson(LAYOUT_ROUTE)" in ensure
+    assert "this._applyLayoutResponse(layoutData, token)" in ensure
+    assert "this._setStatusText(MSG_LAYOUT_NOT_LOADED)" in ensure
+    assert "this._toast('warn', NODE_TITLE, MSG_LAYOUT_NOT_LOADED)" in ensure
+    assert "api.postJson" not in ensure  # refuse, never post the default
+    assert "const MSG_LAYOUT_NOT_LOADED = 'Group layout not loaded yet — try again.'" in controller_source
+    with_loaded = _method_body(controller_source, "_withLoadedLayout(label, edit)")
+    assert "if (this._layoutLoaded) {" in with_loaded
+    assert "this._ensureLayoutLoaded()" in with_loaded
+    # every mutation path goes through the gate
+    for signature in ("_finishStateDrag(drag)", "_deleteCategory(category)", "_commitCategoryRename()"):
+        assert "this._withLoadedLayout(" in _method_body(controller_source, signature), signature
+    assert "if (!(await this._ensureLayoutLoaded())) return" in _method_body(
+        controller_source, "async _doNewCategory()"
+    )
+
+
+def test_group_headers_rename_in_place_on_double_click(controller_source: str) -> None:
+    """Owner ask: controller groups "as identical as possible" to the
+    Notebook. Double-click a header -> inline <input> over the label; Enter
+    commits, Escape cancels, blur commits; rename = key in `layout.order` +
+    entry in `layout.categories`, collapse follows, one `_saveLayout`;
+    empty/duplicate names refused on the status line."""
+    header = _method_body(controller_source, "_buildCategoryHeader(category)")
+    assert "header.addEventListener('dblclick'" in header
+    assert "this._beginCategoryRename(category)" in header
+    begin = _method_body(controller_source, "_beginCategoryRename(category)")
+    assert "const header = this._headerElOf(category)" in begin  # the CURRENT element, post re-render
+    assert "className: 'llsc-inline-rename'" in begin
+    assert "if (event.key === 'Enter') {" in begin
+    assert "} else if (event.key === 'Escape') {" in begin
+    assert "input.addEventListener('blur'" in begin
+    assert "event.stopPropagation()" in begin  # keys never reach the canvas shortcuts
+    commit = _method_body(controller_source, "_commitCategoryRename()")
+    assert "const to = (rename.inputEl.value || '').trim()" in commit
+    assert "this._setStatusText('Enter a name for this group.')" in commit
+    assert 'this._setStatusText(`A group named "${to}" already exists.`)' in commit
+    assert "layout.categories = layout.categories.map((c) => (c === from ? to : c))" in commit
+    assert "layout.order[to] = layout.order[from] || []" in commit
+    assert "delete layout.order[from]" in commit
+    assert "if (this._collapsedCategories.delete(from)) this._collapsedCategories.add(to)" in commit
+    assert commit.count("this._saveLayout()") == 1
+    # the editor survives the poll: no rebuild under an open rename
+    render = _method_body(controller_source, "_renderStateList()")
+    assert "if (this._categoryRename) {" in render
+    assert ".llsc-inline-rename {" in controller_source
+
+
+def test_noop_drop_skips_the_post(controller_source: str) -> None:
+    """A state dropped back onto its own slot is not an edit -- no render,
+    no full-replace POST (the Notebook's isNoopMove/isNoopCategoryMove)."""
+    finish = _method_body(controller_source, "_finishStateDrag(drag)")
+    assert "if (this._isNoopStateDrop(drag)) return" in finish
+    noop = _method_body(controller_source, "_isNoopStateDrop(drag)")
+    assert "const plan = this._groupedRows()" in noop
+    assert "return target.category === category && next == null" in noop
+    assert "const cats = this._layoutCache.categories" in noop
+
+
+# ---------------------------------------------------------------------------
+# v0.68.1 perf/polish round (audit 2026-08-20) -- pll_bridge.js pins ONLY.
+# ---------------------------------------------------------------------------
+
+
+def test_root_only_find_helper_is_marked_unused_by_the_picker(source: str) -> None:
+    """Since v0.64.0 picker.js's findSendCandidates() walks the whole
+    workflow itself; the registry's `find` key is gone (v0.68.1), so
+    findPllNodes and probePll(null)'s null leg are reachable from nothing
+    but this file's own probe. They stay ONLY because the pins above
+    (`hasFindPllNodes`, `findPllOrder`, `probeNullNoCandidates` /
+    `probeNullWithCandidates`) pin them -- remove together."""
+    block = source.split("export function findPllNodes()", 1)[0]
+    assert "UNUSED BY THE PICKER, marked for removal" in block[-1400:]
+    picker = (REPO_ROOT / "web" / "lora_library" / "picker.js").read_text(encoding="utf-8")
+    assert "pll.findPllNodes" not in picker
+    assert "pll.probePll(null" not in picker

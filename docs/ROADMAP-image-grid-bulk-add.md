@@ -1,6 +1,9 @@
 # Roadmap — EPS Image Grid: bulk add (upload button + folders)
 
-**Status:** planned, not started. Researched 2026-07-28.
+**Status:** SHIPPED — M0/M1/M2/M3 landed 2026-07-29 (FORMAT §6.6 "Bulk add
+(2026-07-29)"), and M5's per-tile delete the same day ("Delete one tile"); M4
+`/add_many` NOT built (it was "only if needed" — M2 was enough). Researched
+2026-07-28.
 **Owner ask:** *"Is it possible to give the image grid an upload button? Ideally that upload
 button would allow multiselect to add many images at once. Without multiselect I don't think
 it's worth it, but right now it's really hard to add many images to comfy."*
@@ -84,7 +87,7 @@ stuffs an array into a combo widget behind a `@ts-expect-error`, and it gives no
 
 Each is independently shippable and independently useful.
 
-### M0 — Prove and document what exists *(~1h)*
+### M0 — Prove and document what exists *(~1h)* — SHIPPED 2026-07-29
 
 The cheapest possible win, and it de-risks everything after it.
 
@@ -92,12 +95,13 @@ The cheapest possible win, and it de-risks everything after it.
   that calls `addFilesToBuffer` with 3 fake `File`s and asserts 3 uploads in order.
 - Write the **first HTTP test for `POST /eps_image_grid/add`** (the route has none).
 - Confirm on-device: select 20 files in Finder, drag as one drop, count what lands.
-- README currently says **"Three ways to ADD an image"** (`README.md:356`) — correct it and say
-  plainly that a multi-file drag works.
+- README used to say **"Three ways to ADD an image"** — DONE: it now lists every add path
+  (Add images… / Add folder… / Ctrl+V / Paste (Clipspace) / drag) and says plainly that a
+  multi-file drag works.
 
 **User-visible value:** if drag already works, that alone may solve the stated pain today.
 
-### M1 — "Add images…" button *(~2h)*
+### M1 — "Add images…" button *(~2h)* — SHIPPED 2026-07-29
 
 - `node.addWidget('button', 'Add images…', null, cb, {})` — copy `addClearButton`
   (`image_grid.js:864-869`) exactly, **including `widget.serialize = false` on the instance**
@@ -116,7 +120,7 @@ install (Vue nodes off by default), but Desktop and Cloud installs default it **
 
 **User-visible value:** the Finder drag dance is gone — the #1 stated pain.
 
-### M2 — Make 20–100 images actually pleasant *(~3h)* — **required at the stated batch size**
+### M2 — Make 20–100 images actually pleasant *(~3h)* — **required at the stated batch size** — SHIPPED 2026-07-29
 
 The single worst bug in the current path, and it is already there for drag-and-drop:
 
@@ -142,7 +146,7 @@ The single worst bug in the current path, and it is already there for drag-and-d
 
 **User-visible value:** 40 images completes in a sane time, visibly, and tells you what happened.
 
-### M3 — "Add folder…" *(~2h)* — the second stated pain
+### M3 — "Add folder…" *(~2h)* — the second stated pain — SHIPPED 2026-07-29
 
 - Second button with `webkitdirectory: true` (the VHS pattern) — the OS folder dialog, then
   filter to images, sort numerically, feed the same path.
@@ -152,7 +156,7 @@ The single worst bug in the current path, and it is already there for drag-and-d
 **Beats the closest comparable:** VHS is folder-*only* with no thumbnails and refuses a
 same-named re-upload; this appends to a live buffer you can see.
 
-### M4 — Batch `/add` route *(~2h, only if M2 isn't enough)*
+### M4 — Batch `/add` route *(~2h, only if M2 isn't enough)* — NOT BUILT (M2 was enough)
 
 Today each image is **two** sequential HTTP round trips (`/upload/image` then
 `/eps_image_grid/add`). Uploads could run 3–4 wide (pure I/O), but `/add` **must stay
@@ -162,7 +166,7 @@ so concurrent adds would lose entries.
 If needed: add `POST /eps_image_grid/add_many` taking a list. **Do not repurpose `/add`** —
 `docs/FORMAT.md:1642-1644` freezes shipped route contracts; new capabilities add routes/fields.
 
-### M5 — Grid management *(deferred — deliberately)*
+### M5 — Grid management *(deferred — deliberately)* — per-tile delete SHIPPED 2026-07-29 ("Delete one tile", FORMAT §6.6); reorder still deferred
 
 Per-thumbnail delete, drag-to-reorder. This is the most crowded part of the market
 (Latentnaut, MG-CP, ermin44 all ship it) and the least connected to the stated pain. Revisit
@@ -195,7 +199,8 @@ only if bulk add lands and the buffer becomes hard to curate.
 - **`docs/FORMAT.md` §6.6 is the binding contract** — amend it with a dated, owner-anchored
   subsection (closest precedent: "Drop-to-add (2026-07-22, owner ask)" at `:1004-1012`).
 - **Version bump on every push**: `scripts/bump_version.py` keeps `lora_library/version.py`,
-  `pyproject.toml`, `web/lora_library/version.js` in lockstep (all at **0.35.8** today). Commit
+  `pyproject.toml`, `web/lora_library/version.js` in lockstep (**0.35.8** when this was written;
+  v0.68.0 at this status update). Commit
   style: `Area: plain-language outcome (vX.Y.Z)`; docs-only changes don't bump.
 - **README**: update the node's `## EPS Image Grid (shipped)` section and its row in the
   node table under `## The fifteen nodes`; owner-facing plain language, bolded lead-ins.

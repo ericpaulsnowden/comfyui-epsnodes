@@ -568,3 +568,21 @@ def test_row_math_constants_are_derived_and_cited(source: str) -> None:
 
 def test_no_window_level_listeners(source: str) -> None:
     assert "window.addEventListener" not in source
+
+
+# ---------------------------------------------------------------------------
+# v0.68.1 perf/polish round (audit 2026-08-20)
+# ---------------------------------------------------------------------------
+
+
+def test_root_only_find_helper_is_marked_unused_by_the_picker(source: str) -> None:
+    """Since v0.64.0 picker.js's findSendCandidates() walks the whole
+    workflow itself; the registry's `find` key is gone (v0.68.1), so
+    findDasiwaNodes is reachable from nothing but this file's own probe. It
+    stays ONLY because the pins above (`hasFindDasiwaNodes`, `findOrder`)
+    pin it -- remove together, alongside pll_bridge.js's findPllNodes so
+    the two bridges keep mirroring each other's surface."""
+    block = source.split("export function findDasiwaNodes()", 1)[0]
+    assert "UNUSED BY THE PICKER, marked for removal" in block[-1200:]
+    picker = (REPO_ROOT / "web" / "lora_library" / "picker.js").read_text(encoding="utf-8")
+    assert "dasiwa.findDasiwaNodes" not in picker

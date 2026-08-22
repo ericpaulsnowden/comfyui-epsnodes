@@ -686,3 +686,183 @@ class TestCorruptPngSoftFail:
         before = store.list_refs(VALID_UUID)
         result = store.append_uploaded_image(VALID_UUID, "corrupt.png", "", "input")
         assert result == before  # unchanged buffer, no exception
+
+
+# --------------------------------------- frame files + thumbnails (2026-08-21)
+
+
+class TestFramePath:
+    """``frame_path`` (2026-08-21 perf round): the manifest-listed-only gate
+    in front of ``GET /eps_image_grid/frame`` -- the same rule ``remove_frame``
+    applies, plus a bare-single-segment check, so no query value can ever
+    name anything the manifest doesn't own."""
+
+    def test_resolves_a_listed_frame(self, fake_folder_paths: Path) -> None:
+        store.append_batch(VALID_UUID, _make_batch(2))
+        path = store.frame_path(VALID_UUID, "0002.png")
+        assert path == store.buffer_dir(VALID_UUID) / "0002.png"
+        assert path.is_file()
+
+    def test_unlisted_name_is_none_even_if_the_file_exists(self, fake_folder_paths: Path) -> None:
+        store.append_batch(VALID_UUID, _make_batch(1))
+        (store.buffer_dir(VALID_UUID) / "stray.png").write_bytes(b"not ours")
+        assert store.frame_path(VALID_UUID, "stray.png") is None
+        assert store.frame_path(VALID_UUID, store.MANIFEST_FILENAME) is None
+
+    def test_refuses_separators_dot_segments_and_dotfiles(self, fake_folder_paths: Path) -> None:
+        store.append_batch(VALID_UUID, _make_batch(1))
+        for bad in ("../0001.png", "..", ".", "sub/0001.png", "sub\\0001.png", ".thumbs", "", None):
+            assert store.frame_path(VALID_UUID, bad) is None, bad
+
+    def test_invalid_uuid_is_none(self, fake_folder_paths: Path) -> None:
+        assert store.frame_path("nope", "0001.png") is None
+
+    def test_listed_but_missing_file_is_none(self, fake_folder_paths: Path) -> None:
+        store.append_batch(VALID_UUID, _make_batch(1))
+        (store.buffer_dir(VALID_UUID) / "0001.png").unlink()
+        assert store.frame_path(VALID_UUID, "0001.png") is None
+
+
+class TestWithFrameMtimes:
+    """``with_frame_mtimes`` (2026-08-21): the per-frame cache key. A frame
+    FILE's mtime moves only when THAT file is written; ``buffer_generation``
+    (the manifest mtime) moves on every append -- keying thumbnails on it
+    re-fetched every UNCHANGED frame after every run."""
+
+    def test_adds_int_mtime_without_mutating_the_input(self, fake_folder_paths: Path) -> None:
+        store.append_batch(VALID_UUID, _make_batch(2))
+        refs = store.list_refs(VALID_UUID)
+        decorated = store.with_frame_mtimes(VALID_UUID, refs)
+        assert [set(r) for r in decorated] == [{"filename", "subfolder", "type", "mtime"}] * 2
+        assert all(isinstance(r["mtime"], int) and r["mtime"] > 0 for r in decorated)
+        assert [set(r) for r in refs] == [{"filename", "subfolder", "type"}] * 2  # untouched
+        assert [r["filename"] for r in decorated] == [r["filename"] for r in refs]
+
+    def test_unchanged_frame_keeps_its_mtime_across_an_append(
+        self, fake_folder_paths: Path
+    ) -> None:
+        import time
+
+        store.append_batch(VALID_UUID, _make_batch(1))
+        first = store.with_frame_mtimes(VALID_UUID, store.list_refs(VALID_UUID))[0]["mtime"]
+        generation_before = store.buffer_generation(VALID_UUID)
+        time.sleep(0.002)  # ms-precision keys
+        store.append_batch(VALID_UUID, _make_batch(1))
+        again = store.with_frame_mtimes(VALID_UUID, store.list_refs(VALID_UUID))
+        assert again[0]["mtime"] == first  # THE fix: frame 1's key survives frame 2
+        assert store.buffer_generation(VALID_UUID) != generation_before  # the old key moved
+
+    def test_a_reused_name_after_clear_gets_a_new_mtime(self, fake_folder_paths: Path) -> None:
+        import time
+
+        store.append_batch(VALID_UUID, _make_batch(1))
+        first = store.with_frame_mtimes(VALID_UUID, store.list_refs(VALID_UUID))[0]["mtime"]
+        time.sleep(0.002)
+        store.clear(VALID_UUID)
+        store.append_batch(VALID_UUID, _make_batch(1))
+        [ref] = store.with_frame_mtimes(VALID_UUID, store.list_refs(VALID_UUID))
+        assert ref["filename"] == "0001.png"  # name reuse is REAL (the generation token's case)
+        assert ref["mtime"] != first  # ...and the per-frame key still catches it
+
+    def test_missing_file_and_invalid_uuid_give_zero(self, fake_folder_paths: Path) -> None:
+        store.append_batch(VALID_UUID, _make_batch(1))
+        refs = store.list_refs(VALID_UUID)
+        (store.buffer_dir(VALID_UUID) / "0001.png").unlink()
+        assert store.with_frame_mtimes(VALID_UUID, refs)[0]["mtime"] == 0
+        foreign = store.with_frame_mtimes("nope", refs)
+        assert foreign[0]["mtime"] == 0
+        assert foreign[0]["filename"] == "0001.png"  # the rest of the ref is preserved
+
+
+class TestThumbnailPath:
+    """``thumbnail_path`` (2026-08-21): a genuinely DOWNSCALED, disk-cached
+    webp per frame under ``<buffer>/.thumbs/`` -- core's ``/view?preview=``
+    re-encodes the FULL-resolution frame (no resize), which is what made a
+    100-frame grid 100 full-res draws per repaint."""
+
+    def _thumb(self, name: str = "0001.png") -> Path:
+        return store.buffer_dir(VALID_UUID) / store.THUMBS_DIRNAME / f"{name}.webp"
+
+    def test_builds_a_downscaled_webp_in_dot_thumbs(self, fake_folder_paths: Path) -> None:
+        store.append_batch(VALID_UUID, _make_batch(1, height=100, width=400))
+        thumb = store.thumbnail_path(VALID_UUID, "0001.png", max_edge=128)
+        assert thumb == self._thumb()
+        with Image.open(thumb) as img:
+            assert img.format == "WEBP"
+            assert img.size == (128, 32)  # long edge bound, aspect kept
+
+    def test_default_bound_is_thumb_max_edge(self, fake_folder_paths: Path) -> None:
+        store.append_batch(VALID_UUID, _make_batch(1, height=300, width=600))
+        with Image.open(store.thumbnail_path(VALID_UUID, "0001.png")) as img:
+            assert store.THUMB_MAX_EDGE == 256
+            assert img.size == (256, 128)
+
+    def test_never_upscales_a_small_frame(self, fake_folder_paths: Path) -> None:
+        store.append_batch(VALID_UUID, _make_batch(1, height=4, width=6))
+        with Image.open(store.thumbnail_path(VALID_UUID, "0001.png")) as img:
+            assert img.size == (6, 4)
+
+    def test_cached_while_the_source_is_unchanged(self, fake_folder_paths: Path) -> None:
+        import time
+
+        store.append_batch(VALID_UUID, _make_batch(1, height=50, width=50))
+        source = store.buffer_dir(VALID_UUID) / "0001.png"
+        first = store.thumbnail_path(VALID_UUID, "0001.png")
+        stamp = first.stat().st_mtime_ns
+        assert stamp == source.stat().st_mtime_ns  # stamped with the SOURCE's mtime
+        data = first.read_bytes()
+        time.sleep(0.002)
+        again = store.thumbnail_path(VALID_UUID, "0001.png")
+        assert again == first
+        assert again.stat().st_mtime_ns == stamp  # not regenerated
+        assert again.read_bytes() == data
+
+    def test_regenerated_when_the_name_is_reused_after_clear(self, fake_folder_paths: Path) -> None:
+        import time
+
+        store.append_batch(VALID_UUID, _make_batch(1, height=50, width=50))
+        old_stamp = store.thumbnail_path(VALID_UUID, "0001.png").stat().st_mtime_ns
+        time.sleep(0.002)
+        store.clear(VALID_UUID)
+        assert not self._thumb().exists()  # clear took the thumbs with it
+        store.append_batch(VALID_UUID, _make_batch(1, height=50, width=50))
+        new_thumb = store.thumbnail_path(VALID_UUID, "0001.png")
+        assert new_thumb.stat().st_mtime_ns != old_stamp
+        new_source = store.buffer_dir(VALID_UUID) / "0001.png"
+        assert new_thumb.stat().st_mtime_ns == new_source.stat().st_mtime_ns
+
+    def test_unlisted_or_invalid_is_none(self, fake_folder_paths: Path) -> None:
+        store.append_batch(VALID_UUID, _make_batch(1))
+        assert store.thumbnail_path(VALID_UUID, "9999.png") is None
+        assert store.thumbnail_path(VALID_UUID, "../0001.png") is None
+        assert store.thumbnail_path("nope", "0001.png") is None
+        assert not (store.buffer_dir(VALID_UUID) / store.THUMBS_DIRNAME).exists()
+
+    def test_unreadable_frame_degrades_to_none_not_an_exception(
+        self, fake_folder_paths: Path
+    ) -> None:
+        store.append_batch(VALID_UUID, _make_batch(1))
+        (store.buffer_dir(VALID_UUID) / "0001.png").write_bytes(b"\x89PNG\r\n\x1a\ntruncated")
+        assert store.thumbnail_path(VALID_UUID, "0001.png") is None
+
+    def test_remove_frame_deletes_the_thumbnail(self, fake_folder_paths: Path) -> None:
+        store.append_batch(VALID_UUID, _make_batch(2))
+        store.thumbnail_path(VALID_UUID, "0001.png")
+        store.thumbnail_path(VALID_UUID, "0002.png")
+        store.remove_frame(VALID_UUID, "0001.png")
+        assert not self._thumb("0001.png").exists()
+        assert self._thumb("0002.png").is_file()
+
+    def test_thumbs_dir_is_invisible_to_every_manifest_walker(
+        self, fake_folder_paths: Path
+    ) -> None:
+        store.append_batch(VALID_UUID, _make_batch(2))
+        store.thumbnail_path(VALID_UUID, "0001.png")
+        store.thumbnail_path(VALID_UUID, "0002.png")
+        assert [r["filename"] for r in store.list_refs(VALID_UUID)] == ["0001.png", "0002.png"]
+        store.append_batch(VALID_UUID, _make_batch(1))  # numbering unaffected
+        assert store.list_refs(VALID_UUID)[-1]["filename"] == "0003.png"
+        assert len(store.read_all_as_tensors(VALID_UUID)) == 3
+        store.clone_buffer(VALID_UUID, OTHER_VALID_UUID)
+        assert not (store.buffer_dir(OTHER_VALID_UUID) / store.THUMBS_DIRNAME).exists()
+        assert len(store.list_refs(OTHER_VALID_UUID)) == 3

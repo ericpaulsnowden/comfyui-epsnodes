@@ -27,8 +27,11 @@ const REPO_URL = 'https://github.com/ericpaulsnowden/comfyui-epsnodes'
  * issues using my mac to connect to the linux machine": with
  * `Comfy.VueNodes.Enabled` on, the frontend renders nodes as Vue DOM and
  * **never calls `onDrawForeground`/`onMouseDown`** — so every hand-drawn EPS
- * control (Switcher/Distributor per-row toggles, Resolution's readout,
- * double-click renames) silently disappears. Nothing errors; the features
+ * control (Switcher/Distributor per-row toggles, double-click renames)
+ * silently disappears, and canvas-only hooks go with it (Resolution's
+ * cosmetic `drawSlots` passthrough-output hide and its modifier-click
+ * multi-preset ContextMenu -- its pad/readout is a DOM widget and is fine;
+ * v0.68.1 wording). Nothing errors; the features
  * are just gone, which reads as "these nodes are broken". Two browsers
  * pointed at the SAME server can disagree (the frontend nags each browser to
  * try the new design, and a long-lived tab keeps the old mode), which is
@@ -70,9 +73,10 @@ function warnIfVueNodesMode(node) {
   if (!enabled) return
   vueModeWarned = true
   const detail =
-    'The EPS Switchers (Image, Model, CLIP, VAE), EPS Distributor and EPS ' +
-    'Resolution draw their controls (per-row toggles, size readouts, ' +
-    'double-click rename) directly on the node, and ' +
+    'The EPS Switchers (Image, Model, CLIP, VAE) and EPS Distributor draw ' +
+    'their controls (per-row toggles, double-click rename) directly on the ' +
+    'node, and EPS Resolution hides its passthrough output and opens its ' +
+    'multi-preset menu through canvas-only hooks -- ' +
     "ComfyUI's New node design (beta) does not run that drawing yet. " +
     'To use them, turn OFF Settings > Lite Graph > "New node design (beta)" ' +
     '(Comfy.VueNodes.Enabled) and reload. Full support is planned.'

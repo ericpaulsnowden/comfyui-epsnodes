@@ -1,9 +1,10 @@
 # ROADMAP — EPS LoRA Picker (folder-scoped browsing, favorites, recents)
 
-Status: **researched + roadmapped 2026-08-09, NOT built.** Eric's idea via
-`/anthropic-skills:eric-rearch-ideas`. This file is the durable plan; update
-the milestone headers with `SHIPPED vX.Y.Z` as they land (the convention the
-sweep/grid roadmaps already use).
+Status: **SHIPPED IN FULL — M1–M4 landed as v0.54.0–v0.58.0 (2026-08-09);
+the open decisions below are resolved as built.** Eric's idea via
+`/anthropic-skills:eric-rearch-ideas`. This file is the durable plan; the
+milestone headers carry `SHIPPED vX.Y.Z` (the convention the sweep/grid
+roadmaps already use).
 
 Home: builds **inside comfyui-epsnodes** under `lora_library/` — the same
 module that already holds Apply LoRA Set, LoRA Iterator, and the State
@@ -198,18 +199,23 @@ family-agnostic no-target messages, pins + Node-driven convert tests,
 FORMAT §6.13 M4 bullet, README. Rig verify needs the DaSiWa pack cloned
 into the rig at a pinned commit.
 
-## Open decisions for build time (not blockers)
+## Open decisions for build time (not blockers) — RESOLVED as built
 
 - Tree source: a dedicated tree route vs. build client-side from the flat
   `get_filename_list("loras")` path list (leaning client-side — no new route,
-  matches how rgthree already gets nested paths).
+  matches how rgthree already gets nested paths). **Built: client-side** —
+  FORMAT §6.13 derives the tree from the `GET /lora_library/picker` list; no
+  tree route.
 - Recents recording point: on selection-commit (instant, no backend hook) vs.
   on execute (true "used", needs a hidden prompt/unique_id hook like the
   Run Multiplier guard). M1 can start with selection-commit and add execute
-  later.
+  later. **Built: selection-commit** — `＋ Add` stamps a lora recent
+  (`POST /lora_library/picker/recent`).
 - Whether M1's node subsumes Apply LoRA Set's saved-set role or stays distinct
   (recommend distinct: Picker = browse/scope/fav/recent → stack; Apply LoRA
-  Set = named saved configurations → stack; they compose).
+  Set = named saved configurations → stack; they compose). **Built:
+  distinct** — both nodes ship; the Picker emits Apply LoRA Set's exact five
+  outputs and chains through it.
 
 ## Licensing note (from the 2026-07 research, still current)
 Forkable references (MIT): rgthree, pysssss, nd-super-nodes, Finding LoRA.

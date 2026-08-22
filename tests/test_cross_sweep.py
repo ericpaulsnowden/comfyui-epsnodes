@@ -503,7 +503,12 @@ class TestSweepModeMultiply:
     def test_vae_length_one_multiplies_to_the_plain_sweep(self) -> None:
         aligned = run(vae=["v"], sweep_mode="aligned")
         multiplied = run(vae=["v"], sweep_mode="multiply")
-        assert aligned == multiplied
+        # v0.68.1: model_low (unwired here) is a fresh per-run BLOCKER on
+        # both sides -- blockers compare by identity, so compare the seven
+        # value-bearing outputs and just check the blocker column's shape.
+        assert aligned[:7] == multiplied[:7]
+        assert len(aligned[7]) == len(multiplied[7]) == 4
+        assert all(type(element).__name__ == "FakeExecutionBlocker" for element in aligned[7])
         assert len(multiplied[0]) == 4  # 2 steps x 2 pairs, unchanged
 
     def test_vae_unwired_multiply_matches_aligned(self) -> None:

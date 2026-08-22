@@ -795,6 +795,15 @@ def load_notebook(path: Path) -> tuple[ParsedNotebook, float | None, str]:
             raw = fh.read()
     except FileNotFoundError:
         return parse(""), None, "\n"
+    # Audit 2026-08-21: a file that EXISTS but cannot be read as a UTF-8
+    # text file -- a directory named as the file (IsADirectoryError), a
+    # notes file saved as UTF-16/CP-1252 (UnicodeDecodeError, a plain
+    # ValueError), a permission blip -- used to escape as a 500 with a
+    # traceback out of every notebook route. It is the store's own error
+    # family now, which every mutating route already maps to a clean 400
+    # and the read routes map below.
+    except (OSError, ValueError) as exc:
+        raise MarkdownStoreError(f"could not read {path.name}: {exc}") from exc
     mtime = path.stat().st_mtime
     return parse(raw), mtime, detect_line_ending(raw)
 

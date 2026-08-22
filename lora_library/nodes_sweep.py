@@ -455,6 +455,7 @@ class LoraLibrarySweep:
         models: list[Any] = []
         clips: list[Any] = []
         labels: list[str] = []
+        lora_cache: dict[str, Any] = {}  # one load per file per sweep() (audit 2026-08-21)
         for swept_stack, label in plan:
             # The proven weight-patching path (test_nodes_sets_weight_math.py):
             # reused verbatim, never reimplemented here. An empty swept_stack
@@ -463,7 +464,7 @@ class LoraLibrarySweep:
             # (`if not stack: return model, clip`) -- correct base-model
             # passthrough for that one step, no special-casing needed here.
             patched_model, patched_clip = nodes_sets.LoraLibraryApplySet._apply_stack(
-                context, model, clip, swept_stack
+                context, model, clip, swept_stack, lora_cache=lora_cache
             )
             models.append(patched_model)
             clips.append(patched_clip)

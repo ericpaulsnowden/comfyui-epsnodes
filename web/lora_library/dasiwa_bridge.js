@@ -64,8 +64,15 @@ const MSG_SHAPE_DRIFT =
   'DaSiWa Advanced LoRA Loader internals changed — send disabled (v-check)'
 
 /** Every live `DaSiWa_LTX2LoraLoader` instance in the current graph,
- * ascending node id — §6.13 M4's cross-family combo order (picker.js merges
- * every adapter's find() and re-sorts). */
+ * ascending node id — §6.13 M4's cross-family combo order.
+ * v0.68.1: UNUSED BY THE PICKER, marked for removal. Since v0.64.0
+ * picker.js's findSendCandidates() walks the whole workflow (subgraphs
+ * included) against its adapter registry and never calls this (the
+ * registry's `find` key is gone as of v0.68.1). Root-only and kept solely
+ * because tests/test_dasiwa_bridge_js.py pins the export surface
+ * (`hasFindDasiwaNodes`, `findOrder`); remove together with those pins --
+ * and with pll_bridge.js's findPllNodes, so the two bridges keep mirroring
+ * each other's surface. */
 export function findDasiwaNodes() {
   const nodes = app.graph?._nodes || app.graph?.nodes || []
   return nodes

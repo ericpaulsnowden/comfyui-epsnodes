@@ -284,7 +284,16 @@ def load_presets(context: LibraryContext) -> tuple[dict[str, dict], float | None
     # of taking this warned degrade branch.
     except (OSError, UnicodeDecodeError) as exc:
         logger.warning("EPSNodes: could not read %s (%s); using empty presets", path, exc)
-        return {}, None
+        # Audit 2026-08-21 (DATA LOSS): returning mtime=None here disabled
+        # the §3.5 conflict check, so the NEXT save (base_mtime from an
+        # older read) wrote {new_name: values} over every preset in the
+        # file. The file EXISTS -- its real mtime is the truth for conflict
+        # detection even while its contents are unreadable (this function's
+        # own docstring), so a stale base_mtime 409s instead of wiping.
+        try:
+            return {}, path.stat().st_mtime
+        except OSError:
+            return {}, None
 
     try:
         mtime = path.stat().st_mtime

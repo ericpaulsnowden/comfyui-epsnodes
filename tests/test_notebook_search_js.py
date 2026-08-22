@@ -22,8 +22,15 @@ def test_search_corpus_rides_the_reload_cycle() -> None:
 
 
 def test_matcher_is_and_of_words_over_name_plus_body() -> None:
-    assert "function entryMatchesSearch(name, text, query)" in SRC
+    # v0.68.1: the predicate is the AND over a PREBUILT lowercase haystack
+    # (name + "\n" + body, built once per load -- see the perf pins below);
+    # the old per-call entryMatchesSearch(name, text, query) re-lowercased
+    # every body on every keystroke. Same semantics, split into pure parts.
+    assert "function entryMatchesSearch(haystack, words)" in SRC
     assert ".every((word) => haystack.includes(word))" in SRC
+    assert "function searchHaystack(name, text)" in SRC
+    assert "return `${name}\\n${text || ''}`.toLowerCase()" in SRC
+    assert "function searchWords(query)" in SRC
 
 
 def test_filtering_is_a_view_that_disarms_drag() -> None:
@@ -41,3 +48,38 @@ def test_search_keystrokes_never_reach_canvas_hotkeys() -> None:
     pin = SRC.index("state.searchInputEl.addEventListener('keydown'")
     block = SRC[pin : pin + 400]
     assert "event.stopPropagation()" in block and "'Escape'" in block
+
+
+# ---------------------------------------------------------------------------
+# v0.68.1 perf round (audit 2026-08-20): the search was un-debounced and
+# re-lowercased every entry's body per keystroke.
+# ---------------------------------------------------------------------------
+
+
+def test_search_corpus_is_prebuilt_once_per_load() -> None:
+    # Built right after entryTextByName in reloadNow -- the two always
+    # describe the same load -- and read by renderList instead of
+    # re-lowercasing per entry per keystroke.
+    assert "function buildSearchCorpus(state)" in SRC
+    load = SRC.split("state.entryTextByName = Object.fromEntries(", 1)[1][:400]
+    assert "buildSearchCorpus(state)" in load
+    assert "state.searchCorpus = new Map(" in SRC
+    render = SRC.split("function renderList(state)", 1)[1].split("\n/**", 1)[0]
+    assert "const words = searchWords(searchQuery)" in render
+    assert "state.searchCorpus.get(entry.name) ?? searchHaystack(entry.name, state.entryTextByName[entry.name])" in render
+    assert "searchCorpus: new Map()," in SRC
+
+
+def test_search_input_is_debounced_and_escape_stays_instant() -> None:
+    assert "const SEARCH_DEBOUNCE_MS = 120" in SRC
+    on_input = SRC.split("state.searchInputEl.addEventListener('input'", 1)[1].split("})", 1)[0]
+    assert "scheduleSearchRender(state)" in on_input
+    assert "renderList(state)" not in on_input
+    sched = SRC.split("function scheduleSearchRender(state)", 1)[1].split("\n}\n", 1)[0]
+    assert "clearTimeout(state.searchTimer)" in sched
+    assert "}, SEARCH_DEBOUNCE_MS)" in sched
+    keydown = SRC.split("state.searchInputEl.addEventListener('keydown'", 1)[1][:500]
+    assert "clearTimeout(state.searchTimer)" in keydown
+    assert "renderList(state)" in keydown, "Escape repaints at once"
+    teardown = SRC.split("function teardown(state)", 1)[1].split("\n}\n", 1)[0]
+    assert "if (state.searchTimer) clearTimeout(state.searchTimer)" in teardown

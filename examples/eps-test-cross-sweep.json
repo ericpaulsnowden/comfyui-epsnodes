@@ -774,7 +774,9 @@
       },
       "widgets_values": [
         "eps_sweeptest",
-        "multiply"
+        "multiply",
+        "multiply",
+        ""
       ]
     },
     {
@@ -1139,7 +1141,7 @@
       "outputs": [],
       "properties": {},
       "widgets_values": [
-        "# TEST: EPS Run Multiplier - 3 strengths x 8 pairs = 24 images, foldered\n\n**Setup (3 things, all marked on the canvas):**\n\n1. Copy `eps-cross-test-prompts.md` (ships beside this file) into your EPSNodes library folder.\n2. **PICK YOUR CHECKPOINT** on the red-titled loader (bottom left).\n3. **PICK A LORA STATE** on EPS Apply LoRA Set next to it (make one with the State Controller if you have none).\n\nThen press Run once. **This is a real generation run: 24 images.** At ~15 steps each that is a few minutes on a decent GPU - deliberately sized for a first check, not an overnight job.\n\n## What should happen\n\nYour output folder gets **one folder per strength**, each holding the 8 pairs:\n\n```\noutput/eps_sweeptest/\n  <loraname>_0.0/   Neon City_00001_.png  Golden Hour_00001_.png  ... (8 files)\n  <loraname>_0.5/   Neon City_00001_.png  Golden Hour_00001_.png  ... (8 files)\n  <loraname>_1.0/   Neon City_00001_.png  Golden Hour_00001_.png  ... (8 files)\n```\n\nSame seed (42, fixed) across all 24, denoise 0.6 - so within a folder the only thing changing is the prompt, and between folders the only thing changing is lora strength. That is the clean A/B.\n\n## Scaling it up when it looks right\n\n- **More strengths:** drop the sweep `increment` (0.5 -> 0.1 gives 11 strengths = 88 images).\n- **Multiple loras:** the sweep is set to *All together* so the count stays predictable. Switch it to *Each lora independently* and the run multiplies by the number of loras in your state.\n- **Fewer/more pairs:** change how many prompts are selected in the notebook, or the images.\n\n**Watch the total:** strengths x images x prompts. That is the number of generations queued as ONE job."
+        "# TEST: EPS Run Multiplier - 3 strengths x 8 pairs = 24 images, foldered\n\n**Setup (3 things, all marked on the canvas):**\n\n1. Copy `eps-cross-test-prompts.md` (ships beside this file) into your EPSNodes library folder.\n2. **PICK YOUR CHECKPOINT** on the red-titled loader (bottom left).\n3. **PICK A LORA STATE** on EPS Apply LoRA Set next to it (make one with the State Controller if you have none).\n\nThen press Run once. **This is a real generation run: 24 images.** At ~15 steps each that is a few minutes on a decent GPU - deliberately sized for a first check, not an overnight job.\n\n## What should happen\n\nYour output folder gets **one folder per strength**, each holding the 8 pairs:\n\n```\noutput/eps_sweeptest/\n  <loraname>_0.0/   Neon City_m1_i1_t1_00001_.png  Golden Hour_m1_i1_t2_00001_.png  ... (8 files)\n  <loraname>_0.5/   Neon City_m2_i1_t1_00001_.png  Golden Hour_m2_i1_t2_00001_.png  ... (8 files)\n  <loraname>_1.0/   Neon City_m3_i1_t1_00001_.png  Golden Hour_m3_i1_t2_00001_.png  ... (8 files)\n```\n\nEvery file name ends with its run token (`m` = strength step, `i` = image, `t` = prompt), so a file still says which run it was after it leaves its folder. Same seed (42, fixed) across all 24, denoise 0.6 - so within a folder the only thing changing is the prompt, and between folders the only thing changing is lora strength. That is the clean A/B.\n\n## Scaling it up when it looks right\n\n- **More strengths:** drop the sweep `increment` (0.5 -> 0.1 gives 11 strengths = 88 images).\n- **Multiple loras:** the sweep is set to *All together* so the count stays predictable. Switch it to *Each lora independently* and the run multiplies by the number of loras in your state.\n- **Fewer/more pairs:** change how many prompts are selected in the notebook, or the images.\n\n**Watch the total:** strengths x images x prompts. That is the number of generations queued as ONE job."
       ],
       "color": "#432",
       "bgcolor": "#653"

@@ -44,6 +44,11 @@ def _resolve_path(
     """
     if file_value is not None and not isinstance(file_value, str):
         return None, error_response(400, "'file' must be a string")
+    if isinstance(file_value, str) and "\x00" in file_value:
+        # Audit 2026-08-21: an embedded NUL used to reach open() (loopback)
+        # or Path.resolve() inside the §2 guard (remote) as a 500; this is
+        # the 400 the docstring above always promised.
+        return None, error_response(400, "invalid 'file' path: embedded NUL byte")
     if writing and not (isinstance(file_value, str) and file_value.strip()):
         return None, error_response(
             400,
@@ -85,7 +90,10 @@ def register(context: LibraryContext, routes: web.RouteTableDef) -> None:
         if guard:
             return error_response(403, guard)
 
-        parsed, mtime, _line_ending = markdown_store.load_notebook(path)
+        try:
+            parsed, mtime, _line_ending = markdown_store.load_notebook(path)
+        except markdown_store.MarkdownStoreError as exc:
+            return error_response(400, str(exc))
         entries = markdown_store.list_entries(parsed)
         # §5 amendment (v0.53.0, owner ask 2026-08-08: a search field over
         # titles AND bodies): `include_text=1` adds each entry's body text
@@ -131,7 +139,10 @@ def register(context: LibraryContext, routes: web.RouteTableDef) -> None:
             return error_response(403, guard)
 
         name = request.query.get("name", "")
-        parsed, mtime, _line_ending = markdown_store.load_notebook(path)
+        try:
+            parsed, mtime, _line_ending = markdown_store.load_notebook(path)
+        except markdown_store.MarkdownStoreError as exc:
+            return error_response(400, str(exc))
         description = markdown_store.get_category_description(parsed, name)
         if description is None:
             return error_response(404, f"no such category {name!r} in {path}")
@@ -182,7 +193,10 @@ def register(context: LibraryContext, routes: web.RouteTableDef) -> None:
         if base_mtime is not None and not isinstance(base_mtime, (int, float)):
             return error_response(400, "'base_mtime' must be a number")
 
-        parsed, current_mtime, line_ending = markdown_store.load_notebook(path)
+        try:
+            parsed, current_mtime, line_ending = markdown_store.load_notebook(path)
+        except markdown_store.MarkdownStoreError as exc:
+            return error_response(400, str(exc))
         try:
             markdown_store.check_conflict(base_mtime, current_mtime)
         except markdown_store.ConflictError as exc:
@@ -225,7 +239,10 @@ def register(context: LibraryContext, routes: web.RouteTableDef) -> None:
             return error_response(403, guard)
 
         name = request.query.get("name", "")
-        parsed, mtime, _line_ending = markdown_store.load_notebook(path)
+        try:
+            parsed, mtime, _line_ending = markdown_store.load_notebook(path)
+        except markdown_store.MarkdownStoreError as exc:
+            return error_response(400, str(exc))
         entry = markdown_store.get_entry(parsed, name)
         if entry is None:
             return error_response(404, f"no such entry {name!r} in {path}")
@@ -271,7 +288,10 @@ def register(context: LibraryContext, routes: web.RouteTableDef) -> None:
         if base_mtime is not None and not isinstance(base_mtime, (int, float)):
             return error_response(400, "'base_mtime' must be a number")
 
-        parsed, current_mtime, line_ending = markdown_store.load_notebook(path)
+        try:
+            parsed, current_mtime, line_ending = markdown_store.load_notebook(path)
+        except markdown_store.MarkdownStoreError as exc:
+            return error_response(400, str(exc))
         try:
             markdown_store.check_conflict(base_mtime, current_mtime)
         except markdown_store.ConflictError as exc:
@@ -326,7 +346,10 @@ def register(context: LibraryContext, routes: web.RouteTableDef) -> None:
         if base_mtime is not None and not isinstance(base_mtime, (int, float)):
             return error_response(400, "'base_mtime' must be a number")
 
-        parsed, current_mtime, line_ending = markdown_store.load_notebook(path)
+        try:
+            parsed, current_mtime, line_ending = markdown_store.load_notebook(path)
+        except markdown_store.MarkdownStoreError as exc:
+            return error_response(400, str(exc))
         try:
             markdown_store.check_conflict(base_mtime, current_mtime)
         except markdown_store.ConflictError as exc:
@@ -376,7 +399,10 @@ def register(context: LibraryContext, routes: web.RouteTableDef) -> None:
         if base_mtime is not None and not isinstance(base_mtime, (int, float)):
             return error_response(400, "'base_mtime' must be a number")
 
-        parsed, current_mtime, line_ending = markdown_store.load_notebook(path)
+        try:
+            parsed, current_mtime, line_ending = markdown_store.load_notebook(path)
+        except markdown_store.MarkdownStoreError as exc:
+            return error_response(400, str(exc))
         try:
             markdown_store.check_conflict(base_mtime, current_mtime)
         except markdown_store.ConflictError as exc:
@@ -426,7 +452,10 @@ def register(context: LibraryContext, routes: web.RouteTableDef) -> None:
         if base_mtime is not None and not isinstance(base_mtime, (int, float)):
             return error_response(400, "'base_mtime' must be a number")
 
-        parsed, current_mtime, line_ending = markdown_store.load_notebook(path)
+        try:
+            parsed, current_mtime, line_ending = markdown_store.load_notebook(path)
+        except markdown_store.MarkdownStoreError as exc:
+            return error_response(400, str(exc))
         try:
             markdown_store.check_conflict(base_mtime, current_mtime)
         except markdown_store.ConflictError as exc:

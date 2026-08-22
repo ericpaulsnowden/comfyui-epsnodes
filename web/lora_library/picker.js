@@ -111,6 +111,18 @@ const CLEAR_RECENTS_CONFIRM_MS = 4000
  * many chars -- the toast names the words, it doesn't reprint a novel. */
 const COPY_TOAST_MAX_CHARS = 120
 
+/** v0.68.1 (perf round): the M3 search input repaints on a short debounce
+ * instead of per keystroke -- every keystroke used to `replaceChildren()`
+ * the browser and rebuild one row (with a lazy <img>) per match over the
+ * WHOLE folder. Escape/clear stays instant (clearSearch cancels the pending
+ * repaint). Same value as notebook.js's SEARCH_DEBOUNCE_MS. */
+const SEARCH_DEBOUNCE_MS = 120
+
+/** v0.68.1: the flat search view renders at most this many rows; a
+ * trailing "…N more — keep typing" row says what was left out. A 2000-lora
+ * library matching a one-letter query built 2000 rows per keystroke. */
+const SEARCH_RESULT_CAP = 200
+
 /** Nodes we've already attached to -- guards a double `nodeCreated`. */
 const attachedNodes = new WeakSet()
 
@@ -429,6 +441,7 @@ function createState(node, widget) {
     path: [], // drill-down segments below the scope root -- transient (§6.13)
     pllTargetId: null, // Send-to-loader target node id -- transient, M2 adds no widget (§6.13)
     searchQuery: '', // §6.13 M3 view-only filter -- transient, never serialized
+    searchTimer: null, // v0.68.1: pending debounced search repaint (scheduleSearchRender)
     favDrag: null, // in-flight M3 favorites drag -- element-level, pointer-captured
     loadToken: 0, // guards a stale/superseded fetch from clobbering fresher state
     favoriteToken: 0, // same guard for favorites round-trips (star toggle + M3 reorder)
@@ -436,6 +449,7 @@ function createState(node, widget) {
     root: null,
     searchInputEl: null,
     favRowEls: [], // favorites-view row order (file+el) for the M3 drag -- rebuilt each render
+    browserRowEls: new Map(), // file -> installed browser row el, rebuilt each render (v0.68.1 highlight toggle)
     lastSelectedCount: null, // last painted Selected row count -- drives the node-growth delta
     highlightedFile: null, // browser row click-to-highlight (v0.64.0); second click adds
     selectedHeaderEl: null,
@@ -492,13 +506,13 @@ function buildUi(state) {
   })
   state.searchInputEl.addEventListener('input', () => {
     state.searchQuery = state.searchInputEl.value
-    renderBrowser(state)
+    scheduleSearchRender(state) // v0.68.1: debounced -- see SEARCH_DEBOUNCE_MS
   })
   state.searchInputEl.addEventListener('keydown', (event) => {
     event.stopPropagation()
     if (event.key === 'Escape') {
       event.preventDefault()
-      clearSearch(state)
+      clearSearch(state) // cancels any pending debounced repaint too (v0.68.1)
       renderBrowser(state)
     }
   })
@@ -625,6 +639,7 @@ function writeSelectionWidget(state) {
  * the next explicit load re-syncs everything. */
 function invalidateInFlightLoad(state) {
   state.loadToken++
+  invalidateFeedCache() // v0.68.1: the shared feed is pre-mutation too
 }
 
 /** The last successful feed, shared by every picker node in the session
@@ -633,8 +648,57 @@ function invalidateInFlightLoad(state) {
  * "Loading loras…" until a FRESH fetch finished, every time). A new
  * panel paints from this instantly and the fetch refreshes it in the
  * background; mutations (stars, recents) already invalidate in-flight
- * loads per node, and every applied response overwrites this cache. */
+ * loads per node, and every applied response overwrites this cache.
+ *
+ * v0.68.1 (perf round): the FETCH is shared too, not only the paint -- N
+ * pickers attaching in one tick (a tab switch recreates every one of them)
+ * fired N identical `GET picker` round trips, each one a full library
+ * scan server-side. `fetchFeed()` hands every caller the ONE in-flight
+ * promise, and a feed younger than FEED_CACHE_TTL_MS is served without a
+ * round trip at all. Each node's own `loadToken` semantics are untouched
+ * (a node still drops a response it has since superseded), and
+ * `invalidateInFlightLoad` -- every mutation's success path -- also marks
+ * the shared cache stale and orphans the shared promise
+ * (`invalidateFeedCache`), so the next load after a star/recent/reorder/
+ * clear is a FRESH fetch, never a pre-mutation one served from the cache
+ * or joined mid-flight. A failed shared fetch is released on settle, so the
+ * §7.2 Retry button starts a NEW one rather than re-joining the failure. */
 let lastFeed = null
+let lastFeedAt = 0
+let feedFetchPromise = null
+/** Bumped by invalidateFeedCache(): a fetch that started before the bump
+ * still resolves its own callers but never writes the shared cache. */
+let feedGeneration = 0
+const FEED_CACHE_TTL_MS = 3000
+
+/** The one shared feed fetch -- see lastFeed's header. */
+function fetchFeed() {
+  if (lastFeed && Date.now() - lastFeedAt < FEED_CACHE_TTL_MS) return Promise.resolve(lastFeed)
+  if (feedFetchPromise) return feedFetchPromise
+  const generation = feedGeneration
+  const promise = api.getJson(ROUTE).then((data) => {
+    if (generation === feedGeneration) {
+      lastFeed = data
+      lastFeedAt = Date.now()
+    }
+    return data
+  })
+  const settle = () => {
+    if (feedFetchPromise === promise) feedFetchPromise = null
+  }
+  promise.then(settle, settle) // every caller awaits `promise` itself and handles its own rejection
+  feedFetchPromise = promise
+  return promise
+}
+
+/** The shared cache is pre-mutation now: stale-mark it and orphan the
+ * in-flight promise so the next loadPicker() fetches fresh (v0.68.1). The
+ * cached payload itself stays for the instant paint of a new panel. */
+function invalidateFeedCache() {
+  feedGeneration++
+  lastFeedAt = 0
+  feedFetchPromise = null
+}
 
 /** Apply one feed payload to *state* -- shared by the instant cached
  * paint and the fresh-fetch path, so they can never drift. */
@@ -665,18 +729,22 @@ function applyFeed(state, data) {
 async function loadPicker(state) {
   state.error = null
   const token = ++state.loadToken
+  // v0.68.1: remember what the instant paint showed -- a TTL-served feed is
+  // that very same object, and applying it a second time would be one more
+  // full repaint (plus graph walk) for nothing.
+  let painted = null
   if (!state.loaded && lastFeed) {
     // Instant paint from the session cache; the fetch below reconciles.
+    painted = lastFeed
     applyFeed(state, lastFeed)
   } else {
     render(state) // "Loading loras…" (state.loaded may already be true on a retry)
   }
 
   try {
-    const data = await api.getJson(ROUTE)
+    const data = await fetchFeed() // shared across every picker node (v0.68.1)
     if (token !== state.loadToken) return // superseded by a newer fetch
-    lastFeed = data
-    applyFeed(state, data)
+    if (data !== painted) applyFeed(state, data)
   } catch (error) {
     if (token !== state.loadToken) return
     // A cached paint already on screen stays: stale rows beat an error
@@ -690,6 +758,14 @@ async function loadPicker(state) {
     api.warn('picker feed fetch failed', error)
     render(state)
   }
+}
+
+/** v0.68.1: same files in the same order (timestamps ignored) -- the
+ * change gate for recordRecent's response repaint.
+ * @param {Array<{file: string}>} a @param {Array<{file: string}>} b
+ * @returns {boolean} */
+function sameFileOrder(a, b) {
+  return a.length === b.length && a.every((entry, i) => entry.file === b[i].file)
 }
 
 /** @param {unknown} raw @returns {Array<{file: string, ts: number}>} */
@@ -740,8 +816,20 @@ function activeSearchQuery(state) {
  * they can never drift. Callers: Escape, breadcrumb navigation, a scope
  * change, and the restore/reconfigure resync. */
 function clearSearch(state) {
+  clearTimeout(state.searchTimer) // v0.68.1: a pending debounced repaint must not follow a clear
+  state.searchTimer = null
   state.searchQuery = ''
   if (state.searchInputEl) state.searchInputEl.value = ''
+}
+
+/** v0.68.1: the debounced search repaint -- see SEARCH_DEBOUNCE_MS. Only the
+ * `input` listener schedules; Escape/clear and navigation repaint at once. */
+function scheduleSearchRender(state) {
+  clearTimeout(state.searchTimer)
+  state.searchTimer = setTimeout(() => {
+    state.searchTimer = null
+    renderBrowser(state)
+  }, SEARCH_DEBOUNCE_MS)
 }
 
 /** Sets the per-workflow scope (§6.13: pure view state, serialized with
@@ -773,7 +861,10 @@ function addLora(state, file) {
   state.highlightedFile = file // the just-added row stays the current one
   writeSelectionWidget(state)
   renderSelected(state)
-  renderBrowser(state) // repaint the highlight without waiting for a nav
+  // v0.68.1: ONE browser repaint per Add, owned by recordRecent (it repaints
+  // anyway -- the 🕘 Recent count moved -- and that repaint paints this
+  // highlight). Add used to rebuild the browser three times over: here,
+  // in recordRecent's optimistic update, and again on the POST response.
   recordRecent(state, file)
 }
 
@@ -791,13 +882,17 @@ function flashSelectedRow(state, file) {
  * optimistically so the `🕘 Recent (n)` count is right immediately, the
  * POST failure is a console warn only -- it never blocks or reverts the
  * Add itself. Token-guarded so a slow response can't clobber a newer stamp.
+ * v0.68.1: this function owns an Add's ONE optimistic browser repaint (see
+ * addLora), and the response repaint is change-gated -- the served list
+ * normally equals the optimistic one (same file on top, same cap), so a
+ * third full rebuild of the browser was the rule rather than the exception.
  */
 function recordRecent(state, file) {
   state.recents = [
     { file, ts: Date.now() / 1000 },
     ...state.recents.filter((entry) => entry.file !== file)
   ].slice(0, RECENTS_CAP)
-  renderBrowser(state)
+  renderBrowser(state) // the one optimistic repaint an Add gets (v0.68.1)
   const token = ++state.recentToken
   api
     .postJson(ROUTE_RECENT, { files: [file] })
@@ -805,7 +900,7 @@ function recordRecent(state, file) {
       if (token !== state.recentToken) return
       invalidateInFlightLoad(state)
       const recents = sanitizeRecents(data?.recents)
-      if (recents.length) {
+      if (recents.length && !sameFileOrder(recents, state.recents)) {
         state.recents = recents
         renderBrowser(state)
       }
@@ -1034,6 +1129,7 @@ function renderBrowser(state) {
   }
   state.listEl.replaceChildren()
   state.favRowEls = []
+  state.browserRowEls = new Map()
 
   if (state.error) {
     // §7.2 amendment: the error itself lives in the status line (with
@@ -1113,10 +1209,13 @@ function renderSearchResults(state, query) {
   const folder = currentFolder(state)
   const prefix = folder ? `${folder}/` : ''
   const matches = []
+  let overflow = 0 // v0.68.1: matches past SEARCH_RESULT_CAP -- counted, not built
   for (const name of state.loras) {
     if (prefix && !name.startsWith(prefix)) continue
     const rel = name.slice(prefix.length)
-    if (loraMatchesSearch(rel, query)) matches.push({ file: name, label: rel })
+    if (!loraMatchesSearch(rel, query)) continue
+    if (matches.length < SEARCH_RESULT_CAP) matches.push({ file: name, label: rel })
+    else overflow++
   }
   if (matches.length === 0) {
     state.listEl.append(
@@ -1125,6 +1224,11 @@ function renderSearchResults(state, query) {
     return
   }
   for (const match of matches) state.listEl.append(buildLoraRowEl(state, match.file, match.label))
+  if (overflow > 0) {
+    state.listEl.append(
+      el('div', { className: 'eps-lp-empty', text: `…${overflow} more — keep typing to narrow the search.` })
+    )
+  }
 }
 
 /** `★ Favorites (n)` / `🕘 Recent (n)` -- root-only views over ALL
@@ -1252,17 +1356,31 @@ function buildLoraRowEl(state, file, displayLabel) {
     // the star/copy/Add buttons (and any future child control) keep their
     // own jobs. Ghosts stay click-inert: there is nothing to add here.
     rowEl.classList.toggle('eps-lp-row-active', state.highlightedFile === file)
+    state.browserRowEls.set(file, rowEl)
     rowEl.addEventListener('click', (event) => {
       if (event.target instanceof Element && event.target.closest('button, input')) return
       if (state.highlightedFile === file) {
         addLora(state, file)
       } else {
-        state.highlightedFile = file
-        renderBrowser(state)
+        setHighlightedFile(state, file) // v0.68.1: class toggle, not a list rebuild
       }
     })
   }
   return rowEl
+}
+
+/**
+ * v0.68.1: moves the click-to-load highlight (v0.64.0) by toggling the row
+ * class in place -- the first click on a row used to rebuild the WHOLE
+ * browser list (every row, every lazy <img>) just to move one outline.
+ * `browserRowEls` is rebuilt by every renderBrowser(), so a row the current
+ * paint doesn't show (another view, a ghost) is simply not touched; the
+ * next full paint reads `highlightedFile` as before.
+ */
+function setHighlightedFile(state, file) {
+  state.browserRowEls.get(state.highlightedFile)?.classList.remove('eps-lp-row-active')
+  state.highlightedFile = file
+  state.browserRowEls.get(file)?.classList.add('eps-lp-row-active')
 }
 
 // --- §6.13 M3: Clear recents (armed two-click) ---
@@ -1598,25 +1716,26 @@ function renderStatus(state) {
 /**
  * §6.13 M4: the comfyClass-keyed send-adapter registry -- the ecosystem's
  * one proven multi-target pattern (Lora-Manager's NODE_EXTRACTORS dict).
- * Each entry owns one loader family: `find()` lists its live graph nodes,
- * `probe(node)` is its §6.3-style feature-detection gate, `write(node,
- * rows)` performs the send and may return `{flattened, clamped}` basename
- * lists for the loud-lossy success toast (the rgthree write is never lossy
- * and returns nothing), and `label` is the family's human name for the
- * family-agnostic messages below. Candidate order and the single-candidate
- * auto-adopt are computed ACROSS families; every per-family rule stays in
- * its bridge.
+ * Each entry owns one loader family: `probe(node)` is its §6.3-style
+ * feature-detection gate, `write(node, rows)` performs the send and may
+ * return `{flattened, clamped}` basename lists for the loud-lossy success
+ * toast (the rgthree write is never lossy and returns nothing), and
+ * `label` is the family's human name for the family-agnostic messages
+ * below. Candidate order and the single-candidate auto-adopt are computed
+ * ACROSS families; every per-family rule stays in its bridge.
+ * v0.68.1: the per-family `find` key is GONE -- dead since v0.64.0, when
+ * findSendCandidates() started walking the whole workflow itself against
+ * these comfyClass keys (the bridges' root-only find helpers still exist,
+ * marked unused, pending their test pins' removal).
  */
 const SEND_ADAPTERS = {
   [pll.POWER_LORA_LOADER_TYPE]: {
     label: 'Power Lora Loader (rgthree)',
-    find: pll.findPllNodes,
     probe: pll.probePll,
     write: pll.writeRowsToPll
   },
   [dasiwa.DASIWA_LOADER_TYPE]: {
     label: 'DaSiWa Advanced LoRA Loader',
-    find: dasiwa.findDasiwaNodes,
     probe: dasiwa.probeDasiwa,
     write: dasiwa.writeRowsToDasiwa
   }
@@ -1644,11 +1763,27 @@ const MSG_NO_SEND_TARGET_SELECTED = 'Pick a target loader node above.'
  * v0.63.1 carries the same watch for the same reason).
  */
 function scheduleSendRowRefresh(graph) {
-  if (!graph || graph.__epsLpSendRefreshQueued) return
-  graph.__epsLpSendRefreshQueued = true
+  // v0.68.1: coalesce on the ROOT graph regardless of which (sub)graph
+  // fired, and walk the WHOLE workflow (controller.js's
+  // scheduleControllerRefresh, same reason): the per-graph version iterated
+  // only the firing graph's own `_nodes`, so a loader added at the root
+  // never repainted a picker nested in a subgraph (cosmetic -- the combo
+  // rebuilt its options on open -- but the stale "No loader in graph" text
+  // is exactly what this watch exists to retire). The refresh also arms any
+  // subgraph created since attach, so a loader dropped inside a brand-new
+  // subgraph is watched too. *graph* is the fallback only when there is no
+  // app.graph (never in a browser).
+  const root = app.graph || graph
+  if (!root || root.__epsLpSendRefreshQueued) return
+  root.__epsLpSendRefreshQueued = true
   setTimeout(() => {
-    graph.__epsLpSendRefreshQueued = false
-    for (const node of graph._nodes || []) {
+    root.__epsLpSendRefreshQueued = false
+    try {
+      for (const subgraph of walkGraphs(root)) installGraphNodeWatch(subgraph)
+    } catch (error) {
+      api.warn('graph-change watch arming failed', error)
+    }
+    for (const { node } of walkLiveNodes(root)) {
       const state = node?.__epsLpState
       if (!state) continue
       try {
@@ -1679,9 +1814,24 @@ function installGraphNodeWatch(graph) {
   }
 }
 
+/** v0.68.1: the candidate walk, memoized for the CURRENT synchronous run.
+ * One renderSend() asked for it three times over (buildOptions, then
+ * resolveSendTarget, then probeSendTarget's null leg), and an Add renders
+ * the Send row once via writeSelectionWidget -- so every Add walked the
+ * whole workflow up to three times. The memo dies on the next microtask,
+ * i.e. before any LATER task (a node drop, a paste, a loadGraphData await
+ * boundary, the combo's own mousedown rebuild) can read it, and the graph
+ * watch's coalesced refresh runs in its own task and therefore always walks
+ * fresh -- which is also what heals the one transient: pickers created in
+ * the same synchronous `graph.configure` pass as later nodes paint from a
+ * list that predates those nodes until that refresh tick, exactly as the
+ * v0.63.2 watch already repaints them. Never set across an await. */
+let sendCandidatesMemo = null
+
 /** Every adapter family's live candidates, merged ascending id ACROSS
  * families (§6.13 M4) -- the combo's order AND the auto-adopt universe. */
 function findSendCandidates() {
+  if (sendCandidatesMemo) return sendCandidatesMemo
   // Whole workflow, subgraphs included (v0.64.0): entries are
   // {node, pathId} — pathId ("3:2" style) is the combo value AND the
   // display id, since inner node ids can collide with root ids.
@@ -1689,6 +1839,10 @@ function findSendCandidates() {
   for (const { node, pathId } of walkLiveNodes(app.graph)) {
     if (node && SEND_ADAPTERS[node.type]) candidates.push({ node, pathId })
   }
+  sendCandidatesMemo = candidates
+  queueMicrotask(() => {
+    sendCandidatesMemo = null
+  })
   return candidates
 }
 

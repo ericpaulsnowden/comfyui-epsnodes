@@ -315,6 +315,7 @@ class LoraLibraryApplySet:
         model: Any,
         clip: Any,
         stack: list[tuple[str, float, float]],
+        lora_cache: dict[str, Any] | None = None,
     ) -> tuple[Any, Any]:
         """Patch *model*/*clip* with every stack row, in order.
 
@@ -342,7 +343,16 @@ class LoraLibraryApplySet:
                     file,
                 )
                 continue
-            lora_sd = comfy.utils.load_torch_file(path, safe_load=True)
+            # Audit 2026-08-21: an optional per-call cache -- the Iterator
+            # applies the SAME files at every strength step (N loras x S
+            # steps x N rows = N^2*S loads for a plan that needs N), so one
+            # dict per sweep() call collapses that to one load per file.
+            # Callers that pass nothing keep the one-shot behavior.
+            lora_sd = lora_cache.get(path) if lora_cache is not None else None
+            if lora_sd is None:
+                lora_sd = comfy.utils.load_torch_file(path, safe_load=True)
+                if lora_cache is not None:
+                    lora_cache[path] = lora_sd
             model, clip = comfy.sd.load_lora_for_models(
                 model, clip, lora_sd, strength_model, strength_clip
             )

@@ -683,6 +683,10 @@ const SOURCE_PROBE_MAX_TRIES = 12
 function scheduleSourceProbe(node) {
   const state = node._epsGrid
   if (!state || state.sourceProbe) return
+  // v0.68.1 (2026-08-21): only when the `image` input is actually wired --
+  // an unwired node repainted (every drag tick, resize, configure) used to
+  // arm this 12 x 250 ms poll each time, for a size that cannot appear.
+  if (node.inputs?.[imageInputSlot(node)]?.link == null) return
   let tries = 0
   const tick = () => {
     if (!node._epsGrid || node._epsGrid !== state) return // node gone/replaced
@@ -776,7 +780,9 @@ function setWidgetValue(widget, value) {
 }
 
 /** Writes both axes as real numbers (never 0 — FORMAT.md §6.5 M2) and
- * repaints. This is the ONLY function that turns a drag into widget state. */
+ * repaints. This is the ONLY function that turns a drag into widget state.
+ * (The two setWidgetValue callbacks each request a repaint too; since
+ * v0.68.1 `renderGrid` coalesces all three into one paint per frame.) */
 function writeSize(node, width, height) {
   setWidgetValue(widgetByName(node, 'width'), width)
   setWidgetValue(widgetByName(node, 'height'), height)
@@ -1076,13 +1082,36 @@ function drawGrid(node, ctx, cssW) {
   ctx.restore()
 }
 
+/**
+ * v0.68.1 (2026-08-21): ONE paint per animation frame per node. A single
+ * drag tick used to paint three times -- writeSize() -> the width AND
+ * height callback wraps (each calls renderGrid) -> its own renderGrid() --
+ * and every paint is a layout read (getBoundingClientRect) plus a full 2D
+ * redraw. Every caller keeps calling renderGrid(); the paint itself
+ * (`paintGrid`) lands once, on the next frame. Where requestAnimationFrame
+ * is missing (a non-browser probe) it paints synchronously, as before.
+ */
+function renderGrid(node) {
+  const state = node._epsGrid
+  if (!state) return
+  if (typeof requestAnimationFrame !== 'function') {
+    paintGrid(node)
+    return
+  }
+  if (state.renderRaf != null) return
+  state.renderRaf = requestAnimationFrame(() => {
+    state.renderRaf = null
+    paintGrid(node)
+  })
+}
+
 /** devicePixelRatio-aware repaint: resizes the canvas's backing store to
  * match its CURRENT CSS size (read fresh every call — the "draw-time width
  * check" that keeps this correct regardless of what triggered the repaint,
  * the ResizeObserver included), then draws. Fails soft: a draw error is
  * logged and never breaks the caller (widget writes already happened by the
- * time this runs — see writeSize()). */
-function renderGrid(node) {
+ * time this runs — see writeSize()). Reached only through renderGrid(). */
+function paintGrid(node) {
   const state = node._epsGrid
   if (!state?.canvas?.isConnected) return
   if (!isGridVisible(node)) return
@@ -1272,8 +1301,8 @@ function attachSizeGrid(node) {
     // ("these use native browser tooltips" -- NodeTooltip.vue), so the pad
     // documents itself with a plain `title`.
     canvasEl.title =
-      'Drag inside the pad to set the target size. The readout above shows ' +
-      'width x height, the aspect ratio, and the megapixel count. ' +
+      'Drag inside the pad to set the target size. The readout below the pad ' +
+      'shows width x height, the aspect ratio, and the megapixel count. ' +
       'Drag the far edge of the node to make the pad bigger.'
 
     const domWidget = node.addDOMWidget(GRID_WIDGET_NAME, GRID_WIDGET_TYPE, canvasEl, {
@@ -1309,7 +1338,10 @@ function attachSizeGrid(node) {
       resizeObserver: null,
       cancelDrag: null,
       // Pending source-size probe timer (2026-07-29) -- see scheduleSourceProbe.
-      sourceProbe: null
+      sourceProbe: null,
+      // Pending requestAnimationFrame id for the coalesced repaint (v0.68.1)
+      // -- see renderGrid.
+      renderRaf: null
     }
 
     node.addProperty(PROP_SHOW_GRID, true, 'boolean')
@@ -1460,6 +1492,15 @@ function attachSizeGrid(node) {
       } catch (error) {
         console.warn(PREFIX, 'source-probe cleanup failed', error)
       }
+      try {
+        // ...and the coalesced repaint's pending frame (v0.68.1).
+        if (node._epsGrid?.renderRaf != null && typeof cancelAnimationFrame === 'function') {
+          cancelAnimationFrame(node._epsGrid.renderRaf)
+          node._epsGrid.renderRaf = null
+        }
+      } catch (error) {
+        console.warn(PREFIX, 'grid repaint-frame cleanup failed', error)
+      }
       return originalOnRemoved?.apply(this, args)
     }
   } catch (error) {
@@ -1470,8 +1511,9 @@ function attachSizeGrid(node) {
 // --------------------------------------------------------------- M3: size presets
 //
 // A `preset` COMBO widget (NOT hand-drawn -- Vue nodes render standard
-// widget types natively, unlike the M2 grid's onDrawForeground-painted
-// readout) plus Save/Delete buttons, reflecting/writing the hidden
+// widget types natively; the M2 pad + readout are an addDOMWidget <canvas>
+// this file paints itself, which also renders under Vue) plus Save/Delete
+// buttons, reflecting/writing the hidden
 // `presets` STRING widget the backend contract defines: JSON array of
 // preset NAMES, default `"[]"`. Non-empty selection = fan-out (backend
 // runs once per preset, ignoring the five typed fields); empty = classic

@@ -371,6 +371,127 @@ out.basenames = [
   null
 ].map((f) => grid.basenameForUpload(f))
 
+// ---- 2026-08-21 perf round: per-frame keys, the frame route, Image reuse
+// + key adoption, the focused full-res swap ----
+{
+  const U = '11111111-1111-1111-1111-111111111111'
+  const B = (name, mtime) => ({
+    filename: name, subfolder: `eps_image_grid/${U}`, type: 'output', ...(mtime ? { mtime } : {})
+  })
+
+  // URL shapes
+  const keyed = B('0001.png', 1700000000123)
+  const thumb = grid.thumbUrlForRef(keyed, { epoch: 7 })
+  const thumbOtherEpoch = grid.thumbUrlForRef(B('0001.png', 1700000000123), { epoch: 8 })
+  const thumbKeyless = grid.thumbUrlForRef(B('0001.png'), { epoch: 7 })
+  const foreignRef = { filename: 'x.png', subfolder: 'other', type: 'output' }
+  const thumbForeign = grid.thumbUrlForRef(foreignRef, { epoch: 7 })
+  const full = grid.imageUrlForRef(keyed, { epoch: 7 })
+  const thumbUrl = new URL('http://x' + thumb)
+  out.perfUrls = {
+    thumbPath: thumbUrl.pathname,
+    thumbParams: Array.from(thumbUrl.searchParams.keys()),
+    thumbUuid: thumbUrl.searchParams.get('uuid'),
+    thumbPreview: thumbUrl.searchParams.get('preview'),
+    thumbV: thumbUrl.searchParams.get('v'),
+    stableAcrossEpochsWhenKeyed: thumb === thumbOtherEpoch,
+    keylessFallsBackToEpoch: new URL('http://x' + thumbKeyless).searchParams.get('v') === '7',
+    foreignFallsBackToView:
+      thumbForeign.startsWith('/view?') && thumbForeign.includes('preview=webp%3B80'),
+    fullResUsesMtime:
+      full.startsWith('/view?') &&
+      new URL('http://x' + full).searchParams.get('v') === '1700000000123',
+    roundTrip: grid.refFromImageSrc('http://x' + thumb),
+    noPreviewStillParses: grid.refFromImageSrc('http://x' + thumb.replace('preview=webp%3B80&', ''))
+  }
+
+  // Reuse: an append must not rebuild the unchanged frames' <img>s.
+  const node = makeNode(41, rootGraph)
+  grid.setNodeImagesFromRefs(node, [B('0001.png', 1000), B('0002.png', 2000)])
+  const before = node.imgs.slice()
+  grid.setNodeImagesFromRefs(node, [B('0001.png', 1000), B('0002.png', 2000), B('0003.png', 3000)])
+  out.reuse = {
+    firstTwoReused: node.imgs[0] === before[0] && node.imgs[1] === before[1],
+    thirdIsNew: !before.includes(node.imgs[2]),
+    thirdSrcIsFrameRoute: node.imgs[2].src.startsWith('/eps_image_grid/frame?'),
+    length: node.imgs.length,
+    backToGrid: node.imageIndex === null
+  }
+
+  // Adopt: the executed merge brings a KEYLESS ref (core's ui.images); the
+  // forced /list then keys it -- same arrays, no rebuild, no reload.
+  const node2 = makeNode(42, rootGraph)
+  grid.setNodeImagesFromRefs(node2, [B('0001.png', 1000)])
+  const merged = grid.mergeBufferRefs(node2.images, [B('0002.png')])
+  grid.setNodeImagesFromRefs(node2, merged.refs)
+  const imgsAfterMerge = node2.imgs
+  const imagesAfterMerge = node2.images
+  const keylessSrc = node2.imgs[1].src
+  node2.imageIndex = 1 // the user focuses the new one before the reconcile lands
+  grid.setNodeImagesFromRefs(node2, [B('0001.png', 1000), B('0002.png', 2000)]) // the forced /list
+  const adoptedElement = node2.imgs[1]
+  const afterAdopt = {
+    sameImgsArray: node2.imgs === imgsAfterMerge,
+    sameImagesArray: node2.images === imagesAfterMerge, // the store identity, mutated in place
+    mtimeAdoptedInPlace: node2.images[1].mtime === 2000,
+    srcUntouched: adoptedElement.src === keylessSrc,
+    focusKept: node2.imageIndex === 1
+  }
+  grid.setNodeImagesFromRefs(node2, [B('0001.png', 1000), B('0002.png', 2000), B('0003.png', 3000)])
+  out.adopt = {
+    keylessSrcUsedTheEpochFallback: new URL('http://x' + keylessSrc).searchParams.get('v') === '0',
+    ...afterAdopt,
+    laterRebuildReusedTheAdopted: node2.imgs[1] === adoptedElement
+  }
+
+  // Changed mtime for the same name = content change (a Clear + re-add from
+  // another browser reusing `0001.png`): that image rebuilds, others reuse.
+  const node3 = makeNode(43, rootGraph)
+  grid.setNodeImagesFromRefs(node3, [B('0001.png', 1000), B('0002.png', 2000)])
+  const b3 = node3.imgs.slice()
+  node3.imageIndex = 0
+  grid.setNodeImagesFromRefs(node3, [B('0001.png', 1000), B('0002.png', 9999)])
+  out.changedMtime = {
+    firstReused: node3.imgs[0] === b3[0],
+    secondRebuilt: node3.imgs[1] !== b3[1],
+    backToGrid: node3.imageIndex === null,
+    newSrcCarriesNewKey: new URL('http://x' + node3.imgs[1].src).searchParams.get('v') === '9999'
+  }
+
+  // Focused full-res swap (ensureFocusedFullRes, driven by the draw wrap).
+  const node4 = makeNode(44, rootGraph)
+  grid.setNodeImagesFromRefs(node4, [B('0001.png', 1000), B('0002.png', 2000)])
+  const arr4 = node4.imgs
+  const thumbs4 = node4.imgs.slice()
+  node4.imageIndex = 1
+  grid.ensureFocusedFullRes(node4)
+  const pendingStillThumb = node4.imgs[1] === thumbs4[1]
+  const fullImg = thumbs4[1].__epsFull
+  const fullSrc = fullImg ? fullImg.src : null
+  fullImg.onload() // the browser finishes loading the full frame
+  grid.ensureFocusedFullRes(node4)
+  const swapped = node4.imgs[1] === fullImg && node4.imgs[0] === thumbs4[0] && node4.imgs === arr4
+  node4.imageIndex = null // Escape / the x button / a click back to the grid
+  grid.ensureFocusedFullRes(node4)
+  const restored = node4.imgs[1] === thumbs4[1] && node4.imgs === arr4
+  node4.imageIndex = 1
+  grid.ensureFocusedFullRes(node4)
+  const instantReswap = node4.imgs[1] === fullImg
+  node4.imageIndex = 0 // arrow key to the other tile
+  grid.ensureFocusedFullRes(node4)
+  const movedRestoresPrevious = node4.imgs[1] === thumbs4[1]
+  out.focusSwap = {
+    pendingStillThumb,
+    fullSrcIsCoreViewFullRes:
+      typeof fullSrc === 'string' && fullSrc.startsWith('/view?') && !fullSrc.includes('preview='),
+    swapped,
+    restored,
+    instantReswap,
+    movedRestoresPrevious,
+    imagesUntouched: node4.images.length === 2 && node4.images[1].filename === '0002.png'
+  }
+}
+
 process.stdout.write(JSON.stringify(out))
 """
 
@@ -883,3 +1004,146 @@ def test_clear_button_is_installed_after_both_add_buttons() -> None:
     folder_at = source.index("addAddFolderButton(node) // M3")
     clear_at = source.rindex("addClearButton(node)")
     assert images_at < folder_at < clear_at
+
+
+# ---- 2026-08-21 perf round: per-frame keys, frame route, reuse/adopt, focus swap,
+# one /list per run, no phantom prompt inputs ----
+
+
+def test_thumb_url_is_the_frame_route_keyed_by_the_frames_own_mtime(grid_api: dict) -> None:
+    """Display URLs come from the pack's own `GET /eps_image_grid/frame`
+    (a real downscaled thumbnail -- core's `/view?preview=` never resizes),
+    keyed by that FRAME's mtime so an unchanged frame keeps its URL across
+    appends (the buffer-wide generation re-keyed all N per run)."""
+    urls = grid_api["perfUrls"]
+    assert urls["thumbPath"] == "/eps_image_grid/frame"
+    assert urls["thumbParams"] == ["uuid", "filename", "preview", "v"]
+    assert urls["thumbUuid"] == "11111111-1111-1111-1111-111111111111"
+    assert urls["thumbPreview"] == "webp;80"  # the toggle core's Open/Save/Copy Image strip
+    assert urls["thumbV"] == "1700000000123"
+    assert urls["stableAcrossEpochsWhenKeyed"] is True
+    assert urls["keylessFallsBackToEpoch"] is True
+    assert urls["foreignFallsBackToView"] is True
+    assert urls["fullResUsesMtime"] is True
+
+
+def test_ref_from_image_src_round_trips_the_frame_route_shape(grid_api: dict) -> None:
+    expected = {
+        "name": "0001.png",
+        "subfolder": "eps_image_grid/11111111-1111-1111-1111-111111111111",
+        "type": "output",
+    }
+    assert grid_api["perfUrls"]["roundTrip"] == expected
+    assert grid_api["perfUrls"]["noPreviewStillParses"] == expected
+
+
+def test_an_append_reuses_the_unchanged_frames_image_elements(grid_api: dict) -> None:
+    reuse = grid_api["reuse"]
+    assert reuse["firstTwoReused"] is True
+    assert reuse["thirdIsNew"] is True
+    assert reuse["thirdSrcIsFrameRoute"] is True
+    assert reuse["length"] == 3
+    assert reuse["backToGrid"] is True
+
+
+def test_a_keyless_merged_ref_adopts_its_key_in_place_without_a_reload(grid_api: dict) -> None:
+    """The `executed` merge shows core's keyless `ui.images` ref at once;
+    the forced `/list` that follows keys it -- same `node.images` array
+    (the store identity), `.src` untouched, focus untouched, and a LATER
+    rebuild reuses that element instead of re-fetching the frame."""
+    adopt = grid_api["adopt"]
+    assert adopt["keylessSrcUsedTheEpochFallback"] is True
+    assert adopt["sameImgsArray"] is True
+    assert adopt["sameImagesArray"] is True
+    assert adopt["mtimeAdoptedInPlace"] is True
+    assert adopt["srcUntouched"] is True
+    assert adopt["focusKept"] is True
+    assert adopt["laterRebuildReusedTheAdopted"] is True
+
+
+def test_a_changed_mtime_for_the_same_name_rebuilds_that_image_only(grid_api: dict) -> None:
+    changed = grid_api["changedMtime"]
+    assert changed["firstReused"] is True
+    assert changed["secondRebuilt"] is True
+    assert changed["backToGrid"] is True
+    assert changed["newSrcCarriesNewKey"] is True
+
+
+def test_focused_tile_swaps_to_full_res_once_loaded_and_back_on_unfocus(grid_api: dict) -> None:
+    """Core's single-image view never scales UP (`Math.min(scaleX, scaleY,
+    1)`), so a focused 256 px thumb would paint tiny: the draw-time swap
+    puts a LOADED full-res element in `node.imgs[imageIndex]` in place, and
+    the thumb back the moment focus leaves (homogeneous grid again)."""
+    swap = grid_api["focusSwap"]
+    assert swap["pendingStillThumb"] is True  # never swap an unloaded Image (naturalWidth 0)
+    assert swap["fullSrcIsCoreViewFullRes"] is True
+    assert swap["swapped"] is True
+    assert swap["restored"] is True
+    assert swap["instantReswap"] is True
+    assert swap["movedRestoresPrevious"] is True
+    assert swap["imagesUntouched"] is True
+
+
+def test_all_three_buttons_set_both_serialize_flags() -> None:
+    """`graphToPrompt` (executionUtil.ts) skips a widget ONLY on
+    `options.serialize === false`; the instance flag keeps it out of
+    `widgets_values` (LGraphNode.ts). With only the latter, every queued
+    prompt carried phantom `"Clear": null` / `"Add images…": null` /
+    `"Add folder…": null` inputs (resolution.js precedent, rig-caught
+    2026-08-14)."""
+    for marker in (
+        "function addClearButton",
+        "function addAddImagesButton",
+        "function addAddFolderButton",
+    ):
+        body = _function_body(marker)
+        assert "serialize: false" in body, marker  # options bag -> API prompt
+        assert "widget.serialize = false" in body, marker  # instance -> widgets_values
+
+
+def test_empty_buffer_warning_reads_the_reconcile_instead_of_fetching() -> None:
+    body = _function_body("function warnIfEmptyAfterRun")
+    assert "fetchApi" not in body
+    assert "LIST_ROUTE" not in body
+    assert "refreshed !== true" in body
+    assert "node.images" in body
+
+
+def test_progress_listener_chains_the_warning_onto_the_single_forced_list() -> None:
+    body = _function_body("function installExecutionRefreshListener")
+    assert "scheduleRefresh(node, { force: true }).then(" in body
+    assert "warnIfEmptyAfterRun(node, refreshed)" in body
+
+
+def test_executed_merge_schedules_no_list_of_its_own() -> None:
+    # core sends `executed` BEFORE `finish_progress` (execution.py), so the
+    # progress listener's forced /list always follows the merge -- a second
+    # forced fetch here was a guaranteed duplicate.
+    body = _function_body("function installExecutedMerge")
+    assert "scheduleRefresh" not in body
+    assert "mergeBufferRefs(existing, incoming)" in body
+
+
+def test_display_thumbnails_come_from_the_frame_route_and_degrade_once() -> None:
+    body = _function_body("export function setNodeImagesFromRefs")
+    assert "thumbUrlForRef(ref, { epoch })" in body
+    assert "createThumbImage(node, ref, url)" in body
+    # no full-res /view URL on the display path any more
+    assert "imageUrlForRef(ref, { preview: true, epoch })" not in body
+    create = _function_body("function createThumbImage")
+    assert "__epsDegraded" in create
+    assert "imageUrlForRef(ref, { preview: true" in create  # the one-shot degrade target
+
+
+def test_attach_installs_the_focus_swap_as_a_draw_wrap() -> None:
+    assert "installFocusedFullResSwap(node)" in _SOURCE
+    body = _function_body("function installFocusedFullResSwap")
+    assert "node.onDrawBackground = function" in body
+    assert "ensureFocusedFullRes(this)" in body
+    assert "original.apply(this, args)" in body  # wraps, never replaces core's hook
+
+
+def test_frame_route_and_preview_param_are_pinned_constants() -> None:
+    assert "const FRAME_ROUTE = '/eps_image_grid/frame'" in _SOURCE
+    assert "const PREVIEW_PARAM = 'webp;80'" in _SOURCE
+    assert "const REF_SUBFOLDER_PREFIX = 'eps_image_grid/'" in _SOURCE

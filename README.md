@@ -7,9 +7,10 @@ beyond it — image-flow utilities now live here too.
 
 ## The fifteen nodes
 
-No third-party packs required — every node here runs on ComfyUI alone,
-except the Lora Loader State Controller, which is built to extend
-rgthree-comfy and disables itself without it. Some nodes are drag-and-drop
+No third-party packs required — every node here runs on ComfyUI alone;
+the Lora Loader State Controller is built to extend rgthree-comfy, but only
+its Power Lora Loader targets need it — its EPS LoRA Picker targets work
+without rgthree installed. Some nodes are drag-and-drop
 on their own; others are designed to pair with a saved set or another EPS
 node — the **Works with** column says which. Each node also has its own
 section further down; this is the map.
@@ -19,7 +20,7 @@ section further down; this is the map.
 | [**EPS Prompt Notebook**](#eps-prompt-notebook-shipped) | Your prompt library as a node — a scrolling list of named prompts with an editor beside it, backed by a plain Markdown file you own (local or on a NAS). Select several and the workflow runs once per prompt. | Nothing — its own Markdown file (auto-created). |
 | [**EPS LoRA Picker**](#eps-lora-picker-shipped) | Browse your loras by folder instead of one flat list — drill down, star favorites, see recents, pin a per-workflow folder scope — and build a selection with per-lora strengths. Outputs a `LORA_STACK`, patched model/clip, trigger words, and a filename token. | Your LoRA files; nothing else — favorites/recents live in the shared library folder. |
 | [**EPS Apply LoRA Set**](#eps-apply-lora-set-shipped) | Pick a saved lora configuration ("state") from a dropdown and apply it — which loras, order, on/off, strengths. Standalone: MODEL/CLIP in → out, plus a `LORA_STACK` and trigger words. | Your LoRA files + a saved set (via the Controller, the API, or by hand). |
-| [**EPS Lora Loader State Controller**](#eps-lora-loader-state-controller-shipped-requires-rgthree-comfy) | Captures and applies those states directly on an [rgthree Power Lora Loader](https://github.com/rgthree/rgthree-comfy) — rgthree stays the loader, this moves whole configurations in and out of it. | **rgthree-comfy**'s Power Lora Loader — third-party, self-disables without it. |
+| [**EPS Lora Loader State Controller**](#eps-lora-loader-state-controller-shipped-requires-rgthree-comfy) | Captures and applies those states directly on an [rgthree Power Lora Loader](https://github.com/rgthree/rgthree-comfy) or an EPS LoRA Picker — the loader stays the loader, this moves whole configurations in and out of it. | **rgthree-comfy**'s Power Lora Loader (third-party; only those targets need it) and/or the EPS LoRA Picker (no dependency). |
 | [**EPS LoRA Iterator**](#eps-lora-iterator-shipped) | Auditions any `LORA_STACK` by strength: set min/max/increment and one queue runs your workflow once per step (per lora, or all together). | A `LORA_STACK` source (usually Apply LoRA Set) + a model. |
 | [**EPS Image Switcher**](#eps-image-switcher-shipped) | Any number of image inputs, each independently on/off; the enabled ones fan out (N enabled → N runs). Disabled branches never execute. | Nothing — drag-and-drop with core nodes. |
 | [**EPS Model / CLIP / VAE Switcher**](#eps-model--clip--vae-switcher-shipped) | The image Switcher's exact mechanism for models, CLIPs, and VAEs: any number of inputs, each on/off, enabled ones fan out (N enabled → N runs), disabled branches — including their checkpoint loads — never execute. | Nothing — drag-and-drop with core nodes. |
@@ -27,7 +28,7 @@ section further down; this is the map.
 | [**EPS Checkpoint Switcher**](#eps-checkpoint-switcher-shipped) | Tick several checkpoint files in a list; one queue runs the workflow once per ticked checkpoint, with each run's model, CLIP, and VAE kept together and a label for save paths. | Your checkpoint files — drag-and-drop with core nodes. |
 | [**EPS Resolution**](#eps-resolution-shipped) | Image-first resize + size in one node: target size (with a drag pad), four resize modes, and the original image + both sets of dimensions passed through. Named size presets are shared across your machines — tick several and one Run resizes once per preset. Wire in extra images and they all come out at the same target size in one Run. | Nothing — drag-and-drop with core nodes. |
 | [**EPS Image Grid**](#eps-image-grid-shipped) | Collects images across separate Runs into a buffer that survives restarts, shows them as a thumbnail grid, and fans the whole set out on demand. Add whole batches at once — a multiselect picker, a folder importer, or one big drag. | Nothing — drag-and-drop with core nodes. |
-| [**EPS Run Multiplier**](#eps-run-multiplier-shipped) | Multiplies whatever you wire in: a sweep group (LoRA Iterator, or Checkpoint Switcher with its VAEs) × images × texts, in one node — or just images × texts with no sweep at all — with per-run save paths so big runs land in tidy folders. | Any of: EPS LoRA Iterator / EPS Checkpoint Switcher on the sweep side; an Image Grid or Image Switcher plus a multi-select Prompt Notebook on the pair side. |
+| [**EPS Run Multiplier**](#eps-run-multiplier-shipped) | Multiplies whatever you wire in: a sweep group (LoRA Iterator, or Checkpoint Switcher with its VAEs) × images × texts, in one node — or just images × texts with no sweep at all — with per-run save paths so big runs land in tidy folders. | Any of: EPS LoRA Iterator / EPS Checkpoint Switcher / EPS Model + VAE Switchers (`models`→`model`, `models_low`→`model_low`, `vaes`→`vae`) on the sweep side; an Image Grid or Image Switcher plus a multi-select Prompt Notebook on the pair side. |
 | [**EPS Frame Saver**](#eps-frame-saver-shipped) | Loads a video by path — or takes one from a wire — lets you scrub or play to a frame, and outputs that frame as an image. | A video file on the ComfyUI machine, or any `VIDEO` output in the workflow. |
 
 > **Status: pre-release.** Contracts live in
@@ -148,9 +149,10 @@ captions).
 
 `EPSNodes → LoRA → EPS Lora Loader State Controller`: a small panel node that
 drives a genuine, untouched
-[Power Lora Loader (rgthree)](https://github.com/rgthree/rgthree-comfy)
-elsewhere in your graph — rgthree stays the loader; this node just moves
-whole configurations ("states") in and out of it:
+[Power Lora Loader (rgthree)](https://github.com/rgthree/rgthree-comfy) —
+or an [EPS LoRA Picker](#eps-lora-picker-shipped) — elsewhere in your graph;
+the loader stays the loader, this node just moves whole configurations
+("states") in and out of it (only Power Lora Loader targets need rgthree):
 
 - **Targets both loader families, anywhere in the workflow** (since
   v0.64.0): the `target` dropdown lists every Power Lora Loader (rgthree)
@@ -168,7 +170,7 @@ whole configurations ("states") in and out of it:
   count). Hover a header for a ✕ that removes just the group — its states
   move back to the ungrouped list, nothing is deleted. Groups and order are
   saved in your shared library folder, so every machine sees the same
-  arrangement.
+  arrangement. **Double-click a group header to rename it** (since v0.68.1) — type the new name, Enter saves, Escape cancels; the group keeps its states and its open/collapsed state. Dropping a state back where it already was changes (and saves) nothing. Group changes show up in your other open State Controllers right away, and saving, renaming or deleting a state no longer triggers a full node-definition reload — the `/object_info` round trip and its two toasts are gone, so Save responds immediately.
 - **The Apply Set dropdown shows state names now** — a state named
   "State 1" reads as `State 1`, not its `state-1` file slug (what executes
   is unchanged).
@@ -186,16 +188,25 @@ whole configurations ("states") in and out of it:
   internal id never changes); **Delete State** removes it (two-click "Are
   you sure?" confirm — the armed button turns red; it's deliberately the
   last button in the stack).
-- **Multi-loader targeting:** with two or more Power Lora Loaders in the
-  graph (WAN high/low noise, for example) the target dropdown offers
-  `All Power Lora Loaders (N)`. With `All` selected, a state stores **each
-  loader's OWN config** (a "composite" state): New/Save State captures every
+- **Multi-loader targeting:** with two or more loaders in the graph —
+  Power Lora Loaders and/or EPS LoRA Pickers (WAN high/low noise, for
+  example) — the target dropdown offers `All loaders (N)`. With `All`
+  selected, a state stores **each loader's OWN config** (a "composite"
+  state): New/Save State captures every
   loader distinctly, and picking that state restores each loader to its own
   rows — so one state file holds your whole WAN high+low setup. To feed those
   distinct configs into the standalone `EPS Apply LoRA Set` loaders, give each
   Apply node a `loader_slot` (0 = first loader, 1 = second, …; revealed via
   right-click → Properties → `Show loader slot`). Single-loader states are
   unchanged and fully backward-compatible.
+- **Push State** points your `EPS Apply LoRA Set` nodes at the selected
+  state in one click — it sets each one's dropdown and re-reads it, so one
+  controller keeps any number of Apply nodes in step (and it doubles as an
+  explicit re-apply). Which Apply nodes it reaches follows the controller's
+  `target` and each Apply node's `mirrors loader` tag: a specific loader as
+  target pushes only to Apply nodes tagged to that loader (a toast tells you
+  if none are); `All loaders` pushes to every Apply node; an Apply tagged
+  `(any)` is included in every push. The toast reports the count.
 - A debug `status` line is hidden by default — right-click the node →
   Properties → `Show status` to reveal it.
 - **If a saved state ever disagrees with what you set on the loader**, the
@@ -205,9 +216,10 @@ whole configurations ("states") in and out of it:
   `Debug capture` adds a full table of each row's raw values — paste that
   with any bug report and the cause is pinpointed.
 - It's a frontend-only virtual node: it never executes and can't block a
-  queue. If rgthree isn't installed (or its internals ever drift), the node
-  disables itself with a message and points you at `EPS Apply LoRA Set`, which
-  needs no dependencies.
+  queue. If rgthree isn't installed (or its internals ever drift), Power Lora
+  Loader targets disable themselves with a message that points you at
+  `EPS Apply LoRA Set`, which needs no dependencies — EPS LoRA Picker targets
+  keep working without rgthree at all.
 - Every `EPS Apply LoRA Set` dropdown refreshes automatically after any state
   change — no page reload.
 
@@ -285,8 +297,10 @@ favorites or recently-used anywhere in the ecosystem.
   Stack — need no Send support at all: wire this node's `lora_stack`
   output straight in.
 - **Search, thumbnails, trigger words, ordering:** the search field under
-  the breadcrumb filters as you type — it searches **the folder you're
-  in** (and its subfolders; drill into `characters/` and you search just
+  the breadcrumb filters as you type (debounced, and a very long result
+  list caps at 200 rows with a "keep typing" hint — v0.68.1) — it searches
+  **the folder you're in** (and its subfolders; drill into `characters/`
+  and you search just
   that, back out to the library root and you search everything; every
   word must match somewhere in the path, Escape clears); loras with a
   sidecar image (`mylora.png` / `mylora.preview.png` next to the file)
@@ -317,13 +331,17 @@ LOW branch, each with its own state.) Outputs:
 edge-case override that's **hidden by default** so the node passes the set's
 own strengths straight through; reveal it with right-click → Properties →
 `Show strength scale`.
+A frontend-only **`mirrors loader`** dropdown on the node (default `(any)`)
+tags it to one Power Lora Loader or EPS LoRA Picker in the graph — a grouping
+tag for the State Controller's **Push State**: a controller targeting that
+loader pushes only to Apply nodes tagged to it, while `(any)` follows every
+push. The tag never changes what executes — states still come from the file.
 States are JSON files in `<library folder>/sets/` — captured from a Power
 Lora Loader by the State Controller, created via the API, or hand-edited. Loras
 referenced by a set resolve **separator-insensitively** with a unique-
 basename fallback, so a set written on Windows applies on macOS and vice
 versa; anything that can't resolve is skipped with a logged warning rather
-than failing the run. After creating states outside the graph, press `R`
-(refresh node definitions) to update an open dropdown.
+than failing the run. States created outside the graph (another machine, a script) show up the next time you open the dropdown — it refreshes itself in the background — or press `R` (refresh node definitions).
 
 The weight math is covered by a permanent numeric regression test
 (`tests/test_nodes_sets_weight_math.py`): it drives this node against real
@@ -335,6 +353,8 @@ and `strength_scale`. It needs `torch` plus an importable ComfyUI (set
 and skips cleanly where those are absent.
 
 ## EPS LoRA Iterator (shipped)
+
+Since v0.68.1 each lora file is loaded once per run of the node (not once per strength step), so long sweeps over big loras start faster.
 
 *Renamed from "EPS LoRA Sweep" in v0.48.4 (display name only — saved
 workflows keep working unchanged, and nodes already placed in an old
@@ -472,9 +492,11 @@ off**. Wire the same picture into an upscale branch, a restyle branch and a
 straight-to-save branch, then turn any of them off from this one node — no
 rewiring, no dragging bypass boxes around groups.
 
-- **A toggle on every output.** Click it off and the branch wired to that
-  socket is skipped for that queue; the branches on the sockets still turned
-  on see the real image and run normally.
+- **A toggle on every output,** plus a tri-state **Toggle All** header (all
+  on / all off / a dash for mixed, with a live `enabled/total` count — the
+  same control the Switchers have). Click a toggle off and the branch wired
+  to that socket is skipped for that queue; the branches on the sockets still
+  turned on see the real image and run normally.
 - **One run, not many.** This is the important difference from the Switcher.
   The Switcher's fan-out makes the rest of your workflow run *N times*; the
   Distributor's branches are **parallel paths inside a single run**. Use the
@@ -520,7 +542,8 @@ rewiring, no dragging bypass boxes around groups.
 ComfyUI can see. Tick the ones you want, wire `model`/`clip`/`vae` where a
 Load Checkpoint's outputs would go, and one queue runs the rest of the
 workflow **once per ticked checkpoint** — each run using that checkpoint's
-own model, CLIP, and VAE together, plus a `label` (the filename) you can
+own model, CLIP, and VAE together, plus a `label` (the filename stem, no
+extension) you can
 wire into save paths so results land in folders named by model.
 
 - **Why this beats three separate switchers for model testing:** a
@@ -589,7 +612,7 @@ dimensions. It replaces a resize node + a reroute + a get-image-size node.
   `height` at `0`, the missing axis derives from the **first** wired
   image's aspect and that one target applies to every image. Multi-image
   composes with multi-preset ticks: 3 images x 2 presets = every image at
-  every size.
+  every size. With `keep aspect (fit)` every image fits inside the one shared box (a 0 width/height derives that box from the first image), so a wide first image never shrinks the others (v0.68.1).
 - **Size presets, shared across machines:** the `preset` dropdown (with
   **Save** and **Delete** right under it, above the pad) saves all five
   fields — width, height, mode, interpolation, `multiple_of` — as a named
@@ -620,6 +643,8 @@ dimensions. It replaces a resize node + a reroute + a get-image-size node.
   anything fancier.
 
 ## EPS Image Grid (shipped)
+
+Since v0.69.0 the on-node thumbnails are real downscaled previews served by the pack (disk-cached per frame, keyed by each frame's own timestamp), so a big buffer no longer re-downloads every picture after each run and the canvas draws small images, not full-resolution ones.
 
 `EPSNodes → EPS Image Grid`: a node that **collects images across separate
 Runs** into a buffer and then fans them out — wire a loader in, run it a few
@@ -653,8 +678,10 @@ times to gather images, then send the whole set through a workflow at once.
 - Each node keeps its own independent buffer, even after copy/paste.
 - **Copy/paste:** right-click a collected image → Copy image (to the OS
   clipboard, for Photoshop/etc.) or Copy (Clipspace) (into the mask editor or
-  another node). Four ways to ADD images: the **Add images… button** (a
-  real file picker — select as many as you want at once); with the node
+  another node). Five ways to ADD images: the **Add images… button** (a
+  real file picker — select as many as you want at once); the **Add folder…
+  button** (pick a folder and every image in it, subfolders included, is
+  added); with the node
   selected, **Ctrl+V**; **right-click → Paste (Clipspace)**; or **drag
   files (or an assets-panel image) straight onto the node** — and yes,
   dragging thirty files as one drop adds all thirty. Every path appends to
@@ -684,17 +711,21 @@ times to gather images, then send the whole set through a workflow at once.
 workflows keep working unchanged, and nodes already placed in an old
 workflow keep showing the name they were saved with).*
 
-**One node, up to three axes.** The sweep side
+**One node, up to four axes.** The sweep side
 (`model`/`clip`/`label`/`vae`) is **optional**: wire none of it and the
 node is a pure image × text multiplier (it fully replaced the old EPS
 Cross Product node, removed in v0.50.0). A `pair_mode` switch controls
-the pair side: **`paired`** (default) runs image/text as index-aligned
-pairs you wired elsewhere; **`multiply`** crosses every image with every
-text right on this node — wire an Image Grid and a multi-select Prompt
-Notebook straight in, names riding along per text. With a sweep wired too
-that's a genuine three-axis batch — checkpoints × images × prompts from
-one Run — and `label` is optional as well (no label wired → folders fall
-back to `step_01, step_02, …`). **Sweep inputs must agree on length**:
+the pair side: **`multiply`** (the default — the dropdown itself, like
+`sweep_mode`, stays hidden until you flip `Show mode options` in
+right-click → Properties) crosses every image with every text right on
+this node — wire an Image Grid and a multi-select Prompt Notebook straight
+in, names riding along per text; **`paired`** runs image/text as
+index-aligned pairs you wired elsewhere. With a sweep wired too that's a
+genuine three-axis batch — checkpoints × images × prompts from one Run —
+and with `sweep_mode: multiply` (also the default) `vae` becomes a fourth
+axis crossed against the model axis; `label` is optional as well (no label
+wired → folders fall back to `step_01, step_02, …`). **Sweep inputs must
+agree on length**:
 a length-1 input (one constant VAE for a whole sweep) repeats for every
 step, but two fanned sweep lists of different lengths fail the Run with
 an error naming them — that's always a miswire, usually a leftover wire
@@ -744,11 +775,13 @@ always what you want; the two mode dropdowns are hidden until you flip
 saved an explicit mode keep it; very old saves from before the modes
 existed now load as multiply.
 
-**`sweep_mode` — every model × every VAE (v0.57.0).** Previously the
+**`sweep_mode` — every model × every VAE (v0.57.0).** In `aligned` the
 sweep side is one *aligned* set: step 3 runs model 3 with VAE 3 (what an
 EPS LoRA Iterator or Checkpoint Switcher emits, where they belong
-together). Set **`sweep_mode: multiply`** to treat `vae` as its own axis
-instead: a 4-model Model Switcher × a 2-VAE VAE Switcher = **8 runs**,
+together). **`sweep_mode: multiply`** — the default since v0.66.1 (reveal
+the dropdown via `Show mode options` to pick `aligned`) — treats `vae` as
+its own axis instead: a 4-model Model Switcher × a 2-VAE VAE Switcher =
+**8 runs**,
 model-major (each model loads once and runs both VAEs before the next
 model), with folders like `modelname_vae01/`, `modelname_vae02/`.
 `model`/`clip`/`label` still travel together as one axis. Guard rail:
@@ -765,8 +798,8 @@ strength, each landing in its own folder.
 **Model iteration:** wire the [EPS Checkpoint
 Switcher](#eps-checkpoint-switcher-shipped)'s `model`/`clip`/`vae`/`label`
 into this node's sweep side, and **a multi-select Prompt Notebook's
-`text`** (leave `image` unwired for txt2img, or add images and set
-`pair_mode: multiply`)
+`text`** (leave `image` unwired for txt2img, or add images — the default
+`pair_mode: multiply` crosses them)
 on the other — every ticked checkpoint runs against every prompt, each run
 with its checkpoint's own VAE, saving into a folder named by checkpoint.
 The `vae` output only means something when the sweep side supplies VAEs:
@@ -789,13 +822,14 @@ always a mistake; the same rule covers `model`/`clip`/`image`/`label`).
   images × texts, each group internally matched.
 - **How to wire it:** EPS LoRA Iterator `model`/`clip`/`label` → the same
   inputs here; an image source → `image`, a Notebook's `text`/`name` →
-  likewise (set `pair_mode: multiply` to cross them). Use this node's
+  likewise (the default `pair_mode: multiply` crosses them). Use this node's
   outputs downstream. **Strength-grouped:** all pairs at the first
   strength, then all pairs at the next.
 - **Folders for free:** wire `save_prefix` into SaveImage's
   `filename_prefix` and every run lands at
-  `output/<base_folder>/<sweep label>/<pair name>_00001_.png` — one folder
-  per strength, files named by prompt entry. `base_folder` is a text field
+  `output/<base_folder>/<sweep label>/<pair name>_<run token>_00001_.png`
+  (e.g. `Portrait_m2_i1_t3_00001_.png`) — one folder per strength, files
+  named by prompt entry plus the run token. `base_folder` is a text field
   on the node (nesting with `/` works); the pair name comes from the
   notebook's `name` output, with a clean `pair_01` fallback.
 - **Mind the multiplication:** steps × pairs × (loras, in the sweep's
@@ -844,12 +878,15 @@ See [docs/INSTALL.md](docs/INSTALL.md). Short version: clone into
 ## The library folder
 
 Everything lives in one folder — `*.md` prompt notebooks (`loras.md` is
-just the default one), `sets/*.json` (saved lora states), and
-`resolution_presets.json` (saved size presets) — configured
+just the default one), `sets/*.json` (saved lora states),
+`resolution_presets.json` (saved size presets), `lora_picker.json` (the
+LoRA Picker's favorites and recents), and `lora_sets_layout.json` (the
+State Controller's groups and order) — configured
 in **Settings → EPSNodes → Library folder** (server-side, so every
 browser sees the same value). Point it at a shared/NAS path to use the same
 library from multiple machines. This pack's HTTP routes (library browse/
-read/write, plus the image-grid and frame-saver helpers) carry no auth layer
+read/write, the checkpoint-list, size-preset, LoRA-picker and list-flags
+feeds, plus the image-grid and frame-saver helpers) carry no auth layer
 of their own, so exposing ComfyUI beyond localhost (`--listen`) exposes them
 too — the same trust model as ComfyUI's own routes. Details:
 [docs/FORMAT.md §1](docs/FORMAT.md) (layout) and [§2](docs/FORMAT.md)

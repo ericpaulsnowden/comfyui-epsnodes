@@ -33,7 +33,17 @@ const MSG_NO_TARGET_IN_GRAPH =
 const MSG_NO_TARGET_SELECTED = 'Pick a target loader node above.'
 
 /** Every live `Power Lora Loader (rgthree)` instance in the current graph,
- * ascending node id — §6.13 M2's target-combo order. */
+ * ascending node id — §6.13 M2's target-combo order.
+ * v0.68.1: UNUSED BY THE PICKER, marked for removal. Since v0.64.0
+ * picker.js's findSendCandidates() walks the whole workflow (subgraphs
+ * included) against its adapter registry and never calls this (the
+ * registry's `find` key is gone as of v0.68.1); the only remaining caller
+ * is probePll(null)'s null-target leg below, which the picker never reaches
+ * either (its probeSendTarget owns the family-agnostic null legs). Both are
+ * root-only and kept solely because tests/test_pll_bridge_js.py pins the
+ * export surface (`hasFindPllNodes`, `findPllOrder`) and the null legs
+ * (`probeNullNoCandidates` / `probeNullWithCandidates`); remove together
+ * with those pins. */
 export function findPllNodes() {
   const nodes = app.graph?._nodes || app.graph?.nodes || []
   return nodes
@@ -80,6 +90,8 @@ export function probePll(node) {
     return { ok: false, code: 'no-rgthree', message: MSG_NO_RGTHREE }
   }
   if (!node) {
+    // v0.68.1: unreachable from the picker (see findPllNodes) -- kept for
+    // the test pins only.
     const hasAny = findPllNodes().length > 0
     return {
       ok: false,

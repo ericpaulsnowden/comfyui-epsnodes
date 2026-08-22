@@ -714,8 +714,12 @@ def test_toggle_all_operates_over_every_visible_output_not_just_wired(
     """Unlike switcher.js's connected-only header, Toggle All here must
     cover every VISIBLE out_N regardless of wiring (module docstring): both
     allRowsState and toggleAllRows read outputEntries(node) directly, with
-    no wired/connected-only filter reintroduced."""
-    all_state_body = _function_body(distributor_source, "allRowsState(node)")
+    no wired/connected-only filter reintroduced. (v0.68.1: the signature
+    grew an optional pre-parsed `toggles` map so a draw pass parses the
+    widget once -- the body's no-filter contract is unchanged.)"""
+    all_state_body = _function_body(
+        distributor_source, "allRowsState(node, toggles = readToggles(node))"
+    )
     toggle_all_body = _function_body(distributor_source, "toggleAllRows(node)")
     for body in (all_state_body, toggle_all_body):
         assert "outputEntries(node)" in body
@@ -728,3 +732,37 @@ def test_min_width_guard_flag_present(distributor_source: str) -> None:
     self-contained-copy shape) -- namespaced to this module so it can never
     collide with another eps_image/*.js file's copy on the same node."""
     assert "__epsDistributorMinWidthInstalled" in distributor_source
+
+
+# ------------------------------------------------------------ v0.68.1 pins
+
+
+def test_width_floor_lifts_through_set_size_not_a_dead_is_array_guard(
+    distributor_source: str,
+) -> None:
+    """v0.68.1: on the installed frontend (1.48.7) `LGraphNode.size` is a
+    Proxy over a typed-array view, never an Array, so the old
+    `Array.isArray(node.size)` test in installMinWidth was always false and
+    the lift-the-current-width half of FORMAT.md §7.2's floor never ran.
+    The lift now goes through setSize() (which runs litegraph's
+    `_sizeUpdated` Vue-layout mirror AND the onResize wrap)."""
+    assert "Array.isArray(node.size)" not in distributor_source
+    body = _function_body(distributor_source, "installMinWidth(node, minWidth)")
+    assert "if (node.size && node.size[0] < minWidth)" in body
+    assert "node.setSize([minWidth, node.size[1]])" in body
+
+
+def test_draw_paths_parse_toggles_once_per_pass(distributor_source: str) -> None:
+    """v0.68.1 perf: isRowEnabled() -> readToggles() -> JSON.parse used to
+    run once PER ROW per frame, three times over (header state, header
+    count, row boxes). Each draw path now parses once and reads rows through
+    the pure isSlotEnabled(map, name)."""
+    rows = _function_body(distributor_source, "drawRowToggles(node, ctx)")
+    assert "const toggles = readToggles(node)" in rows
+    assert "isSlotEnabled(toggles, entry.name)" in rows
+    assert "isRowEnabled(node," not in rows
+    header = _function_body(distributor_source, "addHeaderWidget(node)")
+    assert "const toggles = readToggles(drawNode)" in header
+    assert "allRowsState(drawNode, toggles)" in header
+    assert "isSlotEnabled(toggles, entry.name)" in header
+    assert "isRowEnabled(drawNode," not in header

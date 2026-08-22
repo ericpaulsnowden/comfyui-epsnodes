@@ -1,7 +1,8 @@
 """The ``EPSLoraPicker`` ComfyUI node (FORMAT.md §6.13, display: "EPS LoRA
-Picker") -- M1 scope only (browse/favorites/recents panel, execution,
-``IS_CHANGED``); the §6.13 M2 "Send to loader" bridge and M3 search/
-preview/drag-reorder bullets are future ships, not built here.
+Picker") -- the backend half: execution + ``IS_CHANGED``. The panel
+(browse/favorites/recents, §6.13 M2 "Send to loader", M3 search/preview/
+reorder, M4 controller integration -- all shipped v0.54-0.64) lives in
+``web/lora_library/picker.js``.
 
 Deliberately NOT a loader rebuild (§6.13): this node emits the exact same
 ``(model, clip, lora_stack, trigger_words, loras_text)`` shape

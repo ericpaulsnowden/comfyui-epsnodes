@@ -304,3 +304,88 @@ def test_share_toggle_is_re_evaluated_when_the_resolved_path_changes(source: str
     # ...including from the load path that assigns resolvedFile.
     load = source.split("state.resolvedFile = typeof data.file === 'string'", 1)[1][:400]
     assert "updateShareToggle(state)" in load
+
+
+# ---------------------------------------------------------------------------
+# v0.68.1 perf/bug round (audit 2026-08-20): a restored node loaded the
+# notebook TWICE with full text on every workflow load / tab switch, and a
+# double-click rename on a not-yet-active category header collapsed it.
+# ---------------------------------------------------------------------------
+
+
+def test_attach_time_load_is_deferred_and_stands_down_after_configure(source: str) -> None:
+    """`nodeCreated` fires from the node's constructor, before `configure()`
+    restores widgets_values, so `attach()`'s immediate reloadNow fetched the
+    backend-DEFAULT file with full text and wireConfigureReload fetched the
+    saved one right after -- the first was discarded by loadToken but fully
+    paid (whole-file parse + a LAN round trip, per node). litegraph creates
+    AND configures every node of a load synchronously, so a one-tick
+    deferral lands after onConfigure: restored nodes load once (configure),
+    fresh nodes load once (the timer)."""
+    attach = source.split("export function attachNotebookWidget(node)", 1)[1]
+    attach = attach.split("\n}\n", 1)[0]
+    assert "reloadNow(state).catch((error) => api.warn('initial notebook load failed', error))" in attach
+    assert "state.attachLoadTimer = setTimeout(() => {" in attach
+    deferred = attach.split("state.attachLoadTimer = setTimeout(() => {", 1)[1]
+    assert "if (state.configureReloaded) return" in deferred
+    assert deferred.index("if (state.configureReloaded) return") < deferred.index("reloadNow(state)")
+    assert "}, 0)" in deferred
+    # no bare, immediate attach-time load survives
+    assert "\n    reloadNow(state).catch((error) => api.warn('initial notebook load failed'" not in attach
+
+
+def test_configure_reload_raises_the_flag_before_it_reloads(source: str) -> None:
+    block = source.split("function wireConfigureReload(state)", 1)[1]
+    block = block.split("\nfunction ", 1)[0]
+    assert "state.configureReloaded = true" in block
+    assert block.index("state.configureReloaded = true") < block.index("reloadNow(state)")
+    # still conditional on the real mismatch (the existing pin) -- the flag
+    # sits INSIDE that branch, so an unchanged value never sets it
+    gate = block.split("if (restored !== state.file || state.loadError) {", 1)[1]
+    assert "state.configureReloaded = true" in gate[:200]
+
+
+def test_teardown_cancels_the_deferred_attach_load(source: str) -> None:
+    """A node removed before its first tick (undo right after paste) must
+    not fetch for a dead panel."""
+    block = source.split("function teardown(state)", 1)[1].split("\n}\n", 1)[0]
+    assert "if (state.attachLoadTimer) clearTimeout(state.attachLoadTimer)" in block
+    assert "configureReloaded: false," in source and "attachLoadTimer: null," in source
+
+
+def test_double_click_rename_restores_the_pre_pair_collapse_state(source: str) -> None:
+    """Since the 2026-07-29 rule the FIRST tap on a not-yet-active header
+    only selects/expands and the SECOND toggles -- so the two taps that
+    precede a dblclick leave the header COLLAPSED and the rename editor
+    opened on a header whose entries had just vanished: the exact symptom
+    that rule exists to prevent. The dblclick handler now puts the collapse
+    state back to what it was before the first tap of the pair."""
+    header = source.split("function buildCategoryHeaderRow(state, category)", 1)[1]
+    header = header.split("\n}\n", 1)[0]
+    dbl = header.split("headerEl.addEventListener('dblclick'", 1)[1].split("})", 1)[0]
+    assert "restoreCategoryCollapseAfterDoubleClick(state, category)" in dbl
+    assert dbl.index("restoreCategoryCollapseAfterDoubleClick") < dbl.index(
+        "beginInlineRename(state, 'category', category)"
+    ), "restore first, so the editor mounts on the freshly rendered row"
+    # the stale claim that the two taps net to zero is gone
+    assert "two preceding taps have each toggled collapse" not in source
+
+
+def test_first_tap_of_a_pair_notes_the_collapse_state(source: str) -> None:
+    assert "const CATEGORY_DBLCLICK_WINDOW_MS = 1000" in source
+    down = source.split("function onCategoryPointerDown(state, event, category)", 1)[1]
+    down = down.split("\n}\n", 1)[0]
+    assert "state.categoryTapMemo = { category, collapsed: state.collapsedCategories.has(category), at: now }" in down
+    # a second pointerdown on the SAME header inside the window keeps the
+    # first tap's note; any other header, or a later tap, starts fresh
+    assert "prior.category !== category || now - prior.at > CATEGORY_DBLCLICK_WINDOW_MS" in down
+    # and the note is taken BEFORE the tap resolves (the pointerup toggle)
+    assert down.index("state.categoryTapMemo =") < down.index("const drag = {")
+    restore = source.split("function restoreCategoryCollapseAfterDoubleClick(state, category)", 1)[1]
+    restore = restore.split("\n}\n", 1)[0]
+    assert "state.categoryTapMemo = null" in restore, "the note is consumed"
+    assert "if (!memo || memo.category !== category) return" in restore
+    assert "if (memo.collapsed) state.collapsedCategories.add(category)" in restore
+    assert "else state.collapsedCategories.delete(category)" in restore
+    assert "renderList(state)" in restore
+    assert "categoryTapMemo: null," in source

@@ -939,14 +939,15 @@ function wireOutputGrowth(node) {
 // ---------------------------------------------------------------------------
 
 /** @returns {true|false|null} true=all on, false=all off (or no outputs
- * visible -- practically unreachable since MIN_OUTPUTS is 1), null=mixed */
-function allRowsState(node) {
+ * visible -- practically unreachable since MIN_OUTPUTS is 1), null=mixed
+ * *toggles* (v0.68.1): an already-parsed map, so a draw pass parses once. */
+function allRowsState(node, toggles = readToggles(node)) {
   const entries = outputEntries(node)
   if (entries.length === 0) return false
   let allOn = true
   let allOff = true
   for (const entry of entries) {
-    const on = isRowEnabled(node, entry.name)
+    const on = isSlotEnabled(toggles, entry.name)
     allOn = allOn && on
     allOff = allOff && !on
   }
@@ -1050,12 +1051,13 @@ function drawRowToggles(node, ctx) {
     if (reach > maxReach) maxReach = reach
   }
 
+  const toggles = readToggles(node) // v0.68.1: one parse per draw pass, not per row
   const rects = []
   for (const entry of entries) {
     const pos = outputLocalPos(node, entry.idx)
     if (!pos) continue
     const rect = toggleBoxRect(pos[0], pos[1], maxReach)
-    drawToggleBox(ctx, rect.x, rect.y, rect.w, isRowEnabled(node, entry.name), false)
+    drawToggleBox(ctx, rect.x, rect.y, rect.w, isSlotEnabled(toggles, entry.name), false)
     rects.push({ name: entry.name, x: rect.x, y: rect.y, w: rect.w, h: rect.h })
   }
   node.__epsDistributorRowRects = rects
@@ -1199,7 +1201,8 @@ function addHeaderWidget(node) {
     },
     draw(ctx, drawNode, widgetWidth, y, height) {
       const entries = outputEntries(drawNode)
-      const state = allRowsState(drawNode)
+      const toggles = readToggles(drawNode) // v0.68.1: one parse per draw pass
+      const state = allRowsState(drawNode, toggles)
       const boxX = 8
       const boxY = y + (height - HEADER_BOX) / 2
       drawToggleBox(ctx, boxX, boxY, HEADER_BOX, state === true, state === null)
@@ -1211,7 +1214,7 @@ function addHeaderWidget(node) {
       ctx.font = '11px sans-serif'
       ctx.textAlign = 'left'
       ctx.textBaseline = 'middle'
-      const enabledCount = entries.filter((entry) => isRowEnabled(drawNode, entry.name)).length
+      const enabledCount = entries.filter((entry) => isSlotEnabled(toggles, entry.name)).length
       const label =
         entries.length === 0
           ? 'Toggle All (no outputs visible)'
@@ -1252,8 +1255,12 @@ function installMinWidth(node, minWidth) {
     if (size && size[0] < minWidth) size[0] = minWidth
     return originalOnResize?.call(this, size)
   }
-  if (Array.isArray(node.size) && node.size[0] < minWidth) {
-    node.size[0] = minWidth
+  // v0.68.1 (2026-08-21): `node.size` is a Proxy over a typed-array view
+  // (never an Array) on this frontend, so the old `Array.isArray` guard
+  // silently skipped this lift; setSize() runs `_sizeUpdated` + the wrap.
+  if (node.size && node.size[0] < minWidth) {
+    if (typeof node.setSize === 'function') node.setSize([minWidth, node.size[1]])
+    else node.size[0] = minWidth
   }
 }
 

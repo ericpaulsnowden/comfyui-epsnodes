@@ -25,7 +25,7 @@ from pathlib import Path
 import pytest
 from aiohttp import web
 
-from lora_library import nodes_picker
+from lora_library import nodes_picker, routes_lora_picker
 from lora_library.context import LibraryContext
 from lora_library.routes_lora_picker import build_routes
 
@@ -36,6 +36,16 @@ FAKE_LORAS = [
     "styles/film_grain.safetensors",
     "styles/cinematic.safetensors",
 ]
+
+
+@pytest.fixture(autouse=True)
+def _fresh_previews_cache():
+    """The feed's previews sweep is TTL-cached per lora list (audit
+    2026-08-21); tests that swap sidecar files between requests need a
+    clean slate, exactly like a real "20 seconds later" would give."""
+    routes_lora_picker._previews_cache_clear()
+    yield
+    routes_lora_picker._previews_cache_clear()
 
 
 def make_app(context: LibraryContext) -> web.Application:

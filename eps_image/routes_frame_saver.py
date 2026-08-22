@@ -33,6 +33,7 @@ ComfyUI needed either way).
 
 from __future__ import annotations
 
+import asyncio
 import ipaddress
 import logging
 import socket
@@ -214,6 +215,16 @@ def _resolve_input_ref(ref: str) -> tuple[Path | None, str | None]:
     return resolved, None
 
 
+def _needs_loopback(request: web.Request) -> bool:
+    """Whether *request* is in §6.7's loopback-gated `path` mode -- decided
+    from the QUERY alone, before any filesystem work (audit 2026-08-21: the
+    gate used to run after `_resolve_request_source` had already resolved
+    and stat'd a caller-supplied absolute path). `input_ref` mode is the
+    one ungated shape (v0.60.0); everything else -- `path`, both, neither
+    -- is gated, fail-closed."""
+    return not (request.query.get("input_ref", "") or "").strip()
+
+
 def _resolve_request_source(request: web.Request) -> tuple[Path | None, str | None, bool]:
     """Shared param handling for both routes: exactly one of `path` (the
     original mode) or `input_ref` (v0.60.0). Returns
@@ -239,17 +250,27 @@ def register_routes(routes: web.RouteTableDef) -> None:
 
     @routes.get("/eps_frame_saver/probe")
     async def get_probe(request: web.Request) -> web.Response:
-        resolved, error, needs_loopback = _resolve_request_source(request)
-        if needs_loopback and not request_is_loopback(request):
+        # Audit 2026-08-21: the loopback gate runs BEFORE any resolve/stat
+        # of a caller-supplied absolute path (a remote caller used to drive
+        # realpath+stat on arbitrary host paths -- and a hung network mount
+        # -- before being refused; same constant 403 either way).
+        if _needs_loopback(request) and not request_is_loopback(request):
             return error_response(
                 403,
                 "reading a video file only works in a browser on the machine "
                 "ComfyUI runs on",
             )
+        resolved, error, _needs = _resolve_request_source(request)
         if error is not None:
             return error_response(400, error)
         try:
-            info = video.probe(str(resolved))
+            # Off the event loop (audit 2026-08-21): probe's worst tier
+            # decodes the whole file (fragmented mp4 / mpegts, or no frame
+            # count metadata) and even tier 1 is a blocking av.open --
+            # inline, it stalled every other route and the websocket.
+            info = await asyncio.get_running_loop().run_in_executor(
+                None, video.probe, str(resolved)
+            )
         except ValueError as exc:
             # video.probe() wraps every av/ffmpeg failure into a ValueError
             # naming the path (module docstring) -- a bad/unreadable/
@@ -259,13 +280,13 @@ def register_routes(routes: web.RouteTableDef) -> None:
 
     @routes.get("/eps_frame_saver/stream")
     async def get_stream(request: web.Request) -> web.Response:
-        resolved, error, needs_loopback = _resolve_request_source(request)
-        if needs_loopback and not request_is_loopback(request):
+        if _needs_loopback(request) and not request_is_loopback(request):
             return error_response(
                 403,
                 "the video preview only works in a browser on the machine "
                 "ComfyUI runs on",
             )
+        resolved, error, _needs = _resolve_request_source(request)
         if error is not None:
             return error_response(400, error)
         # aiohttp's FileResponse handles Range/If-Modified-Since/ETag itself

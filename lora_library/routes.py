@@ -177,7 +177,10 @@ def _is_inside(path: Path, root: Path) -> bool:
     """
     try:
         return path.resolve().is_relative_to(root.resolve())
-    except OSError:
+    # ValueError too (audit 2026-08-21): Path.resolve() raises it for an
+    # embedded NUL byte, which used to 500 INSIDE the security guard
+    # (fail-closed, so not a bypass -- but the documented answer is a 400).
+    except (OSError, ValueError):
         return False
 
 
@@ -946,16 +949,24 @@ def register_core(context: LibraryContext, routes: web.RouteTableDef) -> None:
         if not directory.is_absolute():
             return error_response(400, f"dir must be an absolute path (got {raw!r})")
         extensions = _parse_extensions(request.query.get("ext", ""))
+        # Audit 2026-08-21: `sorted(iterdir())` + `is_dir()` per entry
+        # stat'd EVERY child (hidden, wrong-suffix or not) before the cap
+        # was consulted, and dirs/files shared one counter so a folder
+        # whose first 500 names were subfolders returned ZERO files.
+        # os.scandir answers is_dir from the directory entry on every
+        # platform that matters (no stat), the suffix filter runs before
+        # any stat, and each kind has its own budget -- names are still
+        # sorted casefold so the first N are alphabetical, as before.
         try:
-            entries = sorted(directory.iterdir(), key=lambda p: p.name.casefold())
+            with os.scandir(directory) as it:
+                scanned = sorted(it, key=lambda e: e.name.casefold())
         except OSError as exc:
             return error_response(400, f"could not list {directory}: {exc}")
 
         dirs: list[dict[str, str]] = []
         files: list[dict[str, object]] = []
-        count = 0
         truncated = False
-        for entry in entries:
+        for entry in scanned:
             if entry.name.startswith("."):
                 continue
             try:
@@ -963,25 +974,23 @@ def register_core(context: LibraryContext, routes: web.RouteTableDef) -> None:
             except OSError:
                 continue
             if is_dir:
-                if count >= _FS_LIST_MAX_ENTRIES:
+                if len(dirs) >= _FS_LIST_MAX_ENTRIES:
                     truncated = True
-                    break
+                    continue
                 dirs.append({"name": entry.name})
-                count += 1
                 continue
-            if entry.suffix.lower() not in extensions:
+            if os.path.splitext(entry.name)[1].lower() not in extensions:
+                continue
+            if len(files) >= _FS_LIST_MAX_ENTRIES:
+                truncated = True
                 continue
             try:
                 stat_result = entry.stat()
             except OSError:
                 continue
-            if count >= _FS_LIST_MAX_ENTRIES:
-                truncated = True
-                break
             files.append(
                 {"name": entry.name, "size": stat_result.st_size, "mtime": stat_result.st_mtime}
             )
-            count += 1
 
         at_root = directory.parent == directory
         parent = _fs_root_parent(directory, windows=windows) if at_root else str(directory.parent)
@@ -1078,7 +1087,19 @@ def register_core(context: LibraryContext, routes: web.RouteTableDef) -> None:
             if not already:
                 current.append(wanted)
         else:
-            current = [entry for entry in current if Path(entry) != path]
+            # Audit 2026-08-21: add compares RESOLVED containment but remove
+            # compared raw Path equality, so un-sharing `.../nas/docs` left
+            # an entry stored as `.../nas/../nas/docs` exposed while the
+            # response said ok. Remove on resolved equality (either
+            # direction of _is_inside) OR exact string match.
+            current = [
+                entry
+                for entry in current
+                if not (
+                    Path(entry) == path
+                    or (_is_inside(Path(entry), path) and _is_inside(path, Path(entry)))
+                )
+            ]
         if current:
             config["remote_dirs"] = current
         else:

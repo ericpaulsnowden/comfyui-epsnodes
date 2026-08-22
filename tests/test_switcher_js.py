@@ -427,15 +427,21 @@ def test_every_switcher_in_the_graph_shares_one_column(switcher_source: str) -> 
     node picked its column from its own longest label (rig-measured: four
     270px-wide switchers at x = 95 / 144 / 186 / 92). Each node now
     publishes its requirement and takes the MAX across every switcher in
-    the SAME graph."""
+    the SAME graph. (v0.68.1: the walk moved into `graphColumnBounds(graph)`,
+    memoized per canvas frame -- see
+    test_graph_column_walk_is_memoized_per_canvas_frame; sharedColumnX is
+    now the two clamps over its node-independent result.)"""
     body = _function_body(switcher_source, "drawRowToggles(node, ctx)")
     assert "const boxX = sharedColumnX(node, ownRequiredX)" in body
     shared = _function_body(switcher_source, "sharedColumnX(node, ownRequiredX)")
+    assert "const bounds = graphColumnBounds(node.graph)" in shared
+    assert "Math.max(ownRequiredX, bounds.need)" in shared
+    walk = _function_body(switcher_source, "graphColumnBounds(graph)")
     # Same graph only -- subgraphs / other tabs must not couple.
-    assert "node.graph?._nodes" in shared
-    assert "if (other === node || !switcherSpecOf(other)) continue" in shared
-    assert "const otherNeed = columnNeedOf(other)" in shared
-    assert "if (otherNeed > need) need = otherNeed" in shared
+    assert "graph?._nodes" in walk
+    assert "if (!switcherSpecOf(other)) continue" in walk
+    assert "const otherNeed = columnNeedOf(other)" in walk
+    assert "if (otherNeed > need) need = otherNeed" in walk
 
 
 def test_column_requirement_is_pure_so_offscreen_switchers_still_count(
@@ -469,10 +475,14 @@ def test_shared_column_yields_to_clearance_and_the_output_edge(
     assert "return Math.max(ownRequiredX, Math.min(need, ceiling))" in shared
     # The CEILING is shared too: a per-node ceiling puts the boxes back at
     # different x the moment clamping binds (rig-measured: 200/207/214,
-    # because each node's outputs are named differently).
-    assert "if (otherCeiling < ceiling) ceiling = otherCeiling" in shared
+    # because each node's outputs are named differently). v0.68.1: the walk
+    # that gathers it lives in graphColumnBounds; the node's OWN ceiling is
+    # still min'd in here.
+    assert "Math.min(outputSafeColumnX(node), bounds.ceiling)" in shared
+    walk = _function_body(switcher_source, "graphColumnBounds(graph)")
+    assert "if (otherCeiling < ceiling) ceiling = otherCeiling" in walk
     # ...and a switcher with no boxes neither raises nor constrains it.
-    assert "if (otherNeed === 0) continue" in shared
+    assert "if (otherNeed === 0) continue" in walk
     ceiling = _function_body(switcher_source, "outputSafeColumnX(node)")
     # litegraph's own length*7 approximation, NOT ctx.measureText -- the
     # mirror is what keeps the box clear of ITS regions.
@@ -522,3 +532,67 @@ def test_pair_moves_fix_link_slots_and_off_refuses_wired_lows(switcher_source: s
     # the tail output is a TRUE add/remove -- §8's one safe removal spot
     assert "node.addOutput(LOW_OUTPUT_NAME, spec.type)" in pair_out
     assert "node.removeOutput(idx)" in pair_out
+
+
+# ------------------------------------------------------------ v0.68.1 pins
+
+
+def test_graph_column_walk_is_memoized_per_canvas_frame(switcher_source: str) -> None:
+    """v0.68.1 perf: the graph-wide column walk used to run inside EVERY
+    visible switcher's onDrawForeground -- (switchers x all graph nodes)
+    per frame. It now runs once per graph per canvas frame, keyed on
+    litegraph's own per-draw() `LGraphCanvas.frame` counter (1.48.7), so a
+    memo hit is by construction the SAME frame's answer -- this is NOT the
+    cross-frame publish state test_column_requirement_is_pure_... forbids
+    (every onDrawForeground in one pass sees one frame value; a
+    rename/rewire lands between frames and the next pass recomputes). No
+    frame counter = no memo = the old per-call walk."""
+    walk = _function_body(switcher_source, "graphColumnBounds(graph)")
+    assert "const frame = app?.canvas?.frame" in walk
+    assert "typeof frame === 'number'" in walk
+    assert "if (cached && cached.frame === frame) return cached" in walk
+    assert "columnBoundsCache.set(graph, bounds)" in walk
+    # A WeakMap keyed by the graph object, not a property bolted onto it.
+    assert "const columnBoundsCache = new WeakMap()" in switcher_source
+    # ...and the pure requirement helper is untouched by the memo.
+    need = _function_body(switcher_source, "columnNeedOf(node)")
+    assert "frame" not in need and "cache" not in need.lower()
+
+
+def test_draw_paths_parse_toggles_once_per_pass(switcher_source: str) -> None:
+    """v0.68.1 perf: isRowEnabled() -> readToggles() -> JSON.parse used to
+    run once PER ROW per frame, ~3x over (header allRowsState, header
+    filter(isRowEnabled), the row boxes). Each draw path now parses once and
+    reads rows through the pure isEnabledIn(map, name)."""
+    assert "function isEnabledIn(toggles, name)" in switcher_source
+    rows = _function_body(switcher_source, "drawRowToggles(node, ctx)")
+    assert "const toggles = readToggles(node)" in rows
+    assert "isEnabledIn(toggles, row.entry.name)" in rows
+    assert "isRowEnabled(node," not in rows
+    header = _function_body(switcher_source, "addHeaderWidget(node)")
+    assert "const toggles = readToggles(drawNode)" in header
+    assert "allRowsState(drawNode, toggles)" in header
+    assert "isEnabledIn(toggles, entry.name)" in header
+    assert "isRowEnabled(drawNode," not in header
+    # The non-draw callers keep the convenient one-shot form.
+    assert "function isRowEnabled(node, name)" in switcher_source
+
+
+def test_width_floor_lifts_through_set_size_not_a_dead_is_array_guard(
+    switcher_source: str,
+) -> None:
+    """v0.68.1: `LGraphNode.size` is a Proxy over a typed-array view on the
+    installed frontend (1.48.7), never an Array -- so `Array.isArray(node.size)`
+    was always false: ensureMinNodeWidth's lift never ran, and
+    outputSafeColumnX's `Array.isArray(node.size) || node.size` was a no-op
+    test by precedence. The lift goes through setSize() (runs litegraph's
+    `_sizeUpdated` + onResize); the computeSize wrap floors whatever array
+    litegraph hands back (a caller-supplied typed `out` included)."""
+    assert "Array.isArray(node.size)" not in switcher_source
+    floor = _function_body(switcher_source, "ensureMinNodeWidth(node)")
+    assert "if (node.size && node.size[0] < MIN_NODE_WIDTH)" in floor
+    assert "node.setSize([MIN_NODE_WIDTH, node.size[1]])" in floor
+    assert "if (size) size[0] = Math.max(size[0], MIN_NODE_WIDTH)" in floor
+    assert "if (Array.isArray(size))" not in floor
+    ceiling = _function_body(switcher_source, "outputSafeColumnX(node)")
+    assert "const width = node.size ? node.size[0] : 0" in ceiling

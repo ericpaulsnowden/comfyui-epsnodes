@@ -422,7 +422,10 @@ class TestNonUtf8PresetsFile:
         with caplog.at_level("WARNING"):
             presets, mtime = store.load_presets(context)
         assert presets == {}
-        # The decode failure takes the could-not-READ branch, which returns
-        # before the stat -- so no mtime, same as an unreadable file.
-        assert mtime is None
+        # Audit 2026-08-21 (DATA LOSS fix): the file EXISTS, so its REAL
+        # mtime comes back even though its contents are unreadable -- a
+        # stale base_mtime must 409 on the next save instead of the old
+        # mtime=None disabling the conflict check and letting that save
+        # overwrite every preset in the file.
+        assert mtime == (library_dir / store.PRESETS_FILENAME).stat().st_mtime
         assert any("could not read" in r.message for r in caplog.records)

@@ -1171,14 +1171,17 @@ class TestSendRegistryM4:
         assert "[dasiwa.DASIWA_LOADER_TYPE]: {" in registry
 
     def test_registry_entries_carry_the_full_adapter_surface(self, source: str) -> None:
-        """Both entries: {label, find, probe, write} -- the whole per-family
-        surface the row plumbing dispatches through."""
+        """Both entries: {label, probe, write} -- the whole per-family
+        surface the row plumbing dispatches through. v0.68.1 dropped the
+        `find` key: dead since v0.64.0, when findSendCandidates() started
+        walking the whole workflow itself against the registry's keys."""
         registry = _send_adapters_block(source)
-        for key in ("label:", "find:", "probe:", "write:"):
+        for key in ("label:", "probe:", "write:"):
             assert registry.count(key) == 2, key
-        assert "find: pll.findPllNodes" in registry
+        assert "find:" not in registry, "the per-family find key is dead code (v0.68.1)"
+        assert "probe: pll.probePll" in registry
         assert "write: pll.writeRowsToPll" in registry
-        assert "find: dasiwa.findDasiwaNodes" in registry
+        assert "probe: dasiwa.probeDasiwa" in registry
         assert "write: dasiwa.writeRowsToDasiwa" in registry
 
     def test_candidates_merge_across_families_ascending_id(self, source: str) -> None:
@@ -1317,7 +1320,8 @@ class TestSendRowGraphWatchV0632:
 
     def test_refresh_is_coalesced_and_state_hangs_off_the_node(self, source: str) -> None:
         body = _function_body(source, "scheduleSendRowRefresh(graph)")
-        assert "graph.__epsLpSendRefreshQueued" in body
+        # v0.68.1: coalesced on the ROOT graph (was: per firing graph).
+        assert "root.__epsLpSendRefreshQueued" in body
         assert "renderSend(state)" in body
         assert "node?.__epsLpState" in body  # no module registry to leak
         assert "node.__epsLpState = state" in source
@@ -1337,7 +1341,10 @@ class TestClickToLoadV0640:
         assert "if (state.highlightedFile === file) {" in body
         add_at = body.index("addLora(state, file)", body.index("rowEl.addEventListener('click'"))
         assert add_at > 0
-        assert "state.highlightedFile = file" in body
+        # v0.68.1: the first click moves the highlight by toggling the row
+        # class (setHighlightedFile) instead of rebuilding the whole list.
+        assert "setHighlightedFile(state, file)" in body
+        assert "state.highlightedFile = file" in _function_body(source, "setHighlightedFile(state, file)")
         # buttons/inputs inside the row keep their own jobs
         assert "event.target.closest('button, input')" in body
         # ghosts have nothing to add -- the handler is gated behind !ghost
@@ -1380,8 +1387,149 @@ class TestTabSwitchFixesV0651:
     ) -> None:
         load = _function_body(source, "loadPicker(state)")
         assert "if (!state.loaded && lastFeed) {" in load
-        assert "lastFeed = data" in load
+        # v0.68.1: the cache write moved into the SHARED fetch every
+        # picker's loadPicker awaits (one round trip for N panels) -- see
+        # TestPerfRoundV0681 for the sharing rules themselves.
+        assert "await fetchFeed()" in load
+        assert "lastFeed = data" in _function_body(source, "fetchFeed()")
         # a cached paint survives a mere refresh hiccup; a never-loaded
         # panel still gets the honest §7.2 error + Retry
         assert "if (state.loaded) {" in load
         assert "state.error = (error && error.message) || 'Failed to load loras'" in load
+
+
+class TestPerfRoundV0681:
+    """v0.68.1 perf/polish round (audit 2026-08-20): one shared feed fetch
+    per tick instead of one per picker; a debounced, capped search; one
+    browser repaint and at most one graph walk per Add; a class-toggle
+    highlight; the Send-row refresh coalesced on the root graph and walking
+    the whole workflow; the dead per-family `find` adapters gone."""
+
+    @pytest.fixture(scope="class")
+    def source(self) -> str:
+        return PICKER_JS.read_text(encoding="utf-8")
+
+    def test_feed_fetch_is_shared_with_a_short_ttl(self, source: str) -> None:
+        """N pickers attaching in one tick (a tab switch recreates every one)
+        fired N identical GET picker round trips; `lastFeed` deduped only
+        the paint. One in-flight promise is handed to every caller and a
+        feed younger than the TTL is served without a round trip."""
+        assert "const FEED_CACHE_TTL_MS = 3000" in source
+        body = _function_body(source, "fetchFeed()")
+        assert "Date.now() - lastFeedAt < FEED_CACHE_TTL_MS) return Promise.resolve(lastFeed)" in body
+        assert "if (feedFetchPromise) return feedFetchPromise" in body
+        assert "api.getJson(ROUTE)" in body
+        # the shared promise is released on settle either way (a Retry after
+        # a failure must start a NEW fetch, not re-join the failed one)
+        assert "promise.then(settle, settle)" in body
+        # the ONLY GET of the feed goes through the shared helper
+        assert source.count("api.getJson(ROUTE)") == 1
+
+    def test_mutations_and_token_guards_still_force_fresh_fetches(self, source: str) -> None:
+        """The per-node loadToken semantics are untouched, and every mutation
+        success (invalidateInFlightLoad) also stale-marks the shared cache
+        and orphans the in-flight promise -- a load after a star/recent/
+        reorder/clear is a FRESH fetch, never a pre-mutation one."""
+        inv = _function_body(source, "invalidateInFlightLoad(state)")
+        assert "state.loadToken++" in inv
+        assert "invalidateFeedCache()" in inv
+        cache = _function_body(source, "invalidateFeedCache()")
+        assert "feedGeneration++" in cache
+        assert "lastFeedAt = 0" in cache
+        assert "feedFetchPromise = null" in cache
+        # a fetch that started before the bump never writes the shared cache
+        fetch = _function_body(source, "fetchFeed()")
+        assert "if (generation === feedGeneration) {" in fetch
+        load = _function_body(source, "loadPicker(state)")
+        assert "const token = ++state.loadToken" in load
+        assert "if (token !== state.loadToken) return" in load
+        # a TTL-served feed is the object the instant paint already applied
+        assert "if (data !== painted) applyFeed(state, data)" in load
+
+    def test_search_is_debounced_but_escape_and_clear_stay_instant(self, source: str) -> None:
+        assert "const SEARCH_DEBOUNCE_MS = 120" in source
+        body = _function_body(source, "buildUi(state)")
+        on_input = body[body.index("state.searchInputEl.addEventListener('input'") :]
+        on_input = on_input[: on_input.index("})")]
+        assert "scheduleSearchRender(state)" in on_input
+        assert "renderBrowser(state)" not in on_input
+        keydown = body[body.index("state.searchInputEl.addEventListener('keydown'") :]
+        keydown = keydown[: keydown.index("})")]
+        assert "clearSearch(state)" in keydown and "renderBrowser(state)" in keydown
+        sched = _function_body(source, "scheduleSearchRender(state)")
+        assert "clearTimeout(state.searchTimer)" in sched
+        assert "}, SEARCH_DEBOUNCE_MS)" in sched
+        # clearing cancels a pending repaint (Escape, navigation, scope change)
+        clear = _function_body(source, "clearSearch(state)")
+        assert "clearTimeout(state.searchTimer)" in clear
+
+    def test_search_results_are_capped_with_a_keep_typing_row(self, source: str) -> None:
+        assert "const SEARCH_RESULT_CAP = 200" in source
+        body = _function_body(source, "renderSearchResults(state, query)")
+        assert "if (matches.length < SEARCH_RESULT_CAP) matches.push({ file: name, label: rel })" in body
+        assert "else overflow++" in body
+        assert "more — keep typing to narrow the search." in body
+        # matching still runs over every lora (the count is honest); only
+        # the ROWS are capped
+        assert "if (!loraMatchesSearch(rel, query)) continue" in body
+
+    def test_one_browser_repaint_per_add_owned_by_record_recent(self, source: str) -> None:
+        """Add rebuilt the browser three times over (addLora, recordRecent's
+        optimistic update, and again on the POST response)."""
+        add = _function_body(source, "addLora(state, file)")
+        assert "renderBrowser(state)" not in add
+        assert "recordRecent(state, file)" in add
+        recent = _function_body(source, "recordRecent(state, file)")
+        assert recent.count("renderBrowser(state)") == 2
+        # ...and the second (response) repaint is change-gated
+        assert "if (recents.length && !sameFileOrder(recents, state.recents)) {" in recent
+        same = _function_body(source, "sameFileOrder(a, b)")
+        assert "a.length === b.length" in same
+        assert "entry.file === b[i].file" in same
+
+    def test_highlight_moves_by_class_toggle_over_a_per_render_row_map(self, source: str) -> None:
+        body = _function_body(source, "setHighlightedFile(state, file)")
+        assert "classList.remove('eps-lp-row-active')" in body
+        assert "classList.add('eps-lp-row-active')" in body
+        assert "state.browserRowEls.set(file, rowEl)" in _function_body(
+            source, "buildLoraRowEl(state, file, displayLabel)"
+        )
+        # the map is rebuilt by every browser paint, like favRowEls
+        browser = _function_body(source, "renderBrowser(state)")
+        assert "state.browserRowEls = new Map()" in browser
+
+    def test_candidate_walk_is_memoized_per_synchronous_run(self, source: str) -> None:
+        """One renderSend asked for the walk three times (buildOptions,
+        resolveSendTarget, probeSendTarget's null leg); the memo dies on the
+        next microtask so no later task can read a stale list."""
+        body = _function_body(source, "findSendCandidates()")
+        assert "if (sendCandidatesMemo) return sendCandidatesMemo" in body
+        assert "sendCandidatesMemo = candidates" in body
+        assert "queueMicrotask(() => {" in body
+        assert "sendCandidatesMemo = null" in body
+        # the walk itself is unchanged (the v0.64.0 pins still hold)
+        assert "walkLiveNodes(app.graph)" in body
+
+    def test_send_row_refresh_coalesces_on_root_and_walks_the_workflow(self, source: str) -> None:
+        """The per-graph version iterated only the firing graph's own
+        `_nodes`, so a nested picker never repainted for a root loader.
+        controller.js's scheduleControllerRefresh shape: root flag, whole
+        walk, and arming any subgraph created since attach."""
+        body = _function_body(source, "scheduleSendRowRefresh(graph)")
+        assert "const root = app.graph || graph" in body
+        assert "root.__epsLpSendRefreshQueued" in body
+        assert "graph.__epsLpSendRefreshQueued" not in body
+        assert "for (const subgraph of walkGraphs(root)) installGraphNodeWatch(subgraph)" in body
+        assert "for (const { node } of walkLiveNodes(root)) {" in body
+        assert "graph._nodes" not in body
+
+    def test_dead_find_adapters_are_gone_and_the_bridges_say_so(self, source: str) -> None:
+        registry = _send_adapters_block(source)
+        assert "find:" not in registry
+        assert "pll.findPllNodes" not in source
+        assert "dasiwa.findDasiwaNodes" not in source
+        # the bridges keep their root-only helpers only for their own test
+        # pins, and say so at the definition (removal is a follow-up)
+        for path in (BRIDGE_JS, DASIWA_JS):
+            bridge = path.read_text(encoding="utf-8")
+            assert "UNUSED BY THE PICKER, marked for removal" in bridge, path.name

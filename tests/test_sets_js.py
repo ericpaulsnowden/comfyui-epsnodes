@@ -63,17 +63,83 @@ def test_comfy_combo_refresh_is_wrapped_so_values_survive_it(source: str) -> Non
     assert "installSetValues(node)" in body
 
 
-def test_sets_changed_also_refreshes_the_node_definitions(source: str) -> None:
-    """Our module cache alone cannot reach the node DEFINITIONS the Vue
-    renderer builds its selects from; `refreshComboInNodes()` can (it
-    refetches /object_info, and INPUT_TYPES re-reads the sets dir per call),
-    so the CRUD event drives both halves."""
+def test_sets_changed_refreshes_only_the_module_cache(source: str) -> None:
+    """v0.68.1 (owner: "saving a state is slow / non-responsive"). Until
+    v0.68.0 the CRUD handler ALSO awaited `app.refreshComboInNodes()`, on the
+    premise that the Vue renderer builds its selects from the node
+    DEFINITIONS. Read from the installed frontend (1.48.7): that call is
+    `reloadNodeDefs()` -- GET /object_info (every pack's INPUT_TYPES re-run
+    server-side), `registerNodeDef` for EVERY node type, every combo of
+    every node rewritten, the Vue node-def store rebuilt, two toasts -- on
+    the main thread right after Save. And the premise is false there: the
+    Vue select evaluates `widget.options.values()` on open
+    (`WidgetSelect` `handleOpenChange` -> `refreshOptions` ->
+    `resolveRawValues`), i.e. THIS module's function and cache. So the CRUD
+    event refreshes the module cache and nothing else; the wrap that
+    survives the frontend's own "R" refresh stays."""
     body = _function_body(source, "initSetsFreshness()")
     assert "'lora_library:sets-changed'" in body
-    assert "await refreshCombosEverywhere()" in body
+    assert "await refreshSetsCache(true)" in body
+    assert "await app.refreshComboInNodes" not in body  # no global node-def reload on the CRUD path
+    assert "app.refreshComboInNodes()" not in body.replace("`app.refreshComboInNodes()`", "")
+    assert "refreshCombosEverywhere" not in source  # the helper is gone, not merely unused
     assert "wrapComfyComboRefresh()" in body
-    guarded = _function_body(source, "refreshCombosEverywhere()")
-    assert "catch" in guarded  # a flaky /object_info must not kill the CRUD path
+    # the mirrors-tag graph watch is armed at setup, when app.graph exists
+    assert "installMirrorsGraphWatch()" in body
+
+
+def test_forced_refresh_is_honored_while_a_fetch_is_in_flight(source: str) -> None:
+    """v0.68.1: `if (fetchInFlight) return` used to come BEFORE `force` was
+    honored, so the CRUD event's forced refresh could no-op against a
+    throttled open-time refetch already in flight (and already stale) --
+    `valuesIncluding`/`installSetValues` kept serving the old list. A forced
+    caller now waits on that fetch and queues exactly one more."""
+    body = _function_body(source, "refreshSetsCache(force = false)")
+    in_flight = body.split("if (fetchInFlight) {", 1)[1].split("\n  }\n", 1)[0]
+    assert "if (!force) return" in in_flight
+    assert "refetchQueued = true" in in_flight
+    assert "return fetchInFlight" in in_flight
+    assert "} while (refetchQueued)" in body
+    assert "fetchInFlight = fetchSetsOnce()" in body
+    assert "let fetchInFlight = null" in source  # a promise now, not a boolean
+
+
+class TestMirrorsComboIsPureV0681:
+    """v0.68.1 perf: the `mirrors loader` combo's function-valued `values`
+    walked the WHOLE workflow on every canvas draw (ComboWidget's
+    `_displayValue` evaluates `values()` whenever no `getOptionLabel` is
+    installed -- read from the installed bundle) and wrote `widget.value`
+    from inside that getter. Now: identity `getOptionLabel` (the value IS the
+    label), a pure `values` that still rebuilds on open in both renderers,
+    and the vanished-loader self-heal moved to a graph-removal watch."""
+
+    @pytest.fixture(scope="class")
+    def source(self) -> str:
+        return SETS_JS.read_text(encoding="utf-8")
+
+    def test_values_is_pure_and_display_is_identity_mapped(self, source: str) -> None:
+        body = _function_body(source, "attachMirrorsWidget(node)")
+        assert "widget.options.values = () => [MIRRORS_ANY_VALUE, ...findPllCandidates().map((c) => c.label)]" in body
+        assert "widget.options.getOptionLabel = (value) => (value == null ? '' : String(value))" in body
+        assert "widget.value = MIRRORS_ANY_VALUE" not in body  # no write inside the getter any more
+
+    def test_heal_rides_on_node_removal_not_on_draw(self, source: str) -> None:
+        heal = _function_body(source, "healMirrorsTags()")
+        assert "findPllCandidates()" in heal
+        assert "widget.value = MIRRORS_ANY_VALUE" in heal
+        watch = _function_body(source, "installMirrorsGraphWatch()")
+        assert "api.walkGraphs(app.graph)" in watch
+        assert "graph.__epsSetsMirrorsWatch" in watch  # install once per graph
+        assert "original?.apply(this, args)" in watch  # chained, never replaced
+        assert "scheduleMirrorsHeal()" in watch
+        # one deferred pass per created node (configure() restores the tag
+        # AFTER nodeCreated, so the tick lands after the whole load)
+        attach = _function_body(source, "attachApplySetBehavior(node)")
+        assert "installMirrorsGraphWatch()" in attach
+        assert "scheduleMirrorsHeal()" in attach
+        # the `set` combo's own name-mapping getOptionLabel is untouched
+        installed = _function_body(source, "installSetValues(node)")
+        assert "cachedNames.get(String(value)) || String(value)" in installed
 
 
 def test_current_value_is_always_one_of_the_options(source: str) -> None:

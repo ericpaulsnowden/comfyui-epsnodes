@@ -200,7 +200,13 @@ function installMinWidth(node, minWidth) {
     if (size && size[0] < minWidth) size[0] = minWidth
     return originalOnResize?.call(this, size)
   }
-  if (Array.isArray(node.size) && node.size[0] < minWidth) node.size[0] = minWidth
+  // v0.68.1 (2026-08-21): `node.size` is a Proxy over a typed-array view
+  // (never an Array) on this frontend, so the old `Array.isArray` guard
+  // silently skipped this lift; setSize() runs `_sizeUpdated` + the wrap.
+  if (node.size && node.size[0] < minWidth) {
+    if (typeof node.setSize === 'function') node.setSize([minWidth, node.size[1]])
+    else node.size[0] = minWidth
+  }
 }
 
 // --- State ---

@@ -38,8 +38,10 @@ handler below, and none of them catch it.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
+import time
 from pathlib import Path
 
 from aiohttp import web
@@ -160,6 +162,37 @@ def _loras_with_previews(context: LibraryContext, loras: list[str]) -> list[str]
     return out
 
 
+#: (loras-list key, monotonic time, previews) -- see `_previews_cached`.
+_previews_cache: tuple[tuple[str, ...], float, list[str]] | None = None
+_PREVIEWS_TTL_S = 20.0
+
+
+def _previews_cache_clear() -> None:
+    """Test seam / explicit invalidation."""
+    global _previews_cache
+    _previews_cache = None
+
+
+async def _previews_cached(context: LibraryContext, loras: list[str]) -> list[str]:
+    """`_loras_with_previews` with two audit-2026-08-21 fixes: it runs in a
+    worker thread (the sweep is one `folder_paths.get_full_path` stat per
+    lora plus one listdir per folder -- on a NAS library that blocked the
+    whole event loop, queue submissions included, on every feed request),
+    and its result is reused for `_PREVIEWS_TTL_S` while the lora list is
+    byte-identical (a tab switch re-creates every picker node and each one
+    fetched the feed). A preview image added on disk shows up within the
+    TTL; a lora added/removed changes the key and refreshes at once."""
+    global _previews_cache
+    key = tuple(loras)
+    now = time.monotonic()
+    cached = _previews_cache
+    if cached is not None and cached[0] == key and now - cached[1] < _PREVIEWS_TTL_S:
+        return list(cached[2])
+    previews = await asyncio.to_thread(_loras_with_previews, context, loras)
+    _previews_cache = (key, now, list(previews))
+    return previews
+
+
 def register(context: LibraryContext, routes: web.RouteTableDef) -> None:
     """Attach the seven §5 ``/lora_library/picker*`` rows to *routes*."""
 
@@ -170,7 +203,7 @@ def register(context: LibraryContext, routes: web.RouteTableDef) -> None:
         return web.json_response(
             {
                 "loras": loras,
-                "previews": _loras_with_previews(context, loras),
+                "previews": await _previews_cached(context, loras),
                 "favorites": state["favorites"],
                 "recents": state["recents"],
                 "mtime": mtime,

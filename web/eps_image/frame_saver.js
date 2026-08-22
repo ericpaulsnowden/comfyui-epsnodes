@@ -59,7 +59,11 @@
  *   re-firing `nodeCreated`) are both belt-and-suspenders re-syncs onto the
  *   same idempotent `fullResync()` — redundant by design, matching
  *   `image_grid.js`'s explicit "all three firing is redundant by design"
- *   stance for the identical class of restore-timing bug.
+ *   stance for the identical class of restore-timing bug. Redundant calls
+ *   are CHEAP since v0.68.1: `fullResync` compares the source tuple
+ *   (`sourceKeyOf`) against what the `<video>` already shows and only
+ *   reloads + re-probes on a change; configure()'s per-link
+ *   `onConnectionsChange` replay is skipped outright (`state.restoring`).
  *
  * **Two widgets, hidden.** `video_path` (STRING) and `frame` (INT) are the
  * node's real, server-declared, serialized widgets — FORMAT.md §6.7 requires
@@ -782,7 +786,10 @@ function applyGating(state) {
       ? 'Video preview and probing only work on the machine running ComfyUI; Run still works.'
       : ''
   }
-  refreshVideoSource(state) // re-decide the preview now that isLocal is known.
+  // Re-decide the preview now that isLocal is known -- v0.68.1: only when
+  // the verdict actually changes what is shown (a local viewer's normal
+  // config resolve used to reload the already-loaded <video> a second time).
+  if (sourceKeyOf(state, state.path) !== state.sourceKey) refreshVideoSource(state)
 }
 
 // ---------------------------------------------------------------------------
@@ -807,6 +814,18 @@ function createState(node, pathWidget, frameWidget) {
     // longer matches the token it was issued under (stale, superseded by a
     // later path change) -- same guard shape as notebook.js's loadToken.
     probeToken: 0,
+    // v0.68.1 (2026-08-21): the source tuple the <video> currently shows --
+    // `sourceKeyOf()` of {wired kind, wired ref, path, remote?} -- recorded
+    // by refreshVideoSource() and compared by fullResync()/applyGating(), so
+    // the restore hooks and the onConnectionsChange wrap (which fires for
+    // OUTPUT rewires too) reload the element + re-probe only when something
+    // the preview actually depends on moved. null = never loaded.
+    sourceKey: null,
+    // v0.68.1: true while litegraph's configure() is replaying this node's
+    // saved links (one onConnectionsChange per input AND output link);
+    // the wrap skips fullResync for those and the onConfigure wrap (fired
+    // last, inside configure) does the single post-restore resync.
+    restoring: false,
     // §2/§7.1-style locality verdict; null = not yet known (treated as
     // local -- see refreshGating's docstring).
     isLocal: null,
@@ -912,8 +931,15 @@ function installMinWidth(node, minWidth) {
     if (size && size[0] < minWidth) size[0] = minWidth
     return originalOnResize?.call(this, size)
   }
-  if (Array.isArray(node.size) && node.size[0] < minWidth) {
-    node.size[0] = minWidth
+  // v0.68.1 (2026-08-21): `node.size` is a Proxy over a typed-array view on
+  // this frontend (LGraphNode.ts `get size()`), never an Array -- the old
+  // `Array.isArray` guard was always false, so this lift of the
+  // CURRENT width (§7.2) never fired and only the onResize wrap above ever
+  // floored anything. setSize() runs litegraph's `_sizeUpdated` (the Vue
+  // layout mirror) and the wrap just installed, so it is the one safe path.
+  if (node.size && node.size[0] < minWidth) {
+    if (typeof node.setSize === 'function') node.setSize([minWidth, node.size[1]])
+    else node.size[0] = minWidth
   }
 }
 
@@ -1508,6 +1534,7 @@ async function startProbe(state, params) {
  * resolves/changes (`applyGating`) -- idempotent, safe to call redundantly.
  */
 function refreshVideoSource(state) {
+  state.sourceKey = sourceKeyOf(state, state.path) // v0.68.1 -- see createState
   state.videoPlayable = null
   state.probe = null
   state.probeToken += 1
@@ -1548,6 +1575,22 @@ function onPathChanged(state, rawPath) {
   updatePathBarText(state)
   setPathBarStatus(state, '')
   refreshVideoSource(state)
+}
+
+/**
+ * v0.68.1 (2026-08-21): everything `refreshVideoSource` branches on, as one
+ * comparable string -- the wire's kind + ref, the (trimmed) path, and the
+ * remote verdict. Two equal keys mean the element would be handed the same
+ * `src` (or the same no-src) and the same probe: nothing to reload.
+ * @param {object} state @param {unknown} rawPath @returns {string}
+ */
+function sourceKeyOf(state, rawPath) {
+  return JSON.stringify([
+    state.wired?.kind ?? null,
+    state.wired?.ref ?? null,
+    String(rawPath || '').trim(),
+    state.isLocal === false
+  ])
 }
 
 /**
@@ -1592,6 +1635,18 @@ function resolveWiredVideo(node) {
  * v0.60.0 onConnectionsChange wrap) call (see file header). */
 function fullResync(state) {
   state.wired = resolveWiredVideo(state.node)
+  // v0.68.1 (2026-08-21): compare the source tuple against what the <video>
+  // already shows BEFORE touching it. This runs from attach, loadedGraphNode,
+  // onConfigure AND every onConnectionsChange (output rewires included), and
+  // each call used to reload the element and re-probe unconditionally. The
+  // path bar still re-syncs every time (cheap, and the wire label may move);
+  // a DELIBERATE pick still goes through onPathChanged/chooseVideoPath
+  // unguarded, so re-picking the same file reloads (§7.2's re-pick lesson).
+  if (sourceKeyOf(state, state.pathWidget.value) === state.sourceKey) {
+    state.path = String(state.pathWidget.value || '').trim()
+    updatePathBarText(state)
+    return
+  }
   onPathChanged(state, state.pathWidget.value)
 }
 
@@ -2090,6 +2145,19 @@ function wireNodeCleanup(state) {
  * `fullResync()`. */
 function wireConfigureResync(state) {
   const node = state.node
+  // v0.68.1: configure() replays onConnectionsChange once per saved input
+  // AND output link (LGraphNode.ts configure) -- flag the window so the
+  // wrap in attach() skips those; onConfigure (configure's last act) then
+  // runs the ONE resync. switcher.js wireImageInputGrowth's exact idiom.
+  const originalConfigure = node.configure
+  node.configure = function (...args) {
+    state.restoring = true
+    try {
+      return originalConfigure.apply(this, args)
+    } finally {
+      state.restoring = false
+    }
+  }
   const originalOnConfigure = node.onConfigure
   node.onConfigure = function (...args) {
     const result =
@@ -2153,7 +2221,10 @@ export function attach(node) {
         }
       }
       try {
-        fullResync(state)
+        // v0.68.1: not during configure()'s per-link replay -- see
+        // wireConfigureResync; fullResync's own source-key compare makes
+        // the live calls (including output-side rewires) reload-free.
+        if (!state.restoring) fullResync(state)
       } catch (error) {
         warn('wire-change resync failed', error)
       }
