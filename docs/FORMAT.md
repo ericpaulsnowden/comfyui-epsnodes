@@ -283,6 +283,7 @@ distinct set), a state may store per-loader configs. Format 2 ADDS a
   OS's native separator there, so a set written on Windows carries `\` and
   one written on macOS carries `/`. Resolution at apply time is therefore
   SEPARATOR-INSENSITIVE and returns the INSTALLED spelling for this
+  The same separator-insensitive rule is applied by §7.6 to EVERY model combo on load and by §6.12 to the Checkpoint Switcher's `selection` (v0.71.0).
   machine: exact match after normalizing both sides' separators to `/`
   first, then unique basename match (rgthree-style leniency for
   cross-machine subfolder differences; basename = last segment across
@@ -2602,6 +2603,22 @@ hand-bypassing groups. Roadmap: `research/roadmap-eps-distributor.md`.
 
 ## §6.12 `EPSCheckpointSwitcher` (display: "EPS Checkpoint Switcher") — tick N checkpoints, run N times
 
+- **Separator-insensitive names (v0.71.0, §7.6; owner report 2026-08-22).**
+  `selection` stores the SAVING machine's `folder_paths` spelling;
+  `execute` and `VALIDATE_INPUTS` resolve each name through one rule —
+  exact listed match, else the single listed file equal after `\`→`/` on
+  both sides (index built once per call); a normalized collision (two
+  listed files differing only by separator, legal on Linux) is no match +
+  a warning naming both; an unresolved name keeps the missing→skipped
+  path. No case folding, no trimming. The panel
+  (`resolveSelectionSpelling`, via `path_heal.js`'s `healComboValue`) keys
+  rows by LOCAL spelling so foreign-spelled ticks display correctly
+  regardless of the setting, and with `EPSNodes.HealModelPaths` on
+  rewrites the stored strings to the local spelling at reconcile (direct
+  widget write, no callback, order preserved); off leaves them alone.
+  Rig-verified 2026-08-22 (Windows spelling accepted by `/prompt`, the
+  LOCAL path reaches the loader).
+
 The grouped answer to "try the same prompt across several models" (owner ask
 2026-08-01). Tick checkpoint FILES in a panel; ONE queue emits four
 index-aligned `OUTPUT_IS_LIST` lists — `model`/`clip`/`vae`/`label` (label =
@@ -3291,6 +3308,35 @@ from a draw.
   (the rest of that pipeline, and every `/eps_image_grid/*` +
   `/upload/image` route, verified working for a genuine non-loopback caller
   on the rig).
+
+**§7.6 Cross-OS model-path healing on load (`web/lora_library/path_heal.js`,
+v0.71.0, owner report 2026-08-22: workflows shared between the Windows PC
+and the Linux box break because model paths carry the other OS's slash
+and every model has to be re-picked).** Combo values carry the saving
+OS's separator; on the other machine they are not in the option list
+(painted missing, "value not in list" at queue). On `loadedGraphNode`
+(core's post-configure `forEachNode` in `app.ts`, subgraphs included,
+AFTER widget values restore — core's own combo fix-up only resets `null`
+values, or everything for the DEFAULT graph, so a real workflow's
+out-of-list value reaches the hook) every combo whose options contain a
+separator is passed through `healComboValue`: a string value not in the
+options is replaced by the ONE option equal after `\`↔`/` normalization +
+trim; zero or several DISTINCT matches → untouched; exact-present
+untouched; case never folded. `widget.value` is written directly — NO
+callback (a restore-time correction, not a user edit); `setDirtyCanvas`
+once per node; every heal console-logged. Counts from all nodes feed a
+`setTimeout(0)` coalescer → ONE toast per load ("EPSNodes: healed N model
+path(s) for this machine"). A `nodeCreated`-chained `onConfigure` wrap
+covers paste (on a whole load it merely fires first; same tally, same
+single toast). Gated by the boolean setting `EPSNodes.HealModelPaths`
+(Settings → EPSNodes → Workflows → "Heal model paths across operating
+systems on load", default ON, read through `app.extensionManager.setting
+.get` on every call; an unreachable store ⇒ ON). Never throws out of a
+hook; no window listeners. Function-valued `options.values` are evaluated
+`values(widget, node)` (ComboWidget's own call). The Checkpoint Switcher's
+`selection` (a STRING, not a combo) reconciles through the same matcher
+(§6.12). It never invents files: the model must exist on the other
+machine under the same relative name. Pins: `tests/test_path_heal_js.py`.
 
 ## §8 Versioning & stability
 

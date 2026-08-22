@@ -43,12 +43,32 @@
  * fully interactive and still checked -- rather than vanishing from the JSON
  * the moment the panel repaints. Unchecking it is the only way to remove it.
  *
+ * **Cross-OS spelling (FORMAT.md §7.6, 2026-08-22).** `selection` stores
+ * names exactly as `folder_paths` lists them -- which means the saving OS's
+ * separator (`styles\sdxl.safetensors` from the Windows PC,
+ * `styles/sdxl.safetensors` from the Linux box), so a workflow carried
+ * across machines used to show every tick as a ⚠ missing row. The panel
+ * now reconciles each saved name against the fetched list
+ * SEPARATOR-INSENSITIVELY through the same pure matcher every other combo
+ * goes through (`path_heal.js`'s `healComboValue`: exact first, then the
+ * ONE listed file equal after `\`↔`/` normalization; zero or several
+ * candidates stay missing; case never folded) -- `resolveSelectionSpelling`
+ * maps each stored entry to its LOCAL listed spelling (or null). Rows are
+ * keyed by local spelling, so a foreign-spelled tick DISPLAYS on the right
+ * row whatever the setting says; with `EPSNodes.HealModelPaths` ON the
+ * stored strings are also rewritten to the local spelling at reconcile
+ * time (restore-time correction: `widget.value` written directly, no
+ * callback, order preserved) so a re-save is clean; OFF leaves the stored
+ * strings alone. The backend resolves the same way at queue time, so an
+ * un-healed value still loads the right file.
+ *
  * No window-level listeners: every interaction here is a plain element-level
  * click/change/input, so the FORMAT.md §7.5 capture-phase requirement for
  * window-level gesture listeners does not come up -- there are none.
  */
 
 import { api } from '../../../scripts/api.js'
+import { healComboValue, isHealEnabled } from '../lora_library/path_heal.js'
 
 /** Frozen once shipped -- mirrors the Python node's class id. */
 export const CLASS_ID = 'EPSCheckpointSwitcher'
@@ -121,6 +141,33 @@ export function toggleName(list, name, checked) {
   const has = arr.includes(name)
   if (checked) return has ? arr.slice() : [...arr, name]
   return has ? arr.filter((entry) => entry !== name) : arr.slice()
+}
+
+/**
+ * Maps every entry of *selection* to its LOCAL listed spelling (file
+ * header "Cross-OS spelling"): the entry itself when *checkpoints* lists
+ * it verbatim; otherwise the ONE listed name equal to it once separators
+ * are normalized (`path_heal.js`'s `healComboValue` -- same matcher as
+ * every other combo, so the panel and the generic heal can never disagree);
+ * `null` when nothing local matches (genuinely missing, or an ambiguous
+ * collision). Pure; never throws on junk input.
+ * @param {string[]} selection @param {string[]} checkpoints
+ * @returns {Map<string, string|null>}
+ */
+export function resolveSelectionSpelling(selection, checkpoints) {
+  const list = Array.isArray(checkpoints) ? checkpoints : []
+  const listed = new Set(list)
+  const spelling = new Map()
+  for (const name of Array.isArray(selection) ? selection : []) {
+    if (typeof name !== 'string' || spelling.has(name)) continue
+    if (listed.has(name)) {
+      spelling.set(name, name)
+      continue
+    }
+    const result = healComboValue(name, list)
+    spelling.set(name, result.healed ? result.value : null)
+  }
+  return spelling
 }
 
 // --- Tiny DOM builder (identical helper to every sibling web/eps_image/*.js
@@ -218,6 +265,7 @@ function createState(node, widget) {
     checkpoints: [], // fetched list, server order -- [] until the first load resolves
     checkpointSet: new Set(),
     selection: [], // current checked names, source of truth mirrored from the widget
+    spelling: new Map(), // selection entry -> LOCAL listed spelling | null (resolveSelectionSpelling)
     loaded: false,
     error: null,
     filterText: '',
@@ -300,9 +348,12 @@ function attachDomWidget(state) {
 
 // --- Row model -- folder split, filter, grouping ---
 
-/** @param {string} name @returns {{folder: string, base: string}} */
+/** Splits on EITHER separator: a foreign-spelled missing entry
+ * (`styles\x.safetensors` saved on Windows, nothing local to heal to) still
+ * groups and labels like its neighbours (file header "Cross-OS spelling").
+ * @param {string} name @returns {{folder: string, base: string}} */
 function splitFolder(name) {
-  const idx = name.lastIndexOf('/')
+  const idx = Math.max(name.lastIndexOf('/'), name.lastIndexOf('\\'))
   if (idx === -1) return { folder: '', base: name }
   return { folder: name.slice(0, idx), base: name.slice(idx + 1) }
 }
@@ -316,17 +367,21 @@ function stripExtension(base) {
 
 /** One row per fetched checkpoint, PLUS one row per selected-but-missing
  * name (file header). Order: fetched (server) order first, then any missing
- * entries in `state.selection`'s own order. */
+ * entries in `state.selection`'s own order. Rows are keyed by LOCAL
+ * spelling: a selection entry saved on the other OS ticks the local row it
+ * resolves to, and only an entry resolving to nothing becomes a ⚠ row. */
 function buildRows(state) {
-  const checkedSet = new Set(state.selection)
+  const checkedLocal = new Set(state.selection.map((name) => localNameOf(state, name)))
   const rows = state.checkpoints.map((name) => ({
     name,
     ...splitFolder(name),
     missing: false,
-    checked: checkedSet.has(name)
+    checked: checkedLocal.has(name)
   }))
   for (const name of state.selection) {
-    if (!state.checkpointSet.has(name)) rows.push({ name, ...splitFolder(name), missing: true, checked: true })
+    if (localNameOf(state, name) === null) {
+      rows.push({ name, ...splitFolder(name), missing: true, checked: true })
+    }
   }
   return rows
 }
@@ -376,7 +431,7 @@ function renderCount(state) {
     state.countEl.textContent = ''
     return
   }
-  const validSelected = state.selection.filter((name) => state.checkpointSet.has(name)).length
+  const validSelected = state.selection.filter((name) => localNameOf(state, name) !== null).length
   const missing = state.selection.length - validSelected
   const suffix = missing > 0 ? ` (${missing} missing)` : ''
   state.countEl.textContent = `${validSelected} of ${state.checkpoints.length} selected${suffix}`
@@ -427,11 +482,62 @@ function renderList(state) {
 
 // --- Data flow -- widget <-> state, and the restore/fetch race (file header) ---
 
+/** The LOCAL listed spelling of a selection entry (file header "Cross-OS
+ * spelling"): itself when listed, the unique separator-insensitive match
+ * when saved on the other OS, `null` when nothing local matches. Reads the
+ * memo `refreshSpelling` keeps; an entry the memo hasn't seen (a name just
+ * ticked) falls back to the fetched set. */
+function localNameOf(state, name) {
+  if (state.spelling.has(name)) return state.spelling.get(name)
+  return state.checkpointSet.has(name) ? name : null
+}
+
+/** Rebuilds the selection -> local-spelling memo; called wherever
+ * `state.selection` or `state.checkpoints` changes. */
+function refreshSpelling(state) {
+  state.spelling = resolveSelectionSpelling(state.selection, state.checkpoints)
+}
+
+/**
+ * FORMAT.md §7.6, the panel's half: with `EPSNodes.HealModelPaths` ON,
+ * rewrite every selection entry that resolves to a DIFFERENTLY-spelled
+ * local file to that local spelling, in place, so a re-save carries this
+ * machine's names. Restore-time correction, not a user edit: the widget
+ * value is written directly (no `callback`), entry ORDER is preserved
+ * (emission order is the saved order; the server list's order on this OS
+ * may differ and is not imposed until the user next clicks), and two
+ * foreign entries collapsing onto one local file dedupe to the first.
+ * Genuinely-missing entries are left exactly as stored. With the setting
+ * OFF this is a no-op -- ticks still DISPLAY correctly via `localNameOf`.
+ * Only meaningful once the list has loaded (`state.loaded`).
+ */
+function healSelectionSpelling(state) {
+  if (!state.loaded || !isHealEnabled()) return
+  const healed = []
+  for (const name of state.selection) {
+    const local = localNameOf(state, name)
+    const next = local === null ? name : local
+    if (!healed.includes(next)) healed.push(next)
+  }
+  const json = JSON.stringify(healed)
+  if (json === JSON.stringify(state.selection)) return
+  const changed = state.selection.filter((name, index) => healed[index] !== name)
+  console.log(PREFIX, `healed ${changed.length} ticked checkpoint name(s) to this machine's spelling:`, changed)
+  state.selection = healed
+  refreshSpelling(state)
+  state.widget.value = json // no callback: a spelling fix, not a user edit (path_heal.js rule)
+  state.node.graph?.setDirtyCanvas(true, true)
+}
+
 /** Re-derives `state.selection` from the widget's CURRENT value and
  * repaints -- the shared reconciliation step both the fetch-completion path
- * and wireConfigureReload call. */
+ * and wireConfigureReload call. Also re-resolves each entry's local
+ * spelling and (setting ON) heals the stored strings, so whichever of
+ * {fetch, onConfigure} finishes last reconciles against the real list. */
 function reloadFromWidget(state) {
   state.selection = selectionFromWidgetValue(state.widget.value)
+  refreshSpelling(state)
+  healSelectionSpelling(state)
   renderList(state)
 }
 
@@ -444,11 +550,23 @@ function reloadFromWidget(state) {
  * was written so the two never drift apart.
  */
 function writeSelectionWidget(state, nextSelection) {
-  const checkedSet = new Set(nextSelection)
-  const known = state.checkpoints.filter((name) => checkedSet.has(name))
-  const missing = nextSelection.filter((name) => !state.checkpointSet.has(name))
+  // Known = resolves to a local file (by LOCAL spelling, so an entry saved
+  // on the other OS with the heal setting OFF keeps its stored string yet
+  // sorts where its local file sits); one entry per local file (first wins).
+  const rank = new Map(state.checkpoints.map((name, index) => [name, index]))
+  const seenLocal = new Set()
+  const known = nextSelection
+    .filter((name) => {
+      const local = localNameOf(state, name)
+      if (local === null || seenLocal.has(local)) return false
+      seenLocal.add(local)
+      return true
+    })
+    .sort((a, b) => rank.get(localNameOf(state, a)) - rank.get(localNameOf(state, b)))
+  const missing = nextSelection.filter((name) => localNameOf(state, name) === null)
   const ordered = [...known, ...missing]
   state.selection = ordered
+  refreshSpelling(state)
   const json = JSON.stringify(ordered)
   state.widget.value = json
   state.widget.callback?.(json)
@@ -456,7 +574,13 @@ function writeSelectionWidget(state, nextSelection) {
 }
 
 function onRowToggle(state, name, checked) {
-  writeSelectionWidget(state, toggleName(state.selection, name, checked))
+  // Rows are keyed by LOCAL spelling: a selection entry saved on the other
+  // OS sits on this same row, so unticking the row must drop it too (and
+  // ticking can't double up on it) -- clear every alias first.
+  const aliasFree = state.selection.filter(
+    (entry) => entry === name || localNameOf(state, entry) !== name
+  )
+  writeSelectionWidget(state, toggleName(aliasFree, name, checked))
   renderList(state)
 }
 
@@ -551,6 +675,7 @@ export function attach(node) {
 
     const state = createState(node, widget)
     state.selection = selectionFromWidgetValue(widget.value)
+    refreshSpelling(state)
     hideSelectionWidget(state)
     buildUi(state)
     wireConfigureReload(state)

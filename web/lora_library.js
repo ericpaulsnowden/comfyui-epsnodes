@@ -16,6 +16,7 @@ import * as notebook from './lora_library/notebook.js'
 import * as sets from './lora_library/sets.js'
 import * as controller from './lora_library/controller.js'
 import * as picker from './lora_library/picker.js'
+import * as pathHeal from './lora_library/path_heal.js'
 import { SETTINGS, initSettings } from './lora_library/settings.js'
 
 /**
@@ -91,6 +92,20 @@ app.registerExtension({
     safely('notebook.attachNotebookWidget', () => notebook.attachNotebookWidget(node))
     safely('sets.attachApplySetBehavior', () => sets.attachApplySetBehavior(node))
     safely('picker.attachPickerPanel', () => picker.attachPickerPanel(node))
+    // FORMAT.md §7.6: every node (any type) gets a chained onConfigure so a
+    // PASTED node's model paths heal too; the load path is loadedGraphNode.
+    safely('pathHeal.attachConfigureHeal', () => pathHeal.attachConfigureHeal(node))
+  },
+
+  /**
+   * Fires once per node, subgraphs included, after a whole workflow has
+   * finished loading -- `app.ts`'s `loadGraphData` invokes it from its
+   * post-configure `forEachNode` loop, after every widget value is restored
+   * (verified in the installed 1.48.7 bundle's source map). FORMAT.md §7.6:
+   * heal model-combo values saved with the other OS's path separator.
+   */
+  loadedGraphNode(node) {
+    safely('pathHeal.loadedGraphNode', () => pathHeal.loadedGraphNode(node))
   },
 
   /**

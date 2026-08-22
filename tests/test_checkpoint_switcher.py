@@ -23,7 +23,11 @@ import pytest
 from eps_image import nodes_checkpoint_switcher
 from eps_image.nodes_checkpoint_switcher import (
     EPSCheckpointSwitcher,
+    _build_spelling_index,
+    _normalize_separators,
     _parse_selection,
+    _resolve_listed_name,
+    _resolve_selection,
     _stem,
 )
 
@@ -399,6 +403,173 @@ class TestValidateInputs:
             selection=json.dumps(["whatever.safetensors"])
         )
         assert result is True
+
+
+# ------------------------------- separator-insensitive names (FORMAT.md §7.6)
+
+
+def _install_fake_folder_paths(monkeypatch: pytest.MonkeyPatch, names: list[str]) -> None:
+    """A fake `folder_paths` listing exactly *names* for "checkpoints" --
+    the `fake_folder_paths` fixture's shape with a caller-chosen list."""
+    fake_module = types.ModuleType("folder_paths")
+    fake_module.get_filename_list = lambda folder: list(names) if folder == "checkpoints" else []
+    monkeypatch.setitem(sys.modules, "folder_paths", fake_module)
+
+
+class TestSeparatorInsensitiveResolution:
+    """Owner report 2026-08-22: a workflow saved on the Windows PC stores
+    `styles\\sdxl.safetensors`; the Linux box lists `styles/sdxl.safetensors`
+    -- the tick used to be skipped as missing and VALIDATE_INPUTS rejected
+    the queue. Both now resolve through ONE rule: exact, then the single
+    listed file equal after `\\`->`/` normalization; collisions never
+    guessed; case never folded."""
+
+    def test_normalize_separators_flips_backslashes_only(self) -> None:
+        assert _normalize_separators("a\\b\\c.st") == "a/b/c.st"
+        assert _normalize_separators("a/b/c.st") == "a/b/c.st"
+        assert _normalize_separators("A/B.ST ") == "A/B.ST "  # no case fold, no trim
+
+    def test_spelling_index_groups_collisions(self) -> None:
+        index = _build_spelling_index(["a.st", "p/q.st", "p\\q.st", "s\\t.st"])
+        assert index == {"a.st": ["a.st"], "p/q.st": ["p/q.st", "p\\q.st"], "s/t.st": ["s\\t.st"]}
+
+    @pytest.mark.parametrize(
+        ("name", "expected"),
+        [
+            ("a.safetensors", "a.safetensors"),  # exact
+            ("styles\\b.safetensors", "styles/b.safetensors"),  # Windows-saved -> local /
+            ("styles/b.safetensors", "styles/b.safetensors"),  # exact, subfoldered
+            ("Styles\\b.safetensors", None),  # case is significant
+            ("nope.safetensors", None),  # genuinely missing
+            ("styles\\b.safetensors ", None),  # no whitespace trimming server-side
+        ],
+    )
+    def test_resolve_listed_name_against_a_posix_list(self, name: str, expected) -> None:
+        listed = ["a.safetensors", "styles/b.safetensors"]
+        index = _build_spelling_index(listed)
+        assert _resolve_listed_name(name, set(listed), index) == expected
+
+    def test_resolve_listed_name_reverse_trip_to_a_windows_list(self) -> None:
+        # A Linux/macOS-saved forward slash resolves to the Windows machine's
+        # backslash spelling -- the same file, the OTHER direction.
+        listed = ["a.safetensors", "styles\\b.safetensors"]
+        index = _build_spelling_index(listed)
+        assert (
+            _resolve_listed_name("styles/b.safetensors", set(listed), index)
+            == "styles\\b.safetensors"
+        )
+
+    def test_exact_match_wins_over_a_normalized_sibling(self) -> None:
+        listed = ["p/q.st", "p\\q.st"]
+        index = _build_spelling_index(listed)
+        assert _resolve_listed_name("p\\q.st", set(listed), index) == "p\\q.st"
+        assert _resolve_listed_name("p/q.st", set(listed), index) == "p/q.st"
+
+    def test_collision_is_no_match_and_warns_naming_both(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        # Two listed files differing only by separator (legal on Linux, where
+        # `\` is an ordinary filename character); a third spelling that
+        # normalizes onto them must not pick one.
+        listed = ["a/b\\c.st", "a\\b/c.st"]
+        index = _build_spelling_index(listed)
+        with caplog.at_level(logging.WARNING, logger="eps_image"):
+            result = _resolve_listed_name("a\\b\\c.st", set(listed), index)
+        assert result is None
+        warnings = [r.message for r in caplog.records if r.levelno == logging.WARNING]
+        assert len(warnings) == 1
+        assert "a/b\\c.st" in warnings[0] and "a\\b/c.st" in warnings[0]
+        assert "not guessing" in warnings[0]
+
+    def test_resolve_selection_without_folder_paths_passes_names_through(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Bare environment: no list to resolve against -> every name pairs
+        # with itself so _load_checkpoint's own FileNotFoundError still owns
+        # the missing verdict (the pre-2026-08-22 behaviour, unchanged).
+        monkeypatch.setitem(sys.modules, "folder_paths", None)
+        assert _resolve_selection(["x\\y.st", "z.st"]) == [("x\\y.st", "x\\y.st"), ("z.st", "z.st")]
+
+    def test_resolve_selection_logs_a_respelling_at_info(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        _install_fake_folder_paths(monkeypatch, ["a.safetensors", "styles/b.safetensors"])
+        with caplog.at_level(logging.INFO, logger="eps_image"):
+            resolved = _resolve_selection(["styles\\b.safetensors", "a.safetensors", "gone.st"])
+        assert resolved == [
+            ("styles\\b.safetensors", "styles/b.safetensors"),
+            ("a.safetensors", "a.safetensors"),
+            ("gone.st", None),
+        ]
+        infos = [r.message for r in caplog.records if r.levelno == logging.INFO]
+        assert any("styles\\b.safetensors" in m and "styles/b.safetensors" in m for m in infos)
+        assert all(r.levelno <= logging.INFO for r in caplog.records)  # no warning for a clean heal
+
+    def test_execute_loads_the_local_spelling_for_a_windows_saved_tick(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _install_fake_folder_paths(monkeypatch, ["a.safetensors", "styles/b.safetensors"])
+        loaded: list[str] = []
+
+        def _fake(name: str) -> tuple[Any, Any, Any]:
+            loaded.append(name)
+            if name == "styles/b.safetensors":
+                return ("MODEL_B", "CLIP_B", "VAE_B")
+            raise FileNotFoundError(name)
+
+        monkeypatch.setattr(nodes_checkpoint_switcher, "_load_checkpoint", _fake)
+        node = EPSCheckpointSwitcher()
+        result = node.execute(selection=json.dumps(["styles\\b.safetensors"]))
+        assert loaded == ["styles/b.safetensors"]  # the LISTED spelling reached the loader
+        assert result == (["MODEL_B"], ["CLIP_B"], ["VAE_B"], ["b"])  # label = stem, as before
+
+    def test_execute_collision_is_skipped_as_missing_with_both_warnings(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        _install_fake_folder_paths(monkeypatch, ["a/b\\c.st", "a\\b/c.st", "ok.st"])
+        _stub_loader(monkeypatch, {"ok.st": ("M", "C", "V")})
+        node = EPSCheckpointSwitcher()
+        with caplog.at_level(logging.WARNING, logger="eps_image"):
+            result = node.execute(selection=json.dumps(["a\\b\\c.st", "ok.st"]))
+        assert result == (["M"], ["C"], ["V"], ["ok"])
+        warnings = [r.message for r in caplog.records if r.levelno == logging.WARNING]
+        assert any("differ only by path separator" in m for m in warnings)
+        assert any("no longer found on disk" in m and "a\\b\\c.st" in m for m in warnings)
+
+    def test_execute_genuinely_missing_name_still_skips_with_the_existing_warning(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        _install_fake_folder_paths(monkeypatch, ["a.safetensors"])
+        _stub_loader(monkeypatch, {"a.safetensors": ("M", "C", "V")})
+        node = EPSCheckpointSwitcher()
+        with caplog.at_level(logging.WARNING, logger="eps_image"):
+            result = node.execute(selection=json.dumps(["a.safetensors", "styles\\gone.st"]))
+        assert result == (["M"], ["C"], ["V"], ["a"])
+        assert any("styles\\gone.st" in r.message for r in caplog.records)
+
+    def test_validate_inputs_accepts_a_windows_saved_spelling(
+        self, fake_folder_paths: list[str]
+    ) -> None:
+        # fake_folder_paths lists "styles/b.safetensors"
+        selection = json.dumps(["styles\\b.safetensors", fake_folder_paths[0]])
+        assert EPSCheckpointSwitcher.VALIDATE_INPUTS(selection=selection) is True
+
+    def test_validate_inputs_still_rejects_a_collision_and_a_true_unknown(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _install_fake_folder_paths(monkeypatch, ["a/b\\c.st", "a\\b/c.st", "ok.st"])
+        result = EPSCheckpointSwitcher.VALIDATE_INPUTS(
+            selection=json.dumps(["a\\b\\c.st", "ok.st", "nope.st"])
+        )
+        assert isinstance(result, str)
+        assert "a\\b\\c.st" in result and "nope.st" in result
+        assert "ok.st" not in result
+
+    def test_validate_inputs_case_is_not_folded(self, fake_folder_paths: list[str]) -> None:
+        selection = json.dumps(["Styles/b.safetensors"])
+        result = EPSCheckpointSwitcher.VALIDATE_INPUTS(selection=selection)
+        assert isinstance(result, str)
+        assert "Styles/b.safetensors" in result
 
 
 # --------------------------------------------------------- class shape / spec

@@ -59,6 +59,28 @@ nothing holds its slot, so every later checkpoint shifts up one index (the
 four outputs stay aligned with each other, just one element shorter per
 missing file). Documented behavior, not a bug.
 
+**Names resolve SEPARATOR-INSENSITIVELY (FORMAT.md §4 / §7.6, 2026-08-22).**
+``folder_paths.get_filename_list`` spells a subfoldered checkpoint with the
+host OS's native separator -- ``styles\\sdxl.safetensors`` on the owner's
+Windows PC, ``styles/sdxl.safetensors`` on the Linux box -- and
+``selection`` stores whatever the SAVING machine listed, so a workflow
+carried across the two used to skip every ticked file as "missing" (and
+``VALIDATE_INPUTS`` rejected the queue). Both ``execute`` and
+``VALIDATE_INPUTS`` now resolve each ticked name through ONE rule
+(:func:`_resolve_listed_name`, over an index :func:`_build_spelling_index`
+builds ONCE per call from the live list): an exact listed match first, then
+the single listed file equal to it after flipping every ``\\`` to ``/`` on
+both sides. A normalized COLLISION -- two listed files differing only by
+separator, legal on Linux where ``\\`` is an ordinary filename character --
+is treated as no match and logged naming both, never guessed; a name that
+resolves to nothing keeps the pre-existing "missing → skipped with a
+warning" path below. Case is never folded (significant on Linux). The
+``label`` output is unaffected (:func:`_stem` already splits on either
+separator). The panel's JS heals the stored spelling on load when the
+``EPSNodes.HealModelPaths`` setting is on; this server-side resolution is
+what makes an un-healed value (setting off, raw API caller) still load the
+right file.
+
 **Queue-time validation is a courtesy, not the enforcement layer.**
 ``VALIDATE_INPUTS`` below re-checks every selected name against
 ``folder_paths.get_filename_list("checkpoints")`` and fails the QUEUE with
@@ -172,6 +194,102 @@ def _stem(filename: str) -> str:
     return stem or base
 
 
+def _normalize_separators(value: str) -> str:
+    """*value* with every ``\\`` flipped to ``/`` -- the FORMAT.md §4 rule
+    (``lora_library/sets_store.py``'s function of the same name). No case
+    folding, no whitespace trimming: both can be significant on Linux."""
+    return value.replace("\\", "/")
+
+
+def _build_spelling_index(listed: list[str]) -> dict[str, list[str]]:
+    """``{normalized spelling: [listed spellings]}`` over *listed* -- built
+    ONCE per ``execute``/``VALIDATE_INPUTS`` call (module docstring "Names
+    resolve SEPARATOR-INSENSITIVELY"). A key with 2+ entries is a collision
+    (two listed files differing only by separator) that
+    :func:`_resolve_listed_name` refuses to guess between."""
+    index: dict[str, list[str]] = {}
+    for entry in listed:
+        index.setdefault(_normalize_separators(entry), []).append(entry)
+    return index
+
+
+def _resolve_listed_name(name: str, listed: set[str], index: dict[str, list[str]]) -> str | None:
+    """The LISTED spelling *name* refers to on this machine, or ``None``.
+
+    Exact match first (the common case: the workflow was saved here).
+    Otherwise the single listed file whose normalized spelling equals
+    *name*'s -- a Windows-saved ``styles\\b.safetensors`` resolves to this
+    Linux/macOS machine's ``styles/b.safetensors`` and vice versa. A
+    normalized collision logs a warning naming every candidate and returns
+    ``None`` (never guesses); so does a name nothing matches (silently --
+    the caller owns the "missing" message, the same split
+    ``sets_store.resolve_lora`` makes).
+    """
+    if name in listed:
+        return name
+    candidates = index.get(_normalize_separators(name), [])
+    if len(candidates) == 1:
+        return candidates[0]
+    if len(candidates) > 1:
+        logger.warning(
+            "EPS Checkpoint Switcher: '%s' matches %d checkpoint files that differ "
+            "only by path separator (%s); not guessing between them -- it is "
+            "treated as missing. Rename one, or tick the exact file on this machine.",
+            name,
+            len(candidates),
+            ", ".join(candidates),
+        )
+    return None
+
+
+def _live_checkpoint_list() -> list[str] | None:
+    """``folder_paths.get_filename_list("checkpoints")`` right now, or
+    ``None`` when it can't be read -- ``folder_paths`` absent (bare import,
+    this pack's tests) or ``get_filename_list`` itself failing (an
+    unreadable model directory). Lazy AND guarded, per the module
+    docstring's bare-importable promise; callers degrade to exact-name
+    behaviour on ``None``."""
+    try:
+        import folder_paths  # ComfyUI's own module; only importable inside ComfyUI
+
+        return list(folder_paths.get_filename_list("checkpoints"))
+    except Exception:
+        return None
+
+
+def _resolve_selection(
+    names: list[str], listed: list[str] | None = None
+) -> list[tuple[str, str | None]]:
+    """Each ticked *name* paired with its listed local spelling (or ``None``
+    when nothing resolves), through :func:`_resolve_listed_name` over an
+    index built once. *listed* is the live checkpoint list (fetched here
+    via :func:`_live_checkpoint_list` when omitted). When the list can't be
+    read at all, every name is paired with ITSELF -- the pre-2026-08-22
+    exact-name behaviour, so a bare test environment (or a broken model
+    folder) still reaches :func:`_load_checkpoint`, whose own
+    ``FileNotFoundError`` keeps owning the "missing" verdict."""
+    if listed is None:
+        listed = _live_checkpoint_list()
+    if listed is None:
+        return [(name, name) for name in names]
+    listed_set = set(listed)
+    index = _build_spelling_index(listed)
+    resolved: list[tuple[str, str | None]] = []
+    for name in names:
+        local = _resolve_listed_name(name, listed_set, index)
+        if local is not None and local != name:
+            # %s, not %r: a repr doubles every backslash, which reads as a
+            # DIFFERENT (wrong) path in the log.
+            logger.info(
+                "EPS Checkpoint Switcher: '%s' resolved to this machine's '%s' "
+                "(path separators differ between operating systems)",
+                name,
+                local,
+            )
+        resolved.append((name, local))
+    return resolved
+
+
 def _load_checkpoint(name: str) -> tuple[Any, Any, Any]:
     """Load one checkpoint file exactly the way core's own
     ``CheckpointLoaderSimple.load_checkpoint`` does it.
@@ -268,7 +386,9 @@ class EPSCheckpointSwitcher:
         "lists (later checkpoints shift up one index; nothing holds its "
         "slot). Ticking nothing, or ticking only checkpoints that have since "
         "been removed from disk, is a valid state: the queue still succeeds "
-        "and the downstream branch simply doesn't run."
+        "and the downstream branch simply doesn't run. Ticks saved on another "
+        "operating system (Windows \\ vs Linux/macOS / in subfolder names) "
+        "still load the right file here."
     )
 
     @classmethod
@@ -349,13 +469,12 @@ class EPSCheckpointSwitcher:
         names = _parse_selection(selection)
         if not names:
             return True
-        try:
-            import folder_paths  # ComfyUI's own module; only importable inside ComfyUI
-
-            known = set(folder_paths.get_filename_list("checkpoints"))
-        except Exception:
+        listed = _live_checkpoint_list()
+        if listed is None:
             return True
-        unknown = [name for name in names if name not in known]
+        # Same separator-insensitive rule as execute (module docstring): a
+        # Windows-saved spelling of a file this machine lists is KNOWN.
+        unknown = [name for name, local in _resolve_selection(names, listed) if local is None]
         if unknown:
             return (
                 "EPS Checkpoint Switcher: unknown checkpoint file(s), not in "
@@ -372,9 +491,14 @@ class EPSCheckpointSwitcher:
         labels: list[str] = []
         missing: list[str] = []
 
-        for name in names:
+        # Separator-insensitive resolution against the live list, ONE index
+        # for the whole call (module docstring). A name nothing resolves to
+        # is handed to the loader AS SAVED so its own FileNotFoundError keeps
+        # owning the "missing" verdict below -- one path for "gone from disk",
+        # "never existed here" and "ambiguous collision" alike.
+        for name, local in _resolve_selection(names):
             try:
-                model, clip, vae = _load_checkpoint(name)
+                model, clip, vae = _load_checkpoint(local if local is not None else name)
             except FileNotFoundError:
                 # module docstring: a stale tick (deleted off disk since the
                 # workflow was saved/validated) is skipped, not fatal -- the

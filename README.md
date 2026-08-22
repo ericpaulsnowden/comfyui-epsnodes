@@ -547,6 +547,7 @@ own model, CLIP, and VAE together, plus a `label` (the filename stem, no
 extension) you can
 wire into save paths so results land in folders named by model.
 
+- **Ticks travel between Windows and Linux/macOS (v0.71.0).** A selection saved on the other OS still shows the right rows ticked and loads the right files; with the heal setting on, the saved names are rewritten to this machine's spelling on load so a re-save is clean.
 - **Why this beats three separate switchers for model testing:** a
   checkpoint's model/CLIP/VAE can never drift out of alignment (they travel
   as a group), there's nothing to wire up per checkpoint, and the label
@@ -919,6 +920,28 @@ of their own, so exposing ComfyUI beyond localhost (`--listen`) exposes them
 too — the same trust model as ComfyUI's own routes. Details:
 [docs/FORMAT.md §1](docs/FORMAT.md) (layout) and [§2](docs/FORMAT.md)
 (security posture).
+
+
+## Sharing workflows between machines
+
+ComfyUI lists subfoldered models with the saving machine's path separator
+— `styles\film_grain.safetensors` on Windows, `styles/film_grain.safetensors`
+on Linux/macOS — so a workflow saved on one and opened on the other shows
+every model as missing and the queue rejects it. Since v0.71.0 EPSNodes
+heals this on load: for every model/file combo (core Load Checkpoint /
+UNET / CLIP / VAE / LoRA / ControlNet / upscale loaders, Load Image
+folders, third-party loaders) a saved value that is missing here but
+matches **exactly one** local file once `\`/`/` are normalized is
+re-pointed at that file, and one toast reports how many were healed. It
+never guesses (zero or several candidates are left alone), never changes
+case, and fires for workflow loads, image/JSON drops, templates, undo/redo
+and paste. Toggle it in **Settings → EPSNodes → Workflows → Heal model
+paths across operating systems on load** (on by default; the setting is
+per server, so set it on each machine). The pack's own LoRA nodes already
+store forward-slash names and resolve either way; the Checkpoint
+Switcher's ticks travel the same way. Keep the folder layout under each
+machine's `models/` mirrored and the chore is gone — a model that truly
+lives somewhere else on the other machine stays red for you to re-pick.
 
 ## Versioning
 

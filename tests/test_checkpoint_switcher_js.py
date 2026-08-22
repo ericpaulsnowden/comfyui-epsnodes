@@ -40,6 +40,12 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 CHECKPOINT_SWITCHER_JS = REPO_ROOT / "web" / "eps_image" / "checkpoint_switcher.js"
+# Since 2026-08-22 (FORMAT.md §7.6) the panel imports the cross-OS matcher
+# from the lora_library side -- its real siblings are copied into the
+# served layout too (see the fixture).
+PATH_HEAL_JS = REPO_ROOT / "web" / "lora_library" / "path_heal.js"
+API_JS = REPO_ROOT / "web" / "lora_library" / "api.js"
+VERSION_JS = REPO_ROOT / "web" / "lora_library" / "version.js"
 
 NODE = shutil.which("node")
 
@@ -83,6 +89,33 @@ TOGGLE_NAME_CASES = [
     (["b", "a", "c"], "d", True, ["b", "a", "c", "d"]),  # new entries append at the end
 ]
 
+#: (selection, fetched checkpoints, expected resolveSelectionSpelling() as a
+#: plain object: entry -> LOCAL listed spelling | None). FORMAT.md §7.6 --
+#: Python single-backslash strings land in JS as single-backslash strings
+#: via json.dumps.
+SPELLING_CASES = [
+    # listed verbatim -> itself
+    (["a.st"], ["a.st", "styles/b.st"], {"a.st": "a.st"}),
+    # saved on Windows, this machine lists forward slashes
+    (["styles\\b.st"], ["a.st", "styles/b.st"], {"styles\\b.st": "styles/b.st"}),
+    # the reverse trip
+    (["styles/b.st"], ["styles\\b.st"], {"styles/b.st": "styles\\b.st"}),
+    # genuinely missing here
+    (["gone.st"], ["a.st"], {"gone.st": None}),
+    # exact-present wins even when a sibling normalizes to the same key
+    (["p\\q.st"], ["p/q.st", "p\\q.st"], {"p\\q.st": "p\\q.st"}),
+    # collision between two DISTINCT local files -> never guess
+    (["p/q.st "], ["p/q.st", "p\\q.st"], {"p/q.st ": None}),
+    # case is not folded
+    (["A/b.st"], ["a/b.st"], {"A/b.st": None}),
+    # duplicates collapse to one key; order of the rest is irrelevant here
+    (["a.st", "a.st", "x\\y.st"], ["x/y.st", "a.st"], {"a.st": "a.st", "x\\y.st": "x/y.st"}),
+    # degenerate inputs never throw
+    ([], ["a.st"], {}),
+    (None, None, {}),
+    ([5, None, "a.st"], ["a.st"], {"a.st": "a.st"}),
+]
+
 PROBE_JS = """
 import * as m from './extensions/comfyui-epsnodes/eps_image/checkpoint_switcher.js'
 
@@ -91,7 +124,8 @@ const out = {
     hasInit: typeof m.init === 'function',
     hasAttach: typeof m.attach === 'function',
     hasSelectionFromWidgetValue: typeof m.selectionFromWidgetValue === 'function',
-    hasToggleName: typeof m.toggleName === 'function'
+    hasToggleName: typeof m.toggleName === 'function',
+    hasResolveSelectionSpelling: typeof m.resolveSelectionSpelling === 'function'
   },
   constants: {
     classId: m.CLASS_ID,
@@ -99,7 +133,10 @@ const out = {
     route: m.ROUTE
   },
   selectionFromWidgetValue: [%(raw_values)s].map((v) => m.selectionFromWidgetValue(v)),
-  toggleName: %(toggle_inputs)s.map(([list, name, checked]) => m.toggleName(list, name, checked))
+  toggleName: %(toggle_inputs)s.map(([list, name, checked]) => m.toggleName(list, name, checked)),
+  resolveSelectionSpelling: %(spelling_inputs)s.map(([selection, checkpoints]) =>
+    Object.fromEntries(m.resolveSelectionSpelling(selection, checkpoints))
+  )
 }
 
 process.stdout.write(JSON.stringify(out))
@@ -117,14 +154,24 @@ def checkpoint_switcher_api(tmp_path_factory: pytest.TempPathFactory) -> dict:
     module_dir.mkdir(parents=True)
     shutil.copyfile(CHECKPOINT_SWITCHER_JS, module_dir / "checkpoint_switcher.js")
 
-    # checkpoint_switcher.js's single import -- `../../../scripts/api.js` --
-    # stubbed exactly as test_distributor_js.py stubs `scripts/app.js`. Only
-    # the pure helpers are exercised here, so a no-op fetchApi suffices; the
-    # relative DEPTH is what's actually load-bearing (get it wrong and Node
-    # fails to resolve the module at all).
+    # checkpoint_switcher.js imports `../../../scripts/api.js` -- stubbed
+    # exactly as test_distributor_js.py stubs `scripts/app.js` -- and, since
+    # FORMAT.md §7.6, `../lora_library/path_heal.js` (-> `./api.js` ->
+    # `./version.js` + `../../../scripts/app.js`): the REAL siblings are
+    # copied in. Only the pure helpers are exercised here, so a no-op
+    # fetchApi / an empty app suffice; the relative DEPTHS are what's
+    # actually load-bearing (get one wrong and Node fails to resolve the
+    # module at all).
+    lora_dir = layout / "extensions" / "comfyui-epsnodes" / "lora_library"
+    lora_dir.mkdir(parents=True)
+    shutil.copyfile(PATH_HEAL_JS, lora_dir / "path_heal.js")
+    shutil.copyfile(API_JS, lora_dir / "api.js")
+    shutil.copyfile(VERSION_JS, lora_dir / "version.js")
+
     scripts = layout / "scripts"
     scripts.mkdir(parents=True, exist_ok=True)
     (scripts / "api.js").write_text("export const api = { fetchApi: () => {} }\n", encoding="utf-8")
+    (scripts / "app.js").write_text("export const app = {}\n", encoding="utf-8")
 
     toggle_inputs = json.dumps(
         [[lst, name, checked] for lst, name, checked, _ in TOGGLE_NAME_CASES]
@@ -135,6 +182,7 @@ def checkpoint_switcher_api(tmp_path_factory: pytest.TempPathFactory) -> dict:
         % {
             "raw_values": ", ".join(js for js, _ in RAW_VALUE_CASES),
             "toggle_inputs": toggle_inputs,
+            "spelling_inputs": json.dumps([[sel, ckpts] for sel, ckpts, _ in SPELLING_CASES]),
         },
         encoding="utf-8",
     )
@@ -193,6 +241,7 @@ def test_module_exports_the_extension_entry_points_and_pure_helpers(
         "hasAttach": True,
         "hasSelectionFromWidgetValue": True,
         "hasToggleName": True,
+        "hasResolveSelectionSpelling": True,
     }
 
 
@@ -323,14 +372,22 @@ def test_selection_order_is_the_fetched_list_order_not_click_order(source: str) 
     order = the server list order"), with unknown/missing names appended
     after rather than interleaved arbitrarily."""
     body = _function_body(source, "writeSelectionWidget(state, nextSelection)")
-    assert "state.checkpoints.filter((name) => checkedSet.has(name))" in body
-    assert "nextSelection.filter((name) => !state.checkpointSet.has(name))" in body
+    # Since FORMAT.md §7.6 the sort key is each entry's LOCAL spelling (so a
+    # foreign-spelled entry, heal setting OFF, keeps its stored string yet
+    # sorts where its local file sits), one entry per local file.
+    assert "const rank = new Map(state.checkpoints.map((name, index) => [name, index]))" in body
+    assert "rank.get(localNameOf(state, a)) - rank.get(localNameOf(state, b))" in body
+    assert "nextSelection.filter((name) => localNameOf(state, name) === null)" in body
     assert "const ordered = [...known, ...missing]" in body
 
 
 def test_row_toggle_uses_the_pure_helper(source: str) -> None:
     body = _function_body(source, "onRowToggle(state, name, checked)")
-    assert "toggleName(state.selection, name, checked)" in body
+    # §7.6: rows are keyed by local spelling, so an untick must also drop a
+    # foreign-spelled alias of the same file -- aliases are cleared first,
+    # then the pure helper applies the click.
+    assert "localNameOf(state, entry) !== name" in body
+    assert "toggleName(aliasFree, name, checked)" in body
     assert "writeSelectionWidget(state," in body
 
 
@@ -343,8 +400,11 @@ def test_missing_rows_are_synthesized_in_a_guarded_branch(source: str) -> None:
     being in the fetched set, still fully checked."""
     body = _function_body(source, "buildRows(state)")
     assert "missing: false" in body
-    assert "if (!state.checkpointSet.has(name))" in body
+    # §7.6: "missing" means resolves to NO local file (separator-insensitive),
+    # not merely "not spelled the way this machine lists it".
+    assert "if (localNameOf(state, name) === null)" in body
     assert "missing: true, checked: true" in body
+    assert "checked: checkedLocal.has(name)" in body
 
 
 def test_missing_rows_render_distinctly_but_stay_interactive(source: str) -> None:
@@ -429,3 +489,76 @@ def test_width_floor_lifts_through_set_size_not_a_dead_is_array_guard(source: st
     body = _function_body(source, "installMinWidth(node, minWidth)")
     assert "if (node.size && node.size[0] < minWidth)" in body
     assert "node.setSize([minWidth, node.size[1]])" in body
+
+
+# ------------------------------------------- cross-OS spelling (FORMAT.md §7.6)
+
+
+def test_resolve_selection_spelling_cases(checkpoint_switcher_api: dict) -> None:
+    """Each stored entry -> its LOCAL listed spelling: itself when listed;
+    the ONE separator-insensitive match otherwise; null when nothing local
+    matches (missing, collision, case difference)."""
+    pairs = zip(SPELLING_CASES, checkpoint_switcher_api["resolveSelectionSpelling"], strict=True)
+    for (selection, checkpoints, expected), got in pairs:
+        msg = (
+            f"resolveSelectionSpelling({selection!r}, {checkpoints!r}) -> {got!r}, "
+            f"wanted {expected!r}"
+        )
+        assert got == expected, msg
+
+
+def test_panel_shares_the_generic_matcher_and_gate(source: str) -> None:
+    """One matcher for every combo in the pack: the panel imports
+    healComboValue/isHealEnabled from path_heal.js rather than re-deriving
+    the rule, so the generic heal and the panel can never disagree."""
+    assert "import { healComboValue, isHealEnabled } from '../lora_library/path_heal.js'" in source
+    body = _function_body(source, "resolveSelectionSpelling(selection, checkpoints)")
+    assert "if (listed.has(name)) {" in body  # exact first
+    assert "healComboValue(name, list)" in body
+    assert "result.healed ? result.value : null" in body
+
+
+def test_reload_reconciles_spelling_then_heals_then_paints(source: str) -> None:
+    """Whichever of {fetch, onConfigure} lands last re-resolves every entry
+    against the REAL list, heals (setting permitting), and only then
+    repaints -- the same single reconcile step as before, extended."""
+    body = _function_body(source, "reloadFromWidget(state)")
+    reparse = body.index("selectionFromWidgetValue(state.widget.value)")
+    spelling = body.index("refreshSpelling(state)")
+    heal = body.index("healSelectionSpelling(state)")
+    paint = body.index("renderList(state)")
+    assert reparse < spelling < heal < paint
+
+
+def test_heal_selection_spelling_is_gated_orderless_and_callback_free(source: str) -> None:
+    """Setting ON: stored strings are rewritten to the local spelling in
+    place -- order preserved, widget written directly (NO callback: a
+    spelling fix, not a user edit), canvas marked dirty. Setting OFF (or
+    list not loaded yet): untouched."""
+    body = _function_body(source, "healSelectionSpelling(state)")
+    assert body.strip().startswith("if (!state.loaded || !isHealEnabled()) return")
+    assert "const local = localNameOf(state, name)" in body
+    assert "state.widget.value = json" in body
+    assert ".callback" not in body
+    assert "state.node.graph?.setDirtyCanvas(true, true)" in body
+    # a no-op when nothing changes: the widget is not rewritten needlessly
+    assert "if (json === JSON.stringify(state.selection)) return" in body
+    # no re-sorting on heal -- only writeSelectionWidget (a user click) imposes server order
+    assert "rank" not in body and "sort(" not in body
+
+
+def test_attach_primes_the_spelling_memo_and_count_uses_it(source: str) -> None:
+    attach = _function_body(source, "attach(node)")
+    assert "refreshSpelling(state)" in attach
+    count = _function_body(source, "renderCount(state)")
+    assert "localNameOf(state, name) !== null" in count
+    local = _function_body(source, "localNameOf(state, name)")
+    assert "state.spelling.has(name)" in local
+    assert "state.checkpointSet.has(name) ? name : null" in local
+
+
+def test_split_folder_splits_on_either_separator(source: str) -> None:
+    """A foreign-spelled MISSING entry still groups/labels like its
+    neighbours rather than showing a backslash-riddled base name."""
+    body = _function_body(source, "splitFolder(name)")
+    assert "Math.max(name.lastIndexOf('/'), name.lastIndexOf('\\\\'))" in body

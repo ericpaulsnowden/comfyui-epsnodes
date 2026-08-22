@@ -30,6 +30,7 @@
 
 import { app } from '../../../scripts/app.js'
 import * as api from './api.js'
+import { HEAL_SETTING_ID } from './path_heal.js'
 
 const CATEGORY = 'EPSNodes'
 
@@ -85,6 +86,26 @@ export const SETTINGS = [
       'until a node fails at run time.',
     type: () => folderStatusRow(),
     defaultValue: ''
+  },
+  {
+    // FORMAT.md §7.6 cross-OS path healing; read by web/lora_library/
+    // path_heal.js on every load through app.extensionManager.setting.get.
+    id: HEAL_SETTING_ID,
+    category: [CATEGORY, 'Workflows', 'Model paths'],
+    name: 'Heal model paths across operating systems on load',
+    tooltip:
+      'When a workflow opens, any model/file combo whose saved value is ' +
+      'missing on this machine is re-pointed at the local file that matches ' +
+      'it once Windows and Linux/macOS path separators (\\ vs /) are ' +
+      'normalized — so a workflow saved on your Windows PC loads on the Linux ' +
+      'box without re-picking every model, and the reverse. Only values that ' +
+      'are already missing locally and match exactly ONE local file are ' +
+      'touched; it never guesses between candidates and never changes case. ' +
+      'Covers core loaders (checkpoint, UNET, CLIP, VAE, LoRA, ControlNet, ' +
+      'upscale), Load Image folders, third-party loaders, and the EPS ' +
+      "Checkpoint Switcher's ticks. Undo/redo and paste are healed the same way.",
+    type: 'boolean',
+    defaultValue: true
   },
   {
     id: 'loraLibrary.versions',
