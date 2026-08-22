@@ -105,6 +105,15 @@ const NODE_TITLE = 'EPS Run Multiplier'
  * run(), v0.58.0) -- payload `{node, steps, pairs, total}`. */
 export const EVENT_NAME = 'eps-run-multiplier-count'
 
+/** v0.68.0: the pack's own `GET /eps/list_flags` -- every loaded class's
+ * INPUT_IS_LIST / OUTPUT_IS_LIST (eps_image/routes_list_flags.py). Core's
+ * `/object_info` exposes output_is_list but NOT input_is_list, and that
+ * one bit is what separates an ordinary mapped node (output length = its
+ * longest list input) from a flattener (emits exactly one) -- guessing
+ * would overclaim. With both known, the estimator counts through ANY
+ * node (owner ask 2026-08-21: models through a third-party enhancer). */
+export const LIST_FLAGS_ROUTE = '/eps/list_flags'
+
 const PREFIX = '[eps_image]'
 const READOUT_WIDGET_NAME = 'eps_rc_readout'
 const READOUT_WIDGET_TYPE = 'eps_run_count_readout'
@@ -782,7 +791,35 @@ function sourceCount(snapshot, link, path) {
     const presets = Math.max(1, resolutionPresetCount(node.widgets?.presets))
     return { count: mapLen * presets, atLeast, srcId: id }
   }
-  if (CORE_SINGLE_CLASSES.has(type)) {
+  // v0.68.0: ANY class whose list flags the adapter injected (from
+  // `GET /eps/list_flags`) gets core's exact rule -- no allow-list needed
+  // (owner ask 2026-08-21: models through a ComfyUI-Krea2T-Enhancer
+  // "only shows 1"). Three shapes, per execution.py:
+  //   - INPUT_IS_LIST false + plain output: MAPPED over its longest list
+  //     input, one element per run -> the CORE_SINGLE_CLASSES body below.
+  //   - INPUT_IS_LIST true + plain output: a FLATTENER -- executes ONCE
+  //     over the whole lists and emits exactly one element (blocked
+  //     outright by a known-blocked upstream, like any consumer).
+  //   - OUTPUT_IS_LIST true on the consumed slot: it emits a list of its
+  //     own choosing -- unknowable length, the honest `≥` floor.
+  // Flags absent (route not answered / older backend): unknowable, as
+  // before -- never a guess.
+  const slotIsList = Array.isArray(node.outputIsList)
+    ? node.outputIsList[resolved.slot ?? 0]
+    : undefined
+  const flagsKnown = typeof node.inputIsList === 'boolean' && typeof slotIsList === 'boolean'
+  if (flagsKnown && node.inputIsList && !slotIsList) {
+    if (path.has(id)) return { count: 1, atLeast: true, srcId: id }
+    const sub = new Set([...path, id])
+    for (const inputLink of Object.values(node.inputs || {})) {
+      const inner = sourceCount(snapshot, inputLink ?? null, sub)
+      if (!inner) continue
+      if (inner.error) return { count: 1, atLeast: true, srcId: id, error: inner.error }
+      if (inner.count === 0 && !inner.atLeast) return { count: 0, atLeast: false, srcId: id }
+    }
+    return { count: 1, atLeast: false, srcId: id }
+  }
+  if (CORE_SINGLE_CLASSES.has(type) || (flagsKnown && !node.inputIsList && !slotIsList)) {
     // Map-over-list (see CORE_SINGLE_CLASSES' own comment): none of these
     // declare INPUT_IS_LIST, so core runs them once per element of their
     // LONGEST list input, broadcasting the rest (execution.py's
@@ -1121,6 +1158,13 @@ export function snapshotFromGraph(graph) {
     if (classType === 'EPSImageGrid' && Number.isFinite(node.imgs?.length)) {
       entry.imageGridCount = node.imgs.length
     }
+    // v0.68.0: the class's list semantics, when the route has answered --
+    // the estimator's generic map-over-list branch keys off these.
+    const flags = listFlags?.get(classType)
+    if (flags) {
+      entry.inputIsList = flags.inputIsList
+      entry.outputIsList = flags.outputIsList
+    }
     snapshot.nodes[String(node.id)] = entry
   }
   return snapshot
@@ -1156,9 +1200,59 @@ let countListenerInstalled = false
  * moment the multiplier executes, long before samplers grind, so a
  * wrong number can be cancelled cheaply.
  */
+/** classType -> {inputIsList: boolean, outputIsList: boolean[]} once the
+ * route has answered; null until then (unknown nodes stay unknowable --
+ * the pre-v0.68.0 posture -- never a guess). */
+let listFlags = null
+let listFlagsPromise = null
+
+/** Fetch the list flags ONCE per page; on arrival every attached readout
+ * recomputes (root graph + subgraphs), so a node that painted `≥` before
+ * the answer settles to its exact count. Failure is logged, not fatal. */
+function loadListFlags() {
+  if (listFlagsPromise) return listFlagsPromise
+  listFlagsPromise = (async () => {
+    try {
+      const response = await api.fetchApi(LIST_FLAGS_ROUTE)
+      if (!response || !response.ok) throw new Error(`HTTP ${response?.status}`)
+      const data = await response.json()
+      const map = new Map()
+      for (const [name, flags] of Object.entries(data?.classes || {})) {
+        map.set(name, {
+          inputIsList: !!flags?.input_is_list,
+          outputIsList: Array.isArray(flags?.output_is_list) ? flags.output_is_list.map(Boolean) : []
+        })
+      }
+      listFlags = map
+      recomputeEveryGraph()
+    } catch (error) {
+      console.warn(PREFIX, 'list flags unavailable -- unknown node classes stay unknowable', error)
+    }
+  })()
+  return listFlagsPromise
+}
+
+/** Schedule a recompute on the root graph and every reachable subgraph
+ * (cycle-guarded, capped) -- used when a late-arriving fact (the list
+ * flags) changes what every readout should say. */
+function recomputeEveryGraph() {
+  const root = app?.graph
+  if (!root) return
+  const seen = new Set()
+  const stack = [root]
+  while (stack.length && seen.size < 64) {
+    const graph = stack.pop()
+    if (!graph || seen.has(graph)) continue
+    seen.add(graph)
+    scheduleGraphRecompute(graph)
+    for (const node of graph._nodes || []) if (node?.subgraph) stack.push(node.subgraph)
+  }
+}
+
 export function init() {
   if (countListenerInstalled) return
   countListenerInstalled = true
+  loadListFlags()
   api.addEventListener(EVENT_NAME, (event) => {
     const detail = event?.detail || {}
     const total = detail.total

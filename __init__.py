@@ -179,6 +179,20 @@ try:
 except Exception:
     logger.exception("EPSNodes: eps_image.routes_checkpoint_switcher failed to register")
 
+# EPS Run Multiplier estimator's list-flags route (`GET /eps/list_flags`,
+# v0.68.0): every loaded class's INPUT_IS_LIST/OUTPUT_IS_LIST so the
+# pre-queue count can map through any ordinary third-party node. No
+# LibraryContext needed (it reads `nodes.NODE_CLASS_MAPPINGS`), registered
+# just as defensively as the three route modules above.
+try:
+    _list_flags_routes_path = "eps_image.routes_list_flags"
+    if _TOP_PREFIX:
+        _list_flags_routes_path = f"{_TOP_PREFIX}.{_list_flags_routes_path}"
+    _list_flags_routes = importlib.import_module(_list_flags_routes_path)
+    _list_flags_routes.register()
+except Exception:
+    logger.exception("EPSNodes: eps_image.routes_list_flags failed to register")
+
 # EPSResolution's server-side size-presets route module (`GET/POST
 # /eps_resolution/presets*`) -- UNLIKE the three context-free eps_image
 # route blocks above, this one needs the shared LibraryContext (FORMAT.md

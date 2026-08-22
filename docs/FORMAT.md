@@ -350,6 +350,7 @@ message>"}` with a 4xx status. `mtime` values are float POSIX seconds.
 | `POST /lora_library/set/delete` `{"slug"}` | `{"ok","sets"}` |
 | `GET /lora_library/sets_layout` | §4.2: `{"layout": {"categories", "order"}}`, HEALED against the sets on disk. No loopback gate — the file lives inside `library_dir` (§2 grants remote read+write; the picker feed's rationale) |
 | `POST /lora_library/sets_layout` `{"layout"}` | §4.2 full replace; body normalized + healed server-side (unknown slugs dropped, missing sets appended uncategorized), so a stale client can never vanish a set. → `{"ok","layout"}`; 400 non-JSON body / non-object layout |
+| `GET /eps/list_flags` | §6.10 estimator feed (v0.68.0): `{"classes": {"<ClassName>": {"input_is_list": bool, "output_is_list": [bool, …]}}}` over `nodes.NODE_CLASS_MAPPINGS`, `getattr` defaults exactly as `execution.py` reads them; per-class inspection failures skipped. No loopback gate — class metadata every viewer already gets in bulk via `/object_info` (plus the one boolean it omits) |
 | `GET /lora_library/picker` | §6.13 panel feed: `{"loras": [installed spellings, `get_filename_list("loras")` order], "previews": [subset of `loras` with a sidecar preview image — v0.61.2, computed with one directory listing per unique folder, case-insensitive name match; the panel builds a thumbnail `<img>` ONLY for these, so no-preview rows never fire a 404 probe or paint a placeholder (owner jank report 2026-08-14)], "favorites": [forward-slash names, store order], "recents": [{"file","ts"} newest first], "mtime": float\|null}`. NO loopback gate — the picker file lives inside `library_dir`, which §2 already grants remote read+write (the presets-routes rationale verbatim; the lora LIST is the same one `/object_info` exposes to every viewer) |
 | `POST /lora_library/picker/favorite` `{"file","on"}` | star/unstar one lora (name normalized to forward slashes in the store). `file` non-empty string, `on` bool, else 400. NOT required to be installed — unstarring a favorite that only exists on the other machine must work. → `{"ok","favorites","mtime"}` |
 | `POST /lora_library/picker/recent` `{"files": [..]}` | record used loras: each moves to the FRONT of `recents` (dedup by file, fresh server-stamped `ts`), list capped at 30. Empty list = no-op 200. Non-list / non-string entry ⇒ 400. → `{"ok","recents","mtime"}` |
@@ -2142,9 +2143,20 @@ label, so two chained Cross Products cannot express it.
     counts through it, and an image-typed output with no backing image
     wired is the known-zero blocker family), a chained §6.10 multiplier
     (recursive, cycle-guarded), and reroutes (followed). A short allow-list of core single-output loaders
-    counts as 1. ANYTHING else is UNKNOWN: it contributes 1 and the
-    readout downgrades to `≥ N`, naming which input is unknowable —
-    never false confidence. An aligned-mode length disagreement or a
+    counts as 1. **ANY other class counts too, since v0.68.0 (owner ask
+    2026-08-21: "multiple models through a ComfyUI-Krea2T-Enhancer … only
+    shows 1")** — `init()` fetches the pack's `GET /eps/list_flags` once
+    (`eps_image/routes_list_flags.py`: every loaded class's
+    `INPUT_IS_LIST`/`OUTPUT_IS_LIST` — core's `/object_info` exposes only
+    the latter, and that missing bit is what separates a mapped node from a
+    flattener), the adapter injects them per node, and the estimator
+    applies `execution.py`'s own rule: INPUT_IS_LIST false + plain output
+    ⇒ MAPPED over its longest list input (exact); INPUT_IS_LIST true +
+    plain output ⇒ flattener, exactly 1; OUTPUT_IS_LIST on the consumed
+    slot ⇒ unknowable length, `≥`. A late answer recomputes every graph
+    (root + subgraphs). Flags absent (route unanswered) ⇒ the old posture:
+    it contributes 1 and the readout downgrades to `≥ N`, naming which
+    input is unknowable — never false confidence. An aligned-mode length disagreement or a
     multiply-mode same-origin vae paints the line as the ERROR it will
     become at queue time, BEFORE the queue: the owner's v0.57.0 mismatch
     would have been visible on the node. Refresh follows the §6.3

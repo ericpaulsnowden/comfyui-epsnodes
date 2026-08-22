@@ -148,6 +148,39 @@ def _chained_solo_shape() -> dict:
     return shape
 
 
+def _third_party(inputs: dict, **flags) -> dict:
+    """A class the estimator has never heard of ("Krea2TEnhancer"), with
+    the adapter-injected list flags (v0.68.0) -- or none, for the
+    unknowable baseline."""
+    return {"classType": "Krea2TEnhancer", "widgets": {}, "inputs": inputs, **flags}
+
+
+def _models_through(enhancer: dict) -> dict:
+    """3-tick Checkpoint Switcher -> enhancer -> multiplier.model, one text."""
+    return {
+        "nodes": {
+            "20": _checkpoint_switcher(["a.st", "b.st", "c.st"]),
+            "3": _text_source(),
+            "en": enhancer,
+            "5": {
+                "classType": "EPSCrossSweep",
+                "widgets": {"base_folder": "", "pair_mode": "multiply", "sweep_mode": "multiply"},
+                "inputs": {"model": _link("en", 0), "text": _link("3")},
+            },
+        }
+    }
+
+
+def _blocked_models_through() -> dict:
+    """The mapped-enhancer shape over an EMPTY-selection Checkpoint Switcher
+    (known-blocked upstream)."""
+    shape = _models_through(
+        _third_party({"model": _link("20", 0)}, inputIsList=False, outputIsList=[False])
+    )
+    shape["nodes"]["20"] = _checkpoint_switcher([])
+    return shape
+
+
 def _image_grid_emit(count: int) -> dict:
     """§6.6 Image Grid in Emit mode with the adapter's injected live buffer
     count (a client-side echo of server state, so always a FLOOR)."""
@@ -1077,6 +1110,49 @@ ESTIMATE_CASES = [
         {"total": 0, "atLeast": False, "error": None,
          "breakdown": "nothing to run (image input is empty/blocked)"},
     ),
+    # ------------------------------ v0.68.0 generic list flags (any node)
+    (
+        # Owner ask: 3 models through a third-party enhancer "only shows 1".
+        # With the route's flags (plain node: INPUT_IS_LIST false, output
+        # not a list) it is MAPPED over the switcher's 3 -> 3 exact steps.
+        "third_party_mapped_node_counts_its_longest_list_input",
+        _models_through(_third_party({"model": _link("20", 0)},
+                                     inputIsList=False, outputIsList=[False])),
+        "5",
+        {"total": 3, "atLeast": False, "steps": 3, "pairs": 1, "unknowns": [], "error": None},
+    ),
+    (
+        # No flags (route not answered): the pre-v0.68.0 posture, unknowable.
+        "third_party_without_flags_stays_unknowable",
+        _models_through(_third_party({"model": _link("20", 0)})),
+        "5",
+        {"total": 1, "atLeast": True, "steps": 1, "unknowns": ["model"], "error": None},
+    ),
+    (
+        # A FLATTENER (INPUT_IS_LIST true, plain output) executes once and
+        # emits exactly one -- 1 EXACT, not a floor.
+        "third_party_flattener_is_exactly_one",
+        _models_through(_third_party({"model": _link("20", 0)},
+                                     inputIsList=True, outputIsList=[False])),
+        "5",
+        {"total": 1, "atLeast": False, "steps": 1, "unknowns": [], "error": None},
+    ),
+    (
+        # OUTPUT_IS_LIST on the consumed slot: it emits a list of its own
+        # choosing -- unknowable, honest floor.
+        "third_party_list_output_is_a_floor",
+        _models_through(_third_party({"model": _link("20", 0)},
+                                     inputIsList=False, outputIsList=[True])),
+        "5",
+        {"total": 1, "atLeast": True, "unknowns": ["model"], "error": None},
+    ),
+    (
+        # A mapped node whose upstream is known-blocked is blocked outright.
+        "third_party_mapped_node_over_a_blocked_upstream_is_zero",
+        _blocked_models_through(),
+        "5",
+        {"total": 0, "atLeast": False, "error": None},
+    ),
 ]
 
 #: (estimate object, expected formatReadout result) -- pins the exact line
@@ -1517,6 +1593,27 @@ def test_resolution_branch_is_mapped_not_flattened(source: str) -> None:
     assert "Math.max(1, resolutionPresetCount(node.widgets?.presets))" in branch
     assert "slot <= 1 ? 'image' : slot >= 6 ? `image_${slot - 4}` : null" in branch
     assert "return { count: 0, atLeast: false, srcId: id }" in branch
+
+
+def test_list_flags_are_fetched_once_and_injected_by_the_adapter(source: str) -> None:
+    """v0.68.0: init() kicks off ONE fetch of the pack's `/eps/list_flags`;
+    the adapter injects each class's flags onto the snapshot entry; the
+    generic branch keys off exactly those two fields, and a late answer
+    recomputes every graph (root + subgraphs)."""
+    assert "export const LIST_FLAGS_ROUTE = '/eps/list_flags'" in source
+    init = _function_body(source, "init()")
+    assert "loadListFlags()" in init
+    loader = _function_body(source, "loadListFlags()")
+    assert "api.fetchApi(LIST_FLAGS_ROUTE)" in loader
+    assert "recomputeEveryGraph()" in loader
+    adapter = _function_body(source, "snapshotFromGraph(graph)")
+    assert "const flags = listFlags?.get(classType)" in adapter
+    assert "entry.inputIsList = flags.inputIsList" in adapter
+    assert "entry.outputIsList = flags.outputIsList" in adapter
+    body = _function_body(source, "sourceCount(snapshot, link, path)")
+    assert "const flagsKnown = typeof node.inputIsList === 'boolean' && typeof slotIsList === 'boolean'" in body
+    assert "if (flagsKnown && node.inputIsList && !slotIsList) {" in body
+    assert "if (CORE_SINGLE_CLASSES.has(type) || (flagsKnown && !node.inputIsList && !slotIsList)) {" in body
 
 
 def test_format_readout_cases(cross_sweep_api: dict) -> None:

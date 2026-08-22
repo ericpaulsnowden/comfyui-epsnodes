@@ -707,8 +707,11 @@ selections, Notebook multi-select, Iterator step math, an Image Grid run
 through an EPS Resolution (or through a switcher and then a Resolution —
 v0.67.1), even chained multipliers — all counted the way ComfyUI will
 actually execute them (fanned lists through loaders included). It is honest about limits:
-anything it can't inspect (a third-party batch node, a saved set's file)
-turns the line into **`≥ N`** and names which input is unknowable; a
+ordinary third-party nodes in the chain (a model enhancer, a CLIP
+tweak — anything ComfyUI maps over a list) count through too, since
+v0.68.0; only a node that emits a list of its own choosing or a saved
+set's file turns the line into **`≥ N`** and names which input is
+unknowable; a
 wiring that will *fail* the queue (mismatched sweep lengths, an empty
 Notebook) paints red with the reason, and a wiring that will silently run
 *zero* times says "nothing to run" and names the empty input. Then, the
