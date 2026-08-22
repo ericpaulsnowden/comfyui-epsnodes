@@ -32,6 +32,9 @@ established for exactly that case. The live behavior is verified on the rig.
 
 from __future__ import annotations
 
+import json
+import shutil
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -389,3 +392,251 @@ def test_first_tap_of_a_pair_notes_the_collapse_state(source: str) -> None:
     assert "else state.collapsedCategories.delete(category)" in restore
     assert "renderList(state)" in restore
     assert "categoryTapMemo: null," in source
+
+
+# ---------------------------------------------------------------------------
+# Library-on-a-NAS round (owner 2026-08-22: "Sometimes the Notebook looks
+# broken but it just takes over a minute to load, even when just tabbing
+# between open workflows"). A tab switch RECREATES the node, and the panel
+# sat on an empty list until a fresh full GET (whole-file parse, full text)
+# came back over the NAS. Now a module-level session cache paints what the
+# previous incarnation loaded INSTANTLY, and `known_mtime` lets the backend
+# answer `unchanged` so the refresh is a stat, not a parse (FORMAT.md
+# §5/§6.1/§7.2).
+#
+# Two layers, the sibling files' conventions: a Node probe of the PURE
+# exported helpers (test_m3_pinning_js.py's served-layout fixture --
+# notebook.js imports ./api.js -> ../../../scripts/api.js, so the layout
+# mirrors that depth and stubs the two core scripts), and source pins for
+# the closure-bound reload path.
+# ---------------------------------------------------------------------------
+
+WEB = REPO_ROOT / "web"
+API_JS = WEB / "lora_library" / "api.js"
+VERSION_JS = WEB / "lora_library" / "version.js"
+NODE = shutil.which("node")
+
+CACHE_PROBE_JS = """
+import * as nb from './extensions/comfyui-epsnodes/lora_library/notebook.js'
+
+const out = {
+  exports: {
+    notebookCacheGet: typeof nb.notebookCacheGet === 'function',
+    notebookCacheSet: typeof nb.notebookCacheSet === 'function',
+    isUnchangedResponse: typeof nb.isUnchangedResponse === 'function'
+  }
+}
+out.missBeforeSet = nb.notebookCacheGet('a.md')
+nb.notebookCacheSet('a.md', { entries: [{ name: 'x' }], mtime: 5 }, 5)
+nb.notebookCacheSet('/nas/b.md', { entries: [] }, null)
+out.hitA = nb.notebookCacheGet('a.md')
+out.hitB = nb.notebookCacheGet('/nas/b.md')
+out.missOtherFile = nb.notebookCacheGet('c.md')
+out.missNonString = nb.notebookCacheGet(null)
+nb.notebookCacheSet('a.md', { entries: [{ name: 'y' }], mtime: 9 }, 9)
+out.overwrittenA = nb.notebookCacheGet('a.md')
+nb.notebookCacheSet('a.md', null, 10)
+out.nullPayloadIgnored = nb.notebookCacheGet('a.md')
+nb.notebookCacheSet('a.md', { entries: [] }, 'not-a-number')
+out.nonNumericMtimeIsNull = nb.notebookCacheGet('a.md')
+out.unchanged = [
+  nb.isUnchangedResponse({ ok: true, unchanged: true, mtime: 1.5, exists: true, file: '/x' }),
+  nb.isUnchangedResponse({ unchanged: true }),
+  nb.isUnchangedResponse({ ok: true, entries: [], mtime: 1 }),
+  nb.isUnchangedResponse({ unchanged: 'yes' }),
+  nb.isUnchangedResponse({ unchanged: 1 }),
+  nb.isUnchangedResponse(null),
+  nb.isUnchangedResponse(undefined),
+  nb.isUnchangedResponse('unchanged')
+]
+process.stdout.write(JSON.stringify(out))
+"""
+
+
+@pytest.fixture(scope="module")
+def cache_api(tmp_path_factory: pytest.TempPathFactory) -> dict:
+    """Runs CACHE_PROBE_JS against the REAL notebook.js in a served-layout
+    tmp dir (importing the module under Node is itself a regression test --
+    see test_m3_pinning_js.py's docstring)."""
+    if NODE is None:
+        pytest.skip("node (JS runtime) not installed")
+    layout = tmp_path_factory.mktemp("web_root")
+    module_dir = layout / "extensions" / "comfyui-epsnodes" / "lora_library"
+    module_dir.mkdir(parents=True)
+    for src in (NOTEBOOK_JS, API_JS, VERSION_JS):
+        shutil.copyfile(src, module_dir / src.name)
+    scripts = layout / "scripts"
+    scripts.mkdir(parents=True, exist_ok=True)
+    (scripts / "api.js").write_text(
+        "export const api = { fetchApi: () => {}, apiURL: (p) => p, addEventListener: () => {} }\n",
+        encoding="utf-8",
+    )
+    (scripts / "app.js").write_text("export const app = {}\n", encoding="utf-8")
+    probe = layout / "probe.mjs"
+    probe.write_text(CACHE_PROBE_JS, encoding="utf-8")
+    result = subprocess.run(
+        [NODE, str(probe)], capture_output=True, text=True, timeout=60, cwd=layout
+    )
+    assert result.returncode == 0, f"probe failed (notebook.js must IMPORT under Node):\n{result.stderr}"
+    return json.loads(result.stdout)
+
+
+def _body(source_text: str, signature: str) -> str:
+    """Body of a top-level ``function <signature> {`` (an `export`/`async`
+    prefix is not part of *signature*) up to its column-0 closing brace --
+    the sibling JS test files' identical helper."""
+    head = f"function {signature} {{\n"
+    assert head in source_text, f"{head!r} not found"
+    start = source_text.index(head) + len(head)
+    end = source_text.index("\n}\n", start)
+    return source_text[start:end]
+
+
+def test_cache_helpers_are_pure_per_file_and_last_write_wins(cache_api: dict) -> None:
+    assert cache_api["exports"] == {k: True for k in cache_api["exports"]}
+    assert cache_api["missBeforeSet"] is None
+    assert cache_api["hitA"] == {"payload": {"entries": [{"name": "x"}], "mtime": 5}, "mtime": 5}
+    # a file that does not exist yet caches its (empty) payload with no mtime
+    assert cache_api["hitB"] == {"payload": {"entries": []}, "mtime": None}
+    # per file, never cross-file
+    assert cache_api["missOtherFile"] is None
+    assert cache_api["missNonString"] is None
+    assert cache_api["overwrittenA"]["mtime"] == 9
+    assert cache_api["overwrittenA"]["payload"]["entries"] == [{"name": "y"}]
+    # defensive: a null payload is ignored, a non-numeric mtime stores as null
+    assert cache_api["nullPayloadIgnored"]["mtime"] == 9
+    assert cache_api["nonNumericMtimeIsNull"] == {"payload": {"entries": []}, "mtime": None}
+
+
+def test_unchanged_is_exactly_unchanged_true(cache_api: dict) -> None:
+    """CONTRACT: `{"ok": true, "unchanged": true, ...}` = keep what's painted;
+    ANY payload without `unchanged: true` is the full payload (an older
+    backend ignores `known_mtime` and returns it)."""
+    assert cache_api["unchanged"] == [True, True, False, False, False, False, False, False]
+
+
+def test_session_cache_is_module_level_and_survives_teardown(source: str) -> None:
+    """The whole point: a node recreated by a tab switch must find what the
+    previous incarnation loaded, so the Map lives at module scope and
+    teardown() (node removal) never clears it."""
+    assert "const notebookCache = new Map()" in source
+    assert "export function notebookCacheGet(file)" in source
+    assert "export function notebookCacheSet(file, payload, mtime)" in source
+    assert "notebookCache.clear(" not in source
+    assert "notebookCache.delete(" not in source
+    teardown = _body(source, "teardown(state)")
+    assert "notebookCache" not in teardown
+
+
+def test_reload_paints_the_cached_payload_before_the_fetch_through_the_load_path(
+    source: str,
+) -> None:
+    """Instant paint: cached payload -> the SAME applyNotebookPayload() the
+    fresh fetch uses, synchronously BEFORE the await, marked in the status
+    row; the fetch then reconciles. Keyed by the `file` value as SENT."""
+    reload = _body(source, "reloadNow(state)")
+    assert "const file = state.fileWidget.value ?? ''" in reload
+    assert "const cached = notebookCacheGet(file)" in reload
+    paint = "applyNotebookPayload(state, file, cached.payload)"
+    fetch = "await api.getJson('/lora_library/notebook', params)"
+    assert paint in reload and fetch in reload
+    assert reload.index("const cached = notebookCacheGet(file)") < reload.index(paint) < reload.index(fetch)
+    # only when the panel is not already showing that exact snapshot
+    assert "if (cached && (!showing || state.paintedMtime !== cached.mtime)) {" in reload
+    assert "const showing = state.file === file && !state.loadError" in reload
+    assert "paintedFromCache = true" in reload
+    assert "setCacheHint(state, CACHE_HINT_REFRESHING)" in reload
+    assert "const CACHE_HINT_REFRESHING = 'cached — refreshing…'" in source
+    # the fresh path lands through the very same function
+    assert "await applyNotebookPayload(state, file, data)" in reload
+    assert "async function applyNotebookPayload(state, file, data)" in source
+    # ...and the token/restore discipline around it is untouched
+    assert reload.startswith("  const token = ++state.loadToken")
+    assert "if (token !== state.loadToken) return" in reload
+
+
+def test_known_mtime_rides_the_reload_get_only_for_what_this_panel_painted(source: str) -> None:
+    """CONTRACT: `known_mtime=<the mtime THIS panel last painted for this
+    file>` -- per node (two Notebooks on one file must not vouch for each
+    other), only while the panel is showing the file, never for a file the
+    panel has not painted (or painted as the error state)."""
+    reload = _body(source, "reloadNow(state)")
+    assert "const params = { file, include_text: '1' }" in reload  # the search-corpus literal survives
+    assert "if ((showing || paintedFromCache) && typeof state.paintedMtime === 'number') {" in reload
+    assert "params.known_mtime = String(state.paintedMtime)" in reload
+    assert "paintedMtime: null," in source
+    apply = _body(source, "applyNotebookPayload(state, file, data)")
+    assert "state.paintedMtime = typeof data.mtime === 'number' ? data.mtime : null" in apply
+    # the error path stops vouching (the list shows the error, not the file)
+    error_branch = reload.split("} catch (error) {", 1)[1].split("if (isUnchangedResponse(data))", 1)[0]
+    assert "state.paintedMtime = null" in error_branch
+    sync = _body(source, "syncNotebookCache(state, data)")
+    assert "state.paintedMtime = mtime" in sync  # a mutation's response mtime is what the panel now shows
+
+
+def test_unchanged_answer_keeps_what_is_painted(source: str) -> None:
+    """CONTRACT: `unchanged: true` => clear the hint, keep the mtime, no
+    re-render, no entry reset; only an explicit reload on an ALREADY-showing
+    file (conflict Reload, unpin) re-runs the editor half, never the list."""
+    reload = _body(source, "reloadNow(state)")
+    block = reload.split("if (isUnchangedResponse(data)) {", 1)[1].split("\n  }\n", 1)[0]
+    assert "return" in block
+    for forbidden in ("renderList(", "applyNotebookPayload(", "notebookCacheSet(", "restoreSelectionFromWidget("):
+        assert forbidden not in block, forbidden
+    assert "if (!paintedFromCache) await loadActiveEditor(state)" in block
+    # the hint clears BEFORE the branch, on success and on failure alike
+    success_tail = reload.split("if (token !== state.loadToken) return\n  setCacheHint(state, '')", 1)
+    assert len(success_tail) == 2
+    assert reload.count("setCacheHint(state, '')") >= 2
+    # the full-payload path caches AFTER the unchanged early return
+    assert reload.index("if (isUnchangedResponse(data)) {") < reload.index(
+        "notebookCacheSet(file, data, typeof data.mtime === 'number' ? data.mtime : null)"
+    )
+    assert "export function isUnchangedResponse(data)" in source
+    assert "data.unchanged === true" in _body(source, "isUnchangedResponse(data)")
+
+
+def test_every_successful_load_and_mutating_response_updates_the_cache(source: str) -> None:
+    reload = _body(source, "reloadNow(state)")
+    assert "notebookCacheSet(file, data, typeof data.mtime === 'number' ? data.mtime : null)" in reload
+    for signature in (
+        "performSave(state, { force = false } = {})",
+        "performSaveCategory(state, { force = false } = {})",
+        "confirmNewEntry(state, rawName)",
+        "confirmNewCategory(state, name)",
+        "performDeleteRun(state, names, startIndex, { force = false } = {})",
+        "performMove(state, name, target, { force = false } = {})",
+        "performMoveRun(state, names, target, startIndex, { force = false } = {})",
+        "performMoveCategory(state, category, target, { force = false } = {})",
+        "applyRenameResult(state, kind, name, renameTo, data)",
+    ):
+        assert "syncNotebookCache(state, data)" in _body(source, signature), signature
+    sync = _body(source, "syncNotebookCache(state, data)")
+    # the fold is keyed by the panel's file, from the panel's fresh state +
+    # the response mtime; a missing mtime stops the cache vouching
+    assert "const file = state.file" in sync
+    assert "const mtime = typeof data?.mtime === 'number' ? data.mtime : null" in sync
+    assert "notebookCacheSet(file, payload, mtime)" in sync
+    assert "text: state.entryTextByName[entry.name] ?? ''" in sync
+    assert "if (typeof file !== 'string' || !file || state.loadError) return" in sync
+
+
+def test_cache_hint_is_its_own_subtle_status_row_element(source: str) -> None:
+    assert "state.cacheHintEl = el('div', { className: 'llnb-status-cached' })" in source
+    assert ".llnb-status-cached:empty { display: none; }" in source
+    assert "cacheHintEl: null," in source
+    hint = _body(source, "setCacheHint(state, text)")
+    assert "state.cacheHintEl.textContent = text || ''" in hint
+
+
+def test_single_load_per_restore_logic_is_intact_around_the_cache(source: str) -> None:
+    """The cache only changes what is on screen while the fetch is in
+    flight: the v0.68.1 deferred attach load / configureReloaded stand-down
+    and the M3 reconcile in wireConfigureReload are byte-for-byte as before."""
+    attach = source.split("export function attachNotebookWidget(node)", 1)[1].split("\n}\n", 1)[0]
+    assert "if (state.configureReloaded) return" in attach
+    assert "notebookCache" not in attach  # no attach-time paint of a not-yet-restored file value
+    wire = _body(source, "wireConfigureReload(state)")
+    assert "state.configureReloaded = true" in wire
+    assert "syncPinnedFromWidget(state)" in wire
+    assert "notebookCache" not in wire

@@ -26,6 +26,32 @@
  * responses out of a detached pane; (5) group headers rename in place on
  * double-click (the Notebook's gesture) and a no-op drop skips its POST.
  *
+ * Library-on-a-NAS round (owner 2026-08-22: the Prompt Notebook shares
+ * between his computers because each node points at an absolute NAS file,
+ * but the controller's states did NOT -- they live in the LIBRARY FOLDER
+ * (`<library>/sets/*.json` + `lora_sets_layout.json`), which on his
+ * machines was still the pack's default LOCAL folder; "Surface it just like
+ * for the prompt library"). The left pane now ends in a compact
+ * `.llsc-states-loc` line (`_buildStatePane`, `flex: 0 0 auto` under the
+ * scrolling list -- §7.2 sizing laws, the list shrinks and scrolls, never
+ * crops): "States: <library>/sets" (front-truncated, full path in `title`)
+ * with an **Open folder** button (`POST /lora_library/sets/open_folder`,
+ * loopback-only -- hidden for a remote viewer; a 404 from an older backend
+ * toasts that the backend needs updating) and a one-line hint; when the
+ * library IS the pack default the row says so plainly ("States: this
+ * machine only (default library folder)") and the hint row names the
+ * Settings path to share (`statesLocationLine`, the pure, exported helper --
+ * the whole sentence rides in the tooltip with the full path). Data:
+ * `GET /lora_library/config` through ONE module-level 30 s cache shared by
+ * every controller (`fetchControllerConfig` -- the picker feed's shared-
+ * fetch shape), refreshed on attach and by the shared poller, and --
+ * preferred when present -- `sets_dir` / `is_default_library` riding the
+ * `GET /lora_library/sets` feed every controller already receives
+ * (`_applySetsResponse`). No event exists for a settings change (settings.js
+ * POSTs `/config` silently), so the line follows the setting within the
+ * 30 s cache TTL via the poller, and at once on the next attach. DOM only,
+ * no window listeners, no canvas drawing (§7.5).
+ *
  * Renamed a THIRD time 2026-07-22 (owner: every node's display name
  * must start with "EPS" so a gallery search for "EPS" surfaces the
  * whole pack): "Lora Loader State Controller" -> "EPS Lora Loader
@@ -872,6 +898,32 @@ const MSG_PICKER_DRIFT = 'EPS LoRA Picker internals changed — controller disab
 
 const LAYOUT_ROUTE = '/lora_library/sets_layout'
 const UNCATEGORIZED = ''
+
+/** Library-on-a-NAS round (file header): where the states live. */
+const CONFIG_ROUTE = '/lora_library/config'
+const SETS_OPEN_FOLDER_ROUTE = '/lora_library/sets/open_folder'
+/** The shared `/config` cache TTL -- one fetch per 30 s for EVERY live
+ * controller (the picker feed's shared-fetch shape). */
+const CONTROLLER_CONFIG_TTL_MS = 30000
+/** The line's share of the pane's height floor (§7.2: the list below must
+ * never be cropped by it -- it shrinks and scrolls instead). */
+const STATES_LOCATION_PX = 30
+/** The plain statement for the pack-default library, in full (tooltip +
+ * the pure helper's `full`), and split across the line's two rows -- a
+ * 300 px node's list pane is ~170 px wide, so the sentence as ONE row
+ * would be ellipsised to nothing and as wrapped prose it swallowed the
+ * whole list (rig, 2026-08-22): row 1 = the fact, row 2 (hint) = the fix. */
+const MSG_STATES_DEFAULT =
+  'States: this machine only (default library folder) — to share between ' +
+  'computers, set Settings → EPSNodes → Library folder to the same NAS ' +
+  'folder on every machine'
+const MSG_STATES_DEFAULT_LABEL = 'States: this machine only (default library folder)'
+const MSG_STATES_SHARE_HOWTO =
+  'To share between computers, set Settings → EPSNodes → Library folder to the same NAS folder on every machine.'
+const MSG_STATES_SHARED_TITLE = 'Shared by every machine whose Library folder points here'
+const MSG_STATES_OPEN_NEEDS_BACKEND =
+  'Open folder needs a newer EPSNodes backend — update the pack on the machine running ComfyUI and restart it.'
+const MSG_STATES_OPEN_REMOTE = 'Only the machine running ComfyUI can open its folders.'
 //: notebook.js's DRAG_THRESHOLD_PX twin -- same feel, same reason.
 const STATE_DRAG_THRESHOLD_PX = 4
 const CATEGORY_DELETE_CONFIRM_MS = 4000
@@ -1015,6 +1067,9 @@ async function runSharedSetsFetch() {
   if (setsData) {
     for (const node of live()) node._guarded('sets poll apply', () => node._applySetsResponse(setsData))
   }
+  // NAS round: the states-location line follows a Settings change within
+  // the 30 s config cache TTL -- usually served from the cache, no request.
+  runSharedConfigFetch().catch(() => {})
   const wantLayout = live().filter(
     (node) => tokens.has(node) && !node._layoutSaveInFlight && tokens.get(node) === node._layoutToken
   )
@@ -1031,6 +1086,133 @@ async function runSharedSetsFetch() {
     node._guarded('layout poll apply', () => node._applyLayoutResponse(layoutData, tokens.get(node)))
   }
 }
+
+// ------------------------------------ library config + states location (NAS round)
+// Where the controller's states live (file header "Library-on-a-NAS round").
+// ONE module-level `/config` cache for every controller: a fetch younger
+// than CONTROLLER_CONFIG_TTL_MS is served without a round trip, concurrent
+// callers join the one in-flight promise, a failed fetch is released on
+// settle so the next caller retries. Refreshed on every attach and by the
+// shared poller above, so the line follows a Settings change within the TTL.
+
+let controllerConfig = null
+let controllerConfigAt = 0
+let controllerConfigPromise = null
+
+function fetchControllerConfig() {
+  if (controllerConfig && Date.now() - controllerConfigAt < CONTROLLER_CONFIG_TTL_MS) {
+    return Promise.resolve(controllerConfig)
+  }
+  if (controllerConfigPromise) return controllerConfigPromise
+  const promise = api.getJson(CONFIG_ROUTE).then((data) => {
+    controllerConfig = data
+    controllerConfigAt = Date.now()
+    return data
+  })
+  const settle = () => {
+    if (controllerConfigPromise === promise) controllerConfigPromise = null
+  }
+  promise.then(settle, settle) // every caller awaits `promise` itself and handles its own rejection
+  controllerConfigPromise = promise
+  return promise
+}
+
+/** Feed the (cached) config to every live controller -- the poller's hook. */
+async function runSharedConfigFetch() {
+  const live = () => [...liveControllers].filter((node) => !node._removed)
+  if (!live().length) return
+  let config
+  try {
+    config = await fetchControllerConfig()
+  } catch (error) {
+    api.warn(`${NODE_TITLE}: GET ${CONFIG_ROUTE} failed (states location line stays as it was)`, error)
+    return
+  }
+  for (const node of live()) node._guarded('config apply', () => node._applyConfigResponse(config))
+}
+
+/**
+ * `<library_dir>/sets` with the library path's own separator (FORMAT.md §1:
+ * sets are ALWAYS under the library folder). Pure; exported for tests.
+ * @param {string} libraryDir
+ * @returns {string}
+ */
+export function setsDirOf(libraryDir) {
+  const dir = String(libraryDir || '')
+  if (!dir) return ''
+  const sep = dir.includes('\\') && !dir.includes('/') ? '\\' : '/'
+  return dir.replace(/[/\\]+$/, '') + sep + 'sets'
+}
+
+/** Separator- and trailing-slash-insensitive path equality (the §4
+ * separator-insensitive spirit; case is left alone). */
+function samePathText(a, b) {
+  const norm = (p) =>
+    String(p || '')
+      .replace(/\\/g, '/')
+      .replace(/\/+$/, '')
+  return !!a && !!b && norm(a) === norm(b)
+}
+
+/**
+ * The states-location line (file header "Library-on-a-NAS round"), pure so
+ * the probe in tests/test_pll_bridge_js.py can pin it. Input = the
+ * `GET /config` payload (`library_dir`, `default_library_dir`, `is_local`,
+ * `library_dir_note`) merged with the `GET /sets` feed's optional
+ * `sets_dir` / `is_default_library` (preferred when present -- the backend
+ * knows; the fallback derives `<library_dir>/sets` and compares against the
+ * default folder client-side).
+ * `text` = row 1 (the path, front-truncated by the caller, or the default-
+ * library fact), `hint` = row 2 (the share how-to / the reassurance, or the
+ * server's `library_dir_note` diagnosis when it has one -- the one thing
+ * worth that row), `title` = the tooltip (the FULL path for the default
+ * case, the sharing statement otherwise), `full` = the whole sentence.
+ * @param {object} config
+ * @returns {{text: string, full: string, title: string, hint: string, isDefault: boolean, setsDir: string}}
+ */
+export function statesLocationLine(config) {
+  const libraryDir = typeof config?.library_dir === 'string' ? config.library_dir : ''
+  const defaultDir = typeof config?.default_library_dir === 'string' ? config.default_library_dir : ''
+  const setsDir =
+    typeof config?.sets_dir === 'string' && config.sets_dir ? config.sets_dir : setsDirOf(libraryDir)
+  const isDefault =
+    typeof config?.is_default_library === 'boolean'
+      ? config.is_default_library
+      : samePathText(libraryDir, defaultDir)
+  const note = typeof config?.library_dir_note === 'string' ? config.library_dir_note.trim() : ''
+  if (!setsDir) return { text: '', full: '', title: '', hint: '', isDefault: false, setsDir: '' }
+  if (isDefault) {
+    return {
+      text: MSG_STATES_DEFAULT_LABEL,
+      full: MSG_STATES_DEFAULT,
+      title: `${setsDir}\n${MSG_STATES_DEFAULT}`,
+      hint: note || MSG_STATES_SHARE_HOWTO,
+      isDefault: true,
+      setsDir
+    }
+  }
+  const text = `States: ${setsDir}`
+  return {
+    text,
+    full: text,
+    title: MSG_STATES_SHARED_TITLE,
+    hint: note || `${MSG_STATES_SHARED_TITLE}.`,
+    isDefault: false,
+    setsDir
+  }
+}
+
+/** notebook.js's frontTruncate twin: keep the TAIL (the folder name) when
+ * the path genuinely overflows; `maxChars` is a character budget the
+ * caller derives from the element's real width. */
+function frontTruncateText(text, maxChars) {
+  const value = String(text ?? '')
+  if (value.length <= maxChars) return value
+  return `…${value.slice(-(Math.max(4, maxChars) - 1))}`
+}
+
+/** Average glyph width (px) of the monospace path text at 10px. */
+const STATES_LOC_AVG_CHAR_PX = 6.4
 
 // ------------------------------------------------------- pure graph helpers
 // (No `this` — these only ever read/write a passed-in node, so probe/capture/
@@ -2085,6 +2267,57 @@ const STATE_PANE_CSS_TEXT = `
 .llsc-btn:hover:not(:disabled) { background: var(--content-hover-bg, #2a2a2a); }
 .llsc-btn:disabled { opacity: 0.45; cursor: default; }
 .llsc-btn-danger { border-color: var(--error-text, #ff4444); color: var(--error-text, #ff4444); }
+.llsc-states-loc {
+  /* NAS round (file header): where the states live -- the foot of the
+     list pane. flex: 0 0 auto under the flex: 1 1 auto / min-height: 0
+     list, so the list shrinks and scrolls and is never cropped (FORMAT.md
+     section 7.2 sizing laws). No backticks in this block. */
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  padding: 3px 6px 4px;
+  border-top: 1px solid var(--border-color, #444);
+  background: var(--comfy-menu-bg, #262626);
+}
+.llsc-states-loc-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+.llsc-states-loc-text {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  color: var(--descrip-text, #999);
+  font-size: 10px;
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+}
+.llsc-states-loc-text.llsc-states-loc-prose {
+  /* the default-library fact is prose, not a path: UI font, still ONE
+     row (tail-ellipsis; the tooltip and the hint row carry the rest) --
+     wrapped prose swallowed the whole list at the 300 px node width */
+  font-family: inherit;
+}
+.llsc-states-loc-open {
+  width: auto;
+  flex: 0 0 auto;
+  padding: 2px 6px;
+  font-size: 10px;
+}
+.llsc-states-loc-hint {
+  font-size: 10px;
+  font-style: italic;
+  color: var(--descrip-text, #999);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.llsc-states-loc-hint:empty { display: none; }
 `
 
 function injectControllerStyles() {
@@ -2287,6 +2520,17 @@ export function registerControllerNode() {
         this._onSetsChanged = null
         // v0.68.1: the open group-rename editor, or null ({category, inputEl}).
         this._categoryRename = null
+        // NAS round (file header): the last `/config` payload this node saw,
+        // the `sets_dir`/`is_default_library` pair the sets feed carried (a
+        // newer backend; preferred), the rendered line's change-gate, and the
+        // ResizeObserver re-fitting the path's front-truncation.
+        this._statesConfig = null
+        this._statesFeed = null
+        this._statesLocSignature = ''
+        this._statesLocObserver = null
+        this._statesLocSetsDir = ''
+        this._statesLocText = ''
+        this._statesLocIsDefault = false
         this._lastProbeKey = ''
         this._lastProbe = null
         this._lastStatusMessage = ''
@@ -2387,6 +2631,10 @@ export function registerControllerNode() {
           // replaces the per-node `_refreshSetsCache()` this used to call.
           this._subscribeSetsChanged()
           registerController(this)
+          // NAS round: where the states live -- one shared, cached /config
+          // (and the resize re-fit, re-armed in case this is a re-add).
+          this._armStatesLocObserver()
+          this._refreshStatesLocation()
         })
       }
 
@@ -2403,6 +2651,8 @@ export function registerControllerNode() {
           this._categoryRename = null
           this._unsubscribeSetsChanged()
           unregisterController(this)
+          this._statesLocObserver?.disconnect()
+          this._statesLocObserver = null
         })
       }
 
@@ -2576,7 +2826,34 @@ export function registerControllerNode() {
 
         this._pane = {}
         this._pane.listEl = el('div', { className: 'llsc-list' })
-        const leftPane = el('div', { className: 'llsc-pane-left' }, [this._pane.listEl])
+        // NAS round (file header): where the states live -- the Notebook's
+        // file-panel idea at the FOOT of the list pane. `flex: 0 0 auto`
+        // under the `flex: 1 1 auto; min-height: 0` list (§7.2 sizing laws:
+        // the list shrinks and scrolls, the line never crops it). Empty and
+        // hidden until the first /config (or sets feed) lands.
+        this._pane.statesLocTextEl = el('div', { className: 'llsc-states-loc-text' })
+        this._pane.statesLocOpenBtn = this._createActionButton(
+          'llsc-btn llsc-states-loc-open',
+          'Open folder',
+          () => {
+            this._guardedAsync('open states folder', () => this._openStatesFolder()).catch(() => {})
+          },
+          'Reveal the states folder on the machine running ComfyUI'
+        )
+        this._pane.statesLocHintEl = el('div', { className: 'llsc-states-loc-hint' })
+        this._pane.statesLocEl = el('div', { className: 'llsc-states-loc' }, [
+          el('div', { className: 'llsc-states-loc-row' }, [
+            this._pane.statesLocTextEl,
+            this._pane.statesLocOpenBtn
+          ]),
+          this._pane.statesLocHintEl
+        ])
+        this._pane.statesLocEl.style.display = 'none'
+        const leftPane = el('div', { className: 'llsc-pane-left' }, [
+          this._pane.listEl,
+          this._pane.statesLocEl
+        ])
+        this._armStatesLocObserver()
 
         // DOM widgets are skipped by ComfyUI's own tooltip layer on purpose
         // ("these use native browser tooltips" -- NodeTooltip.vue), so each
@@ -2650,7 +2927,9 @@ export function registerControllerNode() {
         const domWidget = this.addDOMWidget(STATE_PANE_WIDGET_NAME, STATE_PANE_WIDGET_TYPE, this._pane.root, {
           hideOnZoom: true,
           serialize: false,
-          getMinHeight: () => MIN_STATE_PANE_HEIGHT
+          // NAS round: the states-location line's row rides in the floor
+          // (§7.2) so the list keeps its room at the node's minimum height.
+          getMinHeight: () => MIN_STATE_PANE_HEIGHT + STATES_LOCATION_PX
         })
         domWidget.serialize = false
         domWidget.serializeValue = () => undefined
@@ -3501,6 +3780,19 @@ export function registerControllerNode() {
 
       _applySetsResponse(data) {
         if (this._removed) return // v0.68.1: a late response must not paint a detached pane
+        // NAS round: a newer backend says where the sets live on THIS feed
+        // (`sets_dir` + `is_default_library`, FORMAT.md §5) -- preferred
+        // over the client-side derivation from /config; applied BEFORE the
+        // list's change-gate below, which is about rows, not the line.
+        if (typeof data?.sets_dir === 'string' || typeof data?.is_default_library === 'boolean') {
+          this._statesFeed = {
+            ...(typeof data.sets_dir === 'string' ? { sets_dir: data.sets_dir } : {}),
+            ...(typeof data.is_default_library === 'boolean'
+              ? { is_default_library: data.is_default_library }
+              : {})
+          }
+          this._renderStatesLocation()
+        }
         const list = Array.isArray(data?.sets) ? data.sets : []
         const seenLabels = new Set()
         this._setsCache = list.map((s) => {
@@ -3632,6 +3924,101 @@ export function registerControllerNode() {
         if (!this._w.set) return
         this._w.set.value = label
         this._repaintSelection() // v0.72.1: highlight only -- the list keeps its scroll position
+      }
+
+      // ----------------------------------------- states location (NAS round)
+
+      /** Re-fit the path's front-truncation on a node resize (the
+       * Notebook's ResizeObserver pattern -- an ELEMENT observer, not a
+       * window listener); disconnected in onRemoved, re-armed on a re-add.
+       * Harmless without ResizeObserver: the text keeps its last fit. */
+      _armStatesLocObserver() {
+        if (this._statesLocObserver || typeof ResizeObserver !== 'function') return
+        const textEl = this._pane?.statesLocTextEl
+        if (!textEl) return
+        this._statesLocObserver = new ResizeObserver(() => this._fitStatesLocationText())
+        this._statesLocObserver.observe(textEl)
+      }
+
+      /** One shared, cached /config -> this node's line (file header). */
+      _refreshStatesLocation() {
+        fetchControllerConfig()
+          .then((config) => {
+            if (this._removed) return
+            this._guarded('config apply', () => this._applyConfigResponse(config))
+          })
+          .catch((error) => {
+            api.warn(`${NODE_TITLE}: GET ${CONFIG_ROUTE} failed (states location line stays as it was)`, error)
+          })
+      }
+
+      _applyConfigResponse(config) {
+        if (this._removed || !config || typeof config !== 'object') return
+        this._statesConfig = config
+        this._renderStatesLocation()
+      }
+
+      /**
+       * Paint the line from the merged config + feed through the pure
+       * `statesLocationLine`. Change-gated (a 15 s poll must not touch the
+       * DOM for nothing). The Open folder button hides for a remote viewer
+       * (`is_local === false`): the route is loopback-only, so for them it
+       * could only ever fail (the Notebook's file-panel rule).
+       */
+      _renderStatesLocation() {
+        const pane = this._pane
+        if (!pane?.statesLocEl || this._removed) return
+        if (!this._statesConfig && !this._statesFeed) return
+        const merged = { ...(this._statesConfig || {}), ...(this._statesFeed || {}) }
+        const line = statesLocationLine(merged)
+        const isLocal = this._statesConfig ? this._statesConfig.is_local !== false : true
+        const signature = JSON.stringify([line, isLocal])
+        if (signature === this._statesLocSignature) return
+        this._statesLocSignature = signature
+        this._statesLocSetsDir = line.setsDir
+        this._statesLocText = line.text
+        this._statesLocIsDefault = line.isDefault
+        pane.statesLocEl.style.display = line.text ? '' : 'none'
+        pane.statesLocTextEl.title = line.title
+        // The default-library fact is prose (UI font, CSS tail-ellipsis);
+        // a real path is monospace and front-truncated to keep its tail.
+        pane.statesLocTextEl.classList.toggle('llsc-states-loc-prose', line.isDefault)
+        pane.statesLocHintEl.textContent = line.hint || ''
+        pane.statesLocHintEl.title = line.hint || ''
+        pane.statesLocOpenBtn.style.display = isLocal && line.setsDir ? '' : 'none'
+        this._fitStatesLocationText()
+      }
+
+      /** notebook.js updateFilePanelPath()'s twin: full text first, front-
+       * truncate only once a real overflow is measured at the bar's CURRENT
+       * width (re-run by the ResizeObserver on resize). */
+      _fitStatesLocationText() {
+        const textEl = this._pane?.statesLocTextEl
+        if (!textEl) return
+        const full = this._statesLocText || ''
+        textEl.textContent = full
+        if (!full || this._statesLocIsDefault) return // prose: CSS tail-ellipsis, nothing to front-trim
+        if (textEl.scrollWidth <= textEl.clientWidth + 1) return
+        const budget = Math.max(12, Math.floor(textEl.clientWidth / STATES_LOC_AVG_CHAR_PX))
+        textEl.textContent = frontTruncateText(full, budget)
+      }
+
+      /** `POST /lora_library/sets/open_folder` -- reveals the sets folder
+       * in the OS file manager ON THE SERVER MACHINE. 403 = remote caller
+       * (the button is hidden for them, but a stale `is_local` can race);
+       * 404 = a backend older than this route. */
+      async _openStatesFolder() {
+        try {
+          await api.postJson(SETS_OPEN_FOLDER_ROUTE, {})
+        } catch (error) {
+          if (error?.status === 404) {
+            this._toast('warn', NODE_TITLE, MSG_STATES_OPEN_NEEDS_BACKEND)
+          } else if (error?.status === 403) {
+            this._toast('warn', NODE_TITLE, MSG_STATES_OPEN_REMOTE)
+          } else {
+            this._toast('error', NODE_TITLE, `Could not open the states folder: ${error?.message || error}`)
+          }
+        }
       }
 
       _toast(severity, summary, detail) {

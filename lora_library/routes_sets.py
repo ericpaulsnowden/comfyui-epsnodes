@@ -7,20 +7,32 @@ set slug can only ever resolve to ``context.sets_dir() / f"{slug}.json"``
 (:func:`sets_store.set_path`), which is always inside it by construction —
 there is no "elsewhere" a validated slug could point to. So, unlike the
 notebook routes (arbitrary ``file`` paths) or ``POST /config`` (moves the
-boundary itself), none of the four routes below need a
+boundary itself), none of the set rows below need a
 ``request_is_loopback`` check: the ``SLUG_RE`` format check is the whole
-guard, for both local and remote callers.
+guard, for both local and remote callers. The one exception is
+``POST /lora_library/sets/open_folder`` (NAS round 2026-08-22), which
+drives the SERVER machine's desktop file manager and is therefore
+loopback-only exactly like the notebook's ``open_folder``.
+
+Every store call runs via ``asyncio.to_thread`` (same round, see
+``routes_notebook.py``'s module docstring): ``list_sets``/``load_set``/
+``save_set``/``delete_set``/``load_layout``/``save_layout`` are network
+round trips on a NAS library, and they used to run INSIDE the aiohttp
+handler, stalling every request on the server while one slow mount
+answered. The error mapping around each call is unchanged.
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
 
 from aiohttp import web
 
 from . import sets_store
-from .context import LibraryContext
-from .routes import SLUG_RE, error_response
+from .context import SETS_DIRNAME, LibraryContext
+from .routes import SLUG_RE, error_response, request_is_loopback
+from .routes_notebook import _reveal_folder
 
 logger = logging.getLogger("lora_library")
 
@@ -37,12 +49,53 @@ def _bad_set_id(value: object) -> str:
     )
 
 
+def _sets_payload(context: LibraryContext) -> dict:
+    """``GET /lora_library/sets``'s body (FORMAT.md §5): the cached listing
+    plus, since the NAS round (2026-08-22), WHERE the sets live --
+    ``sets_dir`` (the folder's path, named purely from the config: no
+    mkdir, so an unreachable library still reports the path it should be
+    at) and ``is_default_library`` (the library is the pack's own default
+    folder rather than a configured one) -- so the frontend can tell the
+    user which machine/share their states are on. Runs in a worker thread
+    (``list_sets`` is disk I/O)."""
+    return {
+        "sets": sets_store.list_sets(context),
+        "sets_dir": str(context.configured_library_dir() / SETS_DIRNAME),
+        "is_default_library": context.is_default_library(),
+    }
+
+
 def register(context: LibraryContext, routes: web.RouteTableDef) -> None:
     """Attach the §5 set rows to *routes*."""
 
     @routes.get("/lora_library/sets")
     async def get_sets(_request: web.Request) -> web.Response:
-        return web.json_response({"sets": sets_store.list_sets(context)})
+        return web.json_response(await asyncio.to_thread(_sets_payload, context))
+
+    @routes.post("/lora_library/sets/open_folder")
+    async def post_sets_open_folder(request: web.Request) -> web.Response:
+        """FORMAT.md §5 (NAS round 2026-08-22): reveal ``<library>/sets`` in
+        the OS file manager ON THE SERVER MACHINE -- the notebook's
+        ``open_folder`` for the states folder, same loopback-only wording,
+        same ``_reveal_folder`` technique (imported, not copied). No body
+        fields are read, so none are required. An unreachable library
+        folder is the 400 every other set route answers with
+        (``sets_store._require_sets_dir``'s wording)."""
+        if not request_is_loopback(request):
+            return error_response(
+                403,
+                "opening a folder only works in a browser on the machine "
+                "ComfyUI runs on",
+            )
+        try:
+            folder = await asyncio.to_thread(sets_store._require_sets_dir, context)
+        except sets_store.SetValidationError as exc:
+            return error_response(400, str(exc))
+        try:
+            _reveal_folder(folder)
+        except Exception as exc:  # broad: any spawn failure surfaces to the caller
+            return error_response(500, str(exc))
+        return web.json_response({"ok": True, "path": str(folder)})
 
     # ---- §4.2 sets layout (v0.65.0): categories + display order for the
     # controller's left pane. No loopback gate -- the file lives inside
@@ -53,7 +106,8 @@ def register(context: LibraryContext, routes: web.RouteTableDef) -> None:
 
     @routes.get("/lora_library/sets_layout")
     async def get_sets_layout(_request: web.Request) -> web.Response:
-        return web.json_response({"layout": sets_store.load_layout(context)})
+        layout = await asyncio.to_thread(sets_store.load_layout, context)
+        return web.json_response({"layout": layout})
 
     @routes.post("/lora_library/sets_layout")
     async def post_sets_layout(request: web.Request) -> web.Response:
@@ -64,7 +118,7 @@ def register(context: LibraryContext, routes: web.RouteTableDef) -> None:
         if not isinstance(body, dict) or not isinstance(body.get("layout"), dict):
             return error_response(400, "'layout' must be an object")
         try:
-            layout = sets_store.save_layout(context, body["layout"])
+            layout = await asyncio.to_thread(sets_store.save_layout, context, body["layout"])
         except OSError as exc:
             return error_response(500, f"could not write the sets layout: {exc}")
         return web.json_response({"ok": True, "layout": layout})
@@ -75,7 +129,7 @@ def register(context: LibraryContext, routes: web.RouteTableDef) -> None:
         if not SLUG_RE.match(slug):
             return error_response(400, _bad_set_id(slug))
         try:
-            data = sets_store.load_set(context, slug)
+            data = await asyncio.to_thread(sets_store.load_set, context, slug)
         except sets_store.SetValidationError as exc:
             return error_response(400, str(exc))
         if data is None:
@@ -101,12 +155,13 @@ def register(context: LibraryContext, routes: web.RouteTableDef) -> None:
             return error_response(400, _bad_set_id(raw_slug))
 
         try:
-            saved_slug, _normalized = sets_store.save_set(context, body.get("set"), slug=slug)
+            saved_slug, _normalized = await asyncio.to_thread(
+                sets_store.save_set, context, body.get("set"), slug=slug
+            )
         except sets_store.SetValidationError as exc:
             return error_response(400, str(exc))
-        return web.json_response(
-            {"ok": True, "slug": saved_slug, "sets": sets_store.list_sets(context)}
-        )
+        sets = await asyncio.to_thread(sets_store.list_sets, context)
+        return web.json_response({"ok": True, "slug": saved_slug, "sets": sets})
 
     @routes.post("/lora_library/set/delete")
     async def post_set_delete(request: web.Request) -> web.Response:
@@ -120,11 +175,12 @@ def register(context: LibraryContext, routes: web.RouteTableDef) -> None:
         if not isinstance(slug, str) or not SLUG_RE.match(slug):
             return error_response(400, _bad_set_id(slug))
         try:
-            deleted = sets_store.delete_set(context, slug)
+            deleted = await asyncio.to_thread(sets_store.delete_set, context, slug)
         except sets_store.SetValidationError as exc:
             # An unreachable library folder (sets_store._require_sets_dir,
             # audit 2026-08-08) -- a 400 naming the folder, never a raw 500.
             return error_response(400, str(exc))
         if not deleted:
             return error_response(404, f"no such set {slug!r}")
-        return web.json_response({"ok": True, "sets": sets_store.list_sets(context)})
+        sets = await asyncio.to_thread(sets_store.list_sets, context)
+        return web.json_response({"ok": True, "sets": sets})

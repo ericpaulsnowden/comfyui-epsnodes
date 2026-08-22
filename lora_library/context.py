@@ -15,6 +15,7 @@ import json
 import logging
 import os
 import tempfile
+import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -24,6 +25,19 @@ logger = logging.getLogger("lora_library")
 CONFIG_FILENAME = "config.json"
 DEFAULT_NOTEBOOK_FILENAME = "loras.md"
 SETS_DIRNAME = "sets"
+
+#: How long :meth:`LibraryContext.library_dir` / :meth:`LibraryContext.sets_dir`
+#: trust a directory they already created/verified before issuing another
+#: ``mkdir`` (NAS round 2026-08-22). Every call used to ``mkdir(parents=True,
+#: exist_ok=True)`` -- one network round trip per request on a NAS library,
+#: and several per request for the routes that resolve the folder more than
+#: once (``list_sets`` resolves it once per set file). Thirty seconds is
+#: long enough to collapse a tab-switch burst (every node re-fetching at
+#: once) into ONE syscall and short enough that a library folder deleted or
+#: unmounted underneath a running server is noticed promptly; ``save_config``
+#: and the stores' directory-level ``FileNotFoundError`` paths forget the
+#: cache outright (:meth:`LibraryContext.forget_ensured_dirs`).
+ENSURED_DIR_TTL_S = 30.0
 
 
 @dataclass
@@ -48,6 +62,19 @@ class LibraryContext:
     default_library_dir: Path
     list_loras: Callable[[], list[str]] = field(default=lambda: [])
     resolve_lora_path: Callable[[str], str | None] = field(default=lambda _name: None)
+    #: ``load_config``'s ``((mtime_ns, size), data)`` memo (v0.69.0) -- a
+    #: whole tuple replaced at once, so concurrent readers (route worker
+    #: threads + the execution thread, NAS round 2026-08-22) only ever see a
+    #: complete old or new value; a lost race costs one redundant re-read.
+    _config_cache: tuple[tuple[int, int], dict] | None = field(
+        default=None, init=False, repr=False, compare=False
+    )
+    #: :meth:`_ensure_dir`'s memo: directory -> ``time.monotonic()`` of the
+    #: last successful ``mkdir``. Same concurrency posture: plain dict
+    #: get/set under the GIL, a lost race costs one redundant ``mkdir``.
+    _ensured_dirs: dict[Path, float] = field(
+        default_factory=dict, init=False, repr=False, compare=False
+    )
 
     # ------------------------------------------------------------------ config
 
@@ -74,7 +101,7 @@ class LibraryContext:
             key = (stat.st_mtime_ns, stat.st_size)
         except OSError:
             key = None
-        cached = getattr(self, "_config_cache", None)
+        cached = self._config_cache
         if key is not None and cached is not None and cached[0] == key:
             return dict(cached[1])
         try:
@@ -98,24 +125,80 @@ class LibraryContext:
         return data
 
     def save_config(self, config: dict) -> None:
-        """Atomically persist *config* (FORMAT.md §1)."""
+        """Atomically persist *config* (FORMAT.md §1).
+
+        Also forgets every directory :meth:`_ensure_dir` has verified: the
+        config is where ``library_dir`` lives, so a save may point the
+        library somewhere new, and the next :meth:`library_dir` call must
+        create/verify THAT folder for real.
+        """
         self.user_dir.mkdir(parents=True, exist_ok=True)
         _atomic_write_text(self._config_path, json.dumps(config, indent=2) + "\n")
+        self.forget_ensured_dirs()
 
     # ------------------------------------------------------------- library dir
 
-    def library_dir(self) -> Path:
-        """The active library directory (configured, else default), created."""
+    def configured_library_dir(self) -> Path:
+        """The library directory the config names (else the default) --
+        PURE: no ``mkdir``, no stat, never raises (NAS round 2026-08-22).
+
+        For callers that only need to NAME the folder (``GET /sets``'s
+        ``sets_dir``/``is_default_library`` fields, the §5 config
+        diagnosis) without paying a network round trip to create it --
+        :meth:`library_dir` is the same path, created.
+        """
         configured = self.load_config().get("library_dir")
-        directory = Path(configured) if configured else self.default_library_dir
-        directory.mkdir(parents=True, exist_ok=True)
+        return Path(configured) if configured else self.default_library_dir
+
+    def is_default_library(self) -> bool:
+        """True when the library lives at :attr:`default_library_dir`
+        (unconfigured, or configured to exactly that path) -- pure."""
+        return self.configured_library_dir() == self.default_library_dir
+
+    def library_dir(self) -> Path:
+        """The active library directory (configured, else default), created.
+
+        "Created" is memoized for :data:`ENSURED_DIR_TTL_S` per path
+        (:meth:`_ensure_dir`): the return value is identical, but on a NAS
+        library only the first call in each window pays the ``mkdir``
+        round trip. A ``mkdir`` that FAILS (unreachable/unwritable folder)
+        is never memoized -- every call keeps raising its ``OSError``, as
+        before, so the stores' unreachable-folder handling is unchanged.
+        """
+        directory = self.configured_library_dir()
+        self._ensure_dir(directory)
         return directory
 
     def sets_dir(self) -> Path:
-        """``<library_dir>/sets`` (FORMAT.md §4), created."""
+        """``<library_dir>/sets`` (FORMAT.md §4), created (memoized like
+        :meth:`library_dir`)."""
         directory = self.library_dir() / SETS_DIRNAME
-        directory.mkdir(parents=True, exist_ok=True)
+        self._ensure_dir(directory)
         return directory
+
+    def _ensure_dir(self, directory: Path) -> None:
+        """``directory.mkdir(parents=True, exist_ok=True)``, at most once per
+        :data:`ENSURED_DIR_TTL_S` per path. Raises the ``mkdir``'s own
+        ``OSError`` (and memoizes nothing) when it fails."""
+        now = time.monotonic()
+        stamp = self._ensured_dirs.get(directory)
+        if stamp is not None and now - stamp < ENSURED_DIR_TTL_S:
+            return
+        try:
+            directory.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            self._ensured_dirs.pop(directory, None)
+            raise
+        self._ensured_dirs[directory] = now
+
+    def forget_ensured_dirs(self) -> None:
+        """Drop :meth:`_ensure_dir`'s memo so the next :meth:`library_dir` /
+        :meth:`sets_dir` call verifies the folder on disk again. Called by
+        :meth:`save_config`, and by the stores when they meet a
+        directory-level ``FileNotFoundError`` (the sets folder vanished
+        between two listings, a set file listed a moment ago is gone) --
+        the one signal that the folder itself may no longer be there."""
+        self._ensured_dirs.clear()
 
     def remote_dirs(self) -> list[Path]:
         """Folders OUTSIDE ``library_dir`` that non-loopback callers may also

@@ -22,10 +22,16 @@ inside ``library_dir``, which FORMAT.md §2 already lets non-loopback
 callers read AND write. Do not add one -- see
 ``resolution_presets_store.py``'s own docstring for why this feature
 deliberately reaches into ``lora_library.context`` in the first place.
+
+Every store call runs via ``asyncio.to_thread`` (NAS round 2026-08-22,
+see ``lora_library/routes_notebook.py``'s module docstring): the presets
+file lives in the library folder -- a network round trip on a NAS --
+and used to be read inside the handler. Error mapping is unchanged.
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
 
 from aiohttp import web
@@ -110,7 +116,7 @@ def register(context: store.LibraryContext, routes: web.RouteTableDef) -> None:
 
     @routes.get("/eps_resolution/presets")
     async def get_presets(_request: web.Request) -> web.Response:
-        presets, mtime = store.load_presets(context)
+        presets, mtime = await asyncio.to_thread(store.load_presets, context)
         return web.json_response({"presets": presets, "mtime": mtime})
 
     @routes.post("/eps_resolution/presets/save")
@@ -135,7 +141,9 @@ def register(context: store.LibraryContext, routes: web.RouteTableDef) -> None:
             return err_resp
 
         try:
-            presets, new_mtime = store.save_preset(context, name, values, base_mtime=base_mtime)
+            presets, new_mtime = await asyncio.to_thread(
+                store.save_preset, context, name, values, base_mtime=base_mtime
+            )
         except store.ConflictError as exc:
             return web.json_response({"error": str(exc), "mtime": exc.current_mtime}, status=409)
         except store.PresetStoreError as exc:
@@ -161,7 +169,9 @@ def register(context: store.LibraryContext, routes: web.RouteTableDef) -> None:
             return err_resp
 
         try:
-            presets, new_mtime = store.delete_preset(context, name, base_mtime=base_mtime)
+            presets, new_mtime = await asyncio.to_thread(
+                store.delete_preset, context, name, base_mtime=base_mtime
+            )
         except store.ConflictError as exc:
             return web.json_response({"error": str(exc), "mtime": exc.current_mtime}, status=409)
         except store.PresetNotFoundError as exc:

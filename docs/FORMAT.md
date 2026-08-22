@@ -53,6 +53,26 @@ One directory holds everything a user shares between machines:
   the target file's dominant line-ending style (§3.6). Never call
   `os.path.relpath` against ComfyUI dirs (cross-drive crash on Windows).
 
+**Library on a NAS (v0.74.0, 2026-08-22).** Every read of this folder may
+be a network round trip, so the server (a) performs every library-folder
+read/write from route handlers in a worker thread (`asyncio.to_thread`) — a
+slow or unmounted share delays only the request that touched it, never the
+queue or other requests; (b) memoizes "this folder exists" for 30 s per
+path (`LibraryContext._ensure_dir`, forgotten on `POST /config` and whenever
+a store meets a directory-level `FileNotFoundError`; a FAILING mkdir is
+never memoized) instead of `mkdir`-ing on every call; (c) caches the sets
+listing on the sets DIRECTORY's mtime_ns with a per-file `(mtime_ns, size)`
+second layer re-verified at most every 30 s, and the layout file on its own
+mtime. A save through this pack (any machine, atomic temp+replace) changes
+the directory mtime and is seen on the next listing; an IN-PLACE edit of a
+set file (an editor that truncates+writes) does not, and shows within 30 s;
+SMB/NFS clients may additionally hold a stale directory mtime for their
+attribute-cache window (NFS `acdirmax`, 60 s by default). Measured: `GET
+/sets` with 13 sets went from 122 library syscalls per call (54 mkdir, 54
+stat, 13 open, 1 scandir) to 1 stat; `GET /notebook` with `known_mtime` to 1
+stat; `/config`, `/picker`, `/eps_resolution/presets` lost their per-request
+mkdir.
+
 ## §2 Security posture
 
 ComfyUI custom routes have no auth layer, so exposure follows the server's
@@ -108,6 +128,8 @@ own bind address:
 - `POST /lora_library/config` is loopback-only: `library_dir` IS the
   boundary the two rules above enforce for remote callers, so only the
   local machine may move it.
+
+- `POST /lora_library/sets/open_folder` is loopback-only exactly like the notebook's `open_folder`: it drives the SERVER machine's desktop file manager (v0.74.0).
 
 ## §3 Notebook markdown grammar
 
@@ -358,6 +380,9 @@ documented in full in its §6.x section). JSON in/out; errors are `{"error":
 | `GET /lora_library/sets_layout` | §4.2: `{"layout": {"categories", "order"}}`, HEALED against the sets on disk. No loopback gate — the file lives inside `library_dir` (§2 grants remote read+write; the picker feed's rationale) |
 | `POST /lora_library/sets_layout` `{"layout"}` | §4.2 full replace; body normalized + healed server-side (unknown slugs dropped, missing sets appended uncategorized), so a stale client can never vanish a set. → `{"ok","layout"}`; 400 non-JSON body / non-object layout |
 | `GET /eps/list_flags` | §6.10 estimator feed (v0.68.0): `{"classes": {"<ClassName>": {"input_is_list": bool, "output_is_list": [bool, …]}}}` over `nodes.NODE_CLASS_MAPPINGS`, `getattr` defaults exactly as `execution.py` reads them; per-class inspection failures skipped. No loopback gate — class metadata every viewer already gets in bulk via `/object_info` (plus the one boolean it omits) |
+| `GET /lora_library/notebook?file=[&include_text=1][&known_mtime=<float>]` (v0.74.0 addendum) | **`known_mtime`** = the mtime the caller last painted; when the file exists and still carries it (`abs(diff) < 1e-6`) the answer is `{"ok": true, "unchanged": true, "mtime", "exists": true, "file"}` and NOTHING else — one `stat`, no read/parse. Missing file, mismatch, absent/empty/non-numeric value ⇒ the full payload exactly as before. The §2 guard runs first |
+| `GET /lora_library/sets` (v0.74.0 addendum) | payload now also carries `"sets_dir": "<library>/sets"` (config-derived, no mkdir — reported even while the folder is unreachable) and `"is_default_library": bool` (library_dir is the pack's default folder); the listing is served from the §1 NAS cache |
+| `POST /lora_library/sets/open_folder` (no body) | **loopback-only** (403, the notebook `open_folder` wording): reveals `<library>/sets` in the OS file manager ON THE SERVER MACHINE; unreachable library ⇒ 400 naming the folder; ⇒ `{"ok": true, "path": "<sets dir>"}` (v0.74.0) |
 | `GET /lora_library/picker` | §6.13 panel feed: `{"loras": [installed spellings, `get_filename_list("loras")` order], "previews": [subset of `loras` with a sidecar preview image — v0.61.2, computed with one directory listing per unique folder, case-insensitive name match; the panel builds a thumbnail `<img>` ONLY for these, so no-preview rows never fire a 404 probe or paint a placeholder (owner jank report 2026-08-14)], "favorites": [forward-slash names, store order], "recents": [{"file","ts"} newest first], "mtime": float\|null}`. NO loopback gate — the picker file lives inside `library_dir`, which §2 already grants remote read+write (the presets-routes rationale verbatim; the lora LIST is the same one `/object_info` exposes to every viewer) |
 | `POST /lora_library/picker/favorite` `{"file","on"}` | star/unstar one lora (name normalized to forward slashes in the store). `file` non-empty string, `on` bool, else 400. NOT required to be installed — unstarring a favorite that only exists on the other machine must work. → `{"ok","favorites","mtime"}` |
 | `POST /lora_library/picker/recent` `{"files": [..]}` | record used loras: each moves to the FRONT of `recents` (dedup by file, fresh server-stamped `ts`), list capped at 30. Empty list = no-op 200. Non-list / non-string entry ⇒ 400. → `{"ok","recents","mtime"}` |
@@ -392,6 +417,33 @@ Class ids are FROZEN once shipped. Both nodes re-read their files at every
 execution — **the file is the truth; the UI is a view.**
 
 ### §6.1 `LoraLibraryNotebook` (display: "EPS Prompt Notebook")
+
+**NAS round (v0.74.0, 2026-08-22; owner: "sometimes looks broken but just
+takes over a minute to load, even when just tabbing between open
+workflows", usually from a remote browser):** the notebook routes no longer
+touch the disk on the event loop (resolve + §2 guard + read/write all run
+in a worker thread), and `GET /notebook` accepts `known_mtime` so a reload
+of an unchanged file costs one `stat` (§5). The frontend paints instantly
+from a per-file session cache, sends the mtime it last painted and keeps
+the painted list when `unchanged` comes back (§7.2). Frontend detail:
+`notebook.js` keeps a module-level `Map` keyed by the `file` value exactly
+as the panel sends it (per file, never cross-file) → `{payload, mtime}` of
+the last successful load or mutating POST response in this browser
+session; `reloadNow()` paints a cached payload IMMEDIATELY through the same
+`applyNotebookPayload()` a successful fetch uses (a subtle "cached —
+refreshing…" mark in the status row), then runs the normal fetch; every
+successful load and every mutating POST updates the cache
+(`syncNotebookCache`; entry text too, so the search corpus stays current
+across Save/New/Delete/rename). The reload GET carries
+`known_mtime=<state.paintedMtime>` (per node; never for a file the panel
+has not painted); an `unchanged` answer clears the mark, keeps cache and
+mtime, re-renders nothing (only an explicit reload on an already-showing
+file — conflict Reload, unpin — re-runs the editor half). The v0.68.1
+one-load-per-restore logic, `loadToken`/`configureReloaded` and the M3 pin
+reconcile are untouched; a failed fetch still lands in the §7.2 error
+state. Pure halves `notebookCacheGet`/`notebookCacheSet`/
+`isUnchangedResponse` exported; pins in `tests/test_notebook_restore_js.py`,
+`tests/test_notebook_search_js.py`.
 
 **`pinned` (STRING, optional, TAIL-appended per §8, default `""`, `multiline:
 false`, `"hidden": true` — provenance M3, v0.72.0).** Empty = live (the file
@@ -873,7 +925,36 @@ queue. It drives a **genuine, untouched `Power Lora Loader (rgthree)`**:
   click); (2) `# name` group creation, a duplicate name and a missing name
   are announced with toasts (the status line is hidden by default, so the
   flow was silent; on pre-v0.67.2 builds a poll landing right after could
-  also momentarily paint the new group away). All existing behavior — apply-on-select, composite
+  also momentarily paint the new group away).
+  **States location line (v0.74.0, owner: "Surface it just like for the
+  prompt library" — the Notebook shares between his computers because each
+  node points at an absolute NAS file, while states live in the LIBRARY
+  FOLDER `<library_dir>/sets/*.json` + `lora_sets_layout.json`, still the
+  pack's default LOCAL folder on his machines):** the left pane ends in a
+  compact `.llsc-states-loc` line (`flex: 0 0 auto` under the `flex: 1 1
+  auto; min-height: 0` list — the list shrinks and scrolls, the line never
+  crops it; its 30 px ride in `getMinHeight`). Two rows: "States:
+  `<library_dir>/sets`" (monospace, front-truncated, full path in `title`,
+  tooltip "Shared by every machine whose Library folder points here") + an
+  **Open folder** button, and a one-line hint (or the server's §5
+  `library_dir_note` diagnosis when it has one). When the library IS the
+  pack default (`is_default_library`, else `library_dir` =
+  `default_library_dir` separator-/trailing-slash-insensitively) the row
+  reads "States: this machine only (default library folder)" and the hint
+  "To share between computers, set Settings → EPSNodes → Library folder to
+  the same NAS folder on every machine." (two fixed rows on purpose: one row
+  ellipsised to nothing at the 300 px floor and wrapped prose swallowed the
+  list). Open folder → `POST /lora_library/sets/open_folder` (§5,
+  loopback-only; hidden when `is_local` is false; a 404 from an older
+  backend toasts "Open folder needs a newer EPSNodes backend…"). Data: `GET
+  /lora_library/config` through ONE module-level 30 s cache shared by every
+  controller (`fetchControllerConfig`), fetched on attach and ridden by the
+  shared 15 s poller; `GET /lora_library/sets`'s `sets_dir` +
+  `is_default_library` preferred when present. No settings-change event
+  exists, so the line follows a change within the TTL and at once on the
+  next attach. DOM only; an element `ResizeObserver` re-fits the truncation
+  (disconnected in `onRemoved`). Pure `statesLocationLine(config)` +
+  `setsDirOf` exported; pins in `tests/test_pll_bridge_js.py`. All existing behavior — apply-on-select, composite
   capture/apply with target `All`, selective Push, `Show status`,
   serialize-based capture (v0.14.1), own-menu version-proof apply (v0.13.0) —
   is PRESERVED; only the state-selection UI changes from a dropdown to the
@@ -3095,6 +3176,16 @@ remote read-only revert now EXEMPTS a value arriving via a live link on
 the `file` widget-input (workflow-authored host state, fired through
 `applyToGraph` at queue time — reverting it swapped in the stale
 baseline), while raw remote hand edits still revert.
+
+**§7.2 amendment — Notebook instant paint + controller states line
+(v0.74.0):** the Notebook status row gains a `.llnb-status-cached` mark
+("cached — refreshing…", `:empty`-hidden) shown only between a cached paint
+and its refresh; the cached paint and the fresh fetch share
+`applyNotebookPayload()` so they cannot drift; an `unchanged` answer
+touches neither list nor selection. The State Controller's states-location
+line (§6.3) is the file panel's sibling at the foot of the controller's
+list pane — same `flex: 0 0 auto` discipline as the pin bar, its 30 px in
+`getMinHeight`.
 
 **§7.2 amendment — M3 pin badge rows (v0.72.0):** the Notebook's badge is a
 `flex: 0 0 auto` row inside its FILL widget; `getMinHeight` grows by 26 px

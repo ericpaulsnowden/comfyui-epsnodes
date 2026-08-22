@@ -68,6 +68,7 @@ list on the left (grouped by `# Category` headings, with `＋ New` /
 `text` and `name` (the entry's heading — handy for filename prefixes and
 captions).
 
+- **Instant on tab switch (v0.74.0):** switching between open workflows used to leave the Notebook on an empty list until the file was re-read — over a minute on a slow NAS. It now repaints instantly from what it loaded earlier in this browser session (a faint "cached — refreshing…" shows while it re-checks), and the re-check tells the server what it already has, so an unchanged file costs a stat, not a full re-read.
 - **Pinned from an image (v0.72.0):** drop an EPS Save Image file and the Notebook shows a `📌 Pinned — captured from image …` badge: the prompt text exactly as it was when that image was made, read-only, with a `≠` mark wherever your notebook has changed since — the run recreates the image byte-for-byte. One click on **Unpin** goes back to the live file.
 - **Search everything:** the box at the top of the list filters as you
   type, matching every word you enter against prompt **titles and bodies**
@@ -156,6 +157,7 @@ or an [EPS LoRA Picker](#eps-lora-picker-shipped) — elsewhere in your graph;
 the loader stays the loader, this node just moves whole configurations
 ("states") in and out of it (only Power Lora Loader targets need rgthree):
 
+- **Where your states live, and how to share them (v0.74.0):** the bottom of the state list says where the state files are. Unlike the Notebook's per-node `.md` file, states live in the pack's Library folder (`<library>/sets`), so they are shared between computers only when every machine's Library folder points at the same NAS folder. Never set it? The line reads "States: this machine only (default library folder)" with the fix right under it (Settings → EPSNodes → Library folder); once it is a shared folder it shows the path (hover for the full one) with an Open folder button (from the machine running ComfyUI).
 - **Targets both loader families, anywhere in the workflow** (since
   v0.64.0): the `target` dropdown lists every Power Lora Loader (rgthree)
   AND every [EPS LoRA Picker](#eps-lora-picker-shipped) — including ones
@@ -936,6 +938,25 @@ too — the same trust model as ComfyUI's own routes. Details:
 [docs/FORMAT.md §1](docs/FORMAT.md) (layout) and [§2](docs/FORMAT.md)
 (security posture).
 
+
+## Library on a NAS
+
+Pointing the library at a network share works (it's the design center),
+and since v0.74.0 it stays responsive when the share is slow: the server
+never waits on the share while serving other requests, a notebook that
+hasn't changed re-loads with a single stat instead of a full read (and the
+panel paints instantly from what it last showed while it checks), and the
+State Controller's 15-second sets poll costs one stat instead of re-reading
+every state file. What to expect: a state saved from another machine
+through EPSNodes shows up on the next poll; a state file you hand-edit in
+place on the share shows within 30 seconds; an unmounted share makes the
+affected panel report the folder as unreachable instead of freezing
+ComfyUI. The State Controller shows where your states live and has an
+"Open folder" button on the machine running ComfyUI. **To share states,
+groups, favorites and presets between computers, point every machine's
+Settings → EPSNodes → Library folder at the same share** — notebooks can
+also point at absolute share paths per node, which is why they may already
+look "shared" while states are not.
 
 ## Sharing workflows between machines
 

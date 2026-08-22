@@ -34,6 +34,12 @@ stamp, or a favorites drag-reorder must not 409; the read-modify-write race
 between two machines inside the same second is accepted and self-heals on
 the next write. So ``store.ConflictError`` is never expected to reach any
 handler below, and none of them catch it.
+
+Every ``lora_picker_store`` call runs via ``asyncio.to_thread`` (NAS round
+2026-08-22, see ``routes_notebook.py``'s module docstring): the picker
+file lives in the library folder, a network round trip on a NAS, and the
+feed is requested by every picker node on every tab switch. Error mapping
+around each call is unchanged.
 """
 
 from __future__ import annotations
@@ -199,7 +205,7 @@ def register(context: LibraryContext, routes: web.RouteTableDef) -> None:
     @routes.get("/lora_library/picker")
     async def get_picker(_request: web.Request) -> web.Response:
         loras = context.list_loras()
-        state, mtime = store.load_state(context)
+        state, mtime = await asyncio.to_thread(store.load_state, context)
         return web.json_response(
             {
                 "loras": loras,
@@ -227,7 +233,7 @@ def register(context: LibraryContext, routes: web.RouteTableDef) -> None:
             return error_response(400, "'on' must be a boolean")
 
         try:
-            state, mtime = store.toggle_favorite(context, file, on)
+            state, mtime = await asyncio.to_thread(store.toggle_favorite, context, file, on)
         except store.PickerStoreError as exc:
             return error_response(400, str(exc))
         return web.json_response({"ok": True, "favorites": state["favorites"], "mtime": mtime})
@@ -246,7 +252,7 @@ def register(context: LibraryContext, routes: web.RouteTableDef) -> None:
             return error_response(400, err)
 
         try:
-            state, mtime = store.record_recents(context, files)
+            state, mtime = await asyncio.to_thread(store.record_recents, context, files)
         except store.PickerStoreError as exc:
             return error_response(400, str(exc))
         return web.json_response({"ok": True, "recents": state["recents"], "mtime": mtime})
@@ -256,7 +262,7 @@ def register(context: LibraryContext, routes: web.RouteTableDef) -> None:
         # FORMAT.md §5: no body fields required -- an empty/absent/malformed
         # JSON body is fine, since nothing in it is ever read.
         try:
-            state, mtime = store.clear_recents(context)
+            state, mtime = await asyncio.to_thread(store.clear_recents, context)
         except store.PickerStoreError as exc:
             return error_response(400, str(exc))
         return web.json_response({"ok": True, "recents": state["recents"], "mtime": mtime})
@@ -330,7 +336,7 @@ def register(context: LibraryContext, routes: web.RouteTableDef) -> None:
             return error_response(400, err)
 
         try:
-            state, mtime = store.reorder_favorites(context, files)
+            state, mtime = await asyncio.to_thread(store.reorder_favorites, context, files)
         except store.PickerStoreError as exc:
             return error_response(400, str(exc))
         return web.json_response({"ok": True, "favorites": state["favorites"], "mtime": mtime})

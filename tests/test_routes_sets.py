@@ -35,7 +35,13 @@ async def test_get_sets_empty(context: LibraryContext, aiohttp_client) -> None:
     client = await aiohttp_client(make_app(context))
     resp = await client.get("/lora_library/sets")
     assert resp.status == 200
-    assert await resp.json() == {"sets": []}
+    body = await resp.json()
+    # NAS round 2026-08-22: the listing now also says WHERE the states live
+    # (FORMAT.md §5 `sets_dir` / `is_default_library`); the pin used to be
+    # the bare `{"sets": []}`.
+    assert body["sets"] == []
+    assert body["sets_dir"] == str(context.default_library_dir / "sets")
+    assert body["is_default_library"] is True
 
 
 async def test_get_sets_reflects_saved_sets_sorted_by_name(
@@ -375,7 +381,12 @@ async def test_get_sets_unreachable_library_folder_degrades_to_empty(
     client = await aiohttp_client(make_app(unreachable_context))
     resp = await client.get("/lora_library/sets")
     assert resp.status == 200
-    assert await resp.json() == {"sets": []}
+    body = await resp.json()
+    assert body["sets"] == []
+    # The path is still NAMED (config-derived, no mkdir) even while the
+    # folder is unreachable -- that is exactly when a user needs to see it.
+    assert body["sets_dir"].endswith("sets")
+    assert body["is_default_library"] is False
 
 
 async def test_get_set_unreachable_library_folder_is_400(

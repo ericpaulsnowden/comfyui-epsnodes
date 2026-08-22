@@ -83,3 +83,48 @@ def test_search_input_is_debounced_and_escape_stays_instant() -> None:
     assert "renderList(state)" in keydown, "Escape repaints at once"
     teardown = SRC.split("function teardown(state)", 1)[1].split("\n}\n", 1)[0]
     assert "if (state.searchTimer) clearTimeout(state.searchTimer)" in teardown
+
+
+# ---------------------------------------------------------------------------
+# Library-on-a-NAS round (2026-08-22): the session cache paints the last
+# payload instantly, so the corpus it carries has to be CURRENT -- every
+# mutation now keeps entryTextByName/searchCorpus in step (which also makes
+# "searchable after Save" true without waiting for the next full load).
+# ---------------------------------------------------------------------------
+
+
+def _body(signature: str) -> str:
+    head = f"function {signature} {{\n"
+    start = SRC.index(head) + len(head)
+    return SRC[start : SRC.index("\n}\n", start)]
+
+
+def test_mutations_keep_the_search_corpus_current() -> None:
+    note = _body("noteEntryText(state, name, text)")
+    assert "state.entryTextByName[name] = body" in note
+    assert "state.searchCorpus.set(name, searchHaystack(name, body))" in note
+    forget = _body("forgetEntryText(state, name)")
+    assert "delete state.entryTextByName[name]" in forget and "state.searchCorpus.delete(name)" in forget
+    assert "noteEntryText(state, renameTo || name, typeof data.text === 'string' ? data.text : text)" in _body(
+        "performSave(state, { force = false } = {})"
+    )
+    assert "noteEntryText(state, name, '')" in _body("confirmNewEntry(state, rawName)")
+    assert "forgetEntryText(state, name)" in _body(
+        "performDeleteRun(state, names, startIndex, { force = false } = {})"
+    )
+    assert "if (kind === 'entry') renameEntryText(state, name, renameTo)" in _body(
+        "applyRenameResult(state, kind, name, renameTo, data)"
+    )
+
+
+def test_cached_paint_rebuilds_the_corpus_like_a_fresh_load() -> None:
+    # reloadNow's cached paint and the fresh fetch both land in
+    # applyNotebookPayload, which builds the corpus right after the text map
+    # -- the one-load pin above (`buildSearchCorpus` within 400 chars of the
+    # entryTextByName assignment) therefore covers the cached paint too.
+    apply = _body("applyNotebookPayload(state, file, data)")
+    assert "state.entryTextByName = Object.fromEntries(" in apply
+    assert "buildSearchCorpus(state)" in apply
+    reload = _body("reloadNow(state)")
+    assert "applyNotebookPayload(state, file, cached.payload)" in reload
+    assert "await applyNotebookPayload(state, file, data)" in reload

@@ -863,3 +863,262 @@ def test_new_group_is_announced_with_toasts(controller_source: str) -> None:
     assert exists in body
     assert "Enter a group name after the #" in body
 
+
+
+# ------------------------------------------------ library-on-a-NAS round (2026-08-22)
+# controller.js pins ONLY (the controller's pins live here by convention).
+# Owner: the Notebook shares between his computers (absolute NAS file per
+# node) but the controller's states did NOT -- they live in the LIBRARY
+# FOLDER (`<library>/sets`), still the pack's default LOCAL folder on his
+# machines; "Surface it just like for the prompt library." FORMAT.md §6.3.
+
+API_JS = REPO_ROOT / "web" / "lora_library" / "api.js"
+VERSION_JS = REPO_ROOT / "web" / "lora_library" / "version.js"
+
+STATES_LOC_PROBE_JS = """
+import * as c from './extensions/comfyui-epsnodes/lora_library/controller.js'
+
+const out = {
+  exports: {
+    statesLocationLine: typeof c.statesLocationLine === 'function',
+    setsDirOf: typeof c.setsDirOf === 'function'
+  },
+  defaultSameDir: c.statesLocationLine({ library_dir: '/home/u/lib', default_library_dir: '/home/u/lib/' }),
+  defaultWinSeparators: c.statesLocationLine({ library_dir: 'C:\\\\Users\\\\e\\\\lib', default_library_dir: 'C:/Users/e/lib' }),
+  configuredUnc: c.statesLocationLine({ library_dir: '\\\\\\\\nas\\\\share\\\\comfy', default_library_dir: 'C:\\\\Users\\\\e\\\\lib' }),
+  configuredPosix: c.statesLocationLine({ library_dir: '/mnt/nas/comfy/', default_library_dir: '/home/u/lib' }),
+  feedPreferred: c.statesLocationLine({ library_dir: '/x', default_library_dir: '/x', sets_dir: '/nas/lib/sets', is_default_library: false }),
+  feedSaysDefault: c.statesLocationLine({ library_dir: '/nas', default_library_dir: '/y', sets_dir: '/nas/sets', is_default_library: true }),
+  noteBecomesHint: c.statesLocationLine({ library_dir: '/nas/lib', default_library_dir: '/y', library_dir_note: '  folder unreachable ' }),
+  empty: c.statesLocationLine({}),
+  nul: c.statesLocationLine(null),
+  setsDir: [c.setsDirOf('/a/b/'), c.setsDirOf('C:\\\\lib'), c.setsDirOf(''), c.setsDirOf('/a'), c.setsDirOf(null)]
+}
+process.stdout.write(JSON.stringify(out))
+"""
+
+MSG_STATES_DEFAULT = (
+    "States: this machine only (default library folder) — to share between "
+    "computers, set Settings → EPSNodes → Library folder to the same NAS "
+    "folder on every machine"
+)
+MSG_STATES_SHARED_TITLE = "Shared by every machine whose Library folder points here"
+MSG_STATES_DEFAULT_LABEL = "States: this machine only (default library folder)"
+MSG_STATES_SHARE_HOWTO = (
+    "To share between computers, set Settings → EPSNodes → Library folder to the same NAS folder on every machine."
+)
+
+
+@pytest.fixture(scope="module")
+def controller_api(tmp_path_factory: pytest.TempPathFactory) -> dict:
+    """Runs STATES_LOC_PROBE_JS against the REAL controller.js in a served-
+    layout tmp dir -- controller.js imports `../../../scripts/app.js` and
+    `./api.js` (-> `../../../scripts/api.js`), so the layout mirrors that
+    depth, copies the real api.js/version.js in and stubs the two core
+    scripts (test_m3_pinning_js.py's fixture shape). Importing the module
+    under Node is itself a regression test: its top level must stay free of
+    DOM/LiteGraph touches (the node class is built lazily in
+    registerControllerNode)."""
+    layout = tmp_path_factory.mktemp("web_root")
+    module_dir = layout / "extensions" / "comfyui-epsnodes" / "lora_library"
+    module_dir.mkdir(parents=True)
+    for src in (CONTROLLER_JS, API_JS, VERSION_JS):
+        shutil.copyfile(src, module_dir / src.name)
+    scripts = layout / "scripts"
+    scripts.mkdir(parents=True, exist_ok=True)
+    (scripts / "api.js").write_text(
+        "export const api = { fetchApi: () => {}, apiURL: (p) => p, addEventListener: () => {} }\n",
+        encoding="utf-8",
+    )
+    (scripts / "app.js").write_text("export const app = {}\n", encoding="utf-8")
+    probe = layout / "probe.mjs"
+    probe.write_text(STATES_LOC_PROBE_JS, encoding="utf-8")
+    result = subprocess.run(
+        [NODE, str(probe)], capture_output=True, text=True, timeout=60, cwd=layout
+    )
+    assert result.returncode == 0, f"probe failed (controller.js must IMPORT under Node):\n{result.stderr}"
+    return json.loads(result.stdout)
+
+
+def test_states_location_line_default_library_says_so_plainly(controller_api: dict) -> None:
+    assert controller_api["exports"] == {k: True for k in controller_api["exports"]}
+    line = controller_api["defaultSameDir"]
+    # row 1 = the fact, row 2 (hint) = the fix; the whole sentence is `full`
+    # and rides in the tooltip with the full path (a 300 px node's list pane
+    # is ~170 px wide -- one row would ellipsise the sentence to nothing,
+    # wrapped prose swallowed the whole list on the rig)
+    assert line["text"] == MSG_STATES_DEFAULT_LABEL
+    assert line["full"] == MSG_STATES_DEFAULT
+    assert line["hint"] == MSG_STATES_SHARE_HOWTO
+    assert line["isDefault"] is True
+    assert line["setsDir"] == "/home/u/lib/sets"
+    assert line["title"] == "/home/u/lib/sets\n" + MSG_STATES_DEFAULT  # tooltip carries the full path
+    # separator-/trailing-slash-insensitive equality (the §4 spirit)
+    assert controller_api["defaultWinSeparators"]["isDefault"] is True
+    assert controller_api["defaultWinSeparators"]["setsDir"] == "C:\\Users\\e\\lib\\sets"
+
+
+def test_states_location_line_configured_folder_shows_the_path(controller_api: dict) -> None:
+    unc = controller_api["configuredUnc"]
+    assert unc["text"] == "States: \\\\nas\\share\\comfy\\sets"
+    assert unc["full"] == unc["text"]
+    assert unc["title"] == MSG_STATES_SHARED_TITLE
+    assert unc["hint"] == MSG_STATES_SHARED_TITLE + "."
+    assert unc["isDefault"] is False
+    posix = controller_api["configuredPosix"]
+    assert posix["text"] == "States: /mnt/nas/comfy/sets"
+    assert posix["setsDir"] == "/mnt/nas/comfy/sets"
+
+
+def test_states_location_line_prefers_the_sets_feed_fields(controller_api: dict) -> None:
+    """`GET /lora_library/sets` (newer backend) carries `sets_dir` +
+    `is_default_library`: the backend KNOWS; the client-side derivation is
+    the fallback only."""
+    feed = controller_api["feedPreferred"]
+    assert feed["text"] == "States: /nas/lib/sets" and feed["isDefault"] is False
+    says_default = controller_api["feedSaysDefault"]
+    assert says_default["text"] == MSG_STATES_DEFAULT_LABEL and says_default["setsDir"] == "/nas/sets"
+    assert says_default["full"] == MSG_STATES_DEFAULT
+
+
+def test_states_location_line_surfaces_the_server_diagnosis_and_degrades_to_empty(
+    controller_api: dict,
+) -> None:
+    # FORMAT.md §5 `library_dir_note` (unreachable / wrong-OS path) beats
+    # the sharing reassurance -- it is the one thing worth a hint line.
+    assert controller_api["noteBecomesHint"]["hint"] == "folder unreachable"
+    for key in ("empty", "nul"):
+        assert controller_api[key] == {
+            "text": "", "full": "", "title": "", "hint": "", "isDefault": False, "setsDir": ""
+        }
+    assert controller_api["setsDir"] == ["/a/b/sets", "C:\\lib\\sets", "", "/a/sets", ""]
+
+
+def test_controller_config_fetch_is_one_shared_30s_cache(controller_source: str) -> None:
+    """The picker feed's shared-fetch shape: one module-level cache for
+    EVERY controller, one in-flight promise, released on settle; fetched on
+    attach and by the shared poller (so a Settings change shows within the
+    TTL -- settings.js posts /config silently, there is no event to hear)."""
+    assert "const CONTROLLER_CONFIG_TTL_MS = 30000" in controller_source
+    assert "const CONFIG_ROUTE = '/lora_library/config'" in controller_source
+    fetch = _function_body(controller_source, "fetchControllerConfig()")
+    assert "Date.now() - controllerConfigAt < CONTROLLER_CONFIG_TTL_MS" in fetch
+    assert "if (controllerConfigPromise) return controllerConfigPromise" in fetch
+    assert "api.getJson(CONFIG_ROUTE)" in fetch
+    assert "promise.then(settle, settle)" in fetch
+    added = _method_body(controller_source, "onAdded()")
+    assert "this._refreshStatesLocation()" in added
+    refresh = _method_body(controller_source, "_refreshStatesLocation()")
+    assert "fetchControllerConfig()" in refresh and "this._applyConfigResponse(config)" in refresh
+    assert "if (this._removed) return" in refresh
+    run = _function_body(controller_source, "runSharedSetsFetch()")
+    assert "runSharedConfigFetch().catch(() => {})" in run
+    shared = _function_body(controller_source, "runSharedConfigFetch()")
+    assert "await fetchControllerConfig()" in shared
+    assert "node._applyConfigResponse(config)" in shared
+    # the poller pin above still holds: the config ride adds no GET literal
+    assert run.count("await api.getJson(") == 2
+
+
+def test_states_location_line_sits_under_the_list_and_never_crops_it(controller_source: str) -> None:
+    """§7.2 sizing laws: the left pane is a flex column; the line is
+    `flex: 0 0 auto` BELOW the `flex: 1 1 auto; min-height: 0` scrolling
+    list (the list shrinks and scrolls), and its row rides in getMinHeight."""
+    pane = _method_body(controller_source, "_buildStatePane()")
+    assert "this._pane.statesLocEl = el('div', { className: 'llsc-states-loc' }, [" in pane
+    assert (
+        "const leftPane = el('div', { className: 'llsc-pane-left' }, [\n"
+        "          this._pane.listEl,\n"
+        "          this._pane.statesLocEl\n"
+        "        ])"
+    ) in pane
+    assert "this._pane.statesLocEl.style.display = 'none'" in pane  # hidden until known
+    assert "getMinHeight: () => MIN_STATE_PANE_HEIGHT + STATES_LOCATION_PX" in pane
+    assert "const STATES_LOCATION_PX = 30" in controller_source
+    css = controller_source.split("const STATE_PANE_CSS_TEXT = `", 1)[1].split("\n`\n", 1)[0]
+    loc = css.split(".llsc-states-loc {", 1)[1].split("\n}\n", 1)[0]
+    assert "flex: 0 0 auto;" in loc
+    lst = css.split(".llsc-list {", 1)[1].split("\n}\n", 1)[0]
+    assert "flex: 1 1 auto;" in lst and "min-height: 0;" in lst
+    assert ".llsc-states-loc-hint:empty { display: none; }" in css
+    assert "`" not in css  # CSS_TEXT is a template literal
+
+
+def test_open_folder_is_loopback_gated_and_an_old_backend_toasts(controller_source: str) -> None:
+    """The route is loopback-only (FORMAT.md §2/§5): the button hides for a
+    remote viewer (it could only ever fail for them -- the Notebook's
+    file-panel rule); a 404 from a backend older than the route says so."""
+    assert "const SETS_OPEN_FOLDER_ROUTE = '/lora_library/sets/open_folder'" in controller_source
+    render = _method_body(controller_source, "_renderStatesLocation()")
+    assert "const isLocal = this._statesConfig ? this._statesConfig.is_local !== false : true" in render
+    assert "pane.statesLocOpenBtn.style.display = isLocal && line.setsDir ? '' : 'none'" in render
+    assert "const merged = { ...(this._statesConfig || {}), ...(this._statesFeed || {}) }" in render
+    assert "const line = statesLocationLine(merged)" in render
+    assert "if (signature === this._statesLocSignature) return" in render  # change-gated
+    open_folder = _method_body(controller_source, "async _openStatesFolder()")
+    assert "await api.postJson(SETS_OPEN_FOLDER_ROUTE, {})" in open_folder
+    assert "if (error?.status === 404) {" in open_folder
+    assert "this._toast('warn', NODE_TITLE, MSG_STATES_OPEN_NEEDS_BACKEND)" in open_folder
+    assert "} else if (error?.status === 403) {" in open_folder
+    assert "this._toast('warn', NODE_TITLE, MSG_STATES_OPEN_REMOTE)" in open_folder
+    assert (
+        "const MSG_STATES_OPEN_NEEDS_BACKEND =\n"
+        "  'Open folder needs a newer EPSNodes backend — update the pack on the machine running ComfyUI and restart it.'"
+    ) in controller_source
+    assert "const MSG_STATES_OPEN_REMOTE = 'Only the machine running ComfyUI can open its folders.'" in controller_source
+    pane = _method_body(controller_source, "_buildStatePane()")
+    assert "'Open folder'," in pane
+    assert "'Reveal the states folder on the machine running ComfyUI'" in pane
+
+
+def test_user_facing_states_strings_are_verbatim(controller_source: str) -> None:
+    assert (
+        "const MSG_STATES_DEFAULT =\n"
+        "  'States: this machine only (default library folder) — to share between ' +\n"
+        "  'computers, set Settings → EPSNodes → Library folder to the same NAS ' +\n"
+        "  'folder on every machine'"
+    ) in controller_source
+    assert (
+        "const MSG_STATES_SHARED_TITLE = 'Shared by every machine whose Library folder points here'"
+        in controller_source
+    )
+    assert "const MSG_STATES_DEFAULT_LABEL = 'States: this machine only (default library folder)'" in controller_source
+    assert (
+        "const MSG_STATES_SHARE_HOWTO =\n"
+        "  'To share between computers, set Settings → EPSNodes → Library folder to the same NAS folder on every machine.'"
+    ) in controller_source
+    # the line stays TWO fixed rows -- never wrapped prose (rig 2026-08-22:
+    # the wrapped sentence swallowed the whole list at the 300 px node width)
+    css = controller_source.split("const STATE_PANE_CSS_TEXT = `", 1)[1].split("\n`\n", 1)[0]
+    assert "white-space: normal" not in css.split(".llsc-states-loc {", 1)[1]
+    render = _method_body(controller_source, "_renderStatesLocation()")
+    assert "pane.statesLocTextEl.classList.toggle('llsc-states-loc-prose', line.isDefault)" in render
+
+
+def test_sets_feed_fields_apply_before_the_row_change_gate(controller_source: str) -> None:
+    """`_applySetsResponse` returns early when the ROWS did not change
+    (v0.67.2); the location line reads `sets_dir`/`is_default_library`
+    BEFORE that gate, since it is about the folder, not the rows."""
+    apply = _method_body(controller_source, "_applySetsResponse(data)")
+    assert "typeof data?.sets_dir === 'string'" in apply
+    assert "this._statesFeed = {" in apply
+    assert "this._renderStatesLocation()" in apply
+    assert apply.index("this._renderStatesLocation()") < apply.index("const signature = JSON.stringify(this._setsCache)")
+
+
+def test_states_location_is_dom_only_and_torn_down(controller_source: str) -> None:
+    """§7.5: DOM only, no window listeners, no canvas drawing; the element
+    ResizeObserver (the Notebook's path re-fit pattern) is disconnected in
+    onRemoved and re-armed on a re-add."""
+    section = controller_source.split("// ----------------------------------------- states location (NAS round)", 1)[1]
+    section = section.split("_toast(severity, summary, detail) {", 1)[0]
+    assert "window.addEventListener" not in section
+    assert "onDrawForeground" not in section
+    assert "new ResizeObserver(() => this._fitStatesLocationText())" in section
+    removed = _method_body(controller_source, "onRemoved()")
+    assert "this._statesLocObserver?.disconnect()" in removed
+    added = _method_body(controller_source, "onAdded()")
+    assert "this._armStatesLocObserver()" in added
+    fit = _method_body(controller_source, "_fitStatesLocationText()")
+    assert "textEl.scrollWidth <= textEl.clientWidth + 1" in fit  # front-truncate only on real overflow
+    assert "frontTruncateText(full, budget)" in fit

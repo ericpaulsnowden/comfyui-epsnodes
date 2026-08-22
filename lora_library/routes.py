@@ -6,10 +6,19 @@ helpers; ``routes_notebook.py`` and ``routes_sets.py`` each expose
 ``register(context, routes)`` and are wired in here. Handlers close over
 the injected :class:`~lora_library.context.LibraryContext`, so tests build
 an ``aiohttp.web.Application`` from these registrars directly — no ComfyUI.
+
+NAS round 2026-08-22 (see ``routes_notebook.py``'s module docstring): the
+core routes' disk work -- ``GET /config``'s existence probe of the
+configured folder (an ``is_dir`` that can hang for the SMB timeout on an
+unmounted share) and its ``library_dir()`` mkdir, ``fs/list``'s directory
+scan, ``POST /config``'s write probe, ``POST /remote_dirs``' path
+resolution -- all run via ``asyncio.to_thread`` so a slow mount delays
+only that request.
 """
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import ipaddress
 import logging
@@ -852,6 +861,126 @@ def _check_library_dir(context: LibraryContext) -> tuple[bool, str]:
     return False, _diagnose_library_dir(configured, is_windows=_is_windows())
 
 
+def _config_snapshot(context: LibraryContext, *, is_local: bool) -> dict:
+    """``GET /lora_library/config``'s body (FORMAT.md §5), computed in a
+    worker thread: ``_check_library_dir``'s ``is_dir`` probe of a configured
+    NAS folder can block for the mount's whole timeout when the share is
+    down, and ``library_dir()``'s mkdir is a round trip on a healthy one.
+    *is_local* is the §2 verdict the handler computed on the loop."""
+    configured_raw = context.load_config().get("library_dir")
+    configured = bool(configured_raw)
+    library_dir_exists, library_dir_note = _check_library_dir(context)
+    # 2026-07-19: when unreachable (unmounted NAS, wrong-OS shape),
+    # report the raw configured value as-is rather than calling
+    # `context.library_dir()` — its `mkdir` would take this whole route
+    # down; `library_dir_exists`/`library_dir_note` explain why it's
+    # stale (FORMAT.md §5/§7.3). The common (working) case still
+    # resolves through the real method, matching prior behavior.
+    library_dir = str(context.library_dir()) if library_dir_exists else configured_raw
+    return {
+        "library_dir": library_dir,
+        "default_library_dir": str(context.default_library_dir),
+        "configured": configured,
+        # §2 verdict for THIS caller — lets the frontend gate the
+        # host-machine-only affordances (§7.2 file panel buttons).
+        "is_local": is_local,
+        "library_dir_exists": library_dir_exists,
+        "library_dir_note": library_dir_note,
+        # FORMAT.md §2 remote allow-list — the folders outside
+        # library_dir that non-loopback callers may also touch. Drives
+        # §7.2's host-only "Share with remote browsers" toggle.
+        "remote_dirs": [str(p) for p in context.remote_dirs()],
+    }
+
+
+def _scan_directory(
+    directory: Path, extensions: tuple[str, ...]
+) -> tuple[list[dict[str, str]], list[dict[str, object]], bool]:
+    """``fs/list``'s directory pass -- ``(dirs, files, truncated)`` -- in a
+    worker thread (the listing of a NAS folder is many round trips).
+    Raises the ``os.scandir`` ``OSError`` for the handler's 400.
+
+    Audit 2026-08-21: `sorted(iterdir())` + `is_dir()` per entry stat'd
+    EVERY child (hidden, wrong-suffix or not) before the cap was
+    consulted, and dirs/files shared one counter so a folder whose first
+    500 names were subfolders returned ZERO files. os.scandir answers
+    is_dir from the directory entry on every platform that matters (no
+    stat), the suffix filter runs before any stat, and each kind has its
+    own budget -- names are still sorted casefold so the first N are
+    alphabetical, as before.
+    """
+    with os.scandir(directory) as it:
+        scanned = sorted(it, key=lambda e: e.name.casefold())
+
+    dirs: list[dict[str, str]] = []
+    files: list[dict[str, object]] = []
+    truncated = False
+    for entry in scanned:
+        if entry.name.startswith("."):
+            continue
+        try:
+            is_dir = entry.is_dir()
+        except OSError:
+            continue
+        if is_dir:
+            if len(dirs) >= _FS_LIST_MAX_ENTRIES:
+                truncated = True
+                continue
+            dirs.append({"name": entry.name})
+            continue
+        if os.path.splitext(entry.name)[1].lower() not in extensions:
+            continue
+        if len(files) >= _FS_LIST_MAX_ENTRIES:
+            truncated = True
+            continue
+        try:
+            stat_result = entry.stat()
+        except OSError:
+            continue
+        files.append(
+            {"name": entry.name, "size": stat_result.st_size, "mtime": stat_result.st_mtime}
+        )
+    return dirs, files, truncated
+
+
+def _probe_writable_dir(path: Path) -> None:
+    """``POST /config``'s validation of a new library folder -- create it
+    and round-trip a probe file -- in a worker thread (a NAS write).
+    Raises ``OSError`` for the handler's 400."""
+    path.mkdir(parents=True, exist_ok=True)
+    probe = path / ".lora_library_write_probe"
+    probe.write_text("", encoding="utf-8")
+    probe.unlink()
+
+
+def _merge_remote_dirs(current: list[str], path: Path, *, allow: bool) -> list[str]:
+    """``POST /remote_dirs``' list edit, in a worker thread: ``_is_inside``
+    ``resolve()``s every entry, and an entry may name a NAS folder."""
+    wanted = str(path)
+    if allow:
+        # Compared as resolved paths so the same folder reached two ways
+        # (a trailing slash, a `..`, a symlinked parent) can't be listed
+        # twice — but STORED as given, so an entry stays meaningful while
+        # its NAS is unmounted and unresolvable.
+        already = any(_is_inside(path, Path(entry)) for entry in current)
+        if not already:
+            return [*current, wanted]
+        return list(current)
+    # Audit 2026-08-21: add compares RESOLVED containment but remove
+    # compared raw Path equality, so un-sharing `.../nas/docs` left
+    # an entry stored as `.../nas/../nas/docs` exposed while the
+    # response said ok. Remove on resolved equality (either
+    # direction of _is_inside) OR exact string match.
+    return [
+        entry
+        for entry in current
+        if not (
+            Path(entry) == path
+            or (_is_inside(Path(entry), path) and _is_inside(path, Path(entry)))
+        )
+    ]
+
+
 # ---------------------------------------------------------------- core routes
 
 def register_core(context: LibraryContext, routes: web.RouteTableDef) -> None:
@@ -863,32 +992,10 @@ def register_core(context: LibraryContext, routes: web.RouteTableDef) -> None:
 
     @routes.get("/lora_library/config")
     async def get_config(request: web.Request) -> web.Response:
-        configured_raw = context.load_config().get("library_dir")
-        configured = bool(configured_raw)
-        library_dir_exists, library_dir_note = _check_library_dir(context)
-        # 2026-07-19: when unreachable (unmounted NAS, wrong-OS shape),
-        # report the raw configured value as-is rather than calling
-        # `context.library_dir()` — its `mkdir` would take this whole route
-        # down; `library_dir_exists`/`library_dir_note` explain why it's
-        # stale (FORMAT.md §5/§7.3). The common (working) case still
-        # resolves through the real method, matching prior behavior.
-        library_dir = str(context.library_dir()) if library_dir_exists else configured_raw
-        return web.json_response(
-            {
-                "library_dir": library_dir,
-                "default_library_dir": str(context.default_library_dir),
-                "configured": configured,
-                # §2 verdict for THIS caller — lets the frontend gate the
-                # host-machine-only affordances (§7.2 file panel buttons).
-                "is_local": request_is_loopback(request),
-                "library_dir_exists": library_dir_exists,
-                "library_dir_note": library_dir_note,
-                # FORMAT.md §2 remote allow-list — the folders outside
-                # library_dir that non-loopback callers may also touch. Drives
-                # §7.2's host-only "Share with remote browsers" toggle.
-                "remote_dirs": [str(p) for p in context.remote_dirs()],
-            }
+        payload = await asyncio.to_thread(
+            _config_snapshot, context, is_local=request_is_loopback(request)
         )
+        return web.json_response(payload)
 
     @routes.get("/lora_library/fs/list")
     async def get_fs_list(request: web.Request) -> web.Response:
@@ -928,12 +1035,13 @@ def register_core(context: LibraryContext, routes: web.RouteTableDef) -> None:
         raw = (request.query.get("dir") or "").strip()
         windows = _is_windows()
         if raw == ROOTS:
+            roots = await asyncio.to_thread(_fs_list_roots, context, windows=windows)
             return web.json_response(
                 {
                     "dir": ROOTS,
                     "parent": None,
                     "sep": os.sep,
-                    "dirs": _fs_list_roots(context, windows=windows),
+                    "dirs": roots,
                     "files": [],
                     "truncated": False,
                 }
@@ -945,52 +1053,16 @@ def register_core(context: LibraryContext, routes: web.RouteTableDef) -> None:
         # plain language (:func:`_uri_style_path_error`).
         if "://" in raw:
             return error_response(400, _uri_style_path_error(raw))
-        directory = Path(raw) if raw else context.library_dir()
+        directory = Path(raw) if raw else await asyncio.to_thread(context.library_dir)
         if not directory.is_absolute():
             return error_response(400, f"dir must be an absolute path (got {raw!r})")
         extensions = _parse_extensions(request.query.get("ext", ""))
-        # Audit 2026-08-21: `sorted(iterdir())` + `is_dir()` per entry
-        # stat'd EVERY child (hidden, wrong-suffix or not) before the cap
-        # was consulted, and dirs/files shared one counter so a folder
-        # whose first 500 names were subfolders returned ZERO files.
-        # os.scandir answers is_dir from the directory entry on every
-        # platform that matters (no stat), the suffix filter runs before
-        # any stat, and each kind has its own budget -- names are still
-        # sorted casefold so the first N are alphabetical, as before.
         try:
-            with os.scandir(directory) as it:
-                scanned = sorted(it, key=lambda e: e.name.casefold())
+            dirs, files, truncated = await asyncio.to_thread(
+                _scan_directory, directory, extensions
+            )
         except OSError as exc:
             return error_response(400, f"could not list {directory}: {exc}")
-
-        dirs: list[dict[str, str]] = []
-        files: list[dict[str, object]] = []
-        truncated = False
-        for entry in scanned:
-            if entry.name.startswith("."):
-                continue
-            try:
-                is_dir = entry.is_dir()
-            except OSError:
-                continue
-            if is_dir:
-                if len(dirs) >= _FS_LIST_MAX_ENTRIES:
-                    truncated = True
-                    continue
-                dirs.append({"name": entry.name})
-                continue
-            if os.path.splitext(entry.name)[1].lower() not in extensions:
-                continue
-            if len(files) >= _FS_LIST_MAX_ENTRIES:
-                truncated = True
-                continue
-            try:
-                stat_result = entry.stat()
-            except OSError:
-                continue
-            files.append(
-                {"name": entry.name, "size": stat_result.st_size, "mtime": stat_result.st_mtime}
-            )
 
         at_root = directory.parent == directory
         parent = _fs_root_parent(directory, windows=windows) if at_root else str(directory.parent)
@@ -1024,15 +1096,13 @@ def register_core(context: LibraryContext, routes: web.RouteTableDef) -> None:
         if not raw:
             config.pop("library_dir", None)
             context.save_config(config)
-            return web.json_response({"ok": True, "library_dir": str(context.library_dir())})
+            library_dir = await asyncio.to_thread(context.library_dir)
+            return web.json_response({"ok": True, "library_dir": str(library_dir)})
         path = Path(raw)
         if not path.is_absolute():
             return error_response(400, f"library folder must be an absolute path (got {raw!r})")
         try:
-            path.mkdir(parents=True, exist_ok=True)
-            probe = path / ".lora_library_write_probe"
-            probe.write_text("", encoding="utf-8")
-            probe.unlink()
+            await asyncio.to_thread(_probe_writable_dir, path)
         except OSError as exc:
             return error_response(400, f"library folder is not writable: {exc}")
         config["library_dir"] = str(path)
@@ -1076,30 +1146,9 @@ def register_core(context: LibraryContext, routes: web.RouteTableDef) -> None:
             return error_response(400, "'allow' must be a boolean")
 
         config = context.load_config()
-        current = [str(p) for p in context.remote_dirs()]
-        wanted = str(path)
-        if allow:
-            # Compared as resolved paths so the same folder reached two ways
-            # (a trailing slash, a `..`, a symlinked parent) can't be listed
-            # twice — but STORED as given, so an entry stays meaningful while
-            # its NAS is unmounted and unresolvable.
-            already = any(_is_inside(path, Path(entry)) for entry in current)
-            if not already:
-                current.append(wanted)
-        else:
-            # Audit 2026-08-21: add compares RESOLVED containment but remove
-            # compared raw Path equality, so un-sharing `.../nas/docs` left
-            # an entry stored as `.../nas/../nas/docs` exposed while the
-            # response said ok. Remove on resolved equality (either
-            # direction of _is_inside) OR exact string match.
-            current = [
-                entry
-                for entry in current
-                if not (
-                    Path(entry) == path
-                    or (_is_inside(Path(entry), path) and _is_inside(path, Path(entry)))
-                )
-            ]
+        current = await asyncio.to_thread(
+            _merge_remote_dirs, [str(p) for p in context.remote_dirs()], path, allow=allow
+        )
         if current:
             config["remote_dirs"] = current
         else:

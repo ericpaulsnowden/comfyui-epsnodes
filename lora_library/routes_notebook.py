@@ -7,10 +7,23 @@ delegating everything else to ``markdown_store``. Unlike a set slug, a
 notebook ``file`` value is an arbitrary path the caller chooses (FORMAT.md
 §1/§2) — so, unlike ``routes_sets.py``, every handler here resolves that
 path and runs it through ``notebook_path_error`` before touching disk.
+
+**Every filesystem touch runs off the event loop** (NAS round 2026-08-22,
+owner: the Notebook "sometimes looks broken but just takes over a minute
+to load, even when just tabbing between open workflows", library on a
+NAS, usually from a remote browser). ``load_notebook``/``save_notebook``,
+the resolve+§2-guard step (``library_dir()``'s on-demand mkdir, the
+remote guard's ``Path.resolve`` walks) and ``open_folder``'s ``is_dir``
+all go through ``asyncio.to_thread``, so one slow mount delays only the
+request that touched it instead of stalling every request on the server
+(queue submissions included). The handlers' error mapping is unchanged:
+the thread call raises exactly what the direct call raised, where it
+raised it.
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import subprocess
@@ -61,6 +74,64 @@ def _resolve_path(
         return None, error_response(400, f"invalid 'file' path: {exc}")
 
 
+def _resolve_and_guard_sync(
+    context: LibraryContext, file_value: object, *, loopback: bool, writing: bool
+) -> tuple[Path | None, web.Response | None]:
+    """:func:`_resolve_path` followed by the FORMAT.md §2 guard -- the two
+    steps every handler runs before touching the file, as one synchronous
+    unit so :func:`_resolve_and_guard` can push both off the event loop in
+    a single hop. ``(path, None)`` on success, else ``(None, response)``
+    with the same 400/403 bodies the handlers always produced."""
+    path, err = _resolve_path(context, file_value, writing=writing)
+    if err is not None:
+        return None, err
+    guard = notebook_path_error(context, path, loopback=loopback, writing=writing)
+    if guard:
+        return None, error_response(403, guard)
+    return path, None
+
+
+async def _resolve_and_guard(
+    context: LibraryContext, request: web.Request, file_value: object, *, writing: bool
+) -> tuple[Path | None, web.Response | None]:
+    """:func:`_resolve_and_guard_sync` in a worker thread. Resolving a
+    relative ``file`` ensures the library folder exists (a ``mkdir`` --
+    memoized by ``LibraryContext`` but a NAS round trip when it isn't) and
+    the remote guard ``resolve()``s both the path and every allowed root
+    (an ``lstat`` per path component on the NAS), so neither belongs on
+    the loop. ``request_is_loopback`` stays on the loop: it reads the
+    request, not the disk."""
+    return await asyncio.to_thread(
+        _resolve_and_guard_sync,
+        context,
+        file_value,
+        loopback=request_is_loopback(request),
+        writing=writing,
+    )
+
+
+def _parse_known_mtime(raw: object) -> float | None:
+    """``GET /notebook``'s optional ``known_mtime`` query value as a float,
+    or ``None`` when absent or not a number (then the full payload is
+    returned -- a malformed hint degrades to a slower answer, never to an
+    error; FORMAT.md §5)."""
+    if not isinstance(raw, str) or not raw.strip():
+        return None
+    try:
+        return float(raw)
+    except ValueError:
+        return None
+
+
+def _file_mtime(path: Path) -> float | None:
+    """*path*'s mtime, or ``None`` when it can't be stat'd (missing file,
+    unreachable mount) -- the one ``stat`` the unchanged short-circuit costs."""
+    try:
+        return path.stat().st_mtime
+    except OSError:
+        return None
+
+
 def _reveal_folder(path: Path) -> None:
     """Open *path* in the OS file manager, non-blocking.
 
@@ -81,17 +152,37 @@ def register(context: LibraryContext, routes: web.RouteTableDef) -> None:
 
     @routes.get("/lora_library/notebook")
     async def get_notebook(request: web.Request) -> web.Response:
-        path, err = _resolve_path(context, request.query.get("file", ""))
+        path, err = await _resolve_and_guard(
+            context, request, request.query.get("file", ""), writing=False
+        )
         if err is not None:
             return err
-        guard = notebook_path_error(
-            context, path, loopback=request_is_loopback(request), writing=False
-        )
-        if guard:
-            return error_response(403, guard)
+
+        # FORMAT.md §5 `known_mtime` (NAS round 2026-08-22): the panel sends
+        # the mtime it last painted; when the file still carries it, ONE
+        # stat answers with `unchanged: true` and nothing else -- no read,
+        # no parse, no entries -- so a tab switch / poll over a slow mount
+        # costs a round trip instead of the whole file. Missing file,
+        # mismatch, absent or malformed hint: the full payload, exactly as
+        # before.
+        known_mtime = _parse_known_mtime(request.query.get("known_mtime"))
+        if known_mtime is not None:
+            current_mtime = await asyncio.to_thread(_file_mtime, path)
+            if current_mtime is not None and abs(current_mtime - known_mtime) < 1e-6:
+                return web.json_response(
+                    {
+                        "ok": True,
+                        "unchanged": True,
+                        "mtime": current_mtime,
+                        "exists": True,
+                        "file": str(path),
+                    }
+                )
 
         try:
-            parsed, mtime, _line_ending = markdown_store.load_notebook(path)
+            parsed, mtime, _line_ending = await asyncio.to_thread(
+                markdown_store.load_notebook, path
+            )
         except markdown_store.MarkdownStoreError as exc:
             return error_response(400, str(exc))
         entries = markdown_store.list_entries(parsed)
@@ -129,18 +220,17 @@ def register(context: LibraryContext, routes: web.RouteTableDef) -> None:
 
     @routes.get("/lora_library/notebook/category")
     async def get_notebook_category(request: web.Request) -> web.Response:
-        path, err = _resolve_path(context, request.query.get("file", ""))
+        path, err = await _resolve_and_guard(
+            context, request, request.query.get("file", ""), writing=False
+        )
         if err is not None:
             return err
-        guard = notebook_path_error(
-            context, path, loopback=request_is_loopback(request), writing=False
-        )
-        if guard:
-            return error_response(403, guard)
 
         name = request.query.get("name", "")
         try:
-            parsed, mtime, _line_ending = markdown_store.load_notebook(path)
+            parsed, mtime, _line_ending = await asyncio.to_thread(
+                markdown_store.load_notebook, path
+            )
         except markdown_store.MarkdownStoreError as exc:
             return error_response(400, str(exc))
         description = markdown_store.get_category_description(parsed, name)
@@ -165,14 +255,9 @@ def register(context: LibraryContext, routes: web.RouteTableDef) -> None:
         if not isinstance(body, dict):
             return error_response(400, "body must be a JSON object")
 
-        path, err = _resolve_path(context, body.get("file"), writing=True)
+        path, err = await _resolve_and_guard(context, request, body.get("file"), writing=True)
         if err is not None:
             return err
-        guard = notebook_path_error(
-            context, path, loopback=request_is_loopback(request), writing=True
-        )
-        if guard:
-            return error_response(403, guard)
 
         name = body.get("name")
         if not isinstance(name, str) or not name.strip():
@@ -194,7 +279,9 @@ def register(context: LibraryContext, routes: web.RouteTableDef) -> None:
             return error_response(400, "'base_mtime' must be a number")
 
         try:
-            parsed, current_mtime, line_ending = markdown_store.load_notebook(path)
+            parsed, current_mtime, line_ending = await asyncio.to_thread(
+                markdown_store.load_notebook, path
+            )
         except markdown_store.MarkdownStoreError as exc:
             return error_response(400, str(exc))
         try:
@@ -214,7 +301,9 @@ def register(context: LibraryContext, routes: web.RouteTableDef) -> None:
         except markdown_store.MarkdownStoreError as exc:
             return error_response(400, str(exc))
 
-        new_mtime = markdown_store.save_notebook(path, parsed, line_ending)
+        new_mtime = await asyncio.to_thread(
+            markdown_store.save_notebook, path, parsed, line_ending
+        )
         response = {
             "ok": True,
             "mtime": new_mtime,
@@ -229,18 +318,17 @@ def register(context: LibraryContext, routes: web.RouteTableDef) -> None:
 
     @routes.get("/lora_library/notebook/entry")
     async def get_notebook_entry(request: web.Request) -> web.Response:
-        path, err = _resolve_path(context, request.query.get("file", ""))
+        path, err = await _resolve_and_guard(
+            context, request, request.query.get("file", ""), writing=False
+        )
         if err is not None:
             return err
-        guard = notebook_path_error(
-            context, path, loopback=request_is_loopback(request), writing=False
-        )
-        if guard:
-            return error_response(403, guard)
 
         name = request.query.get("name", "")
         try:
-            parsed, mtime, _line_ending = markdown_store.load_notebook(path)
+            parsed, mtime, _line_ending = await asyncio.to_thread(
+                markdown_store.load_notebook, path
+            )
         except markdown_store.MarkdownStoreError as exc:
             return error_response(400, str(exc))
         entry = markdown_store.get_entry(parsed, name)
@@ -257,14 +345,9 @@ def register(context: LibraryContext, routes: web.RouteTableDef) -> None:
         if not isinstance(body, dict):
             return error_response(400, "body must be a JSON object")
 
-        path, err = _resolve_path(context, body.get("file"), writing=True)
+        path, err = await _resolve_and_guard(context, request, body.get("file"), writing=True)
         if err is not None:
             return err
-        guard = notebook_path_error(
-            context, path, loopback=request_is_loopback(request), writing=True
-        )
-        if guard:
-            return error_response(403, guard)
 
         name = body.get("name")
         if not isinstance(name, str) or not name.strip():
@@ -289,7 +372,9 @@ def register(context: LibraryContext, routes: web.RouteTableDef) -> None:
             return error_response(400, "'base_mtime' must be a number")
 
         try:
-            parsed, current_mtime, line_ending = markdown_store.load_notebook(path)
+            parsed, current_mtime, line_ending = await asyncio.to_thread(
+                markdown_store.load_notebook, path
+            )
         except markdown_store.MarkdownStoreError as exc:
             return error_response(400, str(exc))
         try:
@@ -304,7 +389,9 @@ def register(context: LibraryContext, routes: web.RouteTableDef) -> None:
         except markdown_store.MarkdownStoreError as exc:
             return error_response(400, str(exc))
 
-        new_mtime = markdown_store.save_notebook(path, parsed, line_ending)
+        new_mtime = await asyncio.to_thread(
+            markdown_store.save_notebook, path, parsed, line_ending
+        )
         response = {
             "ok": True,
             "mtime": new_mtime,
@@ -330,14 +417,9 @@ def register(context: LibraryContext, routes: web.RouteTableDef) -> None:
         if not isinstance(body, dict):
             return error_response(400, "body must be a JSON object")
 
-        path, err = _resolve_path(context, body.get("file"), writing=True)
+        path, err = await _resolve_and_guard(context, request, body.get("file"), writing=True)
         if err is not None:
             return err
-        guard = notebook_path_error(
-            context, path, loopback=request_is_loopback(request), writing=True
-        )
-        if guard:
-            return error_response(403, guard)
 
         name = body.get("name")
         if not isinstance(name, str) or not name.strip():
@@ -347,7 +429,9 @@ def register(context: LibraryContext, routes: web.RouteTableDef) -> None:
             return error_response(400, "'base_mtime' must be a number")
 
         try:
-            parsed, current_mtime, line_ending = markdown_store.load_notebook(path)
+            parsed, current_mtime, line_ending = await asyncio.to_thread(
+                markdown_store.load_notebook, path
+            )
         except markdown_store.MarkdownStoreError as exc:
             return error_response(400, str(exc))
         try:
@@ -358,7 +442,9 @@ def register(context: LibraryContext, routes: web.RouteTableDef) -> None:
         if not markdown_store.remove_entry(parsed, name):
             return error_response(404, f"no such entry {name!r} in {path}")
 
-        new_mtime = markdown_store.save_notebook(path, parsed, line_ending)
+        new_mtime = await asyncio.to_thread(
+            markdown_store.save_notebook, path, parsed, line_ending
+        )
         return web.json_response(
             {"ok": True, "mtime": new_mtime, "entries": markdown_store.list_entries(parsed)}
         )
@@ -375,14 +461,9 @@ def register(context: LibraryContext, routes: web.RouteTableDef) -> None:
         if not isinstance(body, dict):
             return error_response(400, "body must be a JSON object")
 
-        path, err = _resolve_path(context, body.get("file"), writing=True)
+        path, err = await _resolve_and_guard(context, request, body.get("file"), writing=True)
         if err is not None:
             return err
-        guard = notebook_path_error(
-            context, path, loopback=request_is_loopback(request), writing=True
-        )
-        if guard:
-            return error_response(403, guard)
 
         name = body.get("name")
         if not isinstance(name, str) or not name.strip():
@@ -400,7 +481,9 @@ def register(context: LibraryContext, routes: web.RouteTableDef) -> None:
             return error_response(400, "'base_mtime' must be a number")
 
         try:
-            parsed, current_mtime, line_ending = markdown_store.load_notebook(path)
+            parsed, current_mtime, line_ending = await asyncio.to_thread(
+                markdown_store.load_notebook, path
+            )
         except markdown_store.MarkdownStoreError as exc:
             return error_response(400, str(exc))
         try:
@@ -413,7 +496,9 @@ def register(context: LibraryContext, routes: web.RouteTableDef) -> None:
         except markdown_store.EntryNotFoundError as exc:
             return error_response(404, str(exc))
 
-        new_mtime = markdown_store.save_notebook(path, parsed, line_ending)
+        new_mtime = await asyncio.to_thread(
+            markdown_store.save_notebook, path, parsed, line_ending
+        )
         return web.json_response(
             {"ok": True, "mtime": new_mtime, "entries": markdown_store.list_entries(parsed)}
         )
@@ -433,14 +518,9 @@ def register(context: LibraryContext, routes: web.RouteTableDef) -> None:
         if not isinstance(body, dict):
             return error_response(400, "body must be a JSON object")
 
-        path, err = _resolve_path(context, body.get("file"), writing=True)
+        path, err = await _resolve_and_guard(context, request, body.get("file"), writing=True)
         if err is not None:
             return err
-        guard = notebook_path_error(
-            context, path, loopback=request_is_loopback(request), writing=True
-        )
-        if guard:
-            return error_response(403, guard)
 
         name = body.get("name")
         if not isinstance(name, str) or not name.strip():
@@ -453,7 +533,9 @@ def register(context: LibraryContext, routes: web.RouteTableDef) -> None:
             return error_response(400, "'base_mtime' must be a number")
 
         try:
-            parsed, current_mtime, line_ending = markdown_store.load_notebook(path)
+            parsed, current_mtime, line_ending = await asyncio.to_thread(
+                markdown_store.load_notebook, path
+            )
         except markdown_store.MarkdownStoreError as exc:
             return error_response(400, str(exc))
         try:
@@ -466,7 +548,9 @@ def register(context: LibraryContext, routes: web.RouteTableDef) -> None:
         except markdown_store.CategoryNotFoundError as exc:
             return error_response(404, str(exc))
 
-        new_mtime = markdown_store.save_notebook(path, parsed, line_ending)
+        new_mtime = await asyncio.to_thread(
+            markdown_store.save_notebook, path, parsed, line_ending
+        )
         return web.json_response(
             {
                 "ok": True,
@@ -501,7 +585,7 @@ def register(context: LibraryContext, routes: web.RouteTableDef) -> None:
             return err
 
         folder = path.parent
-        if not folder.is_dir():
+        if not await asyncio.to_thread(folder.is_dir):
             return error_response(404, f"no such folder {folder}")
 
         try:

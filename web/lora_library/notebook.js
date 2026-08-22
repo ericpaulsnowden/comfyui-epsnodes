@@ -337,6 +337,34 @@
  * pure halves (`parsePinned`, `pinnedDrift`, `pinnedBadgeText`) are
  * exported for tests/test_m3_pinning_js.py.
  *
+ * Session cache + `known_mtime` (library-on-a-NAS round, owner 2026-08-22:
+ * "Sometimes the Notebook looks broken but it just takes over a minute to
+ * load, even when just tabbing between open workflows"). A tab switch
+ * RECREATES the node, and the panel used to sit on an empty list until a
+ * fresh full `GET /notebook` (whole-file parse, `include_text=1`) came back
+ * over the NAS. Now a module-level `Map` (`notebookCache`, keyed by the
+ * `file` value exactly as the panel sends it -- never cross-file) remembers
+ * `{payload, mtime}` of the last successful load of each file in this
+ * browser session, and every mutating POST response folds into it
+ * (`syncNotebookCache`, with the entry text the panel knows --
+ * `noteEntryText`/`forgetEntryText`/`renameEntryText` keep the search corpus
+ * current too). `reloadNow()` paints a cached payload IMMEDIATELY through
+ * the very same `applyNotebookPayload()` a successful fetch uses (a subtle
+ * "cached — refreshing…" mark in the status row says so), then runs the
+ * normal fetch in the background with `known_mtime=<the mtime THIS panel
+ * last painted for the file>` (`state.paintedMtime`, per node -- two
+ * Notebooks on one file must not vouch for each other). The backend may
+ * answer `{"ok": true, "unchanged": true, "mtime", "exists", "file"}`
+ * (FORMAT.md §5/§6.1) -- "keep what's painted": the hint clears, nothing
+ * re-renders, no entry resets; any payload WITHOUT `unchanged: true` is the
+ * full payload as before, and an older backend that ignores the param
+ * simply returns it. The v0.68.1 single-load-per-restore logic
+ * (`reloadNow`/`wireConfigureReload`/`configureReloaded`/`loadToken`) and
+ * the M3 pin reconcile are untouched -- the cache only changes what is on
+ * screen while the fetch is in flight; a failed fetch still lands in the
+ * §7.2 error state. Pure halves (`notebookCacheGet`/`notebookCacheSet`/
+ * `isUnchangedResponse`) are exported for tests/test_notebook_restore_js.py.
+ *
  * Vanilla ES modules, no build step — DOM nodes are built with
  * `document.createElement` (see the local `el()` helper) rather than any
  * templating, matching this pack's other frontend modules.
@@ -835,6 +863,17 @@ const CSS_TEXT = `
   text-overflow: ellipsis;
 }
 .llnb-status-hint:empty { display: none; }
+.llnb-status-cached {
+  /* Session cache (file header): the subtle "cached — refreshing…" mark
+     while a cached paint waits for its refresh fetch. */
+  color: var(--descrip-text, #999);
+  font-size: 10px;
+  font-style: italic;
+  opacity: 0.75;
+  white-space: nowrap;
+  flex: 0 0 auto;
+}
+.llnb-status-cached:empty { display: none; }
 .llnb-picker-backdrop {
   position: fixed;
   inset: 0;
@@ -1146,6 +1185,11 @@ function createState(node, fileWidget, entryWidget, pinnedWidget = null) {
     // the timer handle lives here so teardown() can cancel it.
     configureReloaded: false,
     attachLoadTimer: null,
+    // Session cache (file header): the file mtime of the payload THIS panel
+    // last painted (applyNotebookPayload / syncNotebookCache) -- the
+    // `known_mtime` reloadNow() sends, per node, never shared between two
+    // panels on one file. null = nothing painted / the file did not exist.
+    paintedMtime: null,
     creatingNew: false,
     deleteConfirmActive: false,
     deleteConfirmTimer: null,
@@ -1202,6 +1246,9 @@ function createState(node, fileWidget, entryWidget, pinnedWidget = null) {
     statusTextEl: null,
     statusActionsEl: null,
     statusHintEl: null,
+    // Session cache (file header): the "cached — refreshing…" mark in the
+    // status row while a cached paint waits for its fetch; see setCacheHint().
+    cacheHintEl: null,
     deleteBtn: null,
     filePanelPathEl: null,
     filePanelNoteEl: null,
@@ -1282,7 +1329,11 @@ function buildUi(state) {
   state.statusTextEl = el('div', { className: 'llnb-status-text' })
   state.statusActionsEl = el('div', { className: 'llnb-status-actions' })
   state.statusHintEl = el('div', { className: 'llnb-status-hint' })
+  // Session cache (file header): empty (and :empty-hidden) except while a
+  // cached paint is on screen and its refresh fetch is in flight.
+  state.cacheHintEl = el('div', { className: 'llnb-status-cached' })
   const statusRow = el('div', { className: 'llnb-status' }, [
+    state.cacheHintEl,
     state.statusTextEl,
     state.statusActionsEl,
     state.statusHintEl
@@ -2155,6 +2206,113 @@ function setFileWidgetValue(state, value) {
 }
 
 // ---------------------------------------------------------------------------
+// Session cache (file header "Session cache + known_mtime") — module scope,
+// so a node recreated by a tab switch paints what the previous incarnation
+// loaded. Keyed by the `file` value as the panel SENDS it; per file, never
+// cross-file. Pure (no DOM) and exported for tests/test_notebook_restore_js.py.
+// ---------------------------------------------------------------------------
+
+/** file value (as sent) -> {payload, mtime} of the last successful load /
+ * mutation of that file in this browser session. */
+const notebookCache = new Map()
+
+/** The status-row mark while a cached paint waits for its refresh fetch. */
+const CACHE_HINT_REFRESHING = 'cached — refreshing…'
+
+/**
+ * @param {string} file - the `file` value exactly as sent in `GET /notebook`
+ * @returns {{payload: object, mtime: number|null}|null}
+ */
+export function notebookCacheGet(file) {
+  if (typeof file !== 'string') return null
+  return notebookCache.get(file) || null
+}
+
+/**
+ * Remember the last successful full payload for *file*. `mtime` is the
+ * file's mtime as the server reported it (null when the file did not
+ * exist, in which case reloadNow() sends no `known_mtime`).
+ * @param {string} file @param {object} payload @param {number|null} mtime
+ */
+export function notebookCacheSet(file, payload, mtime) {
+  if (typeof file !== 'string' || !payload || typeof payload !== 'object') return
+  notebookCache.set(file, { payload, mtime: typeof mtime === 'number' ? mtime : null })
+}
+
+/**
+ * The `known_mtime` short-circuit (FORMAT.md §5): a `GET /notebook` answer
+ * of `{"ok": true, "unchanged": true, ...}` carries no entries and means
+ * "what you painted is still the file". Anything else is a full payload.
+ * @param {unknown} data
+ * @returns {boolean}
+ */
+export function isUnchangedResponse(data) {
+  return !!data && typeof data === 'object' && data.unchanged === true
+}
+
+/** Show/clear the subtle cache mark in the status row ('' clears). */
+function setCacheHint(state, text) {
+  if (!state.cacheHintEl) return
+  state.cacheHintEl.textContent = text || ''
+  state.cacheHintEl.title = text
+    ? 'Showing the copy this browser loaded earlier while the file is re-read from disk.'
+    : ''
+}
+
+/**
+ * Fold a mutating POST's response into the session cache: `entries` /
+ * `categories` / `exists` / resolved path from the panel's freshly-updated
+ * state, body text from the panel's own corpus (kept current by
+ * noteEntryText & co.), mtime from the response. Also advances
+ * `state.paintedMtime` -- the panel now shows the file at that mtime -- so
+ * the next `known_mtime` vouches for the post-mutation file. A response
+ * without a numeric mtime leaves the cache unable to vouch (mtime null), so
+ * the next reload fetches in full rather than guessing.
+ */
+function syncNotebookCache(state, data) {
+  const file = state.file
+  if (typeof file !== 'string' || !file || state.loadError) return
+  const mtime = typeof data?.mtime === 'number' ? data.mtime : null
+  const prev = notebookCacheGet(file)
+  const payload = {
+    ...(prev?.payload || {}),
+    file: state.resolvedFile ?? prev?.payload?.file ?? null,
+    exists: state.exists,
+    mtime,
+    entries: (state.entries || []).map((entry) => ({
+      ...entry,
+      text: state.entryTextByName[entry.name] ?? ''
+    })),
+    categories: Array.isArray(state.categories) ? state.categories : [],
+    problems: Array.isArray(prev?.payload?.problems) ? prev.payload.problems : []
+  }
+  state.paintedMtime = mtime
+  notebookCacheSet(file, payload, mtime)
+}
+
+/** The panel now knows *name*'s body: keep the search corpus (and thereby
+ * the next cached paint) current -- also makes "searchable after Save" true
+ * without waiting for the next full load. */
+function noteEntryText(state, name, text) {
+  if (typeof name !== 'string' || !name) return
+  const body = typeof text === 'string' ? text : ''
+  state.entryTextByName[name] = body
+  state.searchCorpus.set(name, searchHaystack(name, body))
+}
+
+function forgetEntryText(state, name) {
+  delete state.entryTextByName[name]
+  state.searchCorpus.delete(name)
+}
+
+function renameEntryText(state, from, to) {
+  if (from === to) return
+  const body = state.entryTextByName[from]
+  forgetEntryText(state, from)
+  noteEntryText(state, to, body)
+}
+
+// ---------------------------------------------------------------------------
 // Loading the notebook list + auto-select
 // ---------------------------------------------------------------------------
 
@@ -2170,11 +2328,34 @@ async function reloadNow(state) {
   refreshRemoteGating(state).catch((error) => api.warn('config refresh failed', error))
 
   const file = state.fileWidget.value ?? ''
+  // Session cache (file header): paint the last known payload of THIS file
+  // at once -- same code path as a successful fetch -- when the panel is
+  // not already showing it (a recreated node, a file switch, a Retry) or
+  // shows an older/newer snapshot than the session's latest (two panels on
+  // one file). The fetch below reconciles; its token discipline is
+  // unchanged, and the cached paint's own editor fetch is superseded by it.
+  const cached = notebookCacheGet(file)
+  const showing = state.file === file && !state.loadError
+  let paintedFromCache = false
+  if (cached && (!showing || state.paintedMtime !== cached.mtime)) {
+    paintedFromCache = true
+    applyNotebookPayload(state, file, cached.payload).catch((error) =>
+      api.warn('cached notebook paint failed', error)
+    )
+    setCacheHint(state, CACHE_HINT_REFRESHING)
+  }
+  // `known_mtime` (FORMAT.md §5): only what THIS panel is showing for this
+  // file right now -- the backend may answer `unchanged` and we keep it.
+  const params = { file, include_text: '1' }
+  if ((showing || paintedFromCache) && typeof state.paintedMtime === 'number') {
+    params.known_mtime = String(state.paintedMtime)
+  }
   let data
   try {
-    data = await api.getJson('/lora_library/notebook', { file, include_text: '1' })
+    data = await api.getJson('/lora_library/notebook', params)
   } catch (error) {
     if (token !== state.loadToken) return
+    setCacheHint(state, '')
     api.warn('failed to load notebook list', error)
     // Owner report 2026-08-03 ("something is making it feel brittle. It
     // should never reset unless the user resets it"): this branch used to
@@ -2193,6 +2374,7 @@ async function reloadNow(state) {
     state.loadError = { file, message: error.message }
     state.file = file
     state.resolvedFile = null
+    state.paintedMtime = null // the list now shows the error, not the file
     updateFilePanelPath(state)
     renderList(state)
     renderPinBar(state) // M3: a pinned badge now reads "library not loaded"
@@ -2209,9 +2391,35 @@ async function reloadNow(state) {
     return
   }
   if (token !== state.loadToken) return
+  setCacheHint(state, '')
 
+  if (isUnchangedResponse(data)) {
+    // FORMAT.md §5 `known_mtime` short-circuit: the file is still exactly
+    // what this panel painted -- keep it (no re-render, no entry reset, the
+    // cache entry and paintedMtime stand). Only when nothing was painted by
+    // THIS call (an explicit Reload/unpin on an already-showing file) does
+    // the editor half re-run, so the active entry's live text lands in the
+    // editor again -- the list is untouched either way.
+    if (!paintedFromCache) await loadActiveEditor(state)
+    return
+  }
+
+  notebookCacheSet(file, data, typeof data.mtime === 'number' ? data.mtime : null)
+  await applyNotebookPayload(state, file, data)
+}
+
+/**
+ * Paint one full `GET /notebook` payload (or its cached copy) into the
+ * panel: list + file panel + status, then the editor half
+ * (loadActiveEditor). The ONE code path for the fresh fetch and the cached
+ * instant paint alike (file header "Session cache"), so they can never
+ * drift. `state.loadToken` discipline is the caller's: the editor fetch
+ * inside captures the current token exactly as before.
+ */
+async function applyNotebookPayload(state, file, data) {
   state.loadError = null
   state.file = file
+  state.paintedMtime = typeof data.mtime === 'number' ? data.mtime : null
   state.entries = Array.isArray(data.entries) ? data.entries : []
   // §7.2 search corpus: body text per entry (include_text=1 above). Built
   // fresh on every successful load, so search always reflects disk truth
@@ -2260,7 +2468,16 @@ async function reloadNow(state) {
   updateDeleteButtonEnabled(state)
   updateSelectionHint(state)
   updateModeHint(state)
+  await loadActiveEditor(state)
+}
 
+/**
+ * The editor half of a load: the active item's live text (entry body or
+ * category description), or the pinned view. Split from
+ * applyNotebookPayload() so the `unchanged` short-circuit can re-run just
+ * this part for an explicit reload on an already-showing file.
+ */
+async function loadActiveEditor(state) {
   // Provenance M3: while pinned the editor shows the PINNED entry's old
   // text (read-only), never the live entry -- the live entries above were
   // still loaded, because that is what the drift comparison (badge + row
@@ -3374,6 +3591,7 @@ async function performMove(state, name, target, { force = false } = {}) {
     // make the NEXT save/delete/move spuriously 409 against this move's own
     // write (§3.5's conflict check is file-wide, not per-entry).
     state.baseMtime = typeof data.mtime === 'number' ? data.mtime : state.baseMtime
+    syncNotebookCache(state, data) // session cache (file header)
     // A move only reorders/recategorizes — it never adds or removes
     // entries — so the current selection/active stay exactly as they were;
     // just re-render against the fresh order.
@@ -3461,6 +3679,7 @@ async function performMoveRun(state, names, target, startIndex, { force = false 
     }
     state.entries = Array.isArray(data.entries) ? data.entries : state.entries
     state.baseMtime = typeof data.mtime === 'number' ? data.mtime : state.baseMtime
+    syncNotebookCache(state, data) // session cache (file header)
   }
 
   state.busy = false
@@ -3501,6 +3720,7 @@ async function performMoveCategory(state, category, target, { force = false } = 
     state.entries = Array.isArray(data.entries) ? data.entries : state.entries
     state.categories = Array.isArray(data.categories) ? data.categories : state.categories
     state.baseMtime = typeof data.mtime === 'number' ? data.mtime : state.baseMtime
+    syncNotebookCache(state, data) // session cache (file header)
     renderList(state)
     updateSaveButtonEnabled(state)
     updateDeleteButtonEnabled(state)
@@ -3931,6 +4151,9 @@ function applyRenameResult(state, kind, name, renameTo, data) {
   if (Array.isArray(data?.entries)) state.entries = data.entries
   if (Array.isArray(data?.categories)) state.categories = data.categories
   if (typeof data?.mtime === 'number') state.baseMtime = data.mtime
+  // Session cache (file header): the body travels with the entry's new name.
+  if (kind === 'entry') renameEntryText(state, name, renameTo)
+  syncNotebookCache(state, data)
 
   if (kind === 'category') {
     // Collapse is tracked by NAME, so the key has to move with the rename or
@@ -4106,6 +4329,8 @@ async function confirmNewEntry(state, rawName) {
     state.busy = false
     state.entries = Array.isArray(data.entries) ? data.entries : state.entries
     state.exists = true
+    noteEntryText(state, name, '') // session cache (file header): created empty
+    syncNotebookCache(state, data)
     closeNewEntryRow(state)
 
     // A new entry is created empty and already known (no need to re-fetch
@@ -4163,6 +4388,7 @@ async function confirmNewCategory(state, name) {
     state.entries = Array.isArray(data.entries) ? data.entries : state.entries
     state.categories = Array.isArray(data.categories) ? data.categories : state.categories
     state.exists = true
+    syncNotebookCache(state, data) // session cache (file header)
     closeNewEntryRow(state)
 
     // A new category is created with an empty description and already
@@ -4277,6 +4503,8 @@ async function performDeleteRun(state, names, startIndex, { force = false } = {}
 
     state.entries = Array.isArray(data.entries) ? data.entries : state.entries
     state.baseMtime = typeof data.mtime === 'number' ? data.mtime : state.baseMtime
+    forgetEntryText(state, name) // session cache (file header)
+    syncNotebookCache(state, data)
 
     const previousActive = state.activeName
     const nextSelection = state.selection.filter((n) => n !== name)
@@ -4376,6 +4604,12 @@ async function performSave(state, { force = false } = {}) {
     // unknown name as a create).
     state.baseMtime = typeof data.mtime === 'number' ? data.mtime : state.baseMtime
     state.entries = Array.isArray(data.entries) ? data.entries : state.entries
+    // Session cache (file header): the body the server STORED, under the
+    // committed name, then the fold -- before the moved-on early return,
+    // since the file changed either way.
+    if (renameTo) forgetEntryText(state, name)
+    noteEntryText(state, renameTo || name, typeof data.text === 'string' ? data.text : text)
+    syncNotebookCache(state, data)
     if (state.activeName !== name) {
       // Selection moved on while the request was in flight. The EDITOR
       // bookkeeping below (field values, lastSaved* baselines) belongs to the
@@ -4493,6 +4727,7 @@ async function performSaveCategory(state, { force = false } = {}) {
     state.baseMtime = typeof data.mtime === 'number' ? data.mtime : state.baseMtime
     state.entries = Array.isArray(data.entries) ? data.entries : state.entries
     state.categories = Array.isArray(data.categories) ? data.categories : state.categories
+    syncNotebookCache(state, data) // session cache (file header)
     if (renameTo && state.collapsedCategories.delete(name)) {
       // Collapse tracks by NAME -- migrate the key whether or not the user
       // moved on mid-flight, or the renamed category springs open.

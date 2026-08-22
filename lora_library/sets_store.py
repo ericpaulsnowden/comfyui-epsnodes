@@ -10,9 +10,14 @@ importable-without-ComfyUI seam as ``context.py`` (see its module docstring).
 
 from __future__ import annotations
 
+import fnmatch
 import json
 import logging
+import os
 import re
+import stat as stat_module
+import threading
+import time
 from pathlib import Path
 
 from .context import LibraryContext, _atomic_write_text
@@ -307,6 +312,9 @@ def load_set(context: LibraryContext, slug: str) -> dict | None:
         with open(path, encoding="utf-8") as fh:
             raw = json.load(fh)
     except FileNotFoundError:
+        # A set that isn't there may mean the FOLDER isn't there any more
+        # (NAS round 2026-08-22): make the next sets_dir() look for real.
+        context.forget_ensured_dirs()
         return None
     except OSError as exc:
         raise SetValidationError(f"could not read set {slug!r}: {exc}") from exc
@@ -339,11 +347,13 @@ def save_set(context: LibraryContext, set_data: dict, slug: str | None = None) -
     — audit 2026-08-08).
     """
     normalized = normalize_set(set_data)
-    _require_sets_dir(context)
+    sets_dir = _require_sets_dir(context)
     if slug is None:
         slug = _unique_slug(context, slugify(normalized["name"]))
     text = json.dumps(normalized, indent=2, ensure_ascii=False) + "\n"
-    _atomic_write_text(set_path(context, slug), text)
+    path = set_path(context, slug)
+    _atomic_write_text(path, text)
+    _forget_listing(sets_dir, path)
     return slug, normalized
 
 
@@ -353,12 +363,156 @@ def delete_set(context: LibraryContext, slug: str) -> bool:
     :class:`SetValidationError` (via :func:`_require_sets_dir`) rather than
     reading as a plain "nothing to delete" ``False`` — the route turns it
     into a 400 naming the folder instead of a misleading 404."""
-    _require_sets_dir(context)
+    sets_dir = _require_sets_dir(context)
+    path = set_path(context, slug)
     try:
-        set_path(context, slug).unlink()
-        return True
+        path.unlink()
     except FileNotFoundError:
+        # Listed a moment ago but gone now: the file, or the whole folder
+        # (NAS round 2026-08-22) -- forget both memos.
+        _forget_listing(sets_dir, path)
+        context.forget_ensured_dirs()
         return False
+    _forget_listing(sets_dir, path)
+    return True
+
+
+# ----------------------------------------- listing caches (NAS round 2026-08-22)
+# Owner situation: the library folder is on a NAS, so every file read is a
+# network round trip -- and `list_sets` opened + parsed EVERY set file on
+# every call, which the State Controller makes every 15 s (its shared poll)
+# and the Apply-Set dropdown makes on every open. Two layers now stand in
+# front of the parse:
+#
+#   1. LISTING layer, keyed on (sets_dir, the DIRECTORY's mtime_ns): the
+#      finished summaries. A directory's mtime changes whenever an entry is
+#      created, deleted or renamed inside it -- which is exactly what the
+#      atomic temp+replace save does (verified on APFS by
+#      tests/test_nas_io_round.py), so a save/delete from ANOTHER process or
+#      machine is noticed by the one `stat` the fast path costs. This
+#      process's own save/delete forgets the entry outright.
+#   2. PER-FILE layer, keyed on (path, the FILE's mtime_ns, size): the
+#      parsed summary. Consulted during a rescan, so only files that
+#      actually changed are re-read.
+#
+# Why a rescan happens at all while the directory mtime is unchanged: an
+# IN-PLACE modification (an editor that truncates and rewrites, rather
+# than replacing the file) changes only the file's own mtime/size, and on
+# SMB/NFS a client's attribute cache can hand back a stale directory mtime
+# for a while. So a cached listing is trusted for at most LISTING_RESCAN_S
+# before the per-file layer re-verifies every file (one scandir + one stat
+# per file, no reads for unchanged files). A change made through this
+# pack's routes is visible immediately; another machine's temp+replace save
+# on the next listing (subject to that client's attribute cache); an
+# in-place edit within LISTING_RESCAN_S.
+#
+# Concurrency: route handlers now call this from worker threads
+# (`asyncio.to_thread`) alongside the execution thread (Apply Set's
+# INPUT_TYPES). The dicts are only ever read/replaced whole under the GIL,
+# so a lost race costs a redundant parse, never a torn value; the rescan
+# itself is serialized by a lock so a tab-switch burst scans once.
+
+#: How long a cached listing is trusted without re-stat'ing each file.
+LISTING_RESCAN_S = 30.0
+
+#: sets_dir -> (dir mtime_ns, monotonic time scanned, summaries).
+_listing_cache: dict[Path, tuple[int, float, list[dict]]] = {}
+#: set file path -> ((file mtime_ns, size), summary).
+_entry_cache: dict[Path, tuple[tuple[int, int], dict]] = {}
+#: layout file path -> ((file mtime_ns, size), raw parsed JSON).
+_layout_cache: dict[Path, tuple[tuple[int, int], object]] = {}
+_rescan_lock = threading.Lock()
+
+
+def clear_caches() -> None:
+    """Forget every listing/per-file/layout memo (test seam + explicit
+    invalidation)."""
+    _listing_cache.clear()
+    _entry_cache.clear()
+    _layout_cache.clear()
+
+
+def _forget_listing(sets_dir: Path, path: Path | None = None) -> None:
+    """This process changed *sets_dir* (a save/delete): drop its listing
+    memo, and *path*'s per-file memo when given."""
+    _listing_cache.pop(sets_dir, None)
+    if path is not None:
+        _entry_cache.pop(path, None)
+
+
+def _copy_summaries(summaries: list[dict]) -> list[dict]:
+    return [dict(entry) for entry in summaries]
+
+
+def _sets_dir_mtime_ns(context: LibraryContext, sets_dir: Path) -> int:
+    """The sets directory's mtime_ns -- the LISTING layer's key. A vanished
+    directory (``FileNotFoundError``) forgets the context's ensured-dir memo
+    and re-creates it once; any other ``OSError`` propagates."""
+    try:
+        return sets_dir.stat().st_mtime_ns
+    except FileNotFoundError:
+        context.forget_ensured_dirs()
+        return context.sets_dir().stat().st_mtime_ns
+
+
+def _scan_sets(context: LibraryContext, sets_dir: Path) -> list[dict]:
+    """One full pass over *sets_dir*: every ``*.json`` with a valid slug,
+    re-parsed only when its (mtime_ns, size) differs from the PER-FILE
+    memo. Returns the name-sorted summaries (the caller memoizes them)."""
+    try:
+        with os.scandir(sets_dir) as it:
+            entries = list(it)
+    except FileNotFoundError:
+        context.forget_ensured_dirs()
+        return []
+    except OSError as exc:
+        logger.warning("EPSNodes: could not list the sets folder %s (%s)", sets_dir, exc)
+        return []
+
+    summaries: list[dict] = []
+    seen: set[Path] = set()
+    for entry in entries:
+        # fnmatch, not endswith: the same case rule Path.glob("*.json")
+        # applied before the cache existed (case-insensitive on Windows).
+        if not fnmatch.fnmatch(entry.name, "*.json"):
+            continue
+        slug = entry.name[: -len(".json")]
+        if not _VALID_SLUG_RE.match(slug):
+            logger.warning(
+                "EPSNodes: ignoring %s — %r is not a valid set slug (FORMAT.md §4); "
+                "rename the file to a valid slug (lowercase letters/digits/-/_, "
+                "starting with a letter or digit) to make it usable",
+                entry.name,
+                slug,
+            )
+            continue
+        path = sets_dir / entry.name
+        seen.add(path)
+        try:
+            file_stat = entry.stat()
+            file_key: tuple[int, int] | None = (file_stat.st_mtime_ns, file_stat.st_size)
+        except OSError:
+            file_key = None  # let load_set report whatever is wrong with it
+        cached = _entry_cache.get(path)
+        if file_key is not None and cached is not None and cached[0] == file_key:
+            summaries.append(dict(cached[1]))
+            continue
+        try:
+            data = load_set(context, slug)
+        except SetValidationError as exc:
+            logger.warning("EPSNodes: skipping unreadable set %r: %s", slug, exc)
+            continue
+        if data is None:  # vanished between scandir and open
+            continue
+        summary = {"slug": slug, "name": data["name"], "count": len(data["loras"])}
+        if file_key is not None:
+            _entry_cache[path] = (file_key, summary)
+        summaries.append(dict(summary))
+    # Prune memos for files that are no longer in this folder.
+    for stale in [p for p in _entry_cache if p.parent == sets_dir and p not in seen]:
+        _entry_cache.pop(stale, None)
+    summaries.sort(key=lambda entry: (entry["name"].casefold(), entry["slug"]))
+    return summaries
 
 
 def list_sets(context: LibraryContext) -> list[dict]:
@@ -375,36 +529,38 @@ def list_sets(context: LibraryContext) -> list[dict]:
     on-demand mkdir raising OSError — an unmounted NAS) degrades to an
     empty listing with a logged warning rather than 500ing every route
     that tails a fresh listing onto its response (audit 2026-08-08).
+
+    Cached (NAS round 2026-08-22, see the section comment above): the
+    common call costs one ``stat`` of the sets directory; a rescan costs one
+    ``scandir`` plus one ``stat`` per file; only CHANGED files are re-read.
+    Always returns fresh copies -- callers may mutate the result freely.
     """
-    summaries = []
     try:
         sets_dir = context.sets_dir()
+        dir_key = _sets_dir_mtime_ns(context, sets_dir)
     except OSError as exc:
         logger.warning(
             "EPSNodes: library sets folder is unreachable (%s); listing no sets", exc
         )
-        return summaries
-    for path in sets_dir.glob("*.json"):
-        slug = path.stem
-        if not _VALID_SLUG_RE.match(slug):
-            logger.warning(
-                "EPSNodes: ignoring %s — %r is not a valid set slug (FORMAT.md §4); "
-                "rename the file to a valid slug (lowercase letters/digits/-/_, "
-                "starting with a letter or digit) to make it usable",
-                path.name,
-                slug,
-            )
-            continue
-        try:
-            data = load_set(context, slug)
-        except SetValidationError as exc:
-            logger.warning("EPSNodes: skipping unreadable set %r: %s", slug, exc)
-            continue
-        if data is None:  # shouldn't happen (we just globbed the file), but be defensive
-            continue
-        summaries.append({"slug": slug, "name": data["name"], "count": len(data["loras"])})
-    summaries.sort(key=lambda entry: (entry["name"].casefold(), entry["slug"]))
-    return summaries
+        return []
+    cached = _listing_cache.get(sets_dir)
+    if (
+        cached is not None
+        and cached[0] == dir_key
+        and time.monotonic() - cached[1] < LISTING_RESCAN_S
+    ):
+        return _copy_summaries(cached[2])
+    with _rescan_lock:
+        cached = _listing_cache.get(sets_dir)  # a concurrent rescan may have landed
+        if (
+            cached is not None
+            and cached[0] == dir_key
+            and time.monotonic() - cached[1] < LISTING_RESCAN_S
+        ):
+            return _copy_summaries(cached[2])
+        summaries = _scan_sets(context, sets_dir)
+        _listing_cache[sets_dir] = (dir_key, time.monotonic(), summaries)
+        return _copy_summaries(summaries)
 
 
 # ------------------------------------------------------------- lora lookup
@@ -552,12 +708,28 @@ def healed_layout(context: LibraryContext, raw: object) -> dict:
 
 def load_layout(context: LibraryContext) -> dict:
     """The healed layout currently on disk (a missing/unreadable file is an
-    empty layout -- healing fills in every set, uncategorized)."""
+    empty layout -- healing fills in every set, uncategorized).
+
+    The file's parsed JSON is memoized on its (mtime_ns, size) (NAS round
+    2026-08-22): one ``stat`` answers the unchanged case, and healing
+    itself rides the cached :func:`list_sets`, so the controller's 15 s
+    layout poll normally costs two ``stat``s and no reads.
+    """
     try:
         path = layout_path(context)
-        if not path.is_file():
+        try:
+            file_stat = path.stat()
+        except FileNotFoundError:
             return healed_layout(context, None)
-        raw = json.loads(path.read_text(encoding="utf-8"))
+        if not stat_module.S_ISREG(file_stat.st_mode):
+            return healed_layout(context, None)
+        key = (file_stat.st_mtime_ns, file_stat.st_size)
+        cached = _layout_cache.get(path)
+        if cached is not None and cached[0] == key:
+            raw = cached[1]
+        else:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+            _layout_cache[path] = (key, raw)
     except (OSError, ValueError) as exc:
         logger.warning("EPSNodes: unreadable sets layout (%s); rebuilding", exc)
         raw = None
@@ -567,5 +739,7 @@ def load_layout(context: LibraryContext) -> dict:
 def save_layout(context: LibraryContext, raw: object) -> dict:
     """Normalize + heal *raw*, write atomically, return what was written."""
     layout = healed_layout(context, raw)
-    _atomic_write_text(layout_path(context), json.dumps(layout, indent=2))
+    path = layout_path(context)
+    _atomic_write_text(path, json.dumps(layout, indent=2))
+    _layout_cache.pop(path, None)
     return layout

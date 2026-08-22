@@ -803,16 +803,25 @@ class TestNotebookPinWiring:
         assert "clearPinnedEditorLook(state)" in reset
         populate = _function_body(notebook_source, "populateEditor(state, text, mtime, name)")
         assert "clearPinnedEditorLook(state)" in populate
-        # reloadNow paints the PINNED editor instead of fetching the live entry
-        reload = notebook_source.split("async function reloadNow(state)", 1)[1].split("\n}\n", 1)[0]
+        # The load's editor half paints the PINNED editor instead of fetching
+        # the live entry. NAS round (2026-08-22): reloadNow's post-fetch body
+        # moved into applyNotebookPayload (shared with the session-cache
+        # instant paint) -> loadActiveEditor, which reloadNow's `unchanged`
+        # branch also re-runs; the pin follows the code it guards.
+        editor = _function_body(notebook_source, "loadActiveEditor(state)")
         assert (
             "if (isPinned(state)) {\n    renderPinBar(state)\n"
             "    paintPinnedEditor(state)\n    return\n  }"
-            in reload
+            in editor
         )
-        assert reload.index("paintPinnedEditor(state)") < reload.index(
+        assert editor.index("paintPinnedEditor(state)") < editor.index(
             "loadEntryText(state, state.activeName)"
         )
+        apply = _function_body(notebook_source, "applyNotebookPayload(state, file, data)")
+        assert "await loadActiveEditor(state)" in apply
+        reload = _function_body(notebook_source, "reloadNow(state)")
+        assert "await applyNotebookPayload(state, file, data)" in reload
+        assert "applyNotebookPayload(state, file, cached.payload)" in reload
 
     @pytest.mark.parametrize(
         "signature",
