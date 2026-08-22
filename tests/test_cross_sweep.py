@@ -284,9 +284,9 @@ class TestTextOnlyPairs:
     multi-select Prompt Notebook, no input images anywhere)."""
 
     def test_pairs_are_the_texts_alone(self) -> None:
-        (models, _c, _i, texts, prefixes, _l, _v, _mlow11, _run_info12) = (
-            run(image=None, text=["t0", "t1", "t2"])
-        )
+        (
+            models, _c, _i, texts, prefixes, _l, _v, _mlow11, _run_info12
+        ) = run(image=None, text=["t0", "t1", "t2"])
         assert len(models) == 6  # 2 steps x 3 texts
         assert texts == ["t0", "t1", "t2", "t0", "t1", "t2"]
         assert len(prefixes) == 6
@@ -294,9 +294,9 @@ class TestTextOnlyPairs:
     def test_image_output_blocks_per_run_not_whole_node(
         self, fake_execution_blocker: type
     ) -> None:
-        (models, _c, images, texts, _p, _l, _v, _mlow12, _run_info13) = (
-            run(image=None, text=["t0", "t1"])
-        )
+        (
+            models, _c, images, texts, _p, _l, _v, _mlow12, _run_info13
+        ) = run(image=None, text=["t0", "t1"])
         assert models == ["m0", "m0", "m1", "m1"]  # real values still flow
         assert all(isinstance(i, fake_execution_blocker) for i in images)
         assert len(images) == len(texts) == 4  # index alignment preserved
@@ -319,9 +319,9 @@ class TestTextOnlyPairs:
         assert prefixes[3] == "ckptB/Landscape_m2_t2"
 
     def test_names_still_shape_save_prefix_in_text_only_mode(self) -> None:
-        (_m, _c, _i, _t, prefixes, _l, _v, _mlow14, _run_info15) = (
-            run(image=None, text=["x"], name=[])
-        )
+        (
+            _m, _c, _i, _t, prefixes, _l, _v, _mlow14, _run_info15
+        ) = run(image=None, text=["x"], name=[])
         assert prefixes == ["lora_0.0/pair_01_m1_t1", "lora_0.5/pair_01_m2_t1"]
 
 
@@ -340,9 +340,9 @@ class TestNoSweepPureMultiplier:
         cp_images = ["i1", "i1", "i1", "i2", "i2", "i2"]
         cp_texts = ["tA", "tB", "tC", "tA", "tB", "tC"]
         cp_names = ["A", "B", "", "A", "B", ""]
-        (models, clips, out_images, out_texts, prefixes, labels, vaes, _mlx2, _run_info16) = (
-            EPSCrossSweep().run(
-        )
+        (
+            models, clips, out_images, out_texts, prefixes, labels, vaes, _mlx2, _run_info16
+        ) = EPSCrossSweep().run(
             text=texts, image=images, name=names, pair_mode="multiply"
         )
         assert out_images == cp_images

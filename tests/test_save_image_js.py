@@ -73,7 +73,9 @@ def save_image_api(tmp_path_factory: pytest.TempPathFactory) -> dict:
     shutil.copyfile(API_JS.parent / "version.js", pack / "lora_library" / "version.js")
     scripts = layout / "scripts"
     scripts.mkdir()
-    (scripts / "app.js").write_text("export const app = { graph: { _nodes: [] } }\n", encoding="utf-8")
+    (scripts / "app.js").write_text(
+        "export const app = { graph: { _nodes: [] } }\n", encoding="utf-8"
+    )
     (scripts / "api.js").write_text(
         "export const api = { fetchApi: () => {}, addEventListener: () => {} }\n", encoding="utf-8"
     )
