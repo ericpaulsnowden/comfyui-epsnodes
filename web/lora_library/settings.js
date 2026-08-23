@@ -144,9 +144,7 @@ async function onLibraryDirChanged(value) {
   // the server already has this value — never POST it back (FORMAT.md §7.3).
   if (serverValue === null || trimmed === serverValue) return
   try {
-    const response = await api.postJson('/lora_library/config', { library_dir: trimmed })
-    serverValue = trimmed === '' ? '' : (response.library_dir ?? trimmed)
-    await refreshLibraryDirStatus()
+    await postLibraryDir(trimmed)
   } catch (error) {
     if (error.status === 403) {
       // §2: only the host machine may move the boundary — e.g. `is_local`
@@ -175,6 +173,44 @@ async function onLibraryDirChanged(value) {
       life: 6000
     })
   }
+}
+
+/** The one `POST /lora_library/config` this file makes (FORMAT.md §5):
+ * persists `trimmed` ('' = back to the per-user default), records what the
+ * server now holds as `serverValue` (the resolved path it echoes), and
+ * re-reads the §5 reachability fields. Throws the api error (status-bearing)
+ * for the caller to explain. */
+async function postLibraryDir(trimmed) {
+  const response = await api.postJson('/lora_library/config', { library_dir: trimmed })
+  serverValue = trimmed === '' ? '' : (response.library_dir ?? trimmed)
+  await refreshLibraryDirStatus()
+  return response
+}
+
+/**
+ * Set the library folder from somewhere other than the Settings dialog --
+ * the State Controller's states-location Browse… (FORMAT.md §6.3). Same
+ * POST as the dialog's own field (`postLibraryDir`), then the dialog is
+ * kept in sync: `serverValue` is updated FIRST, so mirroring the path into
+ * the `loraLibrary.libraryDir` setting makes `onLibraryDirChanged` see an
+ * equal value and never POST a second time. The mirror is best-effort
+ * (guarded; the POST has already succeeded). Loopback-only server-side
+ * (§2): a remote browser's call rejects with the server's 403 message --
+ * callers gate their own Browse… on `is_local` and toast what the server
+ * says. '' resets to the default. Resolves with the POST response
+ * (`{ok, library_dir}`); rejects with the api error.
+ * @param {string} path
+ * @returns {Promise<{ok: boolean, library_dir: string}>}
+ */
+export async function setLibraryDir(path) {
+  const trimmed = String(path ?? '').trim()
+  const response = await postLibraryDir(trimmed)
+  try {
+    await app.extensionManager?.setting?.set?.('loraLibrary.libraryDir', serverValue)
+  } catch (error) {
+    api.warn('library folder set, but the Settings dialog could not be updated to show it', error)
+  }
+  return response
 }
 
 /** Pull the server's config and mirror it into the settings field without

@@ -157,7 +157,7 @@ or an [EPS LoRA Picker](#eps-lora-picker-shipped) — elsewhere in your graph;
 the loader stays the loader, this node just moves whole configurations
 ("states") in and out of it (only Power Lora Loader targets need rgthree):
 
-- **Where your states live, and how to share them (v0.74.0):** the bottom of the state list says where the state files are. Unlike the Notebook's per-node `.md` file, states live in the pack's Library folder (`<library>/sets`), so they are shared between computers only when every machine's Library folder points at the same NAS folder. Never set it? The line reads "States: this machine only (default library folder)" with the fix right under it (Settings → EPSNodes → Library folder); once it is a shared folder it shows the path (hover for the full one) with an Open folder button (from the machine running ComfyUI).
+- **Where your states live, and how to share them (v0.74.0):** the bottom of the state list says where the state files are. Unlike the Notebook's per-node `.md` file, states live in the pack's Library folder (`<library>/sets`), so they are shared between computers only when every machine's Library folder points at the same NAS folder. Never set it? The line reads "States: this machine only (default library folder)" with the fix right under it (Settings → EPSNodes → Library folder); once it is a shared folder it shows the path (hover for the full one) with **Browse…** and **Open folder** buttons (on the machine running ComfyUI). Browse… picks the Library folder for that machine right there — the same setting as Settings (gear) → EPSNodes → Library → Library folder, which a remote browser can only view (v0.74.1).
 - **Targets both loader families, anywhere in the workflow** (since
   v0.64.0): the `target` dropdown lists every Power Lora Loader (rgthree)
   AND every [EPS LoRA Picker](#eps-lora-picker-shipped) — including ones
@@ -951,8 +951,7 @@ every state file. What to expect: a state saved from another machine
 through EPSNodes shows up on the next poll; a state file you hand-edit in
 place on the share shows within 30 seconds; an unmounted share makes the
 affected panel report the folder as unreachable instead of freezing
-ComfyUI. The State Controller shows where your states live and has an
-"Open folder" button on the machine running ComfyUI. **To share states,
+ComfyUI. The State Controller shows where your states live, with Browse… (pick the Library folder for that machine) and Open folder buttons on the machine running ComfyUI. **To share states,
 groups, favorites and presets between computers, point every machine's
 Settings → EPSNodes → Library folder at the same share** — notebooks can
 also point at absolute share paths per node, which is why they may already

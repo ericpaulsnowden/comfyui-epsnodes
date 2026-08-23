@@ -155,6 +155,21 @@ def test_current_value_is_always_one_of_the_options(source: str) -> None:
     assert "return valuesIncluding(widget.value)" in installed
 
 
+def test_library_folder_change_announces_sets_changed() -> None:
+    """Browse… round (2026-08-22): the State Controller can now MOVE the
+    library folder (its states-location Browse…), which changes the set
+    list under every EPS Apply LoRA Set combo at once -- so it fires the
+    same §7.4 `lora_library:sets-changed` event a set CRUD does, and this
+    module's listener refreshes the combos. Still no cross-import."""
+    controller = CONTROLLER_JS.read_text(encoding="utf-8")
+    head = "      async _applyLibraryFolder(path) {\n"
+    assert head in controller
+    body = controller.split(head, 1)[1].split("\n      }\n", 1)[0]
+    assert "await setLibraryDir(path)" in body
+    assert "announceSetsChanged()" in body
+    assert "from './sets.js'" not in controller
+
+
 def test_push_seeds_the_option_when_the_list_is_frozen() -> None:
     """controller.js's half of the same fix: when ComfyUI's refresh has
     frozen the values into an array, Push seeds the slug itself so the push

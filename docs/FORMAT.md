@@ -954,7 +954,33 @@ queue. It drives a **genuine, untouched `Power Lora Loader (rgthree)`**:
   exists, so the line follows a change within the TTL and at once on the
   next attach. DOM only; an element `ResizeObserver` re-fits the truncation
   (disconnected in `onRemoved`). Pure `statesLocationLine(config)` +
-  `setsDirOf` exported; pins in `tests/test_pll_bridge_js.py`. All existing behavior — apply-on-select, composite
+  `setsDirOf` exported; pins in `tests/test_pll_bridge_js.py`.
+  **Browse… (v0.74.1, owner: "there is an 'open folder' button but not a
+  browse button like other nodes. Why is this inconsistent?")** sits BEFORE
+  Open folder, `is_local`-gated like it: opens the Notebook's server-folder
+  picker in folder mode (`pickServerFolder`, §7.2) titled "Library folder
+  for this machine" at the current library folder (the drive list when the
+  server can't see it); "Use this folder" asks once more in-dialog ("Set
+  this machine's Library folder to <path>? States, groups, favorites,
+  presets and the default notebook will then be read from there." → "Set
+  library folder" / "Back"), then `POST /lora_library/config` via
+  settings.js's exported `setLibraryDir` (the `loraLibrary.libraryDir`
+  setting mirrored so the dialog agrees); the shared /config cache is
+  dropped, every controller's sets-feed copy forgotten,
+  `lora_library:sets-changed` fired; toast "Library folder set to <path> —
+  states, groups, favorites, presets and the default notebook now live
+  there. Set the same folder on your other machines to share." Hint row,
+  two variants clamped to two lines: LOCAL "To share between computers, set
+  the Library folder to the same NAS folder on every machine — Browse… here
+  (on the machine running ComfyUI), or Settings (gear) → EPSNodes → Library
+  → Library folder. A remote browser sees that setting read-only."; REMOTE
+  "Set the Library folder on the machine running ComfyUI (its Settings →
+  EPSNodes → Library → Library folder, or Browse… in a controller there) —
+  a remote browser can only view it." (no buttons). Row 1 and the button
+  pair wrap at the 300 px floor; `STATES_LOCATION_PX = 72`. Owner fact
+  behind it: the setting IS registered (EPSNodes → Library → Library
+  folder) but only the host may change it (§2) — a remote browser sees it
+  read-only, which reads as "missing". All existing behavior — apply-on-select, composite
   capture/apply with target `All`, selective Push, `Show status`,
   serialize-based capture (v0.14.1), own-menu version-proof apply (v0.13.0) —
   is PRESERVED; only the state-selection UI changes from a dropdown to the
@@ -3176,6 +3202,18 @@ remote read-only revert now EXEMPTS a value arriving via a live link on
 the `file` widget-input (workflow-authored host state, fired through
 `applyToGraph` at queue time — reverting it swapped in the stale
 baseline), while raw remote hand edits still revert.
+
+**§7.2 amendment — shared server-folder picker (v0.74.1):**
+`pickServerFolder({title, startDir, isLocal, confirmLabel, confirmPrompt,
+confirmFinalLabel}) → Promise<string|null>` (exported from notebook.js) —
+the Notebook's Browse… picker refactored onto a shared `openPickerDialog`
+core; folder mode dims `.md` files, confirms the LISTED folder (disabled at
+Top Level / after a failed listing), optional in-dialog second step; one
+picker at a time across callers (`activePickerSession`); `closeBrowsePicker`
+removes the overlay / fires the cancel hook only for the OWNING session (a
+Notebook teardown never pulls a controller's open picker down). The
+Notebook's own file-picking flow is byte-for-byte unchanged. Settings.js
+exports `setLibraryDir(path)` (one POST site, mirrors the setting).
 
 **§7.2 amendment — Notebook instant paint + controller states line
 (v0.74.0):** the Notebook status row gains a `.llnb-status-cached` mark

@@ -874,6 +874,13 @@ def test_new_group_is_announced_with_toasts(controller_source: str) -> None:
 
 API_JS = REPO_ROOT / "web" / "lora_library" / "api.js"
 VERSION_JS = REPO_ROOT / "web" / "lora_library" / "version.js"
+# Browse… round (2026-08-22): controller.js now imports the Notebook's folder
+# picker (`pickServerFolder`) and the Settings dialog's library-folder POST
+# (`setLibraryDir`); settings.js imports path_heal.js. All three must ride
+# along in the served layout -- and must themselves IMPORT under Node.
+NOTEBOOK_JS = REPO_ROOT / "web" / "lora_library" / "notebook.js"
+SETTINGS_JS = REPO_ROOT / "web" / "lora_library" / "settings.js"
+PATH_HEAL_JS = REPO_ROOT / "web" / "lora_library" / "path_heal.js"
 
 STATES_LOC_PROBE_JS = """
 import * as c from './extensions/comfyui-epsnodes/lora_library/controller.js'
@@ -890,6 +897,27 @@ const out = {
   feedPreferred: c.statesLocationLine({ library_dir: '/x', default_library_dir: '/x', sets_dir: '/nas/lib/sets', is_default_library: false }),
   feedSaysDefault: c.statesLocationLine({ library_dir: '/nas', default_library_dir: '/y', sets_dir: '/nas/sets', is_default_library: true }),
   noteBecomesHint: c.statesLocationLine({ library_dir: '/nas/lib', default_library_dir: '/y', library_dir_note: '  folder unreachable ' }),
+  defaultLocal: c.statesLocationLine({
+    library_dir: '/home/u/lib',
+    default_library_dir: '/home/u/lib',
+    is_local: true,
+  }),
+  defaultRemote: c.statesLocationLine({
+    library_dir: '/home/u/lib',
+    default_library_dir: '/home/u/lib',
+    is_local: false,
+  }),
+  configuredRemote: c.statesLocationLine({
+    library_dir: '/mnt/nas/comfy',
+    default_library_dir: '/home/u/lib',
+    is_local: false,
+  }),
+  noteBeatsRemote: c.statesLocationLine({
+    library_dir: '/home/u/lib',
+    default_library_dir: '/home/u/lib',
+    is_local: false,
+    library_dir_note: 'unreachable',
+  }),
   empty: c.statesLocationLine({}),
   nul: c.statesLocationLine(null),
   setsDir: [c.setsDirOf('/a/b/'), c.setsDirOf('C:\\\\lib'), c.setsDirOf(''), c.setsDirOf('/a'), c.setsDirOf(null)]
@@ -897,16 +925,26 @@ const out = {
 process.stdout.write(JSON.stringify(out))
 """
 
-MSG_STATES_DEFAULT = (
-    "States: this machine only (default library folder) — to share between "
-    "computers, set Settings → EPSNodes → Library folder to the same NAS "
-    "folder on every machine"
-)
 MSG_STATES_SHARED_TITLE = "Shared by every machine whose Library folder points here"
 MSG_STATES_DEFAULT_LABEL = "States: this machine only (default library folder)"
+# Browse… round (owner report 2026-08-22: could not find the Settings field
+# -- it was DISABLED in his remote browser -- and missed a Browse… button
+# next to Open folder): the hint names BOTH fixes and the remote caveat, in
+# a local and a remote variant.
 MSG_STATES_SHARE_HOWTO = (
-    "To share between computers, set Settings → EPSNodes → Library folder to the same NAS folder on every machine."
+    "To share between computers, set the Library folder to the same NAS folder on every machine — "
+    "Browse… here (on the machine running ComfyUI), or Settings (gear) → EPSNodes → Library → "
+    "Library folder. "
+    "A remote browser sees that setting read-only."
 )
+MSG_STATES_SHARE_HOWTO_REMOTE = (
+    "Set the Library folder on the machine running ComfyUI (its Settings → EPSNodes → Library → "
+    "Library folder, "
+    "or Browse… in a controller there) — a remote browser can only view it."
+)
+# `full` (the tooltip's sentence) = row 1 + " — " + row 2
+MSG_STATES_DEFAULT = MSG_STATES_DEFAULT_LABEL + " — " + MSG_STATES_SHARE_HOWTO
+MSG_STATES_DEFAULT_REMOTE = MSG_STATES_DEFAULT_LABEL + " — " + MSG_STATES_SHARE_HOWTO_REMOTE
 
 
 @pytest.fixture(scope="module")
@@ -922,7 +960,7 @@ def controller_api(tmp_path_factory: pytest.TempPathFactory) -> dict:
     layout = tmp_path_factory.mktemp("web_root")
     module_dir = layout / "extensions" / "comfyui-epsnodes" / "lora_library"
     module_dir.mkdir(parents=True)
-    for src in (CONTROLLER_JS, API_JS, VERSION_JS):
+    for src in (CONTROLLER_JS, API_JS, VERSION_JS, NOTEBOOK_JS, SETTINGS_JS, PATH_HEAL_JS):
         shutil.copyfile(src, module_dir / src.name)
     scripts = layout / "scripts"
     scripts.mkdir(parents=True, exist_ok=True)
@@ -1034,8 +1072,16 @@ def test_states_location_line_sits_under_the_list_and_never_crops_it(controller_
     ) in pane
     assert "this._pane.statesLocEl.style.display = 'none'" in pane  # hidden until known
     assert "getMinHeight: () => MIN_STATE_PANE_HEIGHT + STATES_LOCATION_PX" in pane
-    assert "const STATES_LOCATION_PX = 30" in controller_source
     css = controller_source.split("const STATE_PANE_CSS_TEXT = `", 1)[1].split("\n`\n", 1)[0]
+    # Browse… round, measured on the rig at the 300 px floor: the fact/path
+    # row, the Browse… + Open folder row that WRAPS under it there (the two
+    # buttons on one row left the fact 21 px -- "St…"), and the hint
+    # clamped to two lines (67 px measured; 72 leaves slack)
+    assert "const STATES_LOCATION_PX = 72" in controller_source
+    row_css = css.split(".llsc-states-loc-row {", 1)[1].split("\n}\n", 1)[0]
+    assert "flex-wrap: wrap;" in row_css
+    assert "flex: 1 1 120px;" in css.split(".llsc-states-loc-text {", 1)[1].split("\n}\n", 1)[0]
+    assert ".llsc-states-loc-text + .llsc-states-loc-btn {" in css  # the wrapped pair sits right
     loc = css.split(".llsc-states-loc {", 1)[1].split("\n}\n", 1)[0]
     assert "flex: 0 0 auto;" in loc
     lst = css.split(".llsc-list {", 1)[1].split("\n}\n", 1)[0]
@@ -1073,26 +1119,156 @@ def test_open_folder_is_loopback_gated_and_an_old_backend_toasts(controller_sour
 
 def test_user_facing_states_strings_are_verbatim(controller_source: str) -> None:
     assert (
-        "const MSG_STATES_DEFAULT =\n"
-        "  'States: this machine only (default library folder) — to share between ' +\n"
-        "  'computers, set Settings → EPSNodes → Library folder to the same NAS ' +\n"
-        "  'folder on every machine'"
-    ) in controller_source
-    assert (
         "const MSG_STATES_SHARED_TITLE = 'Shared by every machine whose Library folder points here'"
         in controller_source
     )
     assert "const MSG_STATES_DEFAULT_LABEL = 'States: this machine only (default library folder)'" in controller_source
     assert (
         "const MSG_STATES_SHARE_HOWTO =\n"
-        "  'To share between computers, set Settings → EPSNodes → Library folder to the same NAS folder on every machine.'"
+        "  'To share between computers, set the Library folder to the same NAS folder on every "
+        "machine — ' +\n"
+        "  'Browse… here (on the machine running ComfyUI), or Settings (gear) → EPSNodes → Library "
+        "→ Library folder. ' +\n"
+        "  'A remote browser sees that setting read-only.'"
     ) in controller_source
-    # the line stays TWO fixed rows -- never wrapped prose (rig 2026-08-22:
-    # the wrapped sentence swallowed the whole list at the 300 px node width)
+    assert (
+        "const MSG_STATES_SHARE_HOWTO_REMOTE =\n"
+        "  'Set the Library folder on the machine running ComfyUI (its Settings → EPSNodes → "
+        "Library → Library folder, ' +\n"
+        "  'or Browse… in a controller there) — a remote browser can only view it.'"
+    ) in controller_source
+    # `full` is composed, not a third copy
+    assert "const MSG_STATES_DEFAULT =" not in controller_source
+    # the line stays two ROWS -- row 1 one line, the hint CLAMPED to two
+    # lines, never unbounded prose (rig 2026-08-22: the wrapped sentence
+    # swallowed the whole list at the 300 px node width)
     css = controller_source.split("const STATE_PANE_CSS_TEXT = `", 1)[1].split("\n`\n", 1)[0]
-    assert "white-space: normal" not in css.split(".llsc-states-loc {", 1)[1]
+    text_css = css.split(".llsc-states-loc-text {", 1)[1].split("\n}\n", 1)[0]
+    assert "white-space: nowrap;" in text_css
+    hint_css = css.split(".llsc-states-loc-hint {", 1)[1].split("\n}\n", 1)[0]
+    assert "-webkit-line-clamp: 2;" in hint_css
+    assert "display: -webkit-box;" in hint_css and "overflow: hidden;" in hint_css
     render = _method_body(controller_source, "_renderStatesLocation()")
     assert "pane.statesLocTextEl.classList.toggle('llsc-states-loc-prose', line.isDefault)" in render
+    # the full hint always in the tooltip
+    assert "pane.statesLocHintEl.title = line.hint || ''" in render
+
+
+def test_states_location_line_has_local_and_remote_hint_variants(controller_api: dict) -> None:
+    """Browse… round: the hint tells a LOCAL viewer the two fixes (Browse…
+    here, or the Settings path -- read-only from a remote browser) and a
+    REMOTE viewer that the host machine sets it; the server's diagnosis
+    still beats both; the configured-folder reassurance is viewer-neutral."""
+    local = controller_api["defaultLocal"]
+    assert local["hint"] == MSG_STATES_SHARE_HOWTO
+    assert local["full"] == MSG_STATES_DEFAULT
+    assert local["title"] == "/home/u/lib/sets\n" + MSG_STATES_DEFAULT
+    # is_local absent => local
+    assert controller_api["defaultSameDir"]["hint"] == MSG_STATES_SHARE_HOWTO
+    remote = controller_api["defaultRemote"]
+    assert remote["text"] == MSG_STATES_DEFAULT_LABEL
+    assert remote["hint"] == MSG_STATES_SHARE_HOWTO_REMOTE
+    assert remote["full"] == MSG_STATES_DEFAULT_REMOTE
+    assert remote["title"] == "/home/u/lib/sets\n" + MSG_STATES_DEFAULT_REMOTE
+    assert controller_api["noteBeatsRemote"]["hint"] == "unreachable"
+    configured_remote = controller_api["configuredRemote"]
+    assert configured_remote["text"] == "States: /mnt/nas/comfy/sets"
+    assert configured_remote["hint"] == MSG_STATES_SHARED_TITLE + "."
+
+
+def test_browse_sits_before_open_folder_and_is_loopback_gated(controller_source: str) -> None:
+    """Owner report 2026-08-22 ("an 'open folder' button but not a browse
+    button like other nodes"): Browse… BEFORE Open folder, the Notebook
+    file panel's order; both hidden for a remote viewer (the picker's route
+    and the config POST are loopback-only, FORMAT.md §2/§5); the click opens
+    the Notebook's own picker in FOLDER mode, titled for this machine."""
+    assert "import { pickServerFolder } from './notebook.js'" in controller_source
+    assert "import { setLibraryDir } from './settings.js'" in controller_source
+    pane = _method_body(controller_source, "_buildStatePane()")
+    assert "this._pane.statesLocBrowseBtn = this._createActionButton(" in pane
+    assert "'Browse…'," in pane
+    assert pane.index("'Browse…',") < pane.index("'Open folder',")
+    assert (
+        "          el('div', { className: 'llsc-states-loc-row' }, [\n"
+        "            this._pane.statesLocTextEl,\n"
+        "            this._pane.statesLocBrowseBtn,\n"
+        "            this._pane.statesLocOpenBtn\n"
+        "          ]),"
+    ) in pane
+    assert "this._browseLibraryFolder()" in pane
+    render = _method_body(controller_source, "_renderStatesLocation()")
+    assert "pane.statesLocBrowseBtn.style.display = isLocal ? '' : 'none'" in render
+    assert "pane.statesLocOpenBtn.style.display = isLocal && line.setsDir ? '' : 'none'" in render
+    browse = _method_body(controller_source, "async _browseLibraryFolder()")
+    assert "const isLocal = config.is_local !== false" in browse
+    assert "this._toast('warn', NODE_TITLE, MSG_LIBRARY_BROWSE_REMOTE)" in browse
+    assert "const picked = await pickServerFolder({" in browse
+    assert "title: MSG_LIBRARY_BROWSE_TITLE," in browse
+    assert (
+        "startDir: config.library_dir_exists === false ? FS_LIST_ROOTS : current || null,"
+        in browse
+    )
+    assert "confirmLabel: MSG_LIBRARY_BROWSE_CONFIRM," in browse
+    assert "confirmPrompt: libraryBrowsePrompt," in browse
+    assert "if (!picked || this._removed) return" in browse
+    assert "await this._applyLibraryFolder(picked)" in browse
+    assert "const MSG_LIBRARY_BROWSE_TITLE = 'Library folder for this machine'" in controller_source
+    assert "const MSG_LIBRARY_BROWSE_CONFIRM = 'Use this folder'" in controller_source
+    assert "const MSG_LIBRARY_BROWSE_FINAL = 'Set library folder'" in controller_source
+    assert "const FS_LIST_ROOTS = 'ROOTS'" in controller_source
+    assert (
+        "    `Set this machine's Library folder to ${path}? States, groups, favorites, presets and "
+        "` +\n"
+        "    'the default notebook will then be read from there.'"
+    ) in controller_source
+
+
+def test_library_folder_pick_posts_drops_the_cache_and_toasts(controller_source: str) -> None:
+    """The pick goes through settings.js's own POST (`setLibraryDir`, which
+    also mirrors the path into the `loraLibrary.libraryDir` setting so the
+    dialog agrees), then EVERY controller re-reads: shared /config cache
+    dropped, each node's sets-feed copy of the old folder forgotten (it is
+    preferred over /config), the sets-changed event re-runs the shared poll
+    (and refreshes the Apply LoRA Set combos, §7.4); success toasts the
+    agreed sentence, failure the server's message."""
+    apply = _method_body(controller_source, "async _applyLibraryFolder(path)")
+    assert "response = await setLibraryDir(path)" in apply
+    assert (
+        "this._toast('error', NODE_TITLE, `Could not set the library folder: ${error?.message || "
+        "error}`)"
+        in apply
+    )
+    assert "dropControllerConfigCache()" in apply
+    assert "for (const node of liveControllers) node._statesFeed = null" in apply
+    assert "announceSetsChanged()" in apply
+    assert "this._toast('info', NODE_TITLE, libraryFolderSetToast(resolved), 8000)" in apply
+    assert apply.index("dropControllerConfigCache()") < apply.index("announceSetsChanged()")
+    drop = _function_body(controller_source, "dropControllerConfigCache()")
+    assert "controllerConfig = null" in drop and "controllerConfigAt = 0" in drop
+    assert (
+        "    `Library folder set to ${path} — states, groups, favorites, presets and the default ` "
+        "+\n"
+        "    'notebook now live there. Set the same folder on your other machines to share.'"
+    ) in controller_source
+    # `_toast` grew an optional life for the long sentence; the defaults hold
+    toast = _method_body(controller_source, "_toast(severity, summary, detail, life)")
+    assert "life: life ?? (severity === 'error' ? 6000 : 3000)" in toast
+    # settings.js's half: the dialog's POST, reused -- serverValue FIRST so
+    # the mirrored setting value never re-POSTs through onLibraryDirChanged
+    settings = SETTINGS_JS.read_text(encoding="utf-8")
+    set_fn = _function_body(settings, "setLibraryDir(path)")
+    assert "const response = await postLibraryDir(trimmed)" in set_fn
+    assert (
+        "await app.extensionManager?.setting?.set?.('loraLibrary.libraryDir', serverValue)"
+        in set_fn
+    )
+    assert "export async function setLibraryDir(path)" in settings
+    post_fn = _function_body(settings, "postLibraryDir(trimmed)")
+    assert "api.postJson('/lora_library/config', { library_dir: trimmed })" in post_fn
+    assert "serverValue = trimmed === '' ? '' : (response.library_dir ?? trimmed)" in post_fn
+    on_change = _function_body(settings, "onLibraryDirChanged(value)")
+    assert "await postLibraryDir(trimmed)" in on_change
+    assert "api.postJson" not in on_change  # one POST site, not two
 
 
 def test_sets_feed_fields_apply_before_the_row_change_gate(controller_source: str) -> None:
@@ -1111,8 +1287,17 @@ def test_states_location_is_dom_only_and_torn_down(controller_source: str) -> No
     ResizeObserver (the Notebook's path re-fit pattern) is disconnected in
     onRemoved and re-armed on a re-add."""
     section = controller_source.split("// ----------------------------------------- states location (NAS round)", 1)[1]
-    section = section.split("_toast(severity, summary, detail) {", 1)[0]
+    marker = "_toast(severity, summary, detail, life) {"
+    # the section ends at _toast; a moved/renamed marker must not silently widen it
+    assert marker in section
+    section = section.split(marker, 1)[0]
     assert "window.addEventListener" not in section
+    # Browse… round: the two new methods live in this section and add no
+    # listener either -- the picker's own Escape handler is notebook.js's
+    assert (
+        "async _browseLibraryFolder()" in section and "async _applyLibraryFolder(path)"
+        in section
+    )
     assert "onDrawForeground" not in section
     assert "new ResizeObserver(() => this._fitStatesLocationText())" in section
     removed = _method_body(controller_source, "onRemoved()")

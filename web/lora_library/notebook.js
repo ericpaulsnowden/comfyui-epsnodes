@@ -963,6 +963,44 @@ const CSS_TEXT = `
   padding: 6px 8px;
   border-top: 1px solid var(--border-color, #444);
 }
+.llnb-picker-title {
+  /* pickServerFolder(): an optional caption above the path row naming
+     WHAT is being picked (the Notebook's file picker has none). */
+  flex: 0 0 auto;
+  padding: 8px 10px 0;
+  font-size: 11.5px;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.llnb-picker-title:empty { display: none; }
+.llnb-picker-row-dim {
+  /* folder mode: files are context, not choices */
+  opacity: 0.45;
+  cursor: default;
+  pointer-events: none;
+}
+.llnb-picker-confirm {
+  /* folder mode's second step (spec.confirmPrompt): the question replaces
+     the footer; Back restores it. */
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 6px 8px;
+  border-top: 1px solid var(--border-color, #444);
+}
+.llnb-picker-confirm-text {
+  white-space: normal;
+  overflow-wrap: anywhere;
+  color: var(--input-text, #ccc);
+}
+.llnb-picker-confirm-buttons {
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
+}
 `
 
 function injectStyles() {
@@ -1222,8 +1260,10 @@ function createState(node, fileWidget, entryWidget, pinnedWidget = null) {
     lastKnownFileValue: null,
     // The Browse… picker's window-level Escape-key listener while open (the
     // picker lives on document.body, not inside this widget's own DOM — see
-    // openBrowsePicker()).
+    // openBrowsePicker()/openPickerDialog(); this `state` IS the picker
+    // session, `pickerSpec` (file mode) is set per open).
     pickerKeydownHandler: null,
+    pickerSpec: null,
     // Guards the picker's in-flight fs/list fetch (loadPickerDir()): the
     // path bar stays live while a listing is in flight, so a second
     // navigation can lap the first (a slow NAS initial load vs. a typed
@@ -1994,54 +2034,183 @@ function dirnameOfServerPath(path) {
 
 const PICKER_OVERLAY_ID = 'llnb-picker-overlay'
 
-function closeBrowsePicker(state) {
-  document.getElementById(PICKER_OVERLAY_ID)?.remove()
-  if (state.pickerKeydownHandler) {
-    // Same capture flag as the registration in openBrowsePicker(), or this
-    // silently fails to detach (see the drag listeners' identical note).
-    window.removeEventListener('keydown', state.pickerKeydownHandler, { capture: true })
-    state.pickerKeydownHandler = null
+/** The one open picker's session -- a Notebook `state`, or the private
+ * session object pickServerFolder() makes. "Only one picker at a time,
+ * ever" now spans BOTH callers: opening either closes the other first, so
+ * the other's capture-phase Escape listener (and, for a folder pick, its
+ * pending promise -- resolved null) can never dangle behind a removed
+ * overlay. */
+let activePickerSession = null
+
+/**
+ * Tears the picker down: overlay, capture-phase Escape listener (same flag
+ * as the registration in openPickerDialog(), or it silently fails to
+ * detach -- see the drag listeners' identical note), the active-session
+ * mark, and the session's close hook (`pickerOnClose`, pickServerFolder()'s
+ * "cancelled" path; a deliberate pick clears it before closing). Called
+ * from Cancel/Escape/backdrop, from a file pick, from the next open, and
+ * from the Notebook's own teardown(). Safe to call when nothing is open.
+ *
+ * OWNERSHIP: the overlay is removed and the close hook fired only for the
+ * session that actually owns the open picker (`activePickerSession`). Two
+ * reasons, both found on the rig 2026-08-22: openPickerDialog() calls this
+ * on the session it is about to open (a re-open of the same session must
+ * start clean) -- firing the hook there resolved pickServerFolder() null
+ * the instant it opened, so a later pick was a no-op; and a Notebook
+ * teardown() while a CONTROLLER's picker is open must not pull that other
+ * session's overlay out from under it. The keydown listener is removed
+ * unconditionally (it is per session; removing a missing one is a no-op).
+ * @param {object} session - the Notebook `state` or a folder-pick session
+ */
+function closeBrowsePicker(session) {
+  const owns = activePickerSession === session
+  if (owns) {
+    document.getElementById(PICKER_OVERLAY_ID)?.remove()
+    activePickerSession = null
   }
+  if (session.pickerKeydownHandler) {
+    window.removeEventListener('keydown', session.pickerKeydownHandler, { capture: true })
+    session.pickerKeydownHandler = null
+  }
+  if (!owns) return
+  const onClose = session.pickerOnClose
+  session.pickerOnClose = null
+  onClose?.()
 }
 
 /**
- * FORMAT.md §7.2's Browse… dialog. Deliberately attached to `document.body`
- * rather than nested inside this widget's own root: the DOM widget's box is
- * only ever as tall as the node currently is (as small as
- * MIN_WIDGET_HEIGHT), and litegraph can reposition/clip it during pan/zoom
- * (see `hideOnZoom` on attachDomWidget() above) — a file browser confined to
- * that box would be cramped on a small node and would fight the same
- * clipping. A fixed, centered overlay on `document.body` stays a
- * comfortable, constant size regardless of the node's size/position, at the
- * cost of managing its own teardown by hand (closeBrowsePicker(), called
- * from here, Escape, a backdrop click, and this node's own teardown()).
+ * FORMAT.md §7.2's Browse… dialog -- the Notebook's FILE picker. The
+ * Notebook `state` is the picker session (it carries
+ * `pickerKeydownHandler` + `pickerNavToken`); the spec says "file mode,
+ * start at the resolved file's own folder, and a clicked .md row becomes
+ * the `file` widget's value". Everything else -- the modal, the
+ * type-or-paste path row, `fs/list` walking, Escape -- is
+ * openPickerDialog(), shared with pickServerFolder() below.
  */
 function openBrowsePicker(state) {
-  closeBrowsePicker(state) // only one picker at a time, ever
+  state.pickerSpec = {
+    mode: 'file',
+    startDir: dirnameOfServerPath(state.resolvedFile),
+    onPickFile: (chosen) => {
+      // 2026-07-27 (owner: "I can browse to the file now but selecting it
+      // does nothing"): acknowledge the click IMMEDIATELY, naming the path.
+      // The reload behind it is debounced and async, so without this a
+      // selection that is later refused or fails looks like a dead click --
+      // and, diagnostically, the ABSENCE of this line tells us the click
+      // never reached this handler at all.
+      setStatus(state, `Opening ${chosen}...`)
+      api.log?.(`notebook: picked ${chosen}`)
+      setFileWidgetValue(state, chosen)
+    }
+  }
+  openPickerDialog(state)
+}
+
+/**
+ * Pick a FOLDER on the server machine -- the reusable half of the
+ * Notebook's Browse… picker, for callers that want a directory rather
+ * than a .md file (the State Controller's Library-folder Browse…,
+ * FORMAT.md §6.3). Same modal, CSS, `GET /lora_library/fs/list` walking
+ * (drive list / `..` / typed-or-pasted path row), capture-phase Escape and
+ * single-picker-at-a-time rule as the Notebook's; directory-oriented:
+ * folders navigate, files are shown dimmed as context (never choices), and
+ * the footer gains a confirm button (`confirmLabel`, default "Use this
+ * folder") that picks the folder currently LISTED -- disabled at the Top
+ * Level (its entries are roots, not a folder) and after a failed listing.
+ * When `confirmPrompt` is given, the confirm button first swaps the footer
+ * for that question (text for the candidate path) + `confirmFinalLabel` /
+ * Back -- the machine-wide-action "ask twice" step, inside the dialog so a
+ * 300 px node never has to host a confirm strip of its own.
+ *
+ * Resolves with the absolute folder path, or null on Cancel / Escape /
+ * backdrop click / the next picker opening over it / a remote viewer
+ * (`isLocal === false`: the route is loopback-only, FORMAT.md §5, so the
+ * dialog never opens) / no DOM (under Node). Never rejects.
+ * @param {{title?: string, startDir?: string|null, isLocal?: boolean|null,
+ *   confirmLabel?: string, confirmPrompt?: (path: string) => string,
+ *   confirmFinalLabel?: string}} [options]
+ * @returns {Promise<string|null>}
+ */
+export function pickServerFolder(options = {}) {
+  const { title, startDir, isLocal, confirmLabel, confirmPrompt, confirmFinalLabel } = options || {}
+  if (isLocal === false) {
+    api.warn('pickServerFolder: fs/list is loopback-only (FORMAT.md §5); not opening for a remote viewer')
+    return Promise.resolve(null)
+  }
+  if (typeof document === 'undefined' || !document.body) return Promise.resolve(null)
+  return new Promise((resolve) => {
+    let settled = false
+    const finish = (value) => {
+      if (settled) return
+      settled = true
+      resolve(value)
+    }
+    const session = {
+      pickerKeydownHandler: null,
+      pickerNavToken: 0,
+      pickerOnClose: () => finish(null),
+      pickerSpec: {
+        mode: 'folder',
+        title: typeof title === 'string' ? title : 'Choose a folder',
+        startDir: typeof startDir === 'string' && startDir ? startDir : null,
+        confirmLabel: typeof confirmLabel === 'string' && confirmLabel ? confirmLabel : 'Use this folder',
+        confirmPrompt: typeof confirmPrompt === 'function' ? confirmPrompt : null,
+        confirmFinalLabel:
+          typeof confirmFinalLabel === 'string' && confirmFinalLabel ? confirmFinalLabel : 'Confirm',
+        onPickFolder: (path) => finish(path)
+      }
+    }
+    openPickerDialog(session)
+  })
+}
+
+/**
+ * The picker dialog proper, shared by openBrowsePicker() (file mode) and
+ * pickServerFolder() (folder mode) -- `session.pickerSpec` says which.
+ * Deliberately attached to `document.body` rather than nested inside a
+ * widget's own root: a DOM widget's box is only ever as tall as its node
+ * currently is (as small as MIN_WIDGET_HEIGHT), and litegraph can
+ * reposition/clip it during pan/zoom (see `hideOnZoom` on attachDomWidget()
+ * above) — a file browser confined to that box would be cramped on a small
+ * node and would fight the same clipping. A fixed, centered overlay on
+ * `document.body` stays a comfortable, constant size regardless of the
+ * node's size/position, at the cost of managing its own teardown by hand
+ * (closeBrowsePicker(), called from here, Escape, a backdrop click, a pick,
+ * and the Notebook's own teardown()).
+ * @param {object} session - Notebook `state` or a pickServerFolder() session;
+ *   carries `pickerKeydownHandler`, `pickerNavToken`, `pickerSpec`
+ */
+function openPickerDialog(session) {
+  injectStyles() // a controller may open this before any Notebook attached
+  // only one picker at a time, ever -- across both callers
+  if (activePickerSession && activePickerSession !== session) closeBrowsePicker(activePickerSession)
+  closeBrowsePicker(session)
+  activePickerSession = session
+  const spec = session.pickerSpec || {}
 
   const backdrop = el('div', { className: 'llnb-picker-backdrop', attrs: { id: PICKER_OVERLAY_ID } })
   const dialog = el('div', { className: 'llnb-picker' })
   backdrop.append(dialog)
   backdrop.addEventListener('mousedown', (event) => {
-    if (event.target === backdrop) closeBrowsePicker(state)
+    if (event.target === backdrop) closeBrowsePicker(session)
   })
   dialog.addEventListener('mousedown', (event) => event.stopPropagation())
   document.body.append(backdrop)
 
-  state.pickerKeydownHandler = (event) => {
+  session.pickerKeydownHandler = (event) => {
     if (event.key === 'Escape') {
       event.preventDefault()
-      closeBrowsePicker(state)
+      closeBrowsePicker(session)
     }
   }
   // CAPTURE-phase, deliberately (the FORMAT.md §7.5 rule every other
   // window-level listener in this file already follows): the picker's own
-  // path input below — and this panel's name field/textarea — call
+  // path input below — and the Notebook's name field/textarea — call
   // stopPropagation() on every keydown, so a bubble-phase listener never
   // sees Escape while any of them has focus, exactly the state the user is
   // in right after typing a path. closeBrowsePicker() must remove with the
   // same flag.
-  window.addEventListener('keydown', state.pickerKeydownHandler, { capture: true })
+  window.addEventListener('keydown', session.pickerKeydownHandler, { capture: true })
 
   // Type-or-paste-a-path input (FORMAT.md §5/§7.2, owner's NAS fix) — a
   // PERSISTENT row above the listing (unlike `contentEl` below, which every
@@ -2059,7 +2228,7 @@ function openBrowsePicker(state) {
   const goToTypedPath = () => {
     const typed = pathInput.value.trim()
     if (!typed) return
-    loadPickerDir(state, dialog, contentEl, pathErrorEl, typed)
+    loadPickerDir(session, dialog, contentEl, pathErrorEl, typed)
   }
   goBtn.addEventListener('click', goToTypedPath)
   pathInput.addEventListener('keydown', (event) => {
@@ -2071,9 +2240,10 @@ function openBrowsePicker(state) {
   })
 
   const pathRow = el('div', { className: 'llnb-picker-pathrow' }, [pathInput, goBtn])
-  dialog.append(pathRow, pathErrorEl, contentEl)
+  const titleEl = el('div', { className: 'llnb-picker-title', text: spec.title || '' })
+  dialog.append(titleEl, pathRow, pathErrorEl, contentEl)
 
-  loadPickerDir(state, dialog, contentEl, pathErrorEl, dirnameOfServerPath(state.resolvedFile))
+  loadPickerDir(session, dialog, contentEl, pathErrorEl, spec.startDir || null)
 }
 
 /**
@@ -2086,32 +2256,34 @@ function openBrowsePicker(state) {
  * whole dialog — "keeps dialog open" per the owner ask — leaving the path
  * input itself untouched so the user can just fix it and retry.
  */
-async function loadPickerDir(state, dialog, contentEl, pathErrorEl, dir) {
+async function loadPickerDir(session, dialog, contentEl, pathErrorEl, dir) {
   // A lapped response — success OR failure — must neither render nor touch
   // the error slot: the navigation that superseded this one owns the
   // dialog now (see pickerNavToken's state comment; mirrors
   // loadEntryText()'s loadToken guard).
-  const navToken = ++state.pickerNavToken
+  const navToken = ++session.pickerNavToken
   pathErrorEl.textContent = ''
   contentEl.replaceChildren(el('div', { className: 'llnb-picker-status', text: 'Loading…' }))
   let data
   try {
     data = await api.getJson('/lora_library/fs/list', dir ? { dir } : undefined)
   } catch (error) {
-    if (navToken !== state.pickerNavToken) return // superseded by a later navigation
+    if (navToken !== session.pickerNavToken) return // superseded by a later navigation
     api.warn('fs/list failed', error)
     pathErrorEl.textContent = error.message || 'Could not list that path.'
     contentEl.replaceChildren(
       el('div', { className: 'llnb-picker-header', text: 'Browse' }),
-      buildPickerFooter(state)
+      buildPickerFooter(session, null) // folder mode: nothing listed, nothing to confirm
     )
     return
   }
-  if (navToken !== state.pickerNavToken) return // superseded by a later navigation
-  renderPickerDialog(state, dialog, contentEl, pathErrorEl, data)
+  if (navToken !== session.pickerNavToken) return // superseded by a later navigation
+  renderPickerDialog(session, dialog, contentEl, pathErrorEl, data)
 }
 
-function renderPickerDialog(state, dialog, contentEl, pathErrorEl, data) {
+function renderPickerDialog(session, dialog, contentEl, pathErrorEl, data) {
+  const spec = session.pickerSpec || {}
+  const folderMode = spec.mode === 'folder'
   // FS_ROOTS ("ROOTS", STANDARD-fs-browse.md's fs/list sentinel): the
   // synthetic top-level listing (default library dir + Home + platform
   // drives/volumes) — "Top Level" reads better than the raw sentinel string
@@ -2124,7 +2296,7 @@ function renderPickerDialog(state, dialog, contentEl, pathErrorEl, data) {
 
   if (data.parent) {
     const upRow = el('div', { className: 'llnb-picker-row', text: '.. (parent folder)' })
-    upRow.addEventListener('click', () => loadPickerDir(state, dialog, contentEl, pathErrorEl, data.parent))
+    upRow.addEventListener('click', () => loadPickerDir(session, dialog, contentEl, pathErrorEl, data.parent))
     list.append(upRow)
   }
   for (const dir of data.dirs || []) {
@@ -2137,37 +2309,83 @@ function renderPickerDialog(state, dialog, contentEl, pathErrorEl, data) {
     // there instead. Everywhere else, entries are names-only: join onto the
     // current `dir` + the server-reported `sep`.
     const target = isRootsList ? dir.path : joinServerPath(data.dir, dir.name, data.sep)
-    row.addEventListener('click', () => loadPickerDir(state, dialog, contentEl, pathErrorEl, target))
+    row.addEventListener('click', () => loadPickerDir(session, dialog, contentEl, pathErrorEl, target))
     list.append(row)
   }
   for (const file of data.files || []) {
+    if (folderMode) {
+      // context only (a loras.md says "this is a library folder"), never a
+      // choice -- dimmed and inert
+      list.append(el('div', { className: 'llnb-picker-row llnb-picker-row-dim', text: `📄 ${file.name}` }))
+      continue
+    }
     const row = el('div', { className: 'llnb-picker-row', text: `📄 ${file.name}` })
     row.addEventListener('click', () => {
       const chosen = joinServerPath(data.dir, file.name, data.sep)
-      closeBrowsePicker(state)
-      // 2026-07-27 (owner: "I can browse to the file now but selecting it
-      // does nothing"): acknowledge the click IMMEDIATELY, naming the path.
-      // The reload behind it is debounced and async, so without this a
-      // selection that is later refused or fails looks like a dead click --
-      // and, diagnostically, the ABSENCE of this line tells us the click
-      // never reached this handler at all.
-      setStatus(state, `Opening ${chosen}...`)
-      api.log?.(`notebook: picked ${chosen}`)
-      setFileWidgetValue(state, chosen)
+      closeBrowsePicker(session)
+      spec.onPickFile?.(chosen)
     })
     list.append(row)
   }
   if (!data.parent && !(data.dirs || []).length && !(data.files || []).length) {
-    list.append(el('div', { className: 'llnb-picker-empty', text: 'No subfolders or .md files here.' }))
+    list.append(
+      el('div', {
+        className: 'llnb-picker-empty',
+        text: folderMode ? 'No subfolders here.' : 'No subfolders or .md files here.'
+      })
+    )
   }
 
-  contentEl.replaceChildren(header, list, buildPickerFooter(state))
+  contentEl.replaceChildren(header, list, buildPickerFooter(session, data))
 }
 
-function buildPickerFooter(state) {
+/**
+ * The dialog's footer. File mode: Cancel. Folder mode (pickServerFolder()):
+ * the confirm button for the folder currently LISTED (`data.dir`; none at
+ * the Top Level or after a failed listing -> disabled) + Cancel; with
+ * `spec.confirmPrompt`, the confirm click first swaps this footer for the
+ * question + `confirmFinalLabel` / Back (Back rebuilds this footer).
+ * @param {object} session @param {object|null} data - the `fs/list` payload
+ *   this footer belongs to, or null when the listing failed
+ */
+function buildPickerFooter(session, data) {
+  const spec = session.pickerSpec || {}
   const cancelBtn = el('button', { className: 'llnb-btn llnb-btn-small', text: 'Cancel' })
-  cancelBtn.addEventListener('click', () => closeBrowsePicker(state))
-  return el('div', { className: 'llnb-picker-footer' }, [cancelBtn])
+  cancelBtn.addEventListener('click', () => closeBrowsePicker(session))
+  if (spec.mode !== 'folder') {
+    return el('div', { className: 'llnb-picker-footer' }, [cancelBtn])
+  }
+  const candidate = data && typeof data.dir === 'string' && data.dir && data.dir !== FS_ROOTS ? data.dir : null
+  const useBtn = el('button', { className: 'llnb-btn llnb-btn-small', text: spec.confirmLabel || 'Use this folder' })
+  if (!candidate) useBtn.disabled = true
+  const footer = el('div', { className: 'llnb-picker-footer' }, [useBtn, cancelBtn])
+  useBtn.addEventListener('click', () => {
+    if (!candidate) return
+    if (typeof spec.confirmPrompt !== 'function') {
+      commitPickedFolder(session, candidate)
+      return
+    }
+    // Ask twice for a machine-wide action: the question replaces the footer.
+    const yesBtn = el('button', { className: 'llnb-btn llnb-btn-small', text: spec.confirmFinalLabel || 'Confirm' })
+    const backBtn = el('button', { className: 'llnb-btn llnb-btn-small', text: 'Back' })
+    const strip = el('div', { className: 'llnb-picker-confirm' }, [
+      el('div', { className: 'llnb-picker-confirm-text', text: spec.confirmPrompt(candidate) }),
+      el('div', { className: 'llnb-picker-confirm-buttons' }, [yesBtn, backBtn])
+    ])
+    yesBtn.addEventListener('click', () => commitPickedFolder(session, candidate))
+    backBtn.addEventListener('click', () => strip.replaceWith(buildPickerFooter(session, data)))
+    footer.replaceWith(strip)
+  })
+  return footer
+}
+
+/** A deliberate folder pick: NOT a cancel, so the session's close hook is
+ * cleared before the teardown, then the spec's callback gets the path. */
+function commitPickedFolder(session, path) {
+  const onPick = session.pickerSpec?.onPickFolder
+  session.pickerOnClose = null
+  closeBrowsePicker(session)
+  onPick?.(path)
 }
 
 /** Writes `value` through the `file` widget's real setter+callback — the

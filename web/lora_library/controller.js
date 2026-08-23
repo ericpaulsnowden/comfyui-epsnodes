@@ -52,6 +52,28 @@
  * 30 s cache TTL via the poller, and at once on the next attach. DOM only,
  * no window listeners, no canvas drawing (§7.5).
  *
+ * Browse… on that line (owner report 2026-08-22: "there is an 'open
+ * folder' button but not a browse button like other nodes. Why is this
+ * inconsistent?" -- and the Settings field he could not find was the
+ * Library folder field DISABLED in his remote browser, §2/§7.3): a
+ * **Browse…** button BEFORE Open folder, loopback-only like it (a remote
+ * viewer sees neither), opens the Notebook's own server-folder picker in
+ * folder mode (`pickServerFolder`, notebook.js -- same modal/CSS/`fs/list`
+ * walking/typed-path row/Escape) titled "Library folder for this machine",
+ * starting at the current library folder (the drive list when the server
+ * can't see it); "Use this folder" asks once more inside the dialog (the
+ * action is machine-wide), then `setLibraryDir` (settings.js, the dialog's
+ * own `POST /lora_library/config` + the `loraLibrary.libraryDir` setting
+ * kept in sync) -> the shared /config cache is dropped, every controller's
+ * sets-feed copy of the OLD folder is forgotten and the sets-changed event
+ * re-runs the shared poll for all of them (Apply LoRA Set combos included,
+ * §7.4) -> toast "Library folder set to <path> — …". The hint row now says
+ * HOW (Browse… here, or Settings (gear) → EPSNodes → Library → Library
+ * folder, read-only from a remote browser) in a LOCAL and a REMOTE
+ * variant (`statesLocationLine` reads `is_local`), clamped to two lines
+ * (`-webkit-line-clamp`, full text in the tooltip) -- its share of the
+ * pane floor is `STATES_LOCATION_PX`.
+ *
  * Renamed a THIRD time 2026-07-22 (owner: every node's display name
  * must start with "EPS" so a gallery search for "EPS" surfaces the
  * whole pack): "Lora Loader State Controller" -> "EPS Lora Loader
@@ -767,6 +789,11 @@
 
 import { app } from '../../../scripts/app.js'
 import * as api from './api.js'
+// The Notebook's server-folder picker in folder mode (file header "Browse…
+// on that line") and the Settings dialog's own library-folder POST, so the
+// dialog's field and this button can never disagree about what was set.
+import { pickServerFolder } from './notebook.js'
+import { setLibraryDir } from './settings.js'
 
 // ---------------------------------------------------------------- constants
 
@@ -906,24 +933,60 @@ const SETS_OPEN_FOLDER_ROUTE = '/lora_library/sets/open_folder'
  * controller (the picker feed's shared-fetch shape). */
 const CONTROLLER_CONFIG_TTL_MS = 30000
 /** The line's share of the pane's height floor (§7.2: the list below must
- * never be cropped by it -- it shrinks and scrolls instead). */
-const STATES_LOCATION_PX = 30
-/** The plain statement for the pack-default library, in full (tooltip +
- * the pure helper's `full`), and split across the line's two rows -- a
- * 300 px node's list pane is ~170 px wide, so the sentence as ONE row
- * would be ellipsised to nothing and as wrapped prose it swallowed the
- * whole list (rig, 2026-08-22): row 1 = the fact, row 2 (hint) = the fix. */
-const MSG_STATES_DEFAULT =
-  'States: this machine only (default library folder) — to share between ' +
-  'computers, set Settings → EPSNodes → Library folder to the same NAS ' +
-  'folder on every machine'
+ * never be cropped by it -- it shrinks and scrolls instead): at the 300 px
+ * floor, where the floor binds, the fact/path row, the Browse… + Open
+ * folder row that wraps under it there (`.llsc-states-loc-row`), and the
+ * hint clamped to TWO lines -- measured on the rig, Browse… round. A wider
+ * node's line is one row shorter; the list simply keeps the slack. */
+const STATES_LOCATION_PX = 72
+/** Row 1 for the pack-default library; the line's two rows exist because a
+ * 300 px node's list pane is ~170 px wide, so one sentence as ONE row
+ * would be ellipsised to nothing and as unbounded wrapped prose it
+ * swallowed the whole list (rig, 2026-08-22): row 1 = the fact, row 2
+ * (hint) = the fix -- now clamped to two lines, never more. The pure
+ * helper's `full` = row 1 + " — " + row 2 (tooltip, with the full path). */
 const MSG_STATES_DEFAULT_LABEL = 'States: this machine only (default library folder)'
+/** Row 2 for a LOCAL viewer (Browse… round): the fix is right here, or in
+ * the Settings dialog -- named by its real category path, and with the
+ * remote caveat that made the owner read the field as "missing" (§7.3:
+ * the field is disabled in a remote browser). */
 const MSG_STATES_SHARE_HOWTO =
-  'To share between computers, set Settings → EPSNodes → Library folder to the same NAS folder on every machine.'
+  'To share between computers, set the Library folder to the same NAS folder on every machine — ' +
+  'Browse… here (on the machine running ComfyUI), or Settings (gear) → EPSNodes → Library → Library folder. ' +
+  'A remote browser sees that setting read-only.'
+/** Row 2 for a REMOTE viewer (`is_local === false`): only the host can move
+ * the folder (§2); no buttons. */
+const MSG_STATES_SHARE_HOWTO_REMOTE =
+  'Set the Library folder on the machine running ComfyUI (its Settings → EPSNodes → Library → Library folder, ' +
+  'or Browse… in a controller there) — a remote browser can only view it.'
 const MSG_STATES_SHARED_TITLE = 'Shared by every machine whose Library folder points here'
 const MSG_STATES_OPEN_NEEDS_BACKEND =
   'Open folder needs a newer EPSNodes backend — update the pack on the machine running ComfyUI and restart it.'
 const MSG_STATES_OPEN_REMOTE = 'Only the machine running ComfyUI can open its folders.'
+/** Browse… (file header "Browse… on that line"): the folder picker's
+ * caption, its confirm button, the in-dialog second step, the toasts. */
+const MSG_LIBRARY_BROWSE_TITLE = 'Library folder for this machine'
+const MSG_LIBRARY_BROWSE_CONFIRM = 'Use this folder'
+const MSG_LIBRARY_BROWSE_FINAL = 'Set library folder'
+const MSG_LIBRARY_BROWSE_REMOTE = 'Only the machine running ComfyUI can change its library folder.'
+/** `fs/list`'s "top level" sentinel (FORMAT.md §5) -- where Browse… starts
+ * when the server cannot see the configured folder (listing it would only
+ * error). */
+const FS_LIST_ROOTS = 'ROOTS'
+/** The picker's second step -- the action is machine-wide, so it asks once
+ * more, naming the path and what moves with it. */
+function libraryBrowsePrompt(path) {
+  return (
+    `Set this machine's Library folder to ${path}? States, groups, favorites, presets and ` +
+    'the default notebook will then be read from there.'
+  )
+}
+function libraryFolderSetToast(path) {
+  return (
+    `Library folder set to ${path} — states, groups, favorites, presets and the default ` +
+    'notebook now live there. Set the same folder on your other machines to share.'
+  )
+}
 //: notebook.js's DRAG_THRESHOLD_PX twin -- same feel, same reason.
 const STATE_DRAG_THRESHOLD_PX = 4
 const CATEGORY_DELETE_CONFIRM_MS = 4000
@@ -1117,6 +1180,15 @@ function fetchControllerConfig() {
   return promise
 }
 
+/** Forget the shared /config (Browse… just moved the library folder): the
+ * next `fetchControllerConfig` -- every controller's -- is a real GET. An
+ * in-flight fetch is left to settle; it predates the change and its
+ * callers re-read through the poll. */
+function dropControllerConfigCache() {
+  controllerConfig = null
+  controllerConfigAt = 0
+}
+
 /** Feed the (cached) config to every live controller -- the poller's hook. */
 async function runSharedConfigFetch() {
   const live = () => [...liveControllers].filter((node) => !node._removed)
@@ -1163,10 +1235,13 @@ function samePathText(a, b) {
  * knows; the fallback derives `<library_dir>/sets` and compares against the
  * default folder client-side).
  * `text` = row 1 (the path, front-truncated by the caller, or the default-
- * library fact), `hint` = row 2 (the share how-to / the reassurance, or the
- * server's `library_dir_note` diagnosis when it has one -- the one thing
- * worth that row), `title` = the tooltip (the FULL path for the default
- * case, the sharing statement otherwise), `full` = the whole sentence.
+ * library fact), `hint` = row 2 (the share how-to -- the LOCAL variant
+ * names Browse… here + the Settings path, the REMOTE one (`is_local ===
+ * false`) says the host machine sets it -- or the sharing reassurance, or
+ * the server's `library_dir_note` diagnosis when it has one -- the one
+ * thing worth that row), `title` = the tooltip (the FULL path for the
+ * default case, the sharing statement otherwise), `full` = the whole
+ * sentence (row 1 + row 2).
  * @param {object} config
  * @returns {{text: string, full: string, title: string, hint: string, isDefault: boolean, setsDir: string}}
  */
@@ -1180,13 +1255,16 @@ export function statesLocationLine(config) {
       ? config.is_default_library
       : samePathText(libraryDir, defaultDir)
   const note = typeof config?.library_dir_note === 'string' ? config.library_dir_note.trim() : ''
+  const remote = config?.is_local === false
   if (!setsDir) return { text: '', full: '', title: '', hint: '', isDefault: false, setsDir: '' }
   if (isDefault) {
+    const hint = note || (remote ? MSG_STATES_SHARE_HOWTO_REMOTE : MSG_STATES_SHARE_HOWTO)
+    const full = `${MSG_STATES_DEFAULT_LABEL} — ${hint}`
     return {
       text: MSG_STATES_DEFAULT_LABEL,
-      full: MSG_STATES_DEFAULT,
-      title: `${setsDir}\n${MSG_STATES_DEFAULT}`,
-      hint: note || MSG_STATES_SHARE_HOWTO,
+      full,
+      title: `${setsDir}\n${full}`,
+      hint,
       isDefault: true,
       setsDir
     }
@@ -2282,13 +2360,20 @@ const STATE_PANE_CSS_TEXT = `
   background: var(--comfy-menu-bg, #262626);
 }
 .llsc-states-loc-row {
+  /* Browse… round: Browse… + Open folder are ~130 px together and a 300 px
+     node's list pane is ~173 px wide -- on ONE row they left the fact/path
+     21 px ("St…", rig 2026-08-22). The row WRAPS instead: the text keeps a
+     120 px basis, so once the buttons would squeeze it below that they
+     drop to a line of their own under it (right-aligned via the auto
+     margin below); at ~400 px and wider it is one row again. */
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
-  gap: 6px;
+  gap: 2px 6px;
   min-width: 0;
 }
 .llsc-states-loc-text {
-  flex: 1 1 auto;
+  flex: 1 1 120px;
   min-width: 0;
   overflow: hidden;
   white-space: nowrap;
@@ -2297,25 +2382,40 @@ const STATE_PANE_CSS_TEXT = `
   font-size: 10px;
   font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
 }
+.llsc-states-loc-text + .llsc-states-loc-btn {
+  /* the first button after the text: pushes the button pair right when
+     they have wrapped onto their own line (no-op on a shared row, where
+     the text has already grown into the slack) */
+  margin-left: auto;
+}
 .llsc-states-loc-text.llsc-states-loc-prose {
   /* the default-library fact is prose, not a path: UI font, still ONE
      row (tail-ellipsis; the tooltip and the hint row carry the rest) --
      wrapped prose swallowed the whole list at the 300 px node width */
   font-family: inherit;
 }
-.llsc-states-loc-open {
+.llsc-states-loc-btn {
+  /* Browse… + Open folder: compact, content-sized (the right-pane buttons
+     are width: 100%) */
   width: auto;
   flex: 0 0 auto;
   padding: 2px 6px;
   font-size: 10px;
 }
 .llsc-states-loc-hint {
+  /* Browse… round: the how-to is a sentence, so it may take TWO lines --
+     clamped there (never unbounded prose: that swallowed the list at the
+     300 px floor); the full text rides in its title. */
   font-size: 10px;
+  line-height: 1.25;
   font-style: italic;
   color: var(--descrip-text, #999);
-  white-space: nowrap;
+  white-space: normal;
+  overflow-wrap: anywhere;
   overflow: hidden;
-  text-overflow: ellipsis;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
 }
 .llsc-states-loc-hint:empty { display: none; }
 `
@@ -2832,8 +2932,21 @@ export function registerControllerNode() {
         // the list shrinks and scrolls, the line never crops it). Empty and
         // hidden until the first /config (or sets feed) lands.
         this._pane.statesLocTextEl = el('div', { className: 'llsc-states-loc-text' })
+        // Browse… BEFORE Open folder (the Notebook file panel's order) --
+        // both loopback-only, both hidden for a remote viewer
+        // (`_renderStatesLocation`). See the file header "Browse… on that
+        // line".
+        this._pane.statesLocBrowseBtn = this._createActionButton(
+          'llsc-btn llsc-states-loc-btn',
+          'Browse…',
+          () => {
+            this._guardedAsync('browse library folder', () => this._browseLibraryFolder()).catch(() => {})
+          },
+          'Pick the Library folder for the machine running ComfyUI — states, groups, favorites, ' +
+            'presets and the default notebook live there. Set the same folder on every machine to share.'
+        )
         this._pane.statesLocOpenBtn = this._createActionButton(
-          'llsc-btn llsc-states-loc-open',
+          'llsc-btn llsc-states-loc-btn',
           'Open folder',
           () => {
             this._guardedAsync('open states folder', () => this._openStatesFolder()).catch(() => {})
@@ -2844,6 +2957,7 @@ export function registerControllerNode() {
         this._pane.statesLocEl = el('div', { className: 'llsc-states-loc' }, [
           el('div', { className: 'llsc-states-loc-row' }, [
             this._pane.statesLocTextEl,
+            this._pane.statesLocBrowseBtn,
             this._pane.statesLocOpenBtn
           ]),
           this._pane.statesLocHintEl
@@ -3985,6 +4099,7 @@ export function registerControllerNode() {
         pane.statesLocTextEl.classList.toggle('llsc-states-loc-prose', line.isDefault)
         pane.statesLocHintEl.textContent = line.hint || ''
         pane.statesLocHintEl.title = line.hint || ''
+        pane.statesLocBrowseBtn.style.display = isLocal ? '' : 'none'
         pane.statesLocOpenBtn.style.display = isLocal && line.setsDir ? '' : 'none'
         this._fitStatesLocationText()
       }
@@ -4021,13 +4136,71 @@ export function registerControllerNode() {
         }
       }
 
-      _toast(severity, summary, detail) {
+      /**
+       * Browse… (file header "Browse… on that line"): the Notebook's
+       * server-folder picker in folder mode, titled for THIS machine's
+       * library folder, starting at the current one (the drive list when
+       * the server can't see it -- listing it would only error), asking
+       * once more inside the dialog before resolving; a pick goes to
+       * `_applyLibraryFolder`. The button is hidden for a remote viewer
+       * (`_renderStatesLocation`), but a stale `is_local` can race, and
+       * the picker itself refuses for `isLocal === false`.
+       */
+      async _browseLibraryFolder() {
+        const config = this._statesConfig || {}
+        const isLocal = config.is_local !== false
+        if (!isLocal) {
+          this._toast('warn', NODE_TITLE, MSG_LIBRARY_BROWSE_REMOTE)
+          return
+        }
+        const current = typeof config.library_dir === 'string' ? config.library_dir : ''
+        const picked = await pickServerFolder({
+          title: MSG_LIBRARY_BROWSE_TITLE,
+          startDir: config.library_dir_exists === false ? FS_LIST_ROOTS : current || null,
+          isLocal,
+          confirmLabel: MSG_LIBRARY_BROWSE_CONFIRM,
+          confirmPrompt: libraryBrowsePrompt,
+          confirmFinalLabel: MSG_LIBRARY_BROWSE_FINAL
+        })
+        if (!picked || this._removed) return
+        await this._applyLibraryFolder(picked)
+      }
+
+      /**
+       * `POST /lora_library/config {library_dir}` through settings.js's
+       * `setLibraryDir` (the Settings dialog's own request; it also mirrors
+       * the path into the `loraLibrary.libraryDir` setting so the dialog
+       * shows it). Then EVERY controller re-reads: the shared /config cache
+       * is dropped, each node's sets-feed copy of the OLD folder is
+       * forgotten (`_statesFeed` is preferred over /config, so a stale one
+       * would win the next paint), and the sets-changed event re-runs the
+       * shared sets/layout/config poll for all of them now -- and refreshes
+       * the Apply LoRA Set combos (FORMAT.md §7.4): the set list itself
+       * just changed. Errors toast the server's message (403 = remote,
+       * 400 = not absolute / not writable).
+       */
+      async _applyLibraryFolder(path) {
+        let response
+        try {
+          response = await setLibraryDir(path)
+        } catch (error) {
+          this._toast('error', NODE_TITLE, `Could not set the library folder: ${error?.message || error}`)
+          return
+        }
+        const resolved = typeof response?.library_dir === 'string' && response.library_dir ? response.library_dir : path
+        dropControllerConfigCache()
+        for (const node of liveControllers) node._statesFeed = null
+        announceSetsChanged()
+        this._toast('info', NODE_TITLE, libraryFolderSetToast(resolved), 8000)
+      }
+
+      _toast(severity, summary, detail, life) {
         try {
           app.extensionManager?.toast?.add?.({
             severity,
             summary,
             detail,
-            life: severity === 'error' ? 6000 : 3000
+            life: life ?? (severity === 'error' ? 6000 : 3000)
           })
         } catch {
           // Toast is a nicety; never let it be the reason an action "fails".

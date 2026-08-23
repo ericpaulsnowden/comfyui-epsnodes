@@ -449,6 +449,15 @@ out.unchanged = [
   nb.isUnchangedResponse(undefined),
   nb.isUnchangedResponse('unchanged')
 ]
+// Browse… round (2026-08-22): the folder picker is exported and never
+// rejects -- null with no DOM (here) and null for a remote viewer without
+// touching the DOM at all.
+out.pickServerFolder = [
+  typeof nb.pickServerFolder,
+  await nb.pickServerFolder({ title: 'x', startDir: '/nowhere' }),
+  await nb.pickServerFolder({ isLocal: false }),
+  await nb.pickServerFolder()
+]
 process.stdout.write(JSON.stringify(out))
 """
 
@@ -513,6 +522,145 @@ def test_unchanged_is_exactly_unchanged_true(cache_api: dict) -> None:
     ANY payload without `unchanged: true` is the full payload (an older
     backend ignores `known_mtime` and returns it)."""
     assert cache_api["unchanged"] == [True, True, False, False, False, False, False, False]
+
+
+# ------------------------------------------------ Browse… round (2026-08-22)
+# The Notebook's Browse… picker became the shared `openPickerDialog()` core
+# plus an exported FOLDER picker (`pickServerFolder`) for the State
+# Controller's Library-folder Browse… (FORMAT.md §6.3). The Notebook's own
+# file-picking flow must be unchanged.
+
+
+def _picker_section(source: str) -> str:
+    return source.split("const PICKER_OVERLAY_ID = 'llnb-picker-overlay'", 1)[1].split(
+        "function setFileWidgetValue(state, value)", 1
+    )[0]
+
+
+def test_folder_picker_is_exported_and_never_rejects(cache_api: dict) -> None:
+    assert cache_api["pickServerFolder"] == ["function", None, None, None]
+
+
+def test_notebook_file_picking_flow_is_unchanged_by_the_refactor(source: str) -> None:
+    """openBrowsePicker(state) is now a FILE-mode spec over the shared
+    dialog: the Notebook `state` stays the picker session, a clicked .md row
+    still closes the picker, acknowledges the click on the status line and
+    writes the `file` widget through setFileWidgetValue()."""
+    body = _body(source, "openBrowsePicker(state)")
+    assert "mode: 'file'," in body
+    assert "startDir: dirnameOfServerPath(state.resolvedFile)," in body
+    assert "setStatus(state, `Opening ${chosen}...`)" in body
+    assert "setFileWidgetValue(state, chosen)" in body
+    assert "openPickerDialog(state)" in body
+    render = _body(source, "renderPickerDialog(session, dialog, contentEl, pathErrorEl, data)")
+    assert "closeBrowsePicker(session)\n      spec.onPickFile?.(chosen)" in render
+    assert "const chosen = joinServerPath(data.dir, file.name, data.sep)" in render
+    # file mode keeps its footer (Cancel only) and its empty-listing wording
+    footer = _body(source, "buildPickerFooter(session, data)")
+    assert (
+        "if (spec.mode !== 'folder') {\n"
+        "    return el('div', { className: 'llnb-picker-footer' }, [cancelBtn])"
+        in footer
+    )
+    assert "'No subfolders or .md files here.'" in render
+    # teardown still tears the picker down (a node removed mid-picker)
+    teardown = _body(source, "teardown(state)")
+    assert "closeBrowsePicker(state)" in teardown
+    assert "pickerSpec: null," in source  # the state carries the spec slot
+
+
+def test_picker_escape_listener_stays_singular_and_capture_phase(source: str) -> None:
+    """§7.5: the picker's ONE window listener -- capture-phase keydown for
+    Escape, removed with the same flag -- and the one-picker-at-a-time rule
+    now spans both callers through `activePickerSession`. No other window
+    listener was added by the refactor."""
+    section = _picker_section(source)
+    assert section.count("window.addEventListener(") == 1
+    assert (
+        "window.addEventListener('keydown', session.pickerKeydownHandler, { capture: true })"
+        in section
+    )
+    assert section.count("window.removeEventListener(") == 1
+    assert (
+        "window.removeEventListener('keydown', session.pickerKeydownHandler, { capture: true })"
+        in section
+    )
+    assert "let activePickerSession = null" in section
+    open_dialog = _body(source, "openPickerDialog(session)")
+    assert (
+        "if (activePickerSession && activePickerSession !== session) "
+        "closeBrowsePicker(activePickerSession)"
+        in open_dialog
+    )
+    assert "closeBrowsePicker(session)\n  activePickerSession = session" in open_dialog
+    assert "injectStyles()" in open_dialog  # a controller may open it before any Notebook attached
+    close = _body(source, "closeBrowsePicker(session)")
+    # ownership (rig 2026-08-22): the overlay is removed and the CANCEL hook
+    # fired only for the session that owns the open picker -- the open-time
+    # self-close must not resolve pickServerFolder() null, and a Notebook
+    # teardown must not pull a controller's open picker down
+    assert close.lstrip().startswith("const owns = activePickerSession === session")
+    assert (
+        "if (owns) {\n    document.getElementById(PICKER_OVERLAY_ID)?.remove()\n"
+        "    activePickerSession = null\n  }"
+        in close
+    )
+    assert "if (!owns) return" in close
+    assert close.index("session.pickerKeydownHandler = null") < close.index("if (!owns) return")
+    assert (
+        "const onClose = session.pickerOnClose\n  session.pickerOnClose = null\n  onClose?.()"
+        in close
+    )
+
+
+def test_folder_mode_lists_folders_and_confirms_the_listed_folder(source: str) -> None:
+    """pickServerFolder(): directory-oriented -- files dimmed as context,
+    the confirm button picks the folder currently LISTED (disabled at the
+    Top Level and after a failed listing), an optional in-dialog second
+    step (`confirmPrompt`) for machine-wide actions, and a deliberate pick
+    is not a cancel (the close hook is cleared before the teardown)."""
+    assert "export function pickServerFolder(options = {})" in source
+    pick = _body(source, "pickServerFolder(options = {})")
+    assert "if (isLocal === false) {" in pick and "return Promise.resolve(null)" in pick
+    assert (
+        "if (typeof document === 'undefined' || !document.body) return Promise.resolve(null)"
+        in pick
+    )
+    assert "pickerOnClose: () => finish(null)," in pick
+    assert "mode: 'folder'," in pick
+    assert "onPickFolder: (path) => finish(path)" in pick
+    render = _body(source, "renderPickerDialog(session, dialog, contentEl, pathErrorEl, data)")
+    assert "if (folderMode) {" in render
+    assert "className: 'llnb-picker-row llnb-picker-row-dim'" in render
+    assert "folderMode ? 'No subfolders here.' : 'No subfolders or .md files here.'" in render
+    footer = _body(source, "buildPickerFooter(session, data)")
+    assert "data.dir !== FS_ROOTS ? data.dir : null" in footer
+    assert "text: spec.confirmLabel || 'Use this folder'" in footer
+    assert "if (!candidate) useBtn.disabled = true" in footer
+    assert (
+        "if (typeof spec.confirmPrompt !== 'function') {\n"
+        "      commitPickedFolder(session, candidate)"
+        in footer
+    )
+    assert "text: spec.confirmPrompt(candidate)" in footer
+    assert (
+        "backBtn.addEventListener('click', () => strip.replaceWith(buildPickerFooter(session, "
+        "data)))"
+        in footer
+    )
+    commit = _body(source, "commitPickedFolder(session, path)")
+    assert "session.pickerOnClose = null\n  closeBrowsePicker(session)\n  onPick?.(path)" in commit
+    load = _body(source, "loadPickerDir(session, dialog, contentEl, pathErrorEl, dir)")
+    assert "buildPickerFooter(session, null)" in load  # failed listing: nothing to confirm
+    # the dialog's optional caption + the confirm strip have CSS of their own
+    css = source.split("const CSS_TEXT = `", 1)[1].split("\n`\n", 1)[0]
+    for cls in (
+        ".llnb-picker-title",
+        ".llnb-picker-row-dim",
+        ".llnb-picker-confirm",
+        ".llnb-picker-confirm-buttons",
+    ):
+        assert cls + " {" in css, cls
 
 
 def test_session_cache_is_module_level_and_survives_teardown(source: str) -> None:
