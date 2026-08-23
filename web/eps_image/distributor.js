@@ -5,13 +5,18 @@
  * than `EPSDistributor`.
  *
  * The roadmap frames this node as "EPS Image Switcher pointed backwards": one
- * `image` input fans out to fixed `out_1`..`out_16` (MAX_OUTPUTS) IMAGE
- * outputs, each independently gated by a hidden `toggles` JSON widget the
- * backend reads (`{"out_3": false}` = off; absent key = on). All three
- * mechanisms below are structural ports of an existing eps_image file's
- * INPUT-side machinery, pointed at outputs instead -- which is where every
- * genuinely new bit lives, since litegraph and ComfyUI both treat the two
- * sides less symmetrically than they look:
+ * `image` input fans out to fixed `out_1`..`out_16` (MAX_OUTPUTS) outputs,
+ * each independently gated by a hidden `toggles` JSON widget the backend
+ * reads (`{"out_3": false}` = off; absent key = on). The backend's own slot
+ * type is the wildcard `*` (v0.75.0: `nodes_distributor.py`'s tee is fully
+ * type-agnostic server side) -- so wherever this file's own comments say
+ * "IMAGE" below, read it as "whatever concrete type this particular node
+ * instance has adopted": THIS file is what narrows adoption to an allowlist
+ * (images and text, for now; mechanism 4 below). Four mechanisms below are
+ * structural ports of an existing eps_image file's INPUT-side machinery,
+ * pointed at outputs instead -- which is where every genuinely new bit
+ * lives, since litegraph and ComfyUI both treat the two sides less
+ * symmetrically than they look:
  *
  * 1. **Per-slot toggle draw + hit-test** -- a structural port of
  *    `eps_image/switcher.js`'s `onDrawForeground`/`onMouseDown` hand-drawn
@@ -171,6 +176,71 @@
  *        otherwise be fought over. Shrinking stays fully available, just
  *        explicitly: set `Outputs` down by hand, subject to item 2's
  *        refuse-if-wired rule.
+ * 4. **Type adoption (v0.75.0)** -- `syncSlotTypes`/`collectLinkTypes`/
+ *    `resolveAdoptedType`/`isAllowedType`/`inputLabelFor` below. The backend
+ *    (`nodes_distributor.py`) went type-agnostic: `image` is now typed `*`
+ *    and `RETURN_TYPES` is `("*",) * MAX_OUTPUTS` -- the tee already
+ *    identity-passes any Python object and `ExecutionBlocker` is
+ *    type-agnostic, so nothing server-side forbids wiring a STRING (or any
+ *    other type) through this node; see that module's own v0.75.0 docstring
+ *    paragraph. This file supplies the only real restriction -- one
+ *    `ALLOWED_TYPES` allowlist (images and text, for now: owner, "one type
+ *    per node, just do text for now") -- enforced the same two-part way
+ *    core's OWN Reroute node (`extensions/core/rerouteNode.ts`) narrows
+ *    itself after its first connection:
+ *      - **Veto** (`wireTypeVeto`). `LGraphNode.ts`'s `connectSlots` first
+ *        calls `isValidConnection(output.type, input.type)` -- litegraph's
+ *        own generic-or-equal-or-comma-union check, which already accepts
+ *        anything against this node's declared `*` slots -- and only THEN,
+ *        if that passed, calls `inputNode.onConnectInput?.(inputIndex,
+ *        output.type, output, sourceNode, outputIndex)` and
+ *        `sourceNode.onConnectOutput?.(outputIndex, input.type, input,
+ *        inputNode, inputIndex)`, aborting the connection the instant
+ *        either returns exactly `false`. Those two hooks are this file's
+ *        actual gate, chained with whatever else installed them first:
+ *        `isAllowedType` rejects anything outside IMAGE/STRING
+ *        (comma-union-aware, case-insensitive; every generic type always
+ *        passes), and a rejected attempt gets a toast, never a silent
+ *        no-op.
+ *      - **Adoption** (`syncSlotTypes`). Once a connection is allowed to
+ *        land, `collectLinkTypes` reads every relevant slot's CONCRETE
+ *        neighbor type -- the `image` input's own link first (so it wins
+ *        priority), then every visible `out_N` output's links -- and
+ *        `resolveAdoptedType` picks the first concrete one (or `*` if none
+ *        are concrete yet), flagging `mixed` when more than one disagree.
+ *        `syncSlotTypes` then sets the `image` input's `.type`/`.label` and
+ *        every visible `out_N` output's `.type` to match (never `.name` --
+ *        section 6.4; a rename lives in `.label`, untouched here), and
+ *        recolors every touched LLink -- exactly Reroute's own rule: an
+ *        LLink's type is `commonType(input.type, output.type) ||
+ *        input.type || output.type`, and its drawn colour is `link.color`
+ *        if set, else `LGraphCanvas.link_type_colors[link.type]`; Reroute
+ *        itself sets `outputs[0].type = inputType || '*'` and then walks
+ *        its output links setting `link.color =
+ *        LGraphCanvas.link_type_colors[displayType]` for exactly this
+ *        reason, and this file follows that precedent verbatim (guarded
+ *        behind `typeof LGraphCanvas !== 'undefined'` for a fork where the
+ *        global isn't present). A `mixed` result never disconnects
+ *        anything -- a loaded workflow is authoritative, "never destroy a
+ *        wire on load" -- it keeps the INPUT side's type
+ *        (`resolveAdoptedType`'s priority order already guarantees this)
+ *        and warns once per node per distinct mismatched-type combination
+ *        (a flag stashed on the node).
+ *      - **Why `INPUT_LABELS` stays short.** The `image` input is ROW 0 of
+ *        this node -- the SAME row `out_1`'s toggle box draws on -- and
+ *        `MIN_NODE_WIDTH` ("Width floor" below) is a 200px floor tuned for
+ *        that row's existing text, not a long label. So every adopted-type
+ *        label is one short word (`any`/`image`/`text`), never the raw
+ *        backend type string -- the same reason a renamed OUTPUT's label
+ *        pushes `toggleBoxRect` left instead of being left unbounded.
+ *      - **No second hook pair.** `syncSlotTypes` piggybacks on the SAME
+ *        settle points mechanism 3's growth machinery already has --
+ *        `wireOutputGrowth`'s deferred macrotask pass (now ALSO triggered
+ *        by a change on the `image` input, not just an `out_N` output),
+ *        `applyVisibleOutputCount` (a revealed spare socket must be typed
+ *        correctly the instant it appears), the `onConfigure` wrap, and
+ *        `attach()` itself -- rather than installing a second
+ *        `onConnectionsChange`/`configure` pair of its own.
  *
  * **`toggles` lockstep + pruning**: this file's `pruneToggles` mirrors
  * switcher.js's own pruning, but the criterion that keeps a key is VISIBILITY
@@ -235,7 +305,9 @@
  * rest of `eps_image/*.js`.
  *
  * This file has no backend coupling beyond the contract above (widget name
- * `toggles`, output names `out_1`..`out_8`, type `IMAGE`) -- it does not
+ * `toggles`, output names `out_1`..`out_16`, wildcard `*` slot types on
+ * both sides -- this file's own `ALLOWED_TYPES` is what narrows that,
+ * purely on the frontend; mechanism 4 above) -- it does not
  * assume `eps_image/nodes_distributor.py` exists or is registered, matching
  * how this pack's frontend and backend modules are built independently
  * against a shared, pre-agreed contract. Its ONLY import is ComfyUI's
@@ -263,7 +335,35 @@ const PREFIX = '[eps_image:distributor]'
  * identical convention). */
 const NODE_TITLE = 'EPS Distributor'
 
-const OUTPUT_TYPE = 'IMAGE'
+/** Litegraph's own generic "matches anything" type string (mechanism 4's
+ * `isValidConnection` citation) -- what a fresh node's `image` input and
+ * every `out_N` output start out typed as, before any wire adopts a
+ * concrete one. */
+export const WILDCARD = '*'
+/**
+ * Types the FRONTEND allows this node to adopt/carry -- ONE type per node,
+ * matching the server's own "one value in, N copies out" tee (the backend
+ * itself is fully type-agnostic; see nodes_distributor.py's v0.75.0
+ * docstring paragraph). The owner scoped this to images and text for now
+ * ("one type per node, just do text for now") -- extend the list here,
+ * then this file's `isAllowedType` tests, then FORMAT.md section 6.11.
+ */
+export const ALLOWED_TYPES = ['IMAGE', 'STRING']
+/** The `image` input's NAME. KEEP stable: ComfyUI restores inputs BY NAME,
+ * so renaming this would orphan every saved link -- the same rule the
+ * backend's own INPUT_TYPES comment enforces. */
+export const INPUT_NAME = 'image'
+/**
+ * Short display label per adopted type, keyed by the concrete type string
+ * (as ALLOWED_TYPES declares it) plus the generic wildcard. MUST stay
+ * short -- mechanism 4's "Why INPUT_LABELS stays short": the `image` input
+ * shares row 0 with `out_1`'s toggle box at the `MIN_NODE_WIDTH` (200px)
+ * floor, and a long label would collide with that box exactly the way an
+ * unbounded output rename would if `toggleBoxRect` didn't compensate for
+ * it.
+ */
+export const INPUT_LABELS = { '*': 'any', IMAGE: 'image', STRING: 'text' }
+
 /**
  * Backend's fixed `RETURN_NAMES` shape (`out_1`..`out_MAX_OUTPUTS`). MUST
  * equal `nodes_distributor.py`'s `MAX_OUTPUTS` -- that module is the source
@@ -427,6 +527,79 @@ export function isSlotEnabled(map, name) {
   return map[name] !== false
 }
 
+// ---------------------------------------------------------------------------
+// Type adoption (v0.75.0, mechanism 4) -- pure helpers. No node/graph/DOM in
+// any signature, so tests/test_distributor_js.py drives these directly.
+// ---------------------------------------------------------------------------
+
+/** Litegraph's own "matches anything" set -- mirrors `isValidConnection`'s
+ * generic check (mechanism 4). Shared by `isAllowedType` (a generic slot
+ * never blocks a connection) and `resolveAdoptedType` (a generic slot
+ * carries no type preference of its own). Not exported: an internal detail
+ * of this file's type-adoption helpers, not part of the tested contract. */
+function isGenericSlotType(type) {
+  return type === '' || type === '*' || type === 0 || type === null || type === undefined
+}
+
+/**
+ * Whether *type* is compatible with this node's `ALLOWED_TYPES` allowlist:
+ * true for litegraph's generic forms (`''`/`'*'`/`0`/`null`/`undefined`),
+ * true when ANY comma-separated member of *type* (case-insensitive) is in
+ * `ALLOWED_TYPES`, else false. The comma-union case matters because
+ * litegraph slot types can themselves be comma-joined unions (e.g. an
+ * upstream node declaring `STRING,INT`) -- one allowed member is enough to
+ * let the connection through; `resolveAdoptedType` still only ever adopts
+ * one concrete winner. Exported for tests.
+ * @param {string|number|null|undefined} type
+ * @returns {boolean}
+ */
+export function isAllowedType(type) {
+  if (isGenericSlotType(type)) return true
+  const members = String(type).split(',')
+  return members.some((member) => ALLOWED_TYPES.includes(member.trim().toUpperCase()))
+}
+
+/**
+ * The type this node should adopt, given every currently-relevant slot
+ * type in PRIORITY order (input side first -- see `collectLinkTypes`).
+ * Generic entries (`''`/`'*'`/`0`/`null`/`undefined`) are ignored; they
+ * express no preference. Returns the first CONCRETE type encountered, or
+ * the wildcard if none of *candidates* is concrete. `mixed` is true when
+ * more than one DISTINCT concrete type is present among *candidates* -- an
+ * inconsistency `syncSlotTypes` warns about but never acts on by
+ * disconnecting anything (a loaded workflow is authoritative). Because the
+ * input side is listed first by the caller, the returned `type` is always
+ * the input's own concrete type whenever it has one -- exactly the
+ * "keep the INPUT side's type" rule mechanism 4 documents. Pure; exported
+ * for tests.
+ * @param {Array<string|number|null|undefined>} candidates
+ * @returns {{type: string, mixed: boolean}}
+ */
+export function resolveAdoptedType(candidates) {
+  const distinct = []
+  for (const candidate of candidates) {
+    if (isGenericSlotType(candidate)) continue
+    const value = String(candidate)
+    if (!distinct.includes(value)) distinct.push(value)
+  }
+  if (distinct.length === 0) return { type: WILDCARD, mixed: false }
+  return { type: distinct[0], mixed: distinct.length > 1 }
+}
+
+/**
+ * Display label for the `image` input given its adopted *type* --
+ * `INPUT_LABELS`' short mapping, or the lowercased type itself for a
+ * foreign concrete type this file's allowlist doesn't know by name (a type
+ * that arrived via a hand-edited workflow or a non-frontend API caller,
+ * teed through anyway since the backend never forbade it -- module
+ * docstring). Exported for tests.
+ * @param {string} type
+ * @returns {string}
+ */
+export function inputLabelFor(type) {
+  return INPUT_LABELS[type] ?? String(type).toLowerCase()
+}
+
 /**
  * How far an output's DRAWN label reaches leftward from its socket dot.
  * `NodeSlot.draw()` right-aligns the text ending at `socketX - 10`, so the
@@ -490,6 +663,33 @@ function getTogglesWidget(node) {
 
 function outputIndexByName(node, name) {
   return (node.outputs || []).findIndex((output) => output?.name === name)
+}
+
+/** *node*'s `image` input slot OBJECT (not index) by name, or undefined --
+ * shared by `collectLinkTypes`/`syncSlotTypes`/`applyVisibleOutputCount`
+ * (mechanism 4) so "the input" is always looked up the same way. Returns
+ * the live object out of `node.inputs`, so mutating a property on the
+ * result mutates the real slot. */
+function findInput(node, name) {
+  return (node.inputs || []).find((input) => input && input.name === name)
+}
+
+/** Looks up an LLink object by id, tolerant of either shape this
+ * frontend's forks have used for `graph.links` (a plain object/array
+ * indexed by id, or a `Map`) -- frame_saver.js's identical defensive
+ * lookup (`resolveWiredVideo`). Returns null if unreachable. */
+function linkById(graph, linkId) {
+  if (linkId == null || !graph) return null
+  return graph.links?.[linkId] ?? graph.links?.get?.(linkId) ?? null
+}
+
+/** The colour `syncSlotTypes` should paint a link carrying *type* --
+ * Reroute's own rule (mechanism 4): `LGraphCanvas.link_type_colors[type]`,
+ * or `undefined` for the wildcard (falls back to litegraph's default link
+ * colour). Guarded: `LGraphCanvas` may not be a global on every fork. */
+function linkColorFor(type) {
+  if (typeof LGraphCanvas === 'undefined') return undefined
+  return LGraphCanvas.link_type_colors?.[type]
 }
 
 /** What litegraph actually DRAWS for this output -- `label` wins over
@@ -761,6 +961,152 @@ function resyncSize(node) {
   node.setDirtyCanvas?.(true, true)
 }
 
+// ---------------------------------------------------------------------------
+// Type adoption (v0.75.0, mechanism 4) -- node-bound. Builds on
+// outputEntries() above and the pure isAllowedType/resolveAdoptedType/
+// inputLabelFor helpers earlier in the file.
+// ---------------------------------------------------------------------------
+
+/**
+ * Every slot type currently relevant to type adoption, INPUT side first so
+ * `resolveAdoptedType` gives it priority over any wired output. Input: the
+ * `image` input's own link -- the ORIGIN node's declared output type
+ * (`graph.getNodeById(link.origin_id)`, looked up fresh so a rewired
+ * upstream is always read live), falling back to the link's own recorded
+ * `.type` when the origin node can't be found yet (mid-`configure()`, the
+ * origin may restore AFTER this node -- mechanism 3's identical restore-
+ * ordering caveat applies to link endpoints too). Then every currently
+ * VISIBLE `out_N` output's links: the TARGET node's declared input type,
+ * same origin-missing fallback. Tolerant of a missing graph/links
+ * throughout -- always returns an array, never throws.
+ * @param {object} node
+ * @returns {Array<string|number|null|undefined>}
+ */
+function collectLinkTypes(node) {
+  const types = []
+  try {
+    const graph = node?.graph
+    const input = findInput(node, INPUT_NAME)
+    const inputLink = linkById(graph, input?.link)
+    if (inputLink) {
+      const origin = graph?.getNodeById?.(inputLink.origin_id)
+      const originOutput = origin?.outputs?.[inputLink.origin_slot]
+      // Both the live slot type AND the saved `link.type`, slot first: a
+      // still-generic origin (an unadopted Reroute, a node mid-restore)
+      // must not hide the concrete type the link itself recorded.
+      types.push(originOutput?.type, inputLink.type)
+    }
+    for (const entry of outputEntries(node)) {
+      const links = entry.output?.links
+      if (!Array.isArray(links)) continue
+      for (const linkId of links) {
+        const link = linkById(graph, linkId)
+        if (!link) continue
+        const target = graph?.getNodeById?.(link.target_id)
+        const targetInput = target?.inputs?.[link.target_slot]
+        types.push(targetInput?.type, link.type)
+      }
+    }
+  } catch (error) {
+    console.warn(PREFIX, 'collectLinkTypes failed', error)
+    return []
+  }
+  return types
+}
+
+/**
+ * Reconciles this node's adopted type with its current wiring (mechanism
+ * 4): sets the `image` input's `.type`/`.label` and every visible `out_N`
+ * output's `.type` (NEVER `.name` -- that is the RETURN_NAMES/toggles-map
+ * contract, FORMAT.md section 6.4; a rename lives in `.label` and this
+ * function never touches that either) to `resolveAdoptedType`'s result,
+ * and recolors every link touching those slots to match -- core Reroute's
+ * own adoption precedent (mechanism 4's citation).
+ *
+ * A MIXED result (concrete types disagree across the wired slots) never
+ * disconnects anything -- a loaded workflow is authoritative, "never
+ * destroy a wire on load" -- it keeps the INPUT side's type
+ * (`resolveAdoptedType`'s priority order already guarantees this) and logs
+ * once per node per distinct mismatched-type combination (a flag stashed
+ * on the node, keyed by the actual mismatched types so a NEW combination
+ * still gets its own warning).
+ *
+ * Change-gated: `setDirtyCanvas` only fires when a slot or link actually
+ * moved, since this runs on every connect/disconnect pass (the pack's
+ * 1Hz-repaint lesson). Wrapped in try/catch -> warn; never throws.
+ */
+function syncSlotTypes(node) {
+  try {
+    const candidates = collectLinkTypes(node)
+    const { type, mixed } = resolveAdoptedType(candidates)
+    let changed = false
+
+    const input = findInput(node, INPUT_NAME)
+    if (input) {
+      const label = inputLabelFor(type)
+      if (input.type !== type) {
+        input.type = type
+        changed = true
+      }
+      if (input.label !== label) {
+        input.label = label
+        changed = true
+      }
+      const link = linkById(node.graph, input.link)
+      if (link) {
+        const color = linkColorFor(type)
+        if (link.color !== color) {
+          link.color = color
+          changed = true
+        }
+      }
+    }
+
+    for (const entry of outputEntries(node)) {
+      const output = entry.output
+      if (output.type !== type) {
+        output.type = type
+        changed = true
+      }
+      const links = output.links
+      if (Array.isArray(links)) {
+        for (const linkId of links) {
+          const link = linkById(node.graph, linkId)
+          if (!link) continue
+          const color = linkColorFor(type)
+          if (link.color !== color) {
+            link.color = color
+            changed = true
+          }
+        }
+      }
+    }
+
+    if (mixed) {
+      const distinct = []
+      for (const candidate of candidates) {
+        if (isGenericSlotType(candidate)) continue
+        const value = String(candidate)
+        if (!distinct.includes(value)) distinct.push(value)
+      }
+      const signature = distinct.join(',')
+      if (node.__epsDistributorMixedTypeWarning !== signature) {
+        node.__epsDistributorMixedTypeWarning = signature
+        console.warn(
+          PREFIX,
+          `EPS Distributor has mismatched wired types (${distinct.join(', ')}); keeping ${type}.`
+        )
+      }
+    } else {
+      node.__epsDistributorMixedTypeWarning = null
+    }
+
+    if (changed) node.setDirtyCanvas?.(true, true)
+  } catch (error) {
+    console.warn(PREFIX, 'syncSlotTypes failed', error)
+  }
+}
+
 /**
  * Applies the `Outputs` property to `node.outputs`: adds missing tail
  * outputs when growing, removes tail outputs when shrinking -- refusing
@@ -826,11 +1172,17 @@ function applyVisibleOutputCount(node, { grow = false } = {}) {
   const entries = outputEntries(node)
   const currentCount = entries.length
 
+  // A revealed spare socket must match whatever this node has already
+  // adopted (mechanism 4) -- reading `image`'s CURRENT `.type` here, not
+  // the WILDCARD constant, is what keeps a freshly-appeared out_N in sync
+  // with an already-typed node instead of needing a follow-up sync pass.
+  const adoptedType = findInput(node, INPUT_NAME)?.type || WILDCARD
+
   const revealed = []
   if (desired > currentCount) {
     for (let n = currentCount + 1; n <= desired; n++) {
       if (outputIndexByName(node, outputName(n)) === -1) {
-        node.addOutput(outputName(n), OUTPUT_TYPE)
+        node.addOutput(outputName(n), adoptedType)
         revealed.push(outputName(n))
       }
     }
@@ -850,6 +1202,10 @@ function applyVisibleOutputCount(node, { grow = false } = {}) {
   pruneToggles(node)
   clearTogglesFor(node, revealed)
   resyncSize(node)
+  // Mechanism 4: a socket that just changed shape (revealed/removed) or a
+  // node whose wiring changed underneath this pass must end up with every
+  // slot's type/label/link-colour in sync, not just its visible COUNT.
+  syncSlotTypes(node)
 }
 
 /**
@@ -877,6 +1233,18 @@ function applyVisibleOutputCount(node, { grow = false } = {}) {
  * (`highestWiredSlot`) and ignores the `isConnected` argument entirely, so
  * the restore loop's hardcoded `true` could not misgrow even if it did get
  * through.
+ *
+ * v0.75.0 (mechanism 4): this is also where `syncSlotTypes` piggybacks
+ * rather than installing a second hook pair -- the SAME two findings above
+ * (don't mutate under a live restore/mouse-gesture iterator; coalesce a
+ * connect/disconnect burst into one pass) apply just as much to updating
+ * slot types as to updating the visible count. The `onConnectionsChange`
+ * filter below now schedules a pass for a change on the `image` INPUT too,
+ * not just an `out_N` OUTPUT, since wiring/unwiring the input is exactly
+ * when the adopted type can change; the deferred pass always re-syncs
+ * types FIRST, unconditionally, then runs the existing growth short-circuit
+ * (which stays growth-only -- it must never be skipped just because the
+ * OUTPUT COUNT didn't move).
  */
 function wireOutputGrowth(node) {
   const state = { restoring: false, growScheduled: false }
@@ -887,6 +1255,11 @@ function wireOutputGrowth(node) {
     // onConfigure; a node removed from the graph meanwhile needs no pass.
     if (state.restoring || !target.graph) return
     try {
+      // Mechanism 4: re-sync the adopted type on EVERY deferred pass,
+      // unconditionally -- this fires for an `image`-input change now too,
+      // and syncSlotTypes has its own internal change-gating, so there is
+      // no no-op cost to paying for it even when growth itself is a no-op.
+      syncSlotTypes(target)
       // Bail unless the pass would land somewhere other than the stored
       // value. This hook fires on EVERY connect and disconnect, and
       // `applyVisibleOutputCount` also re-derives the node's height
@@ -925,10 +1298,52 @@ function wireOutputGrowth(node) {
     }
     // Name-matched rather than type-matched: `out_N` is only ever an output,
     // and this stays correct if litegraph's slot-type enum values ever move.
-    if (!state.restoring && OUTPUT_NAME_RE.test(slot?.name || '')) {
+    // v0.75.0: a change on the `image` INPUT also needs this pass (mechanism
+    // 4) -- that's the other slot whose adopted type can move.
+    if (!state.restoring && (OUTPUT_NAME_RE.test(slot?.name || '') || slot?.name === INPUT_NAME)) {
       scheduleGrow(this)
     }
     return result
+  }
+}
+
+/**
+ * Installs the frontend-only `ALLOWED_TYPES` allowlist as litegraph's own
+ * connection-veto hooks (mechanism 4) -- NOT a server-side restriction; the
+ * backend's own `image`/`out_N` slots are `*` (module docstring's v0.75.0
+ * paragraph). `LGraphNode.ts`'s `connectSlots` calls `isValidConnection`
+ * first (which already accepts anything against this node's wildcard
+ * slots), and only if THAT passes does it call `onConnectInput`/
+ * `onConnectOutput`, aborting the connection the instant either returns
+ * exactly `false` -- so these two hooks are the real gate. Chained with
+ * whatever else installed them first, so this layers safely alongside any
+ * other extension's hooks; each returns the chained result (possibly
+ * `undefined`) when it isn't the one vetoing.
+ */
+function wireTypeVeto(node) {
+  const originalOnConnectInput = node.onConnectInput
+  node.onConnectInput = function (targetSlot, type, output, sourceNode, sourceSlot) {
+    if (this.inputs?.[targetSlot]?.name === INPUT_NAME && !isAllowedType(type)) {
+      toast(this, 'warn', `EPS Distributor carries images or text for now -- not ${type}.`)
+      return false
+    }
+    if (typeof originalOnConnectInput === 'function') {
+      return originalOnConnectInput.apply(this, arguments)
+    }
+    return undefined
+  }
+
+  const originalOnConnectOutput = node.onConnectOutput
+  node.onConnectOutput = function (outputIndex, inputType, input, targetNode, inputIndex) {
+    const output = this.outputs?.[outputIndex]
+    if (output && OUTPUT_NAME_RE.test(output.name || '') && !isAllowedType(inputType)) {
+      toast(this, 'warn', `EPS Distributor carries images or text for now -- not ${inputType}.`)
+      return false
+    }
+    if (typeof originalOnConnectOutput === 'function') {
+      return originalOnConnectOutput.apply(this, arguments)
+    }
+    return undefined
   }
 }
 
@@ -1318,6 +1733,7 @@ export function attach(node) {
     wireRowToggleClicks(node)
     wireOutputRename(node)
     wireOutputGrowth(node)
+    wireTypeVeto(node)
     addHeaderWidget(node)
 
     // Re-prune AFTER any restore (owner failure report 2026-07-27, the
@@ -1338,6 +1754,13 @@ export function attach(node) {
       const result = originalOnConfigure?.apply(this, arguments)
       try {
         applyVisibleOutputCount(this)
+        // Mechanism 4: a reloaded workflow's saved slot types (or a lack
+        // thereof, for a save from before this feature existed) must be
+        // reconciled with what is actually wired the instant configure()
+        // settles -- applyVisibleOutputCount already calls this at its own
+        // end, but that call ran before this restore's widgets/links were
+        // necessarily final; this one is the authoritative last word.
+        syncSlotTypes(this)
       } catch (error) {
         console.warn(PREFIX, 'post-configure re-prune failed', error)
       }
@@ -1351,6 +1774,10 @@ export function attach(node) {
     // properties loop, which will call this again with the saved value and
     // win last regardless of call order (resolution.js's file header).
     applyVisibleOutputCount(node)
+    // Fresh node: both slots are still WILDCARD, so this just seeds the
+    // input's label to 'any' (mechanism 4) -- a no-op sync for anything
+    // that already ran through applyVisibleOutputCount above.
+    syncSlotTypes(node)
   } catch (error) {
     console.warn(PREFIX, 'attach failed', error)
   }

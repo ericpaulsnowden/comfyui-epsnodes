@@ -112,6 +112,30 @@ actually needs it (at least one disabled slot), exactly like Switcher's own
 all-off branch -- so this module stays importable in a bare test
 environment with no ComfyUI on the path (see tests/test_distributor.py's
 test_module_never_imports_comfy_or_torch).
+
+**v0.75.0 -- any value, one type per node.** Server side the tee is
+type-agnostic: `*` in and `*` out -- `distribute` already identity-passes
+any Python object (it never inspects `image`'s contents, just carries the
+reference or blocks it) and `ExecutionBlocker` is likewise type-agnostic,
+so nothing here cares whether the wired value is an IMAGE, a STRING, or
+anything else. Core agrees: `execution.py`'s per-input check (~line 937,
+`validate_node_input(received_type, input_type)`) delegates to
+`comfy_execution/validation.py::validate_node_input`, which returns `True`
+the moment either side of the comparison is `"*"` -- so an IMAGE or STRING
+link into this node's `*` input, and a `*` output into an IMAGE- or
+STRING-typed downstream input, both validate cleanly at queue time. The
+FRONTEND narrows what actually gets adopted: `distributor.js`'s
+`ALLOWED_TYPES` (IMAGE, STRING for now) vetoes any other connection via
+litegraph's own `onConnectInput`/`onConnectOutput` hooks and adopts the
+concrete type of the first connection onto the input and every visible
+output -- setting real `.type` strings on those slots, not just cosmetics
+-- so litegraph's own `isValidConnection` then rejects a mismatched SECOND
+connection on its own, the same way core's Reroute node narrows itself
+after its first connection. Why the allowlist lives in the frontend only:
+the server contract has no reason to forbid a type the tee can carry
+faithfully, and an API caller who tees something else entirely (a LATENT,
+a MASK, a plain dict) gets exactly what they asked for -- the backend was
+never the thing narrowing this in the first place.
 """
 
 from __future__ import annotations
@@ -189,8 +213,11 @@ def _parse_toggles(toggles: str) -> dict[str, Any]:
 
 
 class EPSDistributor:
-    """One image in, MAX_OUTPUTS (currently 16) independently-gated IMAGE
+    """One value in, MAX_OUTPUTS (currently 16) independently-gated
     outputs out, keyed out_1..out_MAX_OUTPUTS (FORMAT.md section 6.11).
+    Server side the value is opaque -- `"*"` in, `"*"` out (v0.75.0 module
+    docstring paragraph); it is the FRONTEND that narrows what actually
+    gets wired to images and text, for now.
 
     RETURN_TYPES/RETURN_NAMES are both built from MAX_OUTPUTS -- never
     hand-typed -- so the two can never drift apart in length. distribute
@@ -210,14 +237,19 @@ class EPSDistributor:
     """
 
     CATEGORY = "EPSNodes"
-    RETURN_TYPES = ("IMAGE",) * MAX_OUTPUTS
+    # "*" (v0.75.0): the tee is type-agnostic server side -- see module
+    # docstring's "any value, one type per node" paragraph. RETURN_NAMES,
+    # the positional out_1..out_MAX_OUTPUTS contract, and the fixed length
+    # are all unchanged.
+    RETURN_TYPES = ("*",) * MAX_OUTPUTS
     RETURN_NAMES = tuple(f"out_{n}" for n in range(1, MAX_OUTPUTS + 1))
     OUTPUT_TOOLTIPS = (
-        "The input image, or a silent block if this output's toggle is off.",
+        "The input value (image or text), or a silent block if this output's toggle is off.",
     ) * MAX_OUTPUTS
     FUNCTION = "distribute"
     DESCRIPTION = (
-        f"One image in, up to {MAX_OUTPUTS} independently-toggleable images out -- "
+        f"One value in -- an image or a text, one type per node -- up to {MAX_OUTPUTS} "
+        "independently-toggleable copies out -- "
         "a tee with a per-branch gate. A new output socket appears as you "
         f"wire up the last visible one, to a ceiling of {MAX_OUTPUTS}. Every out_N "
         "carries the same image unless "
@@ -239,13 +271,19 @@ class EPSDistributor:
                 # off the input's options dict, exactly as it does for
                 # EPSSwitcher's own `image_N` inputs; `lazy` is orthogonal to
                 # required/optional.
+                # "*" (v0.75.0): type-agnostic server side, narrowed only by
+                # the FRONTEND's ALLOWED_TYPES allowlist (module docstring).
+                # The NAME stays "image" -- ComfyUI restores inputs BY NAME,
+                # so renaming this would orphan every saved link.
                 "image": (
-                    "IMAGE",
+                    "*",
                     {
                         "lazy": True,
                         "tooltip": (
-                            "The image to distribute to every enabled "
-                            "output. If every output is toggled off, this "
+                            "The value to distribute to every enabled "
+                            "output -- an image or a text (STRING), one "
+                            "type per node, set by the first thing you "
+                            "wire. If every output is toggled off, this "
                             "input is never even requested upstream."
                         ),
                     },

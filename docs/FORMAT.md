@@ -2583,15 +2583,46 @@ SINGLE run. Wire one picture to an upscale branch, a restyle branch and a
 save branch, then flip any branch off from this one node — no rewiring, no
 hand-bypassing groups. Roadmap: `research/roadmap-eps-distributor.md`.
 
-- **Input (required):** `image` (IMAGE — IMAGE-only, matching Switcher;
-  any-type is an M2 scope option). **Optional:** a `toggles` STRING widget
+- **Any value, one type per node (v0.75.0; owner: "do one type per node,
+  just do text for now").** Server side the tee is type-agnostic: `image`
+  is declared `*` (name UNCHANGED — inputs restore by name, §8) and
+  `RETURN_TYPES = ("*",) * MAX_OUTPUTS`; `distribute` already identity-passes
+  any Python object and `ExecutionBlocker` is type-agnostic, and core's
+  `comfy_execution/validation.py::validate_node_input` accepts `*` on either
+  side. The FRONTEND narrows (`distributor.js`): `ALLOWED_TYPES = ['IMAGE',
+  'STRING']` (the "for now" list — extend there, then the pin in
+  `tests/test_distributor_js.py` and this entry), vetoed through litegraph's
+  `onConnectInput`/`onConnectOutput` hooks (which `LGraphNode.connectSlots`
+  consults right after `isValidConnection`) with a toast naming the refused
+  type; and **type adoption**: after every connect/disconnect (the same
+  deferred pass `wireOutputGrowth` already runs, plus `onConfigure` and
+  `attach`) `syncSlotTypes` resolves the concrete type from the input link
+  (origin output type, falling back to the saved `link.type` while the origin
+  node is still being restored) and then every output link (target input
+  type), writes it onto the `image` input's `.type` (+ a SHORT `.label`:
+  `any`/`image`/`text` — row 0 is shared with `out_1`'s toggle box at the
+  200 px floor, so the label map must stay short) and onto every visible
+  `out_N`'s `.type` (never `.name` — positional/toggles contract; a user
+  rename lives in `.label`), and colours the links via
+  `LGraphCanvas.link_type_colors[type]` — core `rerouteNode.ts`'s exact
+  precedent. Once adopted, litegraph's own `isValidConnection` rejects a
+  mismatched second wire, so "one type per node" needs no further code; a
+  fully disconnected node falls back to `*`. A mixed set (only reachable via
+  API/hand-edited JSON) keeps the INPUT side's type and warns once — wires
+  are never disconnected on load. A revealed spare socket is added with the
+  currently adopted type. Why the allowlist is frontend-only: the server
+  contract has no reason to forbid a type the tee can carry, and an API
+  caller that tees something else gets exactly what they asked for.
+- **Input (required):** `image` (`*` since v0.75.0 — was IMAGE-only,
+  matching Switcher; the frontend allowlist above is what "IMAGE or STRING"
+  means in practice). **Optional:** a `toggles` STRING widget
   (JSON `{"out_N": false}`), visually hidden by the frontend. `optional`,
   NOT `required`, and NOT ComfyUI's `hidden` section (which is reserved for
   server-supplied `PROMPT`/`UNIQUE_ID`): core's prompt validation rejects a
   hand-built `/prompt` that omits any REQUIRED input BEFORE the node runs,
   which would break the no-frontend API path — so `optional` plus
   `distribute`'s own default is what keeps that path working.
-- **Outputs:** fixed `RETURN_TYPES = ("IMAGE",) * MAX_OUTPUTS` (16),
+- **Outputs:** fixed `RETURN_TYPES = ("*",) * MAX_OUTPUTS` (16; `IMAGE` before v0.75.0),
   `RETURN_NAMES = out_1 … out_16`, both DERIVED from `MAX_OUTPUTS` so they
   cannot drift in length. The frontend hides the trailing unused sockets down
   to the user's chosen count (§6.5 EPS Resolution's `removeOutput`/

@@ -25,6 +25,7 @@ Two files here are **not** workflows — don't drag them onto the canvas:
 | [`eps-test-image-grid.json`](eps-test-image-grid.json) | A buffer that grows across separate Runs and survives a restart | none | yes — press Run |
 | [`eps-test-resolution-presets.json`](eps-test-resolution-presets.json) | Resize + report size in one node; named presets you can tick | none | yes — press Run |
 | [`eps-test-distributor.json`](eps-test-distributor.json) | One image, three independently-toggled branches, one run | none | yes — press Run |
+| [`eps-test-distributor-text.json`](eps-test-distributor-text.json) | One **text**, three independently-toggled branches, one run (v0.75.0: the Distributor carries images or text, one type per node) | none | yes — press Run |
 | [`eps-test-checkpoint-switcher.json`](eps-test-checkpoint-switcher.json) | Tick several checkpoints; one queue runs once per model, with matched model/CLIP/VAE | checkpoint (only to generate) | yes — but writes nothing until you tick a checkpoint |
 | [`eps-test-model-clip-vae-switchers.json`](eps-test-model-clip-vae-switchers.json) | Model / CLIP / VAE switchers as three independent axes | checkpoint | no — the two loaders ship with nothing chosen |
 | [`eps-test-run-multiplier.json`](eps-test-run-multiplier.json) | 2 images × 4 prompts = 8 runs | none | yes — copy `eps-cross-test-prompts.md` into your library first |
@@ -118,6 +119,22 @@ Three passes, all on the canvas note:
 Also try right-click → Properties → `Outputs` to show up to **sixteen**
 sockets, and try lowering it while `out_2` is wired — it refuses rather than
 silently dropping your wire.
+
+## eps-test-distributor-text.json — *press Run, no setup, no GPU*
+
+**Needs:** nothing.
+
+The same Distributor, carrying a **string** (v0.75.0): Text (Multiline) → EPS
+Distributor → three **Preview as Text** nodes. Look at the node first — its
+input label reads `text` (it started as `any` and adopted STRING from the first
+wire) and every socket is STRING-coloured.
+
+1. **All on** → all three previews show the sentence.
+2. **Click `out_2`'s checkbox off** → A and C refresh, **B stays blank** — the
+   branch is skipped, not fed an empty string.
+3. **One type per node** → drag a Load Image's IMAGE onto the input: refused.
+   A MODEL: refused with a short message (images and text only, for now).
+   Disconnect everything and the input reads `any` again.
 
 ## eps-test-checkpoint-switcher.json — *press Run now; add models when you're ready*
 

@@ -168,6 +168,44 @@ IS_ENABLED_CASES = [
 #: test_growth_is_opt_in_per_call_path).
 APPLY_SIGNATURE = "applyVisibleOutputCount(node, { grow = false } = {})"
 
+#: (type, expected isAllowedType()). v0.75.0/mechanism 4: litegraph's own
+#: generic forms always pass regardless of ALLOWED_TYPES; membership is
+#: case-insensitive and comma-union aware (a slot type can itself be a
+#: joined union, e.g. an upstream node declaring "STRING,INT").
+IS_ALLOWED_TYPE_CASES = [
+    ("", True),
+    ("*", True),
+    (0, True),
+    (None, True),
+    ("IMAGE", True),
+    ("string", True),  # case-insensitive
+    ("STRING,INT", True),  # comma-union: one allowed member is enough
+    ("MODEL", False),
+    ("CLIP", False),
+    ("LATENT", False),
+]
+
+#: (candidates, expected {type, mixed}). collectLinkTypes always lists the
+#: `image` INPUT's own type first, so these fixtures encode that same
+#: priority ordering -- resolveAdoptedType itself doesn't know which slot a
+#: candidate came from, it just picks the FIRST concrete one.
+RESOLVE_ADOPTED_TYPE_CASES = [
+    ([], {"type": "*", "mixed": False}),
+    (["*", "STRING"], {"type": "STRING", "mixed": False}),
+    (["IMAGE", "STRING"], {"type": "IMAGE", "mixed": True}),
+    (["STRING", "STRING"], {"type": "STRING", "mixed": False}),
+]
+
+#: (type, expected inputLabelFor()). MASK is a foreign concrete type never
+#: in ALLOWED_TYPES/INPUT_LABELS -- the lowercased-fallback case (a type
+#: that arrived via a hand-edited workflow or a non-frontend API caller).
+INPUT_LABEL_CASES = [
+    ("*", "any"),
+    ("IMAGE", "image"),
+    ("STRING", "text"),
+    ("MASK", "mask"),
+]
+
 #: Custom-label lengths to probe the renamable-output geometry at. 0 and 5
 #: are the un-renamed baseline (`out_N`); the long ones are what a real
 #: rename ("upscale branch", "final save for the client") looks like.
@@ -195,7 +233,10 @@ const out = {
     togglesWidgetName: d.TOGGLES_WIDGET_NAME,
     rowBox: d.ROW_BOX,
     rowGap: d.ROW_GAP,
-    minNodeWidth: d.MIN_NODE_WIDTH
+    minNodeWidth: d.MIN_NODE_WIDTH,
+    wildcard: d.WILDCARD,
+    allowedTypes: d.ALLOWED_TYPES,
+    inputName: d.INPUT_NAME
   },
   outputNames: Array.from({ length: d.MAX_OUTPUTS }, (_, i) => d.outputName(i + 1)),
   parseRoundTrip: [1, 2, 16].map((n) => d.parseOutputSlot(d.outputName(n))),
@@ -205,6 +246,9 @@ const out = {
   growVisible: %(grow_visible_inputs)s.map(([now, wired]) => d.growVisibleCount(now, wired)),
   parseToggles: %(parse_toggles_inputs)s.map((v) => d.parseToggles(v)),
   isEnabled: %(is_enabled_inputs)s.map(([map, name]) => d.isSlotEnabled(map, name)),
+  isAllowed: %(is_allowed_inputs)s.map((v) => d.isAllowedType(v)),
+  resolveAdopted: %(resolve_adopted_inputs)s.map((v) => d.resolveAdoptedType(v)),
+  inputLabel: %(input_label_inputs)s.map((v) => d.inputLabelFor(v)),
   linkChecks: [%(link_cases)s].map((output) => d.isOutputConnected(output)),
   boxRects: socketXs.map((socketX) => {
     const rect = d.toggleBoxRect(socketX, socketY)
@@ -256,6 +300,9 @@ def distributor_api(tmp_path_factory: pytest.TempPathFactory) -> dict:
             "grow_visible_inputs": json.dumps(grow_visible_inputs),
             "parse_toggles_inputs": json.dumps([v for v, _ in PARSE_TOGGLES_CASES]),
             "is_enabled_inputs": json.dumps([[m, n] for m, n, _ in IS_ENABLED_CASES]),
+            "is_allowed_inputs": json.dumps([v for v, _ in IS_ALLOWED_TYPE_CASES]),
+            "resolve_adopted_inputs": json.dumps([v for v, _ in RESOLVE_ADOPTED_TYPE_CASES]),
+            "input_label_inputs": json.dumps([v for v, _ in INPUT_LABEL_CASES]),
             # Built as raw JS, not JSON: `_floatingLinks` is a real `Set`, so
             # the case inputs have to be constructed in the probe itself.
             "link_cases": ", ".join(js for _, js, _ in OUTPUT_LINK_CASES),
@@ -557,6 +604,109 @@ def test_is_slot_enabled_uses_strict_not_equal_false(distributor_api: dict) -> N
     for (given_map, name, expected), got in pairs:
         msg = f"isSlotEnabled({given_map!r}, {name!r}) -> {got!r}, wanted {expected!r}"
         assert got is expected, msg
+
+
+# --------------------------------------------------- type adoption (v0.75.0)
+# The backend went type-agnostic ("*" in, "*" out -- nodes_distributor.py's
+# v0.75.0 docstring paragraph); this file's own ALLOWED_TYPES is what
+# actually narrows what a node instance adopts. distributor.js's own module
+# docstring's mechanism 4 has the full design.
+
+
+def test_type_adoption_constants(distributor_api: dict) -> None:
+    constants = distributor_api["constants"]
+    assert constants["wildcard"] == "*"
+    assert constants["allowedTypes"] == ["IMAGE", "STRING"]
+    assert constants["inputName"] == "image"
+
+
+def test_is_allowed_type(distributor_api: dict) -> None:
+    """Generic slot types always pass; ALLOWED_TYPES membership is
+    case-insensitive and comma-union aware; everything else is rejected."""
+    pairs = zip(IS_ALLOWED_TYPE_CASES, distributor_api["isAllowed"], strict=True)
+    for (given, expected), got in pairs:
+        assert got is expected, f"isAllowedType({given!r}) -> {got!r}, wanted {expected!r}"
+
+
+def test_resolve_adopted_type(distributor_api: dict) -> None:
+    """The first CONCRETE candidate wins (input-side-first priority, per
+    collectLinkTypes' own ordering); `mixed` flags a genuine disagreement
+    without ever picking anything other than that first candidate."""
+    pairs = zip(RESOLVE_ADOPTED_TYPE_CASES, distributor_api["resolveAdopted"], strict=True)
+    for (given, expected), got in pairs:
+        assert got == expected, f"resolveAdoptedType({given!r}) -> {got!r}, wanted {expected!r}"
+
+
+def test_input_label_for(distributor_api: dict) -> None:
+    """INPUT_LABELS' short mapping, with a lowercased fallback for a
+    concrete type this file's allowlist doesn't know by name."""
+    pairs = zip(INPUT_LABEL_CASES, distributor_api["inputLabel"], strict=True)
+    for (given, expected), got in pairs:
+        assert got == expected, f"inputLabelFor({given!r}) -> {got!r}, wanted {expected!r}"
+
+
+def test_add_output_no_longer_hardcodes_image_type(distributor_source: str) -> None:
+    """A revealed spare socket must match whatever this node has already
+    adopted (mechanism 4), not a hardcoded 'IMAGE' -- the backend's own
+    RETURN_TYPES moved to an all-wildcard tuple, so a freshly-appeared out_N
+    that assumed IMAGE would be wrong the moment a text value was adopted."""
+    assert "node.addOutput(outputName(n), 'IMAGE')" not in distributor_source
+    assert "OUTPUT_TYPE = 'IMAGE'" not in distributor_source
+    body = _function_body(distributor_source, APPLY_SIGNATURE)
+    assert "node.addOutput(outputName(n), adoptedType)" in body
+
+
+def test_type_veto_hooks_are_installed_and_consult_is_allowed_type(
+    distributor_source: str,
+) -> None:
+    """The frontend-only allowlist veto (mechanism 4): wireTypeVeto must be
+    installed from attach(), and both connection hooks it wires must
+    actually consult isAllowedType -- not just exist as no-op stubs."""
+    assert "wireTypeVeto(node)" in distributor_source, "not installed from attach()"
+    body = _function_body(distributor_source, "wireTypeVeto(node)")
+    assert "node.onConnectInput = function" in body
+    assert "node.onConnectOutput = function" in body
+    assert body.count("isAllowedType(") == 2, "both hooks must consult isAllowedType"
+
+
+def test_sync_slot_types_is_called_from_every_settle_point(distributor_source: str) -> None:
+    """syncSlotTypes must run from every place node.outputs/node.inputs can
+    change shape or wiring, per mechanism 4's "no second hook pair": the
+    deferred growth pass, applyVisibleOutputCount itself, the onConfigure
+    wrap, and attach()'s own final call."""
+    deferred_body = _function_body(distributor_source, "wireOutputGrowth(node)")
+    assert "syncSlotTypes(target)" in deferred_body
+
+    apply_body = _function_body(distributor_source, APPLY_SIGNATURE)
+    assert "syncSlotTypes(node)" in apply_body
+
+    attach_body = _function_body(distributor_source, "attach(node)")
+    assert "wireTypeVeto(node)" in attach_body
+    assert "syncSlotTypes(this)" in attach_body  # the onConfigure wrap
+    assert "syncSlotTypes(node)" in attach_body  # attach()'s own final call
+
+
+def test_sync_slot_types_never_touches_output_name(distributor_source: str) -> None:
+    """Positional/toggles contract (FORMAT.md section 6.4): syncSlotTypes may
+    set .type/.label on a slot, never .name -- a rename lives in .label, and
+    the toggles map plus the backend's RETURN_NAMES are both keyed by
+    .name."""
+    body = _function_body(distributor_source, "syncSlotTypes(node)")
+    assert ".name =" not in body
+    assert "output.name" not in body
+
+
+def test_deferred_pass_still_has_the_growth_short_circuit(distributor_source: str) -> None:
+    """The pre-existing no-op guard (test_deferred_growth_skips_no_op_passes
+    above) must survive the v0.75.0 restructure that made syncSlotTypes run
+    unconditionally ahead of it -- growth itself must still be skippable
+    independently of the (now unconditional) type sync."""
+    body = _function_body(distributor_source, "wireOutputGrowth(node)")
+    assert (
+        "if (growVisibleCount(clampVisibleCount(stored, wiredMax), wiredMax) === stored) return"
+        in body
+    ), "the existing growth short-circuit must be untouched"
+    assert "syncSlotTypes(target)" in body
 
 
 # --------------------------------------------------- toggle-box geometry

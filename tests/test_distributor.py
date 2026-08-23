@@ -234,6 +234,34 @@ class TestReturnedTupleIsAlwaysMaxOutputsLong:
         assert len(result) == MAX_OUTPUTS == 16
 
 
+# ------------------------------------------------------------- type-agnostic
+
+
+class TestTypeAgnostic:
+    """v0.75.0: the tee is type-agnostic server side -- "*" in, "*" out.
+
+    `distribute` never inspects `image`'s contents (module docstring), so
+    this is really the same identity-passthrough proof as
+    TestAllEnabled/TestSlotsDisabled, just with non-image Python objects to
+    make the point explicit: a str and a dict pass through exactly like the
+    `object()` sentinels used everywhere else in this file.
+    """
+
+    def test_distribute_is_type_agnostic(self, fake_execution_blocker) -> None:
+        node = EPSDistributor()
+
+        text = "hello world"
+        result = node.distribute(image=text, toggles=_toggles(out_2=False))
+        assert len(result) == MAX_OUTPUTS
+        assert isinstance(result[1], fake_execution_blocker)  # out_2, disabled
+        assert all(value is text for index, value in enumerate(result) if index != 1)
+
+        payload = {"foo": "bar"}
+        result = node.distribute(image=payload, toggles=_toggles(out_5=False))
+        assert isinstance(result[4], fake_execution_blocker)  # out_5, disabled
+        assert all(value is payload for index, value in enumerate(result) if index != 4)
+
+
 # ------------------------------------------------------------- class shape
 
 
@@ -242,8 +270,11 @@ class TestClassShape:
         assert EPSDistributor.CATEGORY == "EPSNodes"
 
     def test_return_types_length_and_values(self) -> None:
+        # "*" (v0.75.0): type-agnostic server side -- see module docstring's
+        # "any value, one type per node" paragraph. The frontend is what
+        # narrows this to images/text; the backend contract stays wildcard.
         assert len(EPSDistributor.RETURN_TYPES) == MAX_OUTPUTS == 16
-        assert EPSDistributor.RETURN_TYPES == ("IMAGE",) * MAX_OUTPUTS
+        assert EPSDistributor.RETURN_TYPES == ("*",) * MAX_OUTPUTS
 
     def test_return_names_length_and_values(self) -> None:
         assert len(EPSDistributor.RETURN_NAMES) == MAX_OUTPUTS == 16
@@ -277,7 +308,9 @@ class TestClassShape:
     def test_input_types_shape(self) -> None:
         spec = EPSDistributor.INPUT_TYPES()
         assert set(spec["required"]) == {"image"}
-        assert spec["required"]["image"][0] == "IMAGE"
+        # "*" (v0.75.0): type-agnostic server side; the frontend's own
+        # ALLOWED_TYPES allowlist is what narrows this to images/text.
+        assert spec["required"]["image"][0] == "*"
         assert set(spec["optional"]) == {"toggles"}
         widget_type, options = spec["optional"]["toggles"]
         assert widget_type == "STRING"
@@ -290,6 +323,14 @@ class TestClassShape:
         # ever runs (module docstring).
         spec = EPSDistributor.INPUT_TYPES()
         assert "toggles" not in spec["required"]
+
+    def test_image_input_keeps_its_name(self) -> None:
+        # ComfyUI restores inputs BY NAME -- renaming "image" would orphan
+        # every saved link (module docstring's v0.75.0 paragraph). Only the
+        # TYPE moved to "*"; the NAME did not.
+        spec = EPSDistributor.INPUT_TYPES()
+        assert "image" in spec["required"]
+        assert spec["required"]["image"][0] == "*"
 
 
 # ------------------------------------------------------- lazy upstream skip

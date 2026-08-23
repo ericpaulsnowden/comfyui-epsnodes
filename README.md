@@ -24,7 +24,7 @@ section further down; this is the map.
 | [**EPS LoRA Iterator**](#eps-lora-iterator-shipped) | Auditions any `LORA_STACK` by strength: set min/max/increment and one queue runs your workflow once per step (per lora, or all together). | A `LORA_STACK` source (usually Apply LoRA Set) + a model. |
 | [**EPS Image Switcher**](#eps-image-switcher-shipped) | Any number of image inputs, each independently on/off; the enabled ones fan out (N enabled → N runs). Disabled branches never execute. | Nothing — drag-and-drop with core nodes. |
 | [**EPS Model / CLIP / VAE Switcher**](#eps-model--clip--vae-switcher-shipped) | The image Switcher's exact mechanism for models, CLIPs, and VAEs: any number of inputs, each on/off, enabled ones fan out (N enabled → N runs), disabled branches — including their checkpoint loads — never execute. | Nothing — drag-and-drop with core nodes. |
-| [**EPS Distributor**](#eps-distributor-shipped) | The mirror of the Switcher: one image in, up to sixteen branches out, each independently on/off. New outputs appear as you wire them up. Toggle a branch off and only that branch is skipped — everything happens in one run. | Nothing — drag-and-drop with core nodes. |
+| [**EPS Distributor**](#eps-distributor-shipped) | The mirror of the Switcher: one image — or one text — in, up to sixteen branches out, each independently on/off. New outputs appear as you wire them up. Toggle a branch off and only that branch is skipped — everything happens in one run. | Nothing — drag-and-drop with core nodes. |
 | [**EPS Checkpoint Switcher**](#eps-checkpoint-switcher-shipped) | Tick several checkpoint files in a list; one queue runs the workflow once per ticked checkpoint, with each run's model, CLIP, and VAE kept together and a label for save paths. | Your checkpoint files — drag-and-drop with core nodes. |
 | [**EPS Resolution**](#eps-resolution-shipped) | Image-first resize + size in one node: target size (with a drag pad), four resize modes, and the original image + both sets of dimensions passed through. Named size presets are shared across your machines — tick several and one Run resizes once per preset. Wire in extra images and they all come out at the same target size in one Run. | Nothing — drag-and-drop with core nodes. |
 | [**EPS Image Grid**](#eps-image-grid-shipped) | Collects images across separate Runs into a buffer that survives restarts, shows them as a thumbnail grid, and fans the whole set out on demand. Add whole batches at once — a multiselect picker, a folder importer, or one big drag. | Nothing — drag-and-drop with core nodes. |
@@ -498,10 +498,22 @@ several models/VAEs in one queue".
 
 `EPSNodes → EPS Distributor`: the **mirror of EPS Image Switcher**. Where the
 Switcher gathers many toggleable inputs into one flow, the Distributor takes
-**one image and fans it out to up to sixteen outputs, each independently on or
-off**. Wire the same picture into an upscale branch, a restyle branch and a
-straight-to-save branch, then turn any of them off from this one node — no
+**one value — an image or a text — and fans it out to up to sixteen outputs,
+each independently on or off**. Wire the same picture into an upscale branch, a
+restyle branch and a straight-to-save branch (or the same prompt into three
+CLIP Text Encodes), then turn any of them off from this one node — no
 rewiring, no dragging bypass boxes around groups.
+
+- **Images or text, one type per node (v0.75.0).** The input socket starts
+  as `any` and becomes `image` or `text` with the first thing you wire — into
+  the input or into any output — and every socket on the node takes that type.
+  After that, only matching wires connect: a text-carrying Distributor won't
+  accept an IMAGE, and vice versa (the usual red-X refusal). Disconnect
+  everything and it goes back to `any`. Other kinds of values (MODEL, CLIP,
+  VAE, LATENT…) are refused with a short message for now — say the word and
+  the list grows. Existing image workflows load and run unchanged. Try
+  `examples/eps-test-distributor-text.json` (one prompt, three Preview-as-Text
+  branches, nothing to download).
 
 - **A toggle on every output,** plus a tri-state **Toggle All** header (all
   on / all off / a dash for mixed, with a live `enabled/total` count — the
