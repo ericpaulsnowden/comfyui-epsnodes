@@ -762,6 +762,14 @@ times to gather images, then send the whole set through a workflow at once.
     you so. **Copy (Clipspace)** works everywhere. For real OS image-copy, use
     the ComfyUI desktop app or open ComfyUI via `localhost`/`https`.
 
+- **Focus a frame, emit only it (v0.77.0).** Double-click a frame in the
+  grid to enlarge it — while it's focused, **Emit sends only that one
+  image** (the `mode` widget's label says so: "1 focused, emitting only
+  it"), and the Run Multiplier counts exactly 1 image for it. Double-click
+  again to unfocus and Emit goes back to the whole buffer. A focused frame
+  that no longer exists (deleted elsewhere, another machine) falls back to
+  the full buffer with a logged warning — never a failed queue.
+
 ## EPS Run Multiplier (shipped)
 
 *Renamed from "EPS Cross Sweep" in v0.48.4 (display name only — saved

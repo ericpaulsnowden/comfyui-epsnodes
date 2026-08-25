@@ -1641,6 +1641,28 @@ is the functional core WITHOUT the grid.
 
 ## §6.6 `EPSImageGrid` (display: "EPS Image Grid") — accumulate + fan out
 
+**Focus narrows Emit (v0.77.0, owner ask 2026-08-23: "if you have a single
+image in focus (double click to make it large) the widget should only
+output that one image").** A hidden `focus` STRING widget — TAIL-appended
+after `grid_uuid` (§8's tail-only law; older saves' shorter positional
+`widgets_values` still line up) — carries the focused frame's own on-disk
+FILENAME (stable: `_next_frame_filename` never reuses one, unlike an index
+which shifts under deletes). Emit + non-empty focus → exactly that one
+frame on every output (image/width/height length-1, the wired live image
+dropped too — focus means "only this one"); a focus that no longer
+resolves logs a warning and degrades to the full unfocused Emit; Collect
+ignores it. New store helper `read_frame_as_tensor(grid_uuid, filename)`
+(single-frame decode through the same `frame_path` gate the /frame route
+trusts; `None`, never raises). Frontend keeps the widget in lockstep with
+litegraph's `imageIndex` view state both ways: `syncFocusFromView` on a
+chained `onDrawBackground` (draw-driven — the same poll the full-res swap
+already rides; NOTE for probes: no rAF in a backgrounded pane means no
+draws, a probe artifact, not a bug) and `restoreFocusedView` from
+`refreshFromBuffer` for the restore path; the "emitting only it" hint
+mutates the `mode` widget's `.label` (never `.name`). The §6.10 estimator
+counts a focused Emit grid as exactly 1 (no `≥` floor).
+
+
 **v0.69.0 perf round (owner: "big performance issues" on large buffers):**
 (1) thumbnail URLs are keyed per FRAME (`ref.mtime`, `cacheKeyForRef`) —
 the buffer-wide `generation` moved on every append, so each Collect run

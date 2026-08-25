@@ -679,6 +679,49 @@ def read_all_as_tensors(grid_uuid: str) -> list:
     return tensors
 
 
+def read_frame_as_tensor(grid_uuid: str, filename: str) -> Any | None:
+    """Decode ONE manifest-listed frame fresh from disk, as its own
+    ``[1,H,W,C]`` float tensor -- the single-frame counterpart to
+    :func:`read_all_as_tensors`, added for ``EPSImageGrid``'s Emit-mode
+    ``focus`` narrowing (``nodes_image_grid.py``'s ``run()``, owner ask
+    2026-08-23: "the widget should only output that one image"). Decoding
+    the WHOLE buffer just to pick one frame back out of it would be needless
+    work on top of a buffer that already has no size cap.
+
+    Reuses :func:`frame_path` as its one gate (uuid regex, bare single-
+    segment name, MANIFEST-listed, exists) — the same validation
+    :func:`remove_frame`/the ``GET /eps_image_grid/frame`` route already
+    trust — so a hostile or merely stale *filename* (a frame deleted since
+    the caller last read the buffer) can never reach a filesystem path here
+    at all. Returns ``None``, never raises, for either that case or a
+    decode failure (missing/truncated/corrupt PNG) — the SAME per-frame
+    tolerance :func:`read_all_as_tensors` already applies to one bad frame
+    among many; the caller (``nodes_image_grid.py``) treats a ``None`` here
+    as "this focus no longer resolves" and degrades to emitting the whole
+    buffer instead, logging its own warning.
+    """
+    path = frame_path(grid_uuid, filename)
+    if path is None:
+        return None
+
+    import numpy as np
+    import torch
+    from PIL import Image, ImageOps
+
+    try:
+        with Image.open(path) as raw:
+            # Mirrors read_all_as_tensors' own conversion exactly (same
+            # plain-RGB case; append_batch never writes anything else).
+            pil_image = ImageOps.exif_transpose(raw)
+            pil_image = pil_image.convert("RGB")
+            array = np.array(pil_image).astype(np.float32) / 255.0
+    except (OSError, ValueError, SyntaxError) as exc:
+        # Same PIL SyntaxError gap as append_uploaded_image's catch.
+        logger.warning("eps_image_grid: skipping unreadable frame %s (%s)", path, exc)
+        return None
+    return torch.from_numpy(array)[None, ...]
+
+
 # --------------------------------------------------------------------- clear
 
 

@@ -115,6 +115,14 @@ MODES = [MODE_COLLECT, MODE_EMIT]
 #: degrades to "no buffer yet" rather than erroring.
 DEFAULT_GRID_UUID = ""
 
+#: Same `optional`-default rationale as `DEFAULT_GRID_UUID` right above,
+#: for the `focus` widget (owner ask 2026-08-23: "if you have a single
+#: image in focus ... the widget should only output that one image").
+#: Empty = no frame is focused -- Emit fans the whole buffer out, exactly
+#: today's behavior; a hand-built `/prompt` that omits it degrades the same
+#: way.
+DEFAULT_FOCUS = ""
+
 
 def _expand_to_frames(image_batch: Any) -> list:
     """A `[B,H,W,C]` batch -> a list of B `[1,H,W,C]` slices, in order.
@@ -154,7 +162,14 @@ class EPSImageGrid:
       order it was recorded, with whatever's CURRENTLY wired appended as
       the final image(s) (buffer of 10 + 1 wired -> 11, the rest of the
       workflow runs 11 times). An empty buffer with nothing wired either ->
-      the same `ExecutionBlocker` triple.
+      the same `ExecutionBlocker` triple. **Unless `focus` names a frame
+      still in the buffer (owner ask 2026-08-23) — then Emit narrows to
+      EXACTLY that one frame instead, dropping both the rest of the buffer
+      AND whatever's currently wired** (a focus means "only this one", not
+      "this one plus the usual tail). A `focus` that no longer resolves
+      (the frame it names was deleted) degrades to the unfocused Emit
+      behavior above, with a logged warning — never a hard error. `Collect`
+      mode ignores `focus` entirely; it only ever affects Emit.
 
     Re-reads the on-disk buffer on every execution — there is no in-memory
     state to go stale between Runs (a second EPSImageGrid instance pointed
@@ -170,7 +185,8 @@ class EPSImageGrid:
     OUTPUT_TOOLTIPS = (
         "In Collect mode, the image(s) just fed in. In Emit mode, the "
         "whole buffer plus whatever's currently wired, oldest first -- one "
-        "run downstream per image.",
+        "run downstream per image. Double-click a frame in the grid to "
+        "focus it, and Emit sends ONLY that one frame instead.",
         "Each output image's width, index-aligned with image.",
         "Each output image's height, index-aligned with image.",
     )
@@ -184,7 +200,10 @@ class EPSImageGrid:
         "Switch to Emit and run once to send the whole buffer downstream "
         "instead, in the order it was collected, with whatever's currently "
         "wired appended at the end. Clear the buffer from the node any "
-        "time; there's no size cap, so keep an eye on disk use."
+        "time; there's no size cap, so keep an eye on disk use. Double-"
+        "click a frame to focus it -- while focused, Emit sends ONLY that "
+        "one frame; unfocus (double-click again) to go back to the whole "
+        "buffer."
     )
 
     @classmethod
@@ -228,6 +247,37 @@ class EPSImageGrid:
                     "STRING",
                     {"default": DEFAULT_GRID_UUID, "multiline": False, "hidden": True},
                 ),
+                # Owner ask 2026-08-23: "if you have a single image in focus
+                # (double click to make it large) the widget should only
+                # output that one image." TAIL-appended -- MUST stay LAST in
+                # this dict (FORMAT.md §8's tail-only rule for backend
+                # widgets): litegraph restores a saved workflow's
+                # `widgets_values` POSITIONALLY, so an OLDER save's shorter
+                # array (ending at `grid_uuid`) must still line up with
+                # `mode`/`grid_uuid` unchanged now that a third widget
+                # exists -- appending this one last keeps every existing
+                # index untouched. Empty = no focus (today's unchanged
+                # behavior). Non-empty = the identity of the ONE buffered
+                # frame Emit mode should narrow down to -- a frame's own
+                # on-disk filename (e.g. "0007.png"), chosen over a bare
+                # index because `image_grid_store._next_frame_filename`
+                # never reuses one even across a delete (that file's own
+                # docstring), so it stays STABLE while that frame exists,
+                # unlike an index, which shifts under a delete. Same hidden-
+                # widget shape/rationale as `grid_uuid` right above --
+                # "hidden": True is both flags at once here: litegraph's
+                # options.hidden IS this dict, so it already covers the Vue-
+                # nodes hide path FORMAT.md §7.5/the comment above
+                # documents; `image_grid.js` additionally sets the classic-
+                # canvas `widget.hidden` flag at attach time, the same way
+                # it already does for `grid_uuid`. The frontend writes this
+                # widget when the user double-click-focuses a frame in the
+                # on-node grid, and clears it the same way when focus clears
+                # (unfocus, Clear, or the focused/any tile being deleted).
+                "focus": (
+                    "STRING",
+                    {"default": DEFAULT_FOCUS, "multiline": False, "hidden": True},
+                ),
             },
             # v0.51.1: lets run() see its own consumers (the Collect-mode
             # dead-wire guard below) -- nodes_switcher's exact hidden pair.
@@ -244,6 +294,7 @@ class EPSImageGrid:
         mode: str = MODE_COLLECT,
         image: Any = None,
         grid_uuid: str = DEFAULT_GRID_UUID,
+        focus: str = DEFAULT_FOCUS,
         prompt: Any = None,
         unique_id: Any = None,
     ) -> dict[str, Any]:
@@ -274,9 +325,39 @@ class EPSImageGrid:
             # the rest of the buffer here (that's what Emit is for).
             result_frames = live
         else:  # MODE_EMIT -- never appends; never reports `ui` (point 1).
-            # Buffer chronological first, then whatever's live right now,
-            # newest last (owner's "10 buffered + 1 wired -> 11").
-            result_frames = store.read_all_as_tensors(grid_uuid) + live
+            # Owner ask 2026-08-23 ("if you have a single image in focus ...
+            # the widget should only output that one image"): a resolved
+            # `focus` narrows Emit to EXACTLY that one frame -- not that
+            # frame PLUS whatever's wired, which `live` would otherwise
+            # append (the "10 buffered + 1 wired -> 11" rule right below). A
+            # focus is a deliberate "give me only this one" request; tacking
+            # the tee input back on would silently defeat it. Collect mode
+            # never reaches this branch at all, so `focus` has no effect
+            # there -- matches its own docstring ("Collect mode ignores
+            # `focus` entirely").
+            frame_tensor = store.read_frame_as_tensor(grid_uuid, focus) if focus else None
+            if frame_tensor is not None:
+                result_frames = [frame_tensor]
+            else:
+                if focus:
+                    # Stale view state, not a miswire (contrast the Collect
+                    # dead-wire warning below) -- the frame this widget
+                    # named no longer exists in this buffer (deleted
+                    # elsewhere, a cross-machine/restart save). The frontend
+                    # itself clears this widget the moment it notices a
+                    # stale focus, so in normal use this path is
+                    # unreachable; it only guards a hand-edited/cross-
+                    # restart/cross-machine `/prompt`. Degrade, never crash:
+                    # log and fall back to the WHOLE buffer, exactly Emit's
+                    # unfocused behavior.
+                    logger.warning(
+                        "EPSNodes: EPS Image Grid: focused frame %r no longer exists "
+                        "in this buffer -- emitting the whole buffer instead",
+                        focus,
+                    )
+                # Buffer chronological first, then whatever's live right
+                # now, newest last (owner's "10 buffered + 1 wired -> 11").
+                result_frames = store.read_all_as_tensors(grid_uuid) + live
 
         if not result_frames:
             # See module docstring "Empty-buffer safety". Unreachable with

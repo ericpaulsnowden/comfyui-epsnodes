@@ -492,6 +492,130 @@ out.basenames = [
   }
 }
 
+// ---- Focused Emit (owner ask 2026-08-23): view<->widget sync + restore ----
+{
+  const R3 = (name) => ({ filename: name, subfolder: '', type: 'output' })
+
+  function makeGridNode(id, { mode = 'Emit', focusValue = '' } = {}) {
+    const calls = []
+    const modeWidget = { name: 'mode', value: mode }
+    const focusWidget = {
+      name: 'focus',
+      value: focusValue,
+      callback: (v) => calls.push(v)
+    }
+    const node = {
+      id,
+      graph: rootGraph,
+      imgs: null,
+      images: undefined,
+      imageIndex: null,
+      widgets: [modeWidget, focusWidget],
+      setDirtyCanvas() {}
+    }
+    return { node, modeWidget, focusWidget, calls }
+  }
+
+  // currentFocusedFrameId: pure resolution of imageIndex -> a frame filename
+  {
+    const { node } = makeGridNode(101)
+    const unfocused = grid.currentFocusedFrameId(node)
+    node.images = [R3('a.png'), R3('b.png')]
+    node.imageIndex = 1
+    const focused = grid.currentFocusedFrameId(node)
+    node.imageIndex = 5 // stale/out-of-range -- a transient mid-rebuild state
+    const outOfBounds = grid.currentFocusedFrameId(node)
+    out.focusId = { unfocused, focused, outOfBounds }
+  }
+
+  // syncFocusFromView: writes the widget + fires its callback on a REAL
+  // change, no-ops (no re-fire) when the resolved value hasn't changed.
+  {
+    const { node, focusWidget, calls } = makeGridNode(102, { mode: 'Emit' })
+    node.images = [R3('a.png'), R3('b.png')]
+    node.imageIndex = 1
+    grid.syncFocusFromView(node)
+    const afterFocus = { value: focusWidget.value, calls: calls.length }
+    grid.syncFocusFromView(node) // simulates the next draw -- nothing changed
+    const afterRepeat = { value: focusWidget.value, calls: calls.length }
+    node.imageIndex = null // double-click again / Escape / the close button
+    grid.syncFocusFromView(node)
+    const afterUnfocus = { value: focusWidget.value, calls: calls.length }
+    out.focusSync = { afterFocus, afterRepeat, afterUnfocus }
+  }
+
+  // syncFocusFromView: the on-canvas hint only appears when it would
+  // actually change what a Run does -- Emit mode AND a resolved focus.
+  {
+    const { node, modeWidget } = makeGridNode(103, { mode: 'Emit' })
+    node.images = [R3('a.png')]
+    node.imageIndex = 0
+    grid.syncFocusFromView(node)
+    const emitFocused = modeWidget.label ?? null
+    modeWidget.value = 'Collect' // Collect ignores `focus` entirely (backend)
+    grid.syncFocusFromView(node)
+    const collectFocused = modeWidget.label ?? null
+    modeWidget.value = 'Emit'
+    node.imageIndex = null
+    grid.syncFocusFromView(node)
+    const emitUnfocused = modeWidget.label ?? null
+    out.focusHint = { emitFocused, collectFocused, emitUnfocused }
+  }
+
+  // Delete-clears: `setNodeImagesFromRefs` already resets `imageIndex` to
+  // `null` on ANY content change (the M5 mechanism, tested above) whether
+  // or not the deleted tile was the focused one -- `syncFocusFromView` (the
+  // draw-time poll `installFocusWidgetSync` installs) is what turns that
+  // into the WIDGET actually clearing; no separate delete-specific code
+  // path exists to test.
+  {
+    const { node, focusWidget } = makeGridNode(104, { mode: 'Emit' })
+    grid.setNodeImagesFromRefs(node, [R3('a.png'), R3('b.png'), R3('c.png')])
+    node.imageIndex = 1 // user focused b.png
+    grid.syncFocusFromView(node) // the draw right after focusing
+    const focusedValue = focusWidget.value
+    grid.setNodeImagesFromRefs(node, [R3('a.png'), R3('c.png')]) // /remove: b.png gone
+    grid.syncFocusFromView(node) // the draw right after the delete refresh
+    out.focusDeleteClears = {
+      focusedValue,
+      clearedAfterDelete: focusWidget.value,
+      backToGrid: node.imageIndex === null
+    }
+  }
+
+  // restoreFocusedView: WIDGET -> VIEW, the reload/restore direction.
+  {
+    const { node } = makeGridNode(105, { focusValue: 'b.png' })
+    node.images = [R3('a.png'), R3('b.png'), R3('c.png')]
+    grid.restoreFocusedView(node)
+    const resolved = node.imageIndex
+
+    // Stale: the persisted frame no longer exists in the freshly loaded
+    // buffer -- left showing the grid, never a crash (matches the backend's
+    // own stale-focus degrade).
+    const { node: node2 } = makeGridNode(106, { focusValue: 'missing.png' })
+    node2.images = [R3('a.png')]
+    grid.restoreFocusedView(node2)
+    const staleLeftAsGrid = node2.imageIndex
+
+    // Never overwrites a view something else already established.
+    const { node: node3 } = makeGridNode(107, { focusValue: 'a.png' })
+    node3.images = [R3('a.png'), R3('b.png')]
+    node3.imageIndex = 1
+    grid.restoreFocusedView(node3)
+    const untouched = node3.imageIndex
+
+    // An empty focus value (the common case -- nothing was ever focused) is
+    // a pure no-op.
+    const { node: node4 } = makeGridNode(108, { focusValue: '' })
+    node4.images = [R3('a.png')]
+    grid.restoreFocusedView(node4)
+    const emptyFocusNoop = node4.imageIndex
+
+    out.focusRestore = { resolved, staleLeftAsGrid, untouched, emptyFocusNoop }
+  }
+}
+
 process.stdout.write(JSON.stringify(out))
 """
 
@@ -1147,3 +1271,112 @@ def test_frame_route_and_preview_param_are_pinned_constants() -> None:
     assert "const FRAME_ROUTE = '/eps_image_grid/frame'" in _SOURCE
     assert "const PREVIEW_PARAM = 'webp;80'" in _SOURCE
     assert "const REF_SUBFOLDER_PREFIX = 'eps_image_grid/'" in _SOURCE
+
+
+# ---- Focused Emit (owner ask 2026-08-23): "if you have a single image in
+# focus (double click to make it large) the widget should only output that
+# one image." ----
+
+
+def test_current_focused_frame_id_resolves_imageindex_against_images(grid_api: dict) -> None:
+    focus_id = grid_api["focusId"]
+    assert focus_id["unfocused"] == ""
+    assert focus_id["focused"] == "b.png"
+    # A stale/out-of-range imageIndex (a transient mid-rebuild state) must
+    # degrade to "" rather than throwing or returning undefined.
+    assert focus_id["outOfBounds"] == ""
+
+
+def test_sync_focus_from_view_writes_the_widget_and_fires_its_callback(
+    grid_api: dict,
+) -> None:
+    sync = grid_api["focusSync"]
+    assert sync["afterFocus"] == {"value": "b.png", "calls": 1}
+    # Calling again with nothing changed must NOT re-fire the callback --
+    # writeFocusWidget's whole point is a cheap per-draw no-op once settled.
+    assert sync["afterRepeat"] == {"value": "b.png", "calls": 1}
+    assert sync["afterUnfocus"] == {"value": "", "calls": 2}
+
+
+def test_sync_focus_from_view_hints_only_in_emit_mode_with_a_resolved_focus(
+    grid_api: dict,
+) -> None:
+    hint = grid_api["focusHint"]
+    assert hint["emitFocused"] == "mode — 1 focused, emitting only it"
+    # Collect ignores `focus` entirely on the backend -- the hint must not
+    # claim emission is narrowed there either.
+    assert hint["collectFocused"] is None
+    assert hint["emitUnfocused"] is None
+
+
+def test_delete_of_the_focused_tile_clears_the_focus_widget_too(grid_api: dict) -> None:
+    """No delete-specific code writes the widget -- `setNodeImagesFromRefs`
+    already resets `imageIndex` to `null` on any content change (M5,
+    verified above), and `syncFocusFromView`'s draw-time poll is what turns
+    that into the widget actually clearing on the next draw."""
+    delete_clears = grid_api["focusDeleteClears"]
+    assert delete_clears["focusedValue"] == "b.png"
+    assert delete_clears["clearedAfterDelete"] == ""
+    assert delete_clears["backToGrid"] is True
+
+
+def test_restore_focused_view_resolves_a_persisted_focus_to_an_index(grid_api: dict) -> None:
+    assert grid_api["focusRestore"]["resolved"] == 1
+
+
+def test_restore_focused_view_degrades_when_the_frame_no_longer_exists(grid_api: dict) -> None:
+    # Matches the backend's own stale-focus degrade -- never a crash, and
+    # never a fabricated index; the grid view (`null`) is left showing.
+    assert grid_api["focusRestore"]["staleLeftAsGrid"] is None
+
+
+def test_restore_focused_view_never_overwrites_an_established_view(grid_api: dict) -> None:
+    assert grid_api["focusRestore"]["untouched"] == 1
+
+
+def test_restore_focused_view_is_a_noop_for_an_empty_focus_value(grid_api: dict) -> None:
+    assert grid_api["focusRestore"]["emptyFocusNoop"] is None
+
+
+def test_focus_widget_is_hidden_on_both_the_canvas_and_vue_paths() -> None:
+    """Mirrors `hideGridUuidWidget`'s own BOTH-flags requirement right above
+    it in the source -- the backend's INPUT_TYPES options dict already
+    covers Vue's `options.hidden`; this is the classic-canvas half."""
+    body = _function_body("function hideFocusWidget")
+    assert "widget.hidden = true" in body
+    assert "hidden: true" in body
+
+
+def test_attach_hides_the_focus_widget_and_installs_its_draw_sync() -> None:
+    assert "hideFocusWidget(node)" in _SOURCE
+    assert "installFocusWidgetSync(node)" in _SOURCE
+    # Both must run at attach time, same as every other per-node install.
+    attach_body = _function_body("export function attach")
+    assert "hideFocusWidget(node)" in attach_body
+    assert "installFocusWidgetSync(node)" in attach_body
+
+
+def test_focus_widget_sync_wraps_ondrawbackground_without_replacing_it() -> None:
+    body = _function_body("function installFocusWidgetSync")
+    assert "node.onDrawBackground = function" in body
+    assert "syncFocusFromView(this)" in body
+    assert "original.apply(this, args)" in body  # wraps, never replaces
+
+
+def test_write_focus_widget_sets_value_before_firing_the_callback() -> None:
+    """Same load-bearing order `writeUuid` already established: a widget's
+    `.callback` is a notification hook, not a setter, so `.value =` must
+    happen FIRST or the callback would see/report the stale value."""
+    body = _function_body("function writeFocusWidget")
+    value_index = body.index("widget.value = value")
+    callback_index = body.index("widget.callback(value")
+    assert value_index < callback_index
+
+
+def test_refresh_from_buffer_restores_the_focused_view_after_a_load() -> None:
+    body = _function_body("async function refreshFromBuffer")
+    assert "restoreFocusedView(node)" in body
+    # Must run AFTER the buffer's own refs are in, not before.
+    set_index = body.index("setNodeImagesFromRefs(node, data.refs)")
+    restore_index = body.index("restoreFocusedView(node)")
+    assert set_index < restore_index

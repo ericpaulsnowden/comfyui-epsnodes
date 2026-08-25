@@ -749,6 +749,55 @@
  *     every queued prompt carried `"Clear": null, "Add images…": null,
  *     "Add folder…": null`. Both flags now (the `resolution.js`
  *     Save/Delete precedent, rig-caught 2026-08-14).
+ *
+ * ---- Focused Emit (owner ask 2026-08-23): "if you have a single image in
+ * focus (double click to make it large) the widget should only output that
+ * one image" ----
+ *
+ * Focus was previously view-only: `node.imageIndex` (double-click-enlarge, a
+ * core litegraph behavior this file only ever READ, e.g.
+ * `installFocusedFullResSwap` above) never reached the backend at all.
+ * Making it real needed a new hidden TAIL-appended `focus` widget on the
+ * backend side (`nodes_image_grid.py`'s `INPUT_TYPES`/`run()` -- a resolved
+ * `focus` narrows an Emit run to EXACTLY that one buffered frame, dropping
+ * both the rest of the buffer and whatever's currently wired; a stale one
+ * -- the frame it names no longer exists -- degrades to the ordinary
+ * unfocused Emit behavior with a logged warning, never a hard error) keyed
+ * by that frame's own on-disk filename (`image_grid_store.py`'s
+ * `_next_frame_filename`: never reused even across a delete, so it stays
+ * STABLE while the frame exists, unlike an index, which shifts under one).
+ *
+ * This file's job is keeping that widget in lockstep with `node.imageIndex`
+ * in BOTH directions, entirely through primitives this section reuses
+ * rather than inventing:
+ *  - **VIEW -> WIDGET**: `syncFocusFromView` (`currentFocusedFrameId` +
+ *    `writeFocusWidget`), installed as a SECOND `onDrawBackground` wrap
+ *    (`installFocusWidgetSync`) stacked onto the one
+ *    `installFocusedFullResSwap` already owns -- there is no event to
+ *    intercept the moment core's own click handling sets or clears
+ *    `imageIndex`, so this polls it every draw the same way the full-res
+ *    swap already does for the identical property. Covers focusing,
+ *    unfocusing (however core's own UI does it -- double-click again,
+ *    Escape, the close button), AND every existing path that already resets
+ *    `imageIndex` to `null` on its own (Clear, a bulk add, deleting ANY
+ *    tile) -- none of those write the widget themselves, so the draw-time
+ *    poll is what actually clears it, no per-call-site special-casing
+ *    needed anywhere else in this file.
+ *  - **WIDGET -> VIEW**: `restoreFocusedView`, called from
+ *    `refreshFromBuffer` (the "display-on-load" section below) right after
+ *    `setNodeImagesFromRefs`. `focus` is a real serialized widget but
+ *    `imageIndex` is pure view state litegraph never saves, so a workflow
+ *    reopened with a frame focused would otherwise silently fall back to
+ *    the grid view even though the backend still narrows emission
+ *    correctly. Best-effort: an unresolvable persisted value (the frame was
+ *    deleted elsewhere) just leaves the grid showing -- the hint below
+ *    still names the narrowing.
+ *  - **The hint**: this node draws no persistent count/readout to attach a
+ *    badge to, so `updateFocusHint` reuses the file's OWN established
+ *    "mutate a widget's `.label`, not its `.name`" idiom
+ *    (`runAddBatch`'s `Cancel (n/total)`) on the `mode` widget, shown only
+ *    when it would actually change what a Run does (Emit mode AND a
+ *    resolved focus -- Collect ignores `focus` entirely).
  */
 
 import { api } from '../../../scripts/api.js'
@@ -760,6 +809,15 @@ const NODE_TITLE = 'EPS Image Grid' // FORMAT.md §6.6 display name -- toast sum
 const GRID_UUID_WIDGET_NAME = 'grid_uuid'
 const CLEAR_BUTTON_LABEL = 'Clear'
 const UUID_PROPERTY_NAME = 'uuid'
+//: 2026-08-23 focused emit (owner ask) -- the hidden backend widget that
+//: narrows an Emit run to one frame; see nodes_image_grid.py's INPUT_TYPES.
+const FOCUS_WIDGET_NAME = 'focus'
+const MODE_WIDGET_NAME = 'mode'
+//: Mirrors the backend's own stable widget value (`nodes_image_grid.py`
+//: `MODE_EMIT`) rather than importing it -- FORMAT.md §6.6 calls these mode
+//: strings frozen, user-facing identifiers once shipped (same "mirror, don't
+//: import" idiom `GRID_UUID_RE` below already uses for the backend's regex).
+const MODE_EMIT_VALUE = 'Emit'
 
 //: Mirrors the backend's own validation (`image_grid_store.py`
 //: `_GRID_UUID_RE`) rather than re-deriving a second, possibly-drifting
@@ -810,6 +868,30 @@ function hideGridUuidWidget(node) {
   // -- so with only the canvas flag, this internal widget leaked into the Vue
   // node as a raw editable text field. Canvas mode ignores `options.hidden`
   // right back, so setting both is safe everywhere.
+  widget.hidden = true
+  widget.options = { ...(widget.options || {}), hidden: true }
+}
+
+function getFocusWidget(node) {
+  return findWidget(node, FOCUS_WIDGET_NAME) || null
+}
+
+/**
+ * Hides the `focus` widget's on-canvas row -- the exact same BOTH-flags
+ * reasoning as `hideGridUuidWidget` right above (the backend's own
+ * `INPUT_TYPES` options dict already sets `options.hidden` -- the Vue-nodes
+ * half; this sets the classic-canvas `widget.hidden` flag that renderer
+ * ignores right back). Called once at attach, same as `hideGridUuidWidget`.
+ */
+function hideFocusWidget(node) {
+  const widget = getFocusWidget(node)
+  if (!widget) {
+    console.warn(
+      PREFIX,
+      'EPSImageGrid node is missing its `focus` widget; focused-frame emission will not persist'
+    )
+    return
+  }
   widget.hidden = true
   widget.options = { ...(widget.options || {}), hidden: true }
 }
@@ -1962,6 +2044,120 @@ function installFocusedFullResSwap(node) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Focused Emit (owner ask 2026-08-23): "if you have a single image in focus
+// (double click to make it large) the widget should only output that one
+// image." Focus itself (`node.imageIndex`) is entirely core's own single-
+// image-view click handling -- there is no hook to intercept the moment a
+// double-click sets or clears it, so the same "poll a cheap pure function
+// from a draw-time hook" idiom `ensureFocusedFullRes`/
+// `installFocusedFullResSwap` right above already established for this
+// EXACT property is reused here rather than inventing a second mechanism.
+//
+// `currentFocusedFrameId`/`syncFocusFromView` are the VIEW -> WIDGET
+// direction (double-click focus/unfocus, Escape/the close button, and any
+// content-changing refresh that already resets `imageIndex` to `null` on
+// its own -- Clear, a bulk add, or deleting ANY tile, focused or not,
+// `setNodeImagesFromRefs`'s existing unconditional behavior). The reverse
+// direction, WIDGET -> VIEW (a workflow reopened with `focus` already
+// serialized, restoring the enlarged view `imageIndex` itself never
+// survives a save), is `restoreFocusedView` below, in the "display-on-load"
+// section where it's actually called from (`refreshFromBuffer`).
+// ---------------------------------------------------------------------------
+
+/**
+ * The identity (an on-disk frame filename, e.g. `"0007.png"`) of the frame
+ * currently shown ENLARGED via `node.imageIndex` -- the SAME per-frame
+ * identity the backend's `focus` widget is keyed by (`nodes_image_grid.py`'s
+ * `run()`). `''` when nothing is focused (`node.imageIndex == null`) or the
+ * index doesn't (yet) resolve against `node.images` (a transient mid-
+ * rebuild state -- the next draw settles it). `node.images` is the SAME ref
+ * array `node.imgs`' thumbnails were built from (`setNodeImagesFromRefs`,
+ * both `refs.map(...)`-built together, same length/order by construction),
+ * so this never needs to touch `node.imgs` itself. Pure; exported for tests.
+ */
+export function currentFocusedFrameId(node) {
+  const index = node.imageIndex
+  if (index == null || !Array.isArray(node.images)) return ''
+  const ref = node.images[index]
+  return ref && typeof ref.filename === 'string' ? ref.filename : ''
+}
+
+/**
+ * Writes *value* into the hidden `focus` widget's real `.value`, then fires
+ * its `.callback`, if any -- the exact `writeUuid` idiom already established
+ * above for `grid_uuid` (a widget's `.callback` is a NOTIFICATION hook, not
+ * a setter, so `.value =` must happen first) -- so the graph dirties and the
+ * lead's run-count estimator recomputes. No-op when *value* already matches
+ * the widget's current one, so calling this every draw from
+ * `syncFocusFromView` costs nothing once settled and never spams the
+ * callback/dirty machinery for an unchanged view.
+ */
+function writeFocusWidget(node, value) {
+  const widget = getFocusWidget(node)
+  if (!widget || widget.value === value) return
+  widget.value = value
+  if (typeof widget.callback === 'function') {
+    widget.callback(value, app.canvas, node)
+  }
+}
+
+/**
+ * The node-level "emission is narrowed" affordance the owner's ask calls
+ * for. This node draws no persistent count/readout of its own to attach a
+ * badge to, so this reuses the file's OWN established idiom for a transient
+ * status string instead: mutating a widget's `.label` (the visible text,
+ * distinct from its stable `.name` lookup key) while a state is active --
+ * exactly `runAddBatch`'s `Cancel (n/total)` button-label mutation. Shown on
+ * `mode` (always present, always visible, right next to the widget that
+ * actually decides whether a Run reads it) only while it would truly change
+ * what a Run does: Emit mode AND a resolved focus value -- Collect ignores
+ * `focus` entirely (backend `run()`), so hinting "narrowed" there would be
+ * misleading. Idempotent; safe to call every draw.
+ */
+function updateFocusHint(node, focusValue) {
+  const modeWidget = findWidget(node, MODE_WIDGET_NAME)
+  if (!modeWidget) return
+  const narrowed = Boolean(focusValue) && modeWidget.value === MODE_EMIT_VALUE
+  modeWidget.label = narrowed ? `${MODE_WIDGET_NAME} — 1 focused, emitting only it` : undefined
+}
+
+/**
+ * Keeps the hidden `focus` widget -- the backend signal that narrows an
+ * Emit run to exactly one frame -- in lockstep with the node's OWN view
+ * state (`node.imageIndex`), and keeps the on-canvas hint (`updateFocusHint`)
+ * matching it, every draw. See this section's own header comment for why a
+ * draw-time poll is the right mechanism here (no interception point exists
+ * for the moment `imageIndex` itself changes). Exported for tests.
+ */
+export function syncFocusFromView(node) {
+  const value = currentFocusedFrameId(node)
+  writeFocusWidget(node, value)
+  updateFocusHint(node, value)
+}
+
+/**
+ * Wraps (never replaces) *node*'s `onDrawBackground`, stacking onto
+ * whatever `installFocusedFullResSwap` above already installed there --
+ * both react to the same `imageIndex` property; each preserves and calls
+ * its own captured `original`, the same chaining idiom
+ * `installCopyImageMenuItem` uses for `getExtraMenuOptions`. Guarded per
+ * instance, mirroring every other `install*` wrapper in this file.
+ */
+function installFocusWidgetSync(node) {
+  if (node.__epsGridFocusWidgetSyncInstalled) return
+  node.__epsGridFocusWidgetSyncInstalled = true
+  const original = node.onDrawBackground
+  node.onDrawBackground = function (...args) {
+    try {
+      syncFocusFromView(this)
+    } catch (error) {
+      console.warn(PREFIX, 'focus widget sync failed', error)
+    }
+    return typeof original === 'function' ? original.apply(this, args) : undefined
+  }
+}
+
 /**
  * `POST /upload/image` (core's own route) -- returns `{name, subfolder,
  * type}` on success, throws otherwise. Reimplemented directly (see file
@@ -3057,12 +3253,48 @@ const LIST_ROUTE = '/eps_image_grid/list'
 const CLONE_ROUTE = '/eps_image_grid/clone'
 
 /**
+ * Restores the enlarged single-image VIEW (`node.imageIndex`) from the
+ * hidden `focus` widget's PERSISTED value, right after a load-triggered
+ * buffer refresh (`refreshFromBuffer` below, this function's one caller).
+ * `focus` is a real, serialized widget (unlike `imageIndex`, pure view
+ * state litegraph never saves at all), so a workflow reopened with a frame
+ * focused would otherwise silently fall back to showing the grid --
+ * `setNodeImagesFromRefs` always resets `imageIndex` to `null` on the very
+ * first rebuild after a reload, same as any other content-changing
+ * refresh.
+ *
+ * Best-effort: when the persisted frame no longer resolves against the
+ * freshly loaded buffer (deleted elsewhere, a stale cross-machine save)
+ * this leaves the grid view showing -- `syncFocusFromView`'s own draw-time
+ * hint (the `mode` widget's label) still reflects the persisted `focus`
+ * value as soon as the next draw runs, so "emission is narrowed" stays
+ * visible even without a tile to enlarge, matching the backend's own
+ * degrade (`nodes_image_grid.py`'s `run()`: a stale focus warns and emits
+ * the whole buffer instead, never crashes). Never overwrites a view the
+ * node already has (`node.imageIndex != null` on entry) -- restoring is
+ * only for "nothing has decided a view yet". Pure function of *node*'s own
+ * state; exported for tests.
+ */
+export function restoreFocusedView(node) {
+  if (node.imageIndex != null) return
+  const widget = getFocusWidget(node)
+  const focusValue = widget?.value || ''
+  if (!focusValue) return
+  const refs = Array.isArray(node.images) ? node.images : []
+  const index = refs.findIndex((ref) => ref && ref.filename === focusValue)
+  if (index >= 0) node.imageIndex = index
+}
+
+/**
  * Fetches *node*'s whole on-disk buffer (`GET /eps_image_grid/list`) and
  * repopulates its displayed thumbnails to match -- FORMAT.md §6.6 "Display
  * reflects the buffer on LOAD, not only after a Run". Reuses
  * `setNodeImagesFromRefs` (the exact same "replace the node's thumbnails"
  * primitive the M2 paste-add path already uses), so a load-triggered
- * refresh renders identically to a just-added image.
+ * refresh renders identically to a just-added image; `restoreFocusedView`
+ * (2026-08-23) then re-applies a persisted `focus` widget value to the
+ * freshly loaded refs, in case this refresh is the very first one after a
+ * reload.
  *
  * Called (via `scheduleRefresh` below, never directly) from every place a
  * node's uuid can become "the one to show" without a Run: the deferred
@@ -3087,6 +3319,7 @@ async function refreshFromBuffer(node) {
     if (!data || data.ok !== true || !Array.isArray(data.refs)) return false
     noteBufferGeneration(node, data) // M2 cache-token -- see imageUrlForRef's docstring.
     setNodeImagesFromRefs(node, data.refs)
+    restoreFocusedView(node)
     node.setDirtyCanvas(true, true)
     return true // 2026-08-21: `true` = a `/list` was APPLIED (warnIfEmptyAfterRun reads it)
   } catch (error) {
@@ -3536,6 +3769,7 @@ export function attach(node) {
     const allowCollisionMint = !isGraphConfiguring()
 
     hideGridUuidWidget(node)
+    hideFocusWidget(node) // 2026-08-23 focused emit -- see its own docstring
     // Order is deliberate (owner ask 2026-07-29: "the clear button should be
     // below the two add buttons"): the two ADD actions first, then the
     // destructive one last -- the same put-Delete-last reasoning §6.3's
@@ -3561,6 +3795,7 @@ export function attach(node) {
     installUuidSerializeGuard(node) // 2026-07-24 identity hardening -- see its block comment
     installExecutedMerge(node) // 2026-07-27 focus-clobber root fix -- see its docstring
     installFocusedFullResSwap(node) // 2026-08-21 thumbnails: focused tile stays full-res
+    installFocusWidgetSync(node) // 2026-08-23 focused emit: keeps `focus` synced to imageIndex
 
     // Deferred one tick -- the paste-collision path. See file header
     // point 1 for exactly why this can't run synchronously here. Awaiting

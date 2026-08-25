@@ -135,6 +135,32 @@ class TestInputTypes:
         assert widget_type == "STRING"
         assert spec["default"] == ""
 
+    def test_focus_is_optional_string_defaulting_empty_and_hidden(self) -> None:
+        # Owner ask 2026-08-23. Optional (NOT required) for the same
+        # hand-built-/prompt reason as grid_uuid; DEFAULT_FOCUS == "" means
+        # "no frame focused" (unchanged Emit behavior).
+        input_types = EPSImageGrid.INPUT_TYPES()
+        assert "focus" not in input_types["required"]
+        widget_type, spec = input_types["optional"]["focus"]
+        assert widget_type == "STRING"
+        assert spec["default"] == ""
+        # "hidden": True is the same key nodes_image_grid.py already
+        # documents for grid_uuid as covering the Vue-nodes hide path
+        # (`options.hidden`, FORMAT.md §7.5) -- the classic-canvas half
+        # (`widget.hidden`) is set by image_grid.js at attach time.
+        assert spec["hidden"] is True
+
+    def test_focus_is_the_last_key_in_optional_a_true_tail_append(self) -> None:
+        # FORMAT.md §8's tail-only rule for backend widgets: litegraph
+        # restores a saved workflow's `widgets_values` POSITIONALLY, so an
+        # OLDER save's shorter array (ending at grid_uuid) must still line
+        # up with mode/grid_uuid unchanged -- which only holds if `focus`
+        # was appended, never inserted, into `optional`. `image` is an
+        # IMAGE-typed input (a socket, not a widget) so it doesn't occupy a
+        # widgets_values slot at all; grid_uuid and focus, both STRING, do.
+        input_types = EPSImageGrid.INPUT_TYPES()
+        assert list(input_types["optional"].keys()) == ["image", "grid_uuid", "focus"]
+
 
 class TestIsChanged:
     def test_returns_nan_with_no_args(self) -> None:
@@ -142,7 +168,9 @@ class TestIsChanged:
 
     def test_returns_nan_regardless_of_kwargs(self) -> None:
         assert math.isnan(
-            EPSImageGrid.IS_CHANGED(mode="Emit", image=None, grid_uuid=VALID_UUID)
+            EPSImageGrid.IS_CHANGED(
+                mode="Emit", image=None, grid_uuid=VALID_UUID, focus="0001.png"
+            )
         )
 
     def test_two_calls_are_never_equal(self) -> None:
@@ -393,6 +421,136 @@ class TestEmitMode:
         result = node.run(mode="Emit", image=_make_batch(2), grid_uuid=VALID_UUID)
         images, _widths, _heights = result["result"]
         assert len(images) == 2  # buffer(0) + live(2)
+
+
+class TestFocusedEmit:
+    """Owner ask 2026-08-23: "if you have a single image in focus (double
+    click to make it large) the widget should only output that one image."
+    `focus` names a buffered frame's own on-disk filename (the stable
+    per-frame identity `image_grid_store.py`'s `_next_frame_filename` never
+    reuses even across a delete -- see nodes_image_grid.py's INPUT_TYPES
+    comment for why that beats a bare index)."""
+
+    def test_focus_narrows_emit_to_exactly_that_one_frame(
+        self, fake_folder_paths: Path
+    ) -> None:
+        node = _node()
+        node.run(mode="Collect", image=_make_batch(5), grid_uuid=VALID_UUID)
+        [target] = [
+            r["filename"] for r in store.list_refs(VALID_UUID) if r["filename"] == "0003.png"
+        ]
+        result = node.run(mode="Emit", grid_uuid=VALID_UUID, focus=target)
+        images, widths, heights = result["result"]
+        assert len(images) == 1
+        assert len(widths) == 1
+        assert len(heights) == 1
+
+    def test_focused_frame_is_the_right_one_not_just_any_single_frame(
+        self, fake_folder_paths: Path
+    ) -> None:
+        # Distinct sizes per frame so the emitted one can be identified.
+        node = _node()
+        node.run(mode="Collect", image=_make_batch(1, height=4, width=4), grid_uuid=VALID_UUID)
+        node.run(mode="Collect", image=_make_batch(1, height=9, width=5), grid_uuid=VALID_UUID)
+        node.run(mode="Collect", image=_make_batch(1, height=2, width=7), grid_uuid=VALID_UUID)
+        result = node.run(mode="Emit", grid_uuid=VALID_UUID, focus="0002.png")
+        images, widths, heights = result["result"]
+        assert widths == [5]
+        assert heights == [9]
+        assert images[0].shape == (1, 9, 5, 3)
+
+    def test_focus_drops_the_wired_live_image_too_not_just_the_rest_of_the_buffer(
+        self, fake_folder_paths: Path
+    ) -> None:
+        # "should only output that ONE image" -- not that image plus
+        # whatever's currently wired (contrast the unfocused "10 + 1 -> 11"
+        # rule in TestEmitMode above).
+        node = _node()
+        node.run(mode="Collect", image=_make_batch(3), grid_uuid=VALID_UUID)
+        result = node.run(
+            mode="Emit", image=_make_batch(1), grid_uuid=VALID_UUID, focus="0002.png"
+        )
+        images, widths, heights = result["result"]
+        assert len(images) == len(widths) == len(heights) == 1
+
+    def test_stale_focus_warns_and_emits_the_whole_buffer_instead(
+        self, fake_folder_paths: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        node = _node()
+        node.run(mode="Collect", image=_make_batch(3), grid_uuid=VALID_UUID)
+        with caplog.at_level("WARNING", logger="eps_image"):
+            result = node.run(mode="Emit", grid_uuid=VALID_UUID, focus="9999.png")
+        images, widths, heights = result["result"]
+        assert len(images) == 3  # degraded to the whole buffer, not a crash
+        assert len(widths) == len(heights) == 3
+        assert any("9999.png" in record.message for record in caplog.records)
+        assert any("no longer exists" in record.message for record in caplog.records)
+
+    def test_stale_focus_with_something_wired_still_appends_it_degraded_path(
+        self, fake_folder_paths: Path
+    ) -> None:
+        # The degrade falls all the way back to ordinary unfocused Emit --
+        # including its own "buffer + wired" tail, not just the buffer.
+        node = _node()
+        node.run(mode="Collect", image=_make_batch(2), grid_uuid=VALID_UUID)
+        result = node.run(
+            mode="Emit", image=_make_batch(1), grid_uuid=VALID_UUID, focus="not-a-real-frame.png"
+        )
+        images, _widths, _heights = result["result"]
+        assert len(images) == 3  # 2 buffered + 1 wired
+
+    def test_stale_focus_on_an_empty_buffer_with_nothing_wired_stays_the_safe_blocker(
+        self, fake_folder_paths: Path, fake_execution_blocker: type
+    ) -> None:
+        # The degrade path re-enters the SAME empty-buffer safety net Emit
+        # already has -- never a new crash surface.
+        node = _node()
+        result = node.run(mode="Emit", grid_uuid=VALID_UUID, focus="0001.png")
+        images, widths, heights = result["result"]
+        for lst in (images, widths, heights):
+            assert len(lst) == 1
+            assert isinstance(lst[0], fake_execution_blocker)
+
+    def test_empty_focus_string_is_the_default_unfocused_behavior(
+        self, fake_folder_paths: Path
+    ) -> None:
+        node = _node()
+        node.run(mode="Collect", image=_make_batch(3), grid_uuid=VALID_UUID)
+        explicit_default = node.run(mode="Emit", grid_uuid=VALID_UUID, focus="")
+        omitted = node.run(mode="Emit", grid_uuid=VALID_UUID)
+        assert len(explicit_default["result"][0]) == 3
+        assert len(omitted["result"][0]) == 3
+
+    def test_collect_mode_ignores_focus_entirely(self, fake_folder_paths: Path) -> None:
+        node = _node()
+        # A stray/leftover focus value must not affect Collect's tee at all
+        # -- not even to trigger the stale-focus warning path.
+        result = node.run(
+            mode="Collect", image=_make_batch(2), grid_uuid=VALID_UUID, focus="0001.png"
+        )
+        images, _widths, _heights = result["result"]
+        assert len(images) == 2  # unchanged Collect behavior
+        assert len(store.list_refs(VALID_UUID)) == 2
+
+    def test_collect_mode_with_stale_focus_does_not_warn(
+        self, fake_folder_paths: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        node = _node()
+        with caplog.at_level("WARNING", logger="eps_image"):
+            node.run(
+                mode="Collect", image=_make_batch(1), grid_uuid=VALID_UUID, focus="9999.png"
+            )
+        assert not any("9999.png" in record.message for record in caplog.records)
+
+    def test_focus_is_a_tracked_input_a_bare_api_caller_omitting_it_still_runs(
+        self, fake_folder_paths: Path
+    ) -> None:
+        # DEFAULT_FOCUS ("") covers a hand-built /prompt that omits `focus`
+        # entirely -- same rationale as DEFAULT_GRID_UUID.
+        node = _node()
+        node.run(mode="Collect", image=_make_batch(2), grid_uuid=VALID_UUID)
+        result = node.run(mode="Emit", grid_uuid=VALID_UUID)
+        assert len(result["result"][0]) == 2
 
 
 class TestUiReporting:

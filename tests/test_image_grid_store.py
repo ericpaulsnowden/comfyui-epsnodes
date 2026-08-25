@@ -245,6 +245,70 @@ class TestReadAllAsTensors:
         assert len(tensors) == 1  # the corrupt frame is skipped, not fatal
 
 
+# ------------------------------------------------------- read_frame_as_tensor
+# (2026-08-23, owner ask: EPSImageGrid's Emit-mode `focus` narrowing --
+# nodes_image_grid.py -- needs to decode exactly ONE buffered frame without
+# paying to decode the whole buffer.)
+
+
+class TestReadFrameAsTensor:
+    def test_invalid_uuid_returns_none(self, fake_folder_paths: Path) -> None:
+        assert store.read_frame_as_tensor("not valid", "0001.png") is None
+
+    def test_unlisted_filename_returns_none(self, fake_folder_paths: Path) -> None:
+        store.append_batch(VALID_UUID, _make_batch(1))
+        assert store.read_frame_as_tensor(VALID_UUID, "0099.png") is None
+
+    def test_never_created_uuid_returns_none(self, fake_folder_paths: Path) -> None:
+        assert store.read_frame_as_tensor(VALID_UUID, "0001.png") is None
+
+    def test_path_traversal_filename_returns_none(self, fake_folder_paths: Path) -> None:
+        store.append_batch(VALID_UUID, _make_batch(1))
+        assert store.read_frame_as_tensor(VALID_UUID, "../0001.png") is None
+
+    def test_decodes_the_named_frame_with_the_right_shape(
+        self, fake_folder_paths: Path
+    ) -> None:
+        store.append_batch(VALID_UUID, _make_batch(3, height=8, width=10))
+        tensor = store.read_frame_as_tensor(VALID_UUID, "0002.png")
+        assert tensor is not None
+        assert tuple(tensor.shape) == (1, 8, 10, 3)
+
+    def test_decodes_the_correct_frame_among_several_by_pixel_value(
+        self, fake_folder_paths: Path
+    ) -> None:
+        # Each frame in `_make_batch` carries a distinct flat gray value --
+        # confirm this reads FRAME 2, not frame 1 or 3, by value.
+        batch = _make_batch(3, height=4, width=4)
+        store.append_batch(VALID_UUID, batch)
+        tensor = store.read_frame_as_tensor(VALID_UUID, "0002.png")
+        assert torch.allclose(tensor, batch[1:2], atol=1.0 / 255.0 + 1e-6)
+
+    def test_matches_read_all_as_tensors_for_the_same_frame(
+        self, fake_folder_paths: Path
+    ) -> None:
+        store.append_batch(VALID_UUID, _make_batch(2, height=5, width=6))
+        whole = store.read_all_as_tensors(VALID_UUID)
+        single = store.read_frame_as_tensor(VALID_UUID, "0001.png")
+        assert torch.equal(single, whole[0])
+
+    def test_unreadable_frame_returns_none_instead_of_raising(
+        self, fake_folder_paths: Path
+    ) -> None:
+        store.append_batch(VALID_UUID, _make_batch(1))
+        directory = fake_folder_paths / store.DIRNAME / VALID_UUID
+        (directory / "0001.png").write_bytes(b"not a real png")
+        assert store.read_frame_as_tensor(VALID_UUID, "0001.png") is None
+
+    def test_two_uuids_never_cross_read_each_others_frames(
+        self, fake_folder_paths: Path
+    ) -> None:
+        store.append_batch(VALID_UUID, _make_batch(1))
+        # OTHER_VALID_UUID has no buffer at all yet -- "0001.png" must not
+        # resolve against it just because that name exists under a sibling.
+        assert store.read_frame_as_tensor(OTHER_VALID_UUID, "0001.png") is None
+
+
 # ----------------------------------------------------------------------- clear
 
 
