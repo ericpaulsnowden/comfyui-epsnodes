@@ -29,6 +29,7 @@ Two files here are **not** workflows — don't drag them onto the canvas:
 | [`eps-test-checkpoint-switcher.json`](eps-test-checkpoint-switcher.json) | Tick several checkpoints; one queue runs once per model, with matched model/CLIP/VAE | checkpoint (only to generate) | yes — but writes nothing until you tick a checkpoint |
 | [`eps-test-model-clip-vae-switchers.json`](eps-test-model-clip-vae-switchers.json) | Model / CLIP / VAE switchers as three independent axes | checkpoint | no — the two loaders ship with nothing chosen |
 | [`eps-test-run-multiplier.json`](eps-test-run-multiplier.json) | 2 images × 4 prompts = 8 runs | none | yes — copy `eps-cross-test-prompts.md` into your library first |
+| [`eps-test-prompt-builder.json`](eps-test-prompt-builder.json) | Notebook prompts composed into combined outputs — blocks, reorder, live references (v0.76.0) | none | yes — copy `eps-cross-test-prompts.md` into your library first |
 | [`eps-test-cross-sweep.json`](eps-test-cross-sweep.json) | 3 lora strengths × 8 image/prompt pairs = 24 runs, foldered by strength | checkpoint, LoRA | no — pick a checkpoint and a saved lora state |
 | [`eps-full-pipeline.json`](eps-full-pipeline.json) | Ten of the sixteen nodes stitched into one graph — the full tour | checkpoint, LoRA, rgthree | no — pick a checkpoint, images, a video path, prompts, and a lora state |
 
@@ -135,6 +136,18 @@ wire) and every socket is STRING-coloured.
 3. **One type per node** → drag a Load Image's IMAGE onto the input: refused.
    A MODEL: refused with a short message (images and text only, for now).
    Disconnect everything and the input reads `any` again.
+
+## eps-test-prompt-builder.json — *copy one md file, press Run*
+
+**Needs:** `eps-cross-test-prompts.md` copied into your library folder (same
+file the Run Multiplier demo uses).
+
+A Prompt Notebook (2 entries selected) piped into an **EPS Prompt Builder**
+whose blocks are two other entries from the same file. Two Preview-as-Text
+nodes show the result: **two combined prompts** (the notebook's sweep axis
+passes through — incoming text first, then the blocks, joined by the
+separator widget). The canvas note walks reordering, block deletion, the
+live-reference edit test, and the loud missing-entry failure.
 
 ## eps-test-checkpoint-switcher.json — *press Run now; add models when you're ready*
 

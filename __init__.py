@@ -107,6 +107,7 @@ _routes.register(_context)
 # need the library context for their current milestones).
 _NODE_SPECS = [
     ("lora_library.nodes_notebook", "LoraLibraryNotebook", "EPS Prompt Notebook"),
+    ("lora_library.nodes_prompt_builder", "EPSPromptBuilder", "EPS Prompt Builder"),
     ("lora_library.nodes_sets", "LoraLibraryApplySet", "EPS Apply LoRA Set"),
     ("lora_library.nodes_sweep", "LoraLibrarySweep", "EPS LoRA Iterator"),
     ("lora_library.nodes_picker", "EPSLoraPicker", "EPS LoRA Picker"),

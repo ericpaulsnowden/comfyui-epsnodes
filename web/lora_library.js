@@ -13,6 +13,7 @@
 import { app } from '../../scripts/app.js'
 import * as api from './lora_library/api.js'
 import * as notebook from './lora_library/notebook.js'
+import * as promptBuilder from './lora_library/prompt_builder.js'
 import * as sets from './lora_library/sets.js'
 import * as controller from './lora_library/controller.js'
 import * as picker from './lora_library/picker.js'
@@ -90,6 +91,7 @@ app.registerExtension({
    */
   nodeCreated(node) {
     safely('notebook.attachNotebookWidget', () => notebook.attachNotebookWidget(node))
+    safely('promptBuilder.attachPromptBuilderPanel', () => promptBuilder.attachPromptBuilderPanel(node))
     safely('sets.attachApplySetBehavior', () => sets.attachApplySetBehavior(node))
     safely('picker.attachPickerPanel', () => picker.attachPickerPanel(node))
     // FORMAT.md §7.6: every node (any type) gets a chained onConfigure so a

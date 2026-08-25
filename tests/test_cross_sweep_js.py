@@ -87,6 +87,16 @@ def _pinned(*names: str) -> str:
     )
 
 
+def _builder(inputs: dict) -> dict:
+    """§6.15 Prompt Builder: passes the incoming text axis through (one
+    combined output per incoming text); unwired text input -> exactly 1."""
+    return {
+        "classType": "EPSPromptBuilder",
+        "widgets": {"file": "loras.md", "blocks": '["Neon City"]', "separator": ", "},
+        "inputs": inputs,
+    }
+
+
 def _checkpoint_switcher(names: list[str]) -> dict:
     """§6.12: every output is `selection`-array length."""
     return {
@@ -322,6 +332,39 @@ ESTIMATE_CASES = [
         },
     ),
     (
+        # §6.6 focus: a focused frame narrows Emit to exactly one image --
+        # count 1, EXACT (no >= floor), regardless of the adapter's echo.
+        "emit_grid_with_focus_counts_exactly_one",
+        {
+            "nodes": {
+                "30": _notebook("First\nSecond\n\n"),
+                "31": {
+                    "classType": "EPSImageGrid",
+                    "widgets": {"mode": "Emit", "focus": "frame-abc"},
+                    "inputs": {},
+                },
+                "5": {
+                    "classType": "EPSCrossSweep",
+                    "widgets": {"pair_mode": "multiply", "sweep_mode": "aligned"},
+                    "inputs": {
+                        "image": _link("31"),
+                        "text": _link("30", 0),
+                        "name": _link("30", 1),
+                    },
+                },
+            }
+        },
+        "5",
+        {
+            "total": 2,
+            "atLeast": False,
+            "steps": 1,
+            "pairs": 2,
+            "unknowns": [],
+            "error": None,
+        },
+    ),
+    (
         # The injected imageGridCount is a client-side ECHO of SERVER state
         # (the live node's imgs preview can lag or lie), so the number is
         # used but stays a FLOOR: atLeast True, the readout keeps its >=.
@@ -529,6 +572,60 @@ ESTIMATE_CASES = [
                     "classType": "EPSCrossSweep",
                     "widgets": {"pair_mode": "paired", "sweep_mode": "aligned"},
                     "inputs": {"text": _link("90", 1)},
+                },
+            }
+        },
+        "5",
+        {"error": "EPS Prompt Notebook has no entry selected — the queue will fail"},
+    ),
+    (
+        # §6.15 Prompt Builder passes the incoming text axis through: a
+        # 3-line notebook piped into it still means 3 runs downstream.
+        "builder_passes_the_notebook_axis_through",
+        {
+            "nodes": {
+                "30": _notebook("First\nSecond\nThird"),
+                "40": _builder({"text": _link("30", 0), "name": _link("30", 1)}),
+                "5": {
+                    "classType": "EPSCrossSweep",
+                    "widgets": {"pair_mode": "paired", "sweep_mode": "aligned"},
+                    "inputs": {"text": _link("40", 0), "name": _link("40", 1)},
+                },
+            }
+        },
+        "5",
+        {"total": 3, "atLeast": False, "steps": 1, "pairs": 3, "unknowns": [], "error": None},
+    ),
+    (
+        # Unwired text input: the builder emits exactly ONE combined prompt
+        # from its blocks alone -- never zero, never unknown.
+        "builder_with_no_text_input_is_exactly_one",
+        {
+            "nodes": {
+                "40": _builder({}),
+                "5": {
+                    "classType": "EPSCrossSweep",
+                    "widgets": {"pair_mode": "paired", "sweep_mode": "aligned"},
+                    "inputs": {"text": _link("40", 0)},
+                },
+            }
+        },
+        "5",
+        {"total": 1, "atLeast": False, "steps": 1, "pairs": 1, "unknowns": [], "error": None},
+    ),
+    (
+        # An empty notebook piped into the builder is still that queue's
+        # error -- the builder consumes the raising upstream, so the error
+        # paint must survive the pass-through.
+        "builder_propagates_the_empty_notebook_error",
+        {
+            "nodes": {
+                "90": {"classType": "LoraLibraryNotebook", "widgets": {"entry": ""}, "inputs": {}},
+                "40": _builder({"text": _link("90", 0)}),
+                "5": {
+                    "classType": "EPSCrossSweep",
+                    "widgets": {"pair_mode": "paired", "sweep_mode": "aligned"},
+                    "inputs": {"text": _link("40", 0)},
                 },
             }
         },

@@ -3203,6 +3203,58 @@ onto comfyui and recreate just that image"). Shipped v0.70.0.
   `baked: false`), `tests/test_save_image_js.py` (token grammar, verdicts,
   the chained `handleFile` wrap).
 
+## §6.15 `EPSPromptBuilder` (display: "EPS Prompt Builder") — compose from the Notebook
+
+New in v0.76.0 (owner spec 2026-08-23, four design choices confirmed the same
+day: notebook DROPDOWN as the file source; blocks are LIVE references;
+one-output-per-incoming fan-out; separator WIDGET defaulting to `", "`).
+`lora_library/nodes_prompt_builder.py` + `web/lora_library/prompt_builder.js`;
+category "EPSNodes"; class id frozen once shipped (§8).
+
+- **Purpose.** The §6.1 Notebook stays the single EDITING surface; this node
+  COMPOSES from it. Left pane mirrors one notebook file's entries (same
+  names, same order, search over titles+bodies via `include_text=1`);
+  right pane is an ordered list of BLOCKS added by double-click, reordered
+  by drag, removed by ✕ (list-only removal — never touches the file).
+- **Backend contract.** `RETURN_TYPES ("STRING","STRING")` = `text`/`name`,
+  `OUTPUT_IS_LIST (True, True)`, `INPUT_IS_LIST True` (it gathers an
+  upstream multi-select notebook's list; widgets unwrap via local helpers,
+  own-your-helpers precedent). Widgets in order: `file` (hidden — §6.1
+  semantics, resolved through the same context path as the notebook),
+  `blocks` (hidden, JSON array of entry NAMES in order; malformed → `[]` +
+  warning), `separator` (visible; `\n`/`\t`/`\\` escapes decoded; empty
+  allowed). Optional link inputs `text`/`name` (forceInput).
+- **Combine.** Per incoming text `t`: `[t if non-blank] + [block texts in
+  order]` joined by the decoded separator — piped-in text always FIRST.
+  Names pair with texts (pairwise when equal length, broadcast when single,
+  else "") and the output name joins the non-empty incoming name + block
+  names with `+`. Output length = len(incoming texts), or 1 when `text` is
+  unwired; unwired + zero blocks → `([""], [""])`, valid.
+- **Live references + `IS_CHANGED`.** A block stores the entry NAME and its
+  text is re-read at execution; `IS_CHANGED` is the notebook's file token
+  (mtime:size, "missing" fallback) so an on-disk edit — from either machine
+  — re-executes. Any block name missing from the file raises a ValueError
+  naming EVERY missing name and the file (§6.10 solo's loud posture: a
+  stale block must never silently produce a wrong prompt). The panel
+  pre-warns with a red "missing" badge on such blocks.
+- **Fan-out and the §6.10 estimator.** One combined output per incoming
+  text keeps the sweep axis: `cross_sweep.js`'s `sourceCount` has an
+  `EPSPromptBuilder` branch — count = the `text` input's upstream count
+  (error/zero propagate; cycle-guarded), or exactly 1 when unwired. This
+  branch must come before the generic list-flags rule: the node declares
+  `INPUT_IS_LIST`, which the generic rule would read as a flattener.
+- **Panel (§7 laws apply).** A DOM widget (no canvas drawing — Vue-safe)
+  built on §6.1's scaffolding: reuses `notebook.js`'s exported
+  `notebookCacheGet/Set`/`isUnchangedResponse` + `GET /lora_library/notebook
+  ?file=…&include_text=1&known_mtime=…` (instant paint from the session
+  cache, ~5 s change-gated poll — never repaint on an unchanged tick). The
+  notebook DROPDOWN lists every §6.1 node on the canvas including
+  subgraphs (api.js walkers, ':'-joined path ids), labeled title + file
+  basename, de-duplicated by file; exactly one notebook auto-selects;
+  selecting writes this node's `file` widget. `file`/`blocks` are hidden
+  BOTH ways (§7.5: options.hidden for Vue + widget.hidden for canvas).
+  All state lives in the two widgets — nothing in localStorage.
+
 ## §7 Frontend surfaces
 
 **§7.2 amendment — load-failure is an explicit, value-preserving ERROR

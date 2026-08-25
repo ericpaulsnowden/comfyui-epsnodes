@@ -1,0 +1,307 @@
+{
+  "id": "eps-test-prompt-builder",
+  "revision": 0,
+  "last_node_id": 5,
+  "last_link_id": 4,
+  "nodes": [
+    {
+      "id": 1,
+      "type": "LoraLibraryNotebook",
+      "pos": [
+        -1050,
+        240
+      ],
+      "size": [
+        420,
+        360
+      ],
+      "flags": {},
+      "order": 0,
+      "mode": 0,
+      "inputs": [
+        {
+          "localized_name": "file",
+          "name": "file",
+          "type": "STRING",
+          "widget": {
+            "name": "file"
+          },
+          "link": null
+        },
+        {
+          "localized_name": "entry",
+          "name": "entry",
+          "type": "STRING",
+          "widget": {
+            "name": "entry"
+          },
+          "link": null
+        }
+      ],
+      "outputs": [
+        {
+          "localized_name": "text",
+          "name": "text",
+          "shape": 6,
+          "type": "STRING",
+          "links": [
+            1
+          ]
+        },
+        {
+          "localized_name": "name",
+          "name": "name",
+          "shape": 6,
+          "type": "STRING",
+          "links": [
+            2
+          ]
+        }
+      ],
+      "title": "EPS Prompt Notebook (2 selected)",
+      "properties": {
+        "Node name for S&R": "LoraLibraryNotebook"
+      },
+      "widgets_values": [
+        "eps-cross-test-prompts.md",
+        "Neon City\nGolden Hour"
+      ]
+    },
+    {
+      "id": 2,
+      "type": "EPSPromptBuilder",
+      "pos": [
+        -560,
+        240
+      ],
+      "size": [
+        520,
+        420
+      ],
+      "flags": {},
+      "order": 1,
+      "mode": 0,
+      "inputs": [
+        {
+          "localized_name": "file",
+          "name": "file",
+          "type": "STRING",
+          "widget": {
+            "name": "file"
+          },
+          "link": null
+        },
+        {
+          "localized_name": "blocks",
+          "name": "blocks",
+          "type": "STRING",
+          "widget": {
+            "name": "blocks"
+          },
+          "link": null
+        },
+        {
+          "localized_name": "separator",
+          "name": "separator",
+          "type": "STRING",
+          "widget": {
+            "name": "separator"
+          },
+          "link": null
+        },
+        {
+          "localized_name": "text",
+          "name": "text",
+          "type": "STRING",
+          "link": 1
+        },
+        {
+          "localized_name": "name",
+          "name": "name",
+          "type": "STRING",
+          "link": 2
+        }
+      ],
+      "outputs": [
+        {
+          "localized_name": "text",
+          "name": "text",
+          "shape": 6,
+          "type": "STRING",
+          "links": [
+            3
+          ]
+        },
+        {
+          "localized_name": "name",
+          "name": "name",
+          "shape": 6,
+          "type": "STRING",
+          "links": [
+            4
+          ]
+        }
+      ],
+      "title": "EPS Prompt Builder",
+      "properties": {
+        "Node name for S&R": "EPSPromptBuilder"
+      },
+      "widgets_values": [
+        "eps-cross-test-prompts.md",
+        "[\"Ink Sketch\", \"Pastel Studio\"]",
+        ", "
+      ]
+    },
+    {
+      "id": 3,
+      "type": "PreviewAny",
+      "pos": [
+        -20,
+        160
+      ],
+      "size": [
+        360,
+        140
+      ],
+      "flags": {},
+      "order": 2,
+      "mode": 0,
+      "inputs": [
+        {
+          "localized_name": "source",
+          "name": "source",
+          "type": "*",
+          "link": 3
+        }
+      ],
+      "outputs": [],
+      "title": "Combined text (2 prompts)",
+      "properties": {
+        "Node name for S&R": "PreviewAny"
+      },
+      "widgets_values": []
+    },
+    {
+      "id": 4,
+      "type": "PreviewAny",
+      "pos": [
+        -20,
+        360
+      ],
+      "size": [
+        360,
+        140
+      ],
+      "flags": {},
+      "order": 3,
+      "mode": 0,
+      "inputs": [
+        {
+          "localized_name": "source",
+          "name": "source",
+          "type": "*",
+          "link": 4
+        }
+      ],
+      "outputs": [],
+      "title": "Combined name",
+      "properties": {
+        "Node name for S&R": "PreviewAny"
+      },
+      "widgets_values": []
+    },
+    {
+      "id": 5,
+      "type": "MarkdownNote",
+      "pos": [
+        -1050,
+        -430
+      ],
+      "size": [
+        880,
+        620
+      ],
+      "flags": {},
+      "order": 0,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [],
+      "title": "Note",
+      "properties": {},
+      "widgets_values": [
+        "# TEST: EPS Prompt Builder - compose from the Notebook (v0.76.0)\n\n**Setup (once):** copy `eps-cross-test-prompts.md` (next to this file in\n`examples/`) into your library folder - the same file the Run Multiplier\ndemo uses. Then press **Run**.\n\nThe Notebook on the left has **Neon City + Golden Hour** selected and is\npiped into the Builder. The Builder's blocks are **Ink Sketch, Pastel\nStudio** - live references to the same file.\n\n## Pass 1 - just Run\n\nTwo \"Preview as Text\" nodes show TWO combined prompts (one per selected\nnotebook entry - the sweep axis passes through):\n\n- `Neon City's text, Ink Sketch's text, Pastel Studio's text`\n- `Golden Hour's text, Ink Sketch's text, Pastel Studio's text`\n\nThe name preview shows `Neon City+Ink Sketch+Pastel Studio` and\n`Golden Hour+Ink Sketch+Pastel Studio`.\n\n## Pass 2 - reorder and delete\n\nDrag `Pastel Studio` above `Ink Sketch` on the Builder's right pane, Run:\nthe combined order flips. Click x on a block: only the block disappears -\nthe Notebook and the md file are untouched.\n\n## Pass 3 - live references\n\nEdit `Ink Sketch`'s text in the NOTEBOOK (not the Builder - the Builder's\nleft list is read-only on purpose), Run: the Builder picks up the new text\nautomatically. Rename an entry the Builder uses and the block turns red\n(\"missing\") and the queue fails naming it - fix by re-adding the renamed\nprompt or deleting the block.\n\n## Pass 4 - alone\n\nDisconnect the Notebook wires: the Builder still runs, emitting ONE\ncombined prompt from its blocks alone.\n"
+      ]
+    }
+  ],
+  "links": [
+    [
+      1,
+      1,
+      0,
+      2,
+      3,
+      "STRING"
+    ],
+    [
+      2,
+      1,
+      1,
+      2,
+      4,
+      "STRING"
+    ],
+    [
+      3,
+      2,
+      0,
+      3,
+      0,
+      "STRING"
+    ],
+    [
+      4,
+      2,
+      1,
+      4,
+      0,
+      "STRING"
+    ]
+  ],
+  "groups": [
+    {
+      "id": 1,
+      "title": "The library (edit here)",
+      "bounding": [
+        -1070,
+        180,
+        460,
+        460
+      ],
+      "color": "#3f789e",
+      "flags": {}
+    },
+    {
+      "id": 2,
+      "title": "Compose here",
+      "bounding": [
+        -580,
+        180,
+        560,
+        500
+      ],
+      "color": "#8A8",
+      "flags": {}
+    }
+  ],
+  "config": {},
+  "extra": {
+    "ds": {
+      "scale": 0.6,
+      "offset": [
+        1120,
+        480
+      ]
+    }
+  },
+  "version": 0.4
+}

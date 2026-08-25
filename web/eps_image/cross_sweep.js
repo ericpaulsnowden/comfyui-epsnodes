@@ -649,6 +649,26 @@ function sourceCount(snapshot, link, path) {
     }
     return { count: lines, atLeast: false, srcId: id }
   }
+  if (type === 'EPSPromptBuilder') {
+    // §6.15: one combined output per incoming `text` -- the piped-in sweep
+    // axis passes straight through (owner's chosen fan-out, 2026-08-23);
+    // with the text input unwired the node emits exactly ONE combined
+    // prompt built from its blocks alone. Never the zero/error family on
+    // its own -- build() emits [""] even with no blocks and no input --
+    // but an upstream zero/blocked/error list IS consumed, so those
+    // propagate unchanged (one blocker element blocks the consumer, and an
+    // upstream error is still this queue's error).
+    if (path.has(id)) return { count: 1, atLeast: true, srcId: id }
+    const textLink = node.inputs?.text ?? null
+    if (!textLink) return { count: 1, atLeast: false, srcId: id }
+    const inner = sourceCount(snapshot, textLink, new Set([...path, id]))
+    if (!inner) return { count: 1, atLeast: false, srcId: id }
+    if (inner.error) {
+      return { count: inner.count, atLeast: inner.atLeast, srcId: id, error: inner.error }
+    }
+    if (inner.count === 0 && !inner.atLeast) return { count: 0, atLeast: false, srcId: id }
+    return { count: inner.count, atLeast: inner.atLeast, srcId: id }
+  }
   if (type === 'EPSImageGrid') {
     // §6.6: Collect passes ONLY the wired image through and a Run
     // Multiplier fed mid-collection is counted per the §6.10 contract as
@@ -658,6 +678,15 @@ function sourceCount(snapshot, link, path) {
     // upgrades the count from "1, unknowable" to "N, still a floor":
     // atLeast stays true and the readout keeps its `≥`.
     if (node.widgets?.mode === 'Collect') return { count: 0, atLeast: false, srcId: id }
+    if (typeof node.widgets?.focus === 'string' && node.widgets.focus.trim() !== '') {
+      // §6.6 focus (owner ask 2026-08-23): a double-click-focused frame
+      // narrows Emit to exactly THAT frame -- one, no floor. A STALE focus
+      // (frame gone, cross-restart edge) makes the server degrade to the
+      // whole buffer, but the panel clears the widget whenever focus
+      // clears or the frame is deleted, so the estimate follows the
+      // honest common case rather than painting a permanent >=.
+      return { count: 1, atLeast: false, srcId: id }
+    }
     if (Number.isFinite(node.imageGridCount)) {
       return { count: node.imageGridCount, atLeast: true, srcId: id }
     }

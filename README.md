@@ -5,7 +5,7 @@ live in **plain files you own**. Everything appears under **EPSNodes** in
 the node browser and Settings. It started as a LoRA family and has grown
 beyond it — image-flow utilities now live here too.
 
-## The sixteen nodes
+## The seventeen nodes
 
 No third-party packs required — every node here runs on ComfyUI alone;
 the Lora Loader State Controller is built to extend rgthree-comfy, but only
@@ -18,6 +18,7 @@ section further down; this is the map.
 | Node | What it does | Works with |
 | --- | --- | --- |
 | [**EPS Prompt Notebook**](#eps-prompt-notebook-shipped) | Your prompt library as a node — a scrolling list of named prompts with an editor beside it, backed by a plain Markdown file you own (local or on a NAS). Select several and the workflow runs once per prompt. | Nothing — its own Markdown file (auto-created). |
+| [**EPS Prompt Builder**](#eps-prompt-builder-shipped) | Composes prompts *from* your Prompt Notebook: its entries listed on the left, a reorderable list of building blocks on the right, all combined — after any piped-in text — into one output. The notebook stays the single place you edit. | An EPS Prompt Notebook on the canvas (it defines the file). |
 | [**EPS LoRA Picker**](#eps-lora-picker-shipped) | Browse your loras by folder instead of one flat list — drill down, star favorites, see recents, pin a per-workflow folder scope — and build a selection with per-lora strengths. Outputs a `LORA_STACK`, patched model/clip, trigger words, and a filename token. | Your LoRA files; nothing else — favorites/recents live in the shared library folder. |
 | [**EPS Apply LoRA Set**](#eps-apply-lora-set-shipped) | Pick a saved lora configuration ("state") from a dropdown and apply it — which loras, order, on/off, strengths. Standalone: MODEL/CLIP in → out, plus a `LORA_STACK` and trigger words. | Your LoRA files + a saved set (via the Controller, the API, or by hand). |
 | [**EPS Lora Loader State Controller**](#eps-lora-loader-state-controller-shipped-requires-rgthree-comfy) | Captures and applies those states directly on an [rgthree Power Lora Loader](https://github.com/rgthree/rgthree-comfy) or an EPS LoRA Picker — the loader stays the loader, this moves whole configurations in and out of it. | **rgthree-comfy**'s Power Lora Loader (third-party; only those targets need it) and/or the EPS LoRA Picker (no dependency). |
@@ -147,6 +148,38 @@ captions).
   existing CRLF/LF style is preserved so cross-OS diffs stay clean.
 - The workflow stores only the file path + selected entry name — never the
   text. The file is the truth; the node is a view.
+
+## EPS Prompt Builder (shipped)
+
+`EPSNodes → EPS Prompt Builder`: the Prompt Notebook's composing partner. The
+Notebook stays your library — writing, renaming, reordering, deleting all
+happen there — and the Builder assembles prompts *out of* it:
+
+- **Left pane: your notebook's prompts,** same names, same order, with the
+  same search (titles and bodies). A dropdown at the top lists every Prompt
+  Notebook on the canvas — the Builder mirrors the selected one's Markdown
+  file; with a single notebook on the canvas it picks it automatically. The
+  list is read-only here on purpose: one place to edit, no drift.
+- **Right pane: building blocks.** Double-click a prompt on the left and it's
+  appended as a block. Drag blocks to reorder; the ✕ removes a block from
+  this list only — the notebook entry is untouched.
+- **Blocks are live references, not copies.** A block stores the entry's
+  *name*; its text is read from the file at run time, so polishing a prompt
+  in the Notebook flows straight into every Builder that uses it. A block
+  whose entry was renamed or deleted shows a red *missing* badge, and the
+  queue fails loudly naming it — never a silently wrong prompt.
+- **Combined behind the scenes:** at run time the blocks' texts are joined in
+  order into the `text` output, with a separator you control (a small
+  `separator` widget, default `", "`; type `\n` for a newline). The `name`
+  output joins the block names the same way for save paths.
+- **`text`/`name` inputs for chaining:** pipe a Prompt Notebook (or anything)
+  in and its text is prepended before your blocks. A **multi-select**
+  notebook upstream keeps its sweep axis: N incoming prompts → N combined
+  outputs, so the Run Multiplier still counts N runs — the Builder never
+  multiplies and never collapses your sweep.
+- Try `examples/eps-test-prompt-builder.json` (copy
+  `examples/eps-cross-test-prompts.md` into your library first, same file the
+  Run Multiplier demo uses).
 
 ## EPS Lora Loader State Controller (shipped; requires rgthree-comfy)
 
