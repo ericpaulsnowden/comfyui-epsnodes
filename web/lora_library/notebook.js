@@ -254,28 +254,62 @@
  * Single-tap collapse (owner ask 2026-07-19 "single tap category name to
  * collapse category"): a plain tap on a header now does TWO things at once
  * — toggleCategoryCollapse() flips its membership in
- * `state.collapsedCategories` (a plain `Set<string>`, created once per
- * node in createState() and never read by anything outside this file) and
- * selectCategory() still enters category mode, exactly as before. ONE
- * exception, added 2026-07-29 after the rename report: the tap that first
- * SELECTS a header only ever expands, never collapses, because selecting is
- * the only way to get a category's name into the editor and hiding all of its
- * entries in the same gesture read as the entries having been deleted. Taps on
- * an ALREADY-ACTIVE header toggle collapse exactly as before, so the feature
- * he asked for is intact — see toggleCategoryCollapse()'s own comment. Collapse
- * state is deliberately NOT a node property and never touches
- * `entry`/`file` — it lives only on this in-memory `Set`, so it is pure
- * per-node, per-session UI state: it survives any number of renderList()
- * redraws (renderList() reads the Set fresh every call and skips a
- * collapsed category's entry rows, still rendering the header itself) but
- * resets on a page reload, and — critically, given the file header's
- * opening promise that "only `file` + `entry` persist" — it is NEVER
- * serialized into the workflow. A collapsed category's entries are simply
- * absent from `state.dragRows` too, so they're inert (no click, no drag
- * source) until expanded again; the header itself stays a valid drop
+ * `state.collapsedCategories` (a `Set<string>`, created once per node in
+ * createState() -- the fast render-time lookup, `.has()` per category per
+ * renderList() call) and selectCategory() still enters category mode,
+ * exactly as before. ONE exception, added 2026-07-29 after the rename
+ * report: the tap that first SELECTS a header only ever expands, never
+ * collapses, because selecting is the only way to get a category's name
+ * into the editor and hiding all of its entries in the same gesture read as
+ * the entries having been deleted. Taps on an ALREADY-ACTIVE header toggle
+ * collapse exactly as before, so the feature he asked for is intact — see
+ * toggleCategoryCollapse()'s own comment. A collapsed category's entries are
+ * simply absent from `state.dragRows` too, so they're inert (no click, no
+ * drag source) until expanded again; the header itself stays a valid drop
  * TARGET either way (computeDropTarget()'s category-append geometry
  * degrades to "append after the header" when there's nothing visible
  * under it, the same fallback an actually-empty category already used).
+ *
+ * Collapsed sections persist WITH THE WORKFLOW (owner ask 2026-08-23,
+ * superseding the "never a node property, resets on reload" design above):
+ * `state.collapsedCategories` is now a CACHE the `Collapsed sections` node
+ * property (`PROP_COLLAPSED_SECTIONS`) drives, not the source of truth
+ * itself. registerCollapsedSectionsProperty() (called once from attach,
+ * right after buildUi() so `state.listEl` exists) wires the property the
+ * same way this pack's other per-instance UI-toggle properties do
+ * (resolution.js/sets.js/picker.js/switcher.js's `addProperty()` +
+ * wrapped `onPropertyChanged` idiom, cited in full at
+ * PROP_COLLAPSED_SECTIONS's own declaration): `addProperty()` seeds a
+ * fresh node's default (`[]`) but never fires `onPropertyChanged`, so
+ * `registerCollapsedSectionsProperty()` also applies it once explicitly;
+ * a RESTORED node's `configure()` runs immediately after attach (always,
+ * per the other property files' citations) and its properties-merge loop
+ * both sets `node.properties[PROP_COLLAPSED_SECTIONS]` to the SAVED array
+ * and fires the wrapped `onPropertyChanged` for it -- which re-applies the
+ * Set from that saved value and repaints -- before this panel's first
+ * ENTRIES-populated render ever runs (that render is always async, off a
+ * fetch or a cached paint, both scheduled no earlier than the SAME tick
+ * `onConfigure` runs in -- see wireConfigureReload()/reloadNow()). Sections
+ * therefore render collapsed from the first paint that has anything to
+ * show, no flash-open-then-close. Every place that used to ONLY mutate the
+ * Set -- toggleCategoryCollapse(), restoreCategoryCollapseAfterDoubleClick(),
+ * and the two rename migrations in applyRenameResult()/
+ * performSaveCategory() that move a collapsed key from the old category
+ * name to the new one -- now also calls syncCollapsedSectionsProperty(),
+ * which writes `Array.from(state.collapsedCategories)` back into the
+ * property and dirties the canvas (`node.graph?.setDirtyCanvas(true,
+ * true)`) so the workflow's next save captures it. A collapsed name the
+ * file no longer has (a deleted/renamed-away category) is simply never
+ * looked up by renderList()'s per-category loop -- it stays in the
+ * property harmlessly until the user next collapses/expands something
+ * else, at which point the fresh `Array.from()` write drops it; no
+ * separate pruning pass. A hand-edit of the property via the node's
+ * right-click Properties panel repaints the section headers through the
+ * same onPropertyChanged path, for free. The pure halves --
+ * parseCollapsedSections() (tolerant: the canonical array-of-strings shape,
+ * a JSON-encoded string of the same for a hand-edit, anything else folds to
+ * `[]`), toggleCollapsedSection() (pure array in, new array out), and
+ * isSectionCollapsed() -- are exported for tests/test_notebook_restore_js.py.
  *
  * Drag a category header (owner ask 2026-07-19 "drag category and
  * everything in it"): a header is now ALSO a drag SOURCE, not just a drop
@@ -460,6 +494,21 @@ const DRAG_THRESHOLD_PX = 4
  * re-notes on the second tap, which degrades to "expanded" -- the common
  * case -- never to the hidden-entries bug. See onCategoryPointerDown(). */
 const CATEGORY_DBLCLICK_WINDOW_MS = 1000
+
+/**
+ * Collapsed sections persist with the workflow (owner ask 2026-08-23: "I
+ * often group by type of workflow so I never want to see specific prompts
+ * in specific workflows but they keep opening up and making the list too
+ * long"). A node PROPERTY, not a widget -- same naming convention as this
+ * pack's other per-instance UI-toggle properties (controller.js's `Show
+ * status`, sets.js's `Show strength scale`/`Show loader slot`, picker.js's
+ * `Auto-grow with selection`, switcher.js's `High/low pairs`): properties
+ * serialize with the workflow (`LGraphNode.serialize`) with none of the §8
+ * positional-`widgets_values` hazard a tail STRING widget would carry, and
+ * (unlike the old `state.collapsedCategories` Set alone) they survive a
+ * save/reload. Value: an array of collapsed category NAMES -- see
+ * "Single-tap collapse" below for the registration/read/write helpers. */
+const PROP_COLLAPSED_SECTIONS = 'Collapsed sections'
 
 /** STANDARD-fs-browse.md's `fs/list` sentinel for "the top level" — this
  * pack's own default library dir (labeled) + Home, then every Windows drive
@@ -1097,6 +1146,13 @@ export function attachNotebookWidget(node) {
 
     const state = createState(node, fileWidget, entryWidget, pinnedWidget)
     buildUi(state)
+    // Collapsed sections persist with the workflow (file header "Single-tap
+    // collapse" -> "Collapsed sections persist WITH THE WORKFLOW"): must run
+    // after buildUi() (state.listEl has to exist for the explicit initial
+    // apply's eventual renderList() calls) and before this function returns,
+    // so the wrapped onPropertyChanged is in place before ComfyUI's next
+    // `node.configure()` call for a restored node.
+    registerCollapsedSectionsProperty(state)
     hideFileWidget(state)
     hidePinnedWidget(state)
     wireFileWidget(state)
@@ -1192,10 +1248,15 @@ function createState(node, fileWidget, entryWidget, pinnedWidget = null) {
     // what the user has typed. See beginInlineRename().
     inlineRename: null,
     // Single-tap collapse (FORMAT.md §7.2 amendment, owner ask 2026-07-19)
-    // — category names currently collapsed in the left list. Pure UI/
-    // session state: never read outside this file, never serialized, reset
-    // on reload of the page (not on reloadNow()/renderList(), which read it
-    // fresh every call — see toggleCategoryCollapse()).
+    // — category names currently collapsed in the left list. Never read
+    // outside this file (reloadNow()/renderList() read it fresh every call
+    // — see toggleCategoryCollapse()). Replaced wholesale (not mutated
+    // key-by-key) by applyCollapsedSectionsFromProperty() whenever the
+    // `Collapsed sections` node property changes — see the file header's
+    // "Collapsed sections persist WITH THE WORKFLOW" paragraph; it is a
+    // render-time CACHE over that property now, not its own source of
+    // truth. registerCollapsedSectionsProperty() (attach) seeds it from
+    // the (possibly saved) property before this Set is ever read.
     collapsedCategories: new Set(),
     // v0.68.1: the collapse state of a category header as of the FIRST tap
     // of a would-be double-click pair -- {category, collapsed, at}; see
@@ -3387,10 +3448,140 @@ function buildCategoryHeaderRow(state, category) {
   return headerEl
 }
 
+// ---------------------------------------------------------------------------
+// Collapsed sections persist with the workflow (owner ask 2026-08-23) — the
+// pure array helpers, then the node-property registration/read/write halves
+// that keep `state.collapsedCategories` (the render-time cache) and
+// `node.properties[PROP_COLLAPSED_SECTIONS]` (the source of truth) in sync.
+// See the file header's "Single-tap collapse" section for the full design.
+// ---------------------------------------------------------------------------
+
+/**
+ * Tolerant parse of the `Collapsed sections` node property into an array of
+ * category-name strings. Accepts the canonical shape (an array, non-string
+ * entries dropped), a JSON-encoded string of the same (what a hand-edit
+ * through the node's Properties panel round-trips as), or anything else --
+ * `undefined`/`null`/malformed JSON/a non-array all fold to `[]`. Never
+ * throws.
+ * @param {unknown} raw
+ * @returns {string[]}
+ */
+export function parseCollapsedSections(raw) {
+  if (Array.isArray(raw)) return raw.filter((name) => typeof name === 'string')
+  if (typeof raw === 'string') {
+    const trimmed = raw.trim()
+    if (!trimmed) return []
+    let parsed
+    try {
+      parsed = JSON.parse(trimmed)
+    } catch {
+      return []
+    }
+    return Array.isArray(parsed) ? parsed.filter((name) => typeof name === 'string') : []
+  }
+  return []
+}
+
+/**
+ * Returns a NEW array with `name` toggled in/out of `list` -- pure, never
+ * mutates its argument (this file's other list-transform helpers, e.g.
+ * `parseSelectionValue`'s callers, follow the same rule).
+ * @param {string[]} list
+ * @param {string} name
+ * @returns {string[]}
+ */
+export function toggleCollapsedSection(list, name) {
+  const current = Array.isArray(list) ? list : []
+  return current.includes(name) ? current.filter((entry) => entry !== name) : [...current, name]
+}
+
+/**
+ * Whether `name` is collapsed per `list` -- tolerant, a non-array `list`
+ * reads as "nothing collapsed" rather than throwing.
+ * @param {string[]} list
+ * @param {string} name
+ * @returns {boolean}
+ */
+export function isSectionCollapsed(list, name) {
+  return Array.isArray(list) && list.includes(name)
+}
+
+/**
+ * Registers the `Collapsed sections` property and wires it live -- called
+ * once from attach(), right after buildUi() (state.listEl must exist for
+ * the render calls below). Mirrors this pack's existing per-instance
+ * UI-toggle-property idiom (resolution.js's Show original size/Show
+ * passthrough, sets.js's Show strength scale/Show loader slot, picker.js's
+ * Auto-grow with selection, switcher.js's High/low pairs): `addProperty()`
+ * is a silent, unconditional `node.properties[name] = default` -- it never
+ * fires `onPropertyChanged` -- so a FRESH node needs the explicit
+ * `applyCollapsedSectionsFromProperty()` call below it. A RESTORED node's
+ * `configure()` runs immediately after attach() returns (every one of the
+ * files above cites the same LGraphNode.ts ordering) and its
+ * properties-merge loop both overwrites `node.properties[...]` with the
+ * FILE's saved array and fires the wrapped `onPropertyChanged` for it --
+ * which re-applies the Set and repaints -- so the saved value always wins
+ * last, before any entries-populated render exists to show a flash.
+ */
+function registerCollapsedSectionsProperty(state) {
+  const node = state.node
+  if (typeof node.addProperty === 'function') {
+    node.addProperty(PROP_COLLAPSED_SECTIONS, [], 'array')
+  } else {
+    node.properties = node.properties || {}
+    if (!(PROP_COLLAPSED_SECTIONS in node.properties)) node.properties[PROP_COLLAPSED_SECTIONS] = []
+  }
+  const original = node.onPropertyChanged
+  node.onPropertyChanged = function (name, value, prevValue) {
+    const result = original?.call(this, name, value, prevValue)
+    if (name === PROP_COLLAPSED_SECTIONS) {
+      // Covers BOTH configure()'s restore (the saved array lands here) and a
+      // live hand-edit through the node's right-click Properties panel --
+      // the latter is the nice-to-have "a hand-edited property repaints the
+      // section headers" (owner ask's implementation note).
+      applyCollapsedSectionsFromProperty(state)
+      renderList(state)
+    }
+    return result
+  }
+  // addProperty() alone never fires onPropertyChanged (see above) -- sync a
+  // FRESH node's Set explicitly now; a RESTORED node's configure() does this
+  // again momentarily with the real saved value via the wrapper just above.
+  applyCollapsedSectionsFromProperty(state)
+}
+
+/**
+ * READ half: replaces the contents of `state.collapsedCategories` (the
+ * render-time cache -- unchanged `.has()` calls throughout renderList()/
+ * buildCategoryHeaderRow()) with whatever the node property currently says.
+ * Never writes the property or dirties the canvas -- see
+ * syncCollapsedSectionsProperty() for the write half.
+ */
+function applyCollapsedSectionsFromProperty(state) {
+  const names = parseCollapsedSections(state.node.properties?.[PROP_COLLAPSED_SECTIONS])
+  state.collapsedCategories = new Set(names)
+}
+
+/**
+ * WRITE half: folds the CURRENT `state.collapsedCategories` Set back into
+ * the node property and dirties the canvas so the workflow's next save
+ * captures it -- called from every place that mutates the Set (the toggle
+ * below, the double-click restore, and the two rename migrations that move
+ * a collapsed key from the old category name to the new one).
+ */
+function syncCollapsedSectionsProperty(state) {
+  const node = state.node
+  node.properties = node.properties || {}
+  node.properties[PROP_COLLAPSED_SECTIONS] = Array.from(state.collapsedCategories)
+  node.graph?.setDirtyCanvas(true, true)
+}
+
 /** Single-tap collapse (FORMAT.md §7.2 amendment, owner ask 2026-07-19) —
- * flips `category`'s membership in the session-only `state.collapsedCategories`
- * Set and re-renders; see the file header for why this never touches
- * serialization. Called unconditionally on every tap (see
+ * flips `category`'s membership in `state.collapsedCategories` and
+ * re-renders; the Set is now a cache over the `Collapsed sections` node
+ * property (see the file header) rather than session-only state, so every
+ * mutation here also calls syncCollapsedSectionsProperty() to write it
+ * through and dirty the canvas. Called unconditionally on every tap (see
  * onCategoryPointerDown()/the header's own keydown handler above) — even
  * when the category is already active, since re-selecting it is a no-op
  * for selectCategory() but the collapse toggle must still happen.
@@ -3408,7 +3599,7 @@ function toggleCategoryCollapse(state, category) {
   if (state.activeCategory !== category) {
     // The selecting tap: never hide the contents, but do reveal them if this
     // header was sitting collapsed.
-    state.collapsedCategories.delete(category)
+    if (state.collapsedCategories.delete(category)) syncCollapsedSectionsProperty(state)
     renderList(state)
     return
   }
@@ -3417,6 +3608,7 @@ function toggleCategoryCollapse(state, category) {
   } else {
     state.collapsedCategories.add(category)
   }
+  syncCollapsedSectionsProperty(state)
   renderList(state)
 }
 
@@ -3425,7 +3617,9 @@ function toggleCategoryCollapse(state, category) {
  * state as of the pair's FIRST pointerdown (onCategoryPointerDown); this
  * puts it back and repaints so beginInlineRename() mounts on the fresh row.
  * No memo for this header (keyboard taps, a stale note from another
- * header) means nothing to restore.
+ * header) means nothing to restore. Also writes through the property (owner
+ * ask 2026-08-23) since this is a genuine collapse-state mutation, same as
+ * toggleCategoryCollapse() above.
  */
 function restoreCategoryCollapseAfterDoubleClick(state, category) {
   const memo = state.categoryTapMemo
@@ -3434,6 +3628,7 @@ function restoreCategoryCollapseAfterDoubleClick(state, category) {
   if (state.collapsedCategories.has(category) === memo.collapsed) return
   if (memo.collapsed) state.collapsedCategories.add(category)
   else state.collapsedCategories.delete(category)
+  syncCollapsedSectionsProperty(state)
   renderList(state)
 }
 
@@ -4375,8 +4570,13 @@ function applyRenameResult(state, kind, name, renameTo, data) {
 
   if (kind === 'category') {
     // Collapse is tracked by NAME, so the key has to move with the rename or
-    // a collapsed category springs open (and vice versa).
-    if (state.collapsedCategories.delete(name)) state.collapsedCategories.add(renameTo)
+    // a collapsed category springs open (and vice versa); the persisted
+    // property (file header "Collapsed sections persist...") has to move
+    // with it too, or the workflow's next save loses the migration.
+    if (state.collapsedCategories.delete(name)) {
+      state.collapsedCategories.add(renameTo)
+      syncCollapsedSectionsProperty(state)
+    }
     if (state.activeCategory === name) {
       state.activeCategory = renameTo
       state.nameFieldEl.value = renameTo
@@ -4948,8 +5148,11 @@ async function performSaveCategory(state, { force = false } = {}) {
     syncNotebookCache(state, data) // session cache (file header)
     if (renameTo && state.collapsedCategories.delete(name)) {
       // Collapse tracks by NAME -- migrate the key whether or not the user
-      // moved on mid-flight, or the renamed category springs open.
+      // moved on mid-flight, or the renamed category springs open. The
+      // persisted property has to move with it too (file header "Collapsed
+      // sections persist...").
       state.collapsedCategories.add(renameTo)
+      syncCollapsedSectionsProperty(state)
     }
     if (state.activeCategory !== name) {
       renderList(state)

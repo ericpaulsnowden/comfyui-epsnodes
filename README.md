@@ -149,6 +149,14 @@ captions).
 - The workflow stores only the file path + selected entry name — never the
   text. The file is the truth; the node is a view.
 
+- **Closed sections stay closed — per workflow (v0.79.0).** Collapse a
+  category (`#` heading) and that workflow remembers it: the state saves
+  with the workflow and the sections render collapsed from the first paint
+  on reload. Group prompts by workflow type and each workflow keeps its own
+  view — the sections you never want to see there stop re-opening. (It's a
+  right-click node property, `Collapsed sections`, if you ever want to
+  hand-edit it.)
+
 ## EPS Prompt Builder (shipped)
 
 `EPSNodes → EPS Prompt Builder`: the Prompt Notebook's composing partner. The

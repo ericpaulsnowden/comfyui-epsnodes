@@ -418,6 +418,27 @@ execution — **the file is the truth; the UI is a view.**
 
 ### §6.1 `LoraLibraryNotebook` (display: "EPS Prompt Notebook")
 
+**Collapsed sections persist per workflow (v0.79.0, owner ask 2026-08-23:
+"I often group by type of workflow so I never want to see specific prompts
+in specific workflows but they keep opening up").** The panel's
+`state.collapsedCategories` Set became a render-time CACHE over
+`node.properties['Collapsed sections']` (an array of collapsed category
+names — a PROPERTY, not a widget, so no §8 positional hazard; Title-Case
+name per the pack's property convention). Registered at attach via the
+addProperty + wrapped-onPropertyChanged + explicit-apply idiom; since
+attach precedes `configure()` and the entries-populated render is always
+async, configure's properties loop lands the saved array before the first
+real paint — collapsed from first paint, no flash. All five Set-mutation
+sites write through (`syncCollapsedSectionsProperty` + setDirtyCanvas):
+both `toggleCategoryCollapse` branches,
+`restoreCategoryCollapseAfterDoubleClick`, and the two rename-migration
+sites. Unknown names are kept harmlessly and drop out on the next write.
+A hand-edited property repaints. No localStorage anywhere in the path.
+Pure helpers `parseCollapsedSections`/`toggleCollapsedSection`/
+`isSectionCollapsed` exported. (Tap semantics unchanged: the selecting tap
+on an inactive header only reveals; the second tap toggles.)
+
+
 **NAS round (v0.74.0, 2026-08-22; owner: "sometimes looks broken but just
 takes over a minute to load, even when just tabbing between open
 workflows", usually from a remote browser):** the notebook routes no longer

@@ -423,7 +423,10 @@ const out = {
   exports: {
     notebookCacheGet: typeof nb.notebookCacheGet === 'function',
     notebookCacheSet: typeof nb.notebookCacheSet === 'function',
-    isUnchangedResponse: typeof nb.isUnchangedResponse === 'function'
+    isUnchangedResponse: typeof nb.isUnchangedResponse === 'function',
+    parseCollapsedSections: typeof nb.parseCollapsedSections === 'function',
+    toggleCollapsedSection: typeof nb.toggleCollapsedSection === 'function',
+    isSectionCollapsed: typeof nb.isSectionCollapsed === 'function'
   }
 }
 out.missBeforeSet = nb.notebookCacheGet('a.md')
@@ -457,6 +460,44 @@ out.pickServerFolder = [
   await nb.pickServerFolder({ title: 'x', startDir: '/nowhere' }),
   await nb.pickServerFolder({ isLocal: false }),
   await nb.pickServerFolder()
+]
+
+// Collapsed sections persist with the workflow (owner ask 2026-08-23) --
+// the pure array helpers behind the `Collapsed sections` node property.
+out.collapsedParse = [
+  nb.parseCollapsedSections(['A', 'B']),
+  nb.parseCollapsedSections(['A', 1, null, 'B', {}]), // non-strings dropped
+  nb.parseCollapsedSections('["A","B"]'), // a hand-edited JSON string round-trips
+  nb.parseCollapsedSections('not json'), // malformed JSON folds to []
+  nb.parseCollapsedSections('[1,2]'), // a JSON array of non-strings folds to []
+  nb.parseCollapsedSections(''), // blank string
+  nb.parseCollapsedSections('   '), // whitespace-only string
+  nb.parseCollapsedSections(null),
+  nb.parseCollapsedSections(undefined),
+  nb.parseCollapsedSections(42),
+  nb.parseCollapsedSections({ A: true }) // a plain object, not an array
+]
+const onceCollapsed = nb.toggleCollapsedSection([], 'A')
+const twiceCollapsed = nb.toggleCollapsedSection(onceCollapsed, 'A')
+const addInput = ['A']
+const addResult = nb.toggleCollapsedSection(addInput, 'B')
+const removeInput = ['A', 'B']
+const removeResult = nb.toggleCollapsedSection(removeInput, 'A')
+out.collapsedToggle = {
+  onceCollapsed,
+  twiceCollapsed, // toggling twice round-trips to empty
+  addInput, // the original array must be untouched (pure)
+  addResult,
+  removeInput,
+  removeResult,
+  nonArrayInput: nb.toggleCollapsedSection(null, 'A')
+}
+out.collapsedIsSection = [
+  nb.isSectionCollapsed(['A', 'B'], 'A'),
+  nb.isSectionCollapsed(['A', 'B'], 'C'),
+  nb.isSectionCollapsed([], 'A'),
+  nb.isSectionCollapsed(null, 'A'),
+  nb.isSectionCollapsed(undefined, 'A')
 ]
 process.stdout.write(JSON.stringify(out))
 """
@@ -788,3 +829,196 @@ def test_single_load_per_restore_logic_is_intact_around_the_cache(source: str) -
     assert "state.configureReloaded = true" in wire
     assert "syncPinnedFromWidget(state)" in wire
     assert "notebookCache" not in wire
+
+
+# ---------------------------------------------------------------------------
+# Collapsed sections persist with the workflow (owner ask 2026-08-23: "I
+# often group by type of workflow so I never want to see specific prompts
+# in specific workflows but they keep opening up and making the list too
+# long"). Before this round, `state.collapsedCategories` was session/
+# per-node UI state that reset on every page reload (the old "Single-tap
+# collapse" design, still described -- historically -- earlier in the file
+# header). Now a `Collapsed sections` node PROPERTY (array of collapsed
+# category names) is the source of truth, restored the same way this pack's
+# other per-instance UI-toggle properties are (resolution.js's Show original
+# size, sets.js's Show strength scale, picker.js's Auto-grow with selection,
+# switcher.js's High/low pairs): `addProperty()` at attach + a wrapped
+# `onPropertyChanged` + one explicit initial apply call. `state.
+# collapsedCategories` is now a CACHE over that property, not its own source
+# of truth -- see registerCollapsedSectionsProperty()/
+# applyCollapsedSectionsFromProperty()/syncCollapsedSectionsProperty().
+# ---------------------------------------------------------------------------
+
+
+def test_collapsed_sections_pure_helpers_are_exported(cache_api: dict) -> None:
+    assert cache_api["exports"]["parseCollapsedSections"] is True
+    assert cache_api["exports"]["toggleCollapsedSection"] is True
+    assert cache_api["exports"]["isSectionCollapsed"] is True
+
+
+def test_parse_collapsed_sections_is_tolerant(cache_api: dict) -> None:
+    """CONTRACT: the canonical array-of-strings shape, and a JSON-encoded
+    string of the same (a hand-edit through the node's Properties panel
+    round-trips as a string) both parse; everything else -- malformed JSON,
+    a JSON array of non-strings, blank/whitespace, null, undefined, a bare
+    number, a plain object -- folds to `[]` rather than throwing."""
+    parsed = cache_api["collapsedParse"]
+    assert parsed[0] == ["A", "B"]
+    assert parsed[1] == ["A", "B"]  # non-string array entries dropped
+    assert parsed[2] == ["A", "B"]  # JSON-encoded string round-trips
+    assert parsed[3] == []  # malformed JSON
+    assert parsed[4] == []  # JSON array of non-strings
+    assert parsed[5] == []  # blank string
+    assert parsed[6] == []  # whitespace-only string
+    assert parsed[7] == []  # null
+    assert parsed[8] == []  # undefined
+    assert parsed[9] == []  # a bare number
+    assert parsed[10] == []  # a plain object, not an array
+
+
+def test_toggle_collapsed_section_round_trips_and_never_mutates_its_input(
+    cache_api: dict,
+) -> None:
+    toggle = cache_api["collapsedToggle"]
+    assert toggle["onceCollapsed"] == ["A"]
+    assert toggle["twiceCollapsed"] == []  # toggling twice round-trips to empty
+    assert toggle["addInput"] == ["A"], "the original array must be untouched"
+    assert toggle["addResult"] == ["A", "B"]
+    assert toggle["removeInput"] == ["A", "B"], "the original array must be untouched"
+    assert toggle["removeResult"] == ["B"]
+    assert toggle["nonArrayInput"] == ["A"], "a non-array list reads as empty, not a throw"
+
+
+def test_is_section_collapsed_is_tolerant(cache_api: dict) -> None:
+    assert cache_api["collapsedIsSection"] == [True, False, False, False, False]
+
+
+def test_collapsed_sections_property_is_registered_right_after_build_ui(source: str) -> None:
+    """Must run before `attachNotebookWidget` returns, and specifically
+    after `buildUi(state)` (state.listEl has to exist for the property
+    wiring's render calls), so the wrapped onPropertyChanged is already in
+    place before ComfyUI's next `node.configure()` call for a restored
+    node."""
+    attach = source.split("export function attachNotebookWidget(node)", 1)[1].split("\n}\n", 1)[0]
+    assert "registerCollapsedSectionsProperty(state)" in attach
+    assert attach.index("buildUi(state)") < attach.index("registerCollapsedSectionsProperty(state)")
+
+
+def test_collapsed_sections_property_follows_the_packs_property_idiom(source: str) -> None:
+    """Same shape as resolution.js/sets.js/picker.js/switcher.js's own
+    per-instance UI-toggle properties: addProperty() (a silent seed that
+    never fires onPropertyChanged) + a CHAINED onPropertyChanged (never
+    replaced -- other wiring may already own it) + one explicit initial
+    apply call so a fresh node (no configure() coming) is synced too."""
+    assert "const PROP_COLLAPSED_SECTIONS = 'Collapsed sections'" in source
+    reg = source.split("function registerCollapsedSectionsProperty(state)", 1)[1]
+    reg = reg.split("\n}\n", 1)[0]
+    assert "node.addProperty(PROP_COLLAPSED_SECTIONS, [], 'array')" in reg
+    assert "const original = node.onPropertyChanged" in reg
+    assert "node.onPropertyChanged = function (name, value, prevValue) {" in reg
+    assert "original?.call(this, name, value, prevValue)" in reg
+    assert "if (name === PROP_COLLAPSED_SECTIONS) {" in reg
+    assert "applyCollapsedSectionsFromProperty(state)" in reg
+    assert "renderList(state)" in reg
+    # the explicit initial apply call sits OUTSIDE (after) the wrapper --
+    # it must run unconditionally, not only when a property change fires.
+    # The wrapper's own closing brace is the LAST "}" in `reg` (nothing after
+    # it but that trailing call), so rsplit's second half is "after it".
+    after_wrapper = reg.rsplit("}", 1)[1]
+    assert reg.count("applyCollapsedSectionsFromProperty(state)") == 2
+    assert "applyCollapsedSectionsFromProperty(state)" in after_wrapper
+
+
+def test_apply_collapsed_sections_from_property_reads_through_the_tolerant_parser(
+    source: str,
+) -> None:
+    apply_fn = _body(source, "applyCollapsedSectionsFromProperty(state)")
+    assert "parseCollapsedSections(state.node.properties?.[PROP_COLLAPSED_SECTIONS])" in apply_fn
+    assert "state.collapsedCategories = new Set(names)" in apply_fn
+
+
+def test_sync_collapsed_sections_property_writes_and_dirties_the_canvas(source: str) -> None:
+    sync = _body(source, "syncCollapsedSectionsProperty(state)")
+    assert (
+        "node.properties[PROP_COLLAPSED_SECTIONS] = Array.from(state.collapsedCategories)" in sync
+    )
+    assert "node.graph?.setDirtyCanvas(true, true)" in sync
+
+
+def test_every_collapse_mutation_site_writes_through_the_property(source: str) -> None:
+    """Both toggleCategoryCollapse() branches (the selecting tap that may
+    reveal a collapsed header, and the already-active toggle), the
+    double-click restore, and the two rename migrations (applyRenameResult's
+    category branch, performSaveCategory's rename branch) all mutate
+    `state.collapsedCategories` -- every one of them must also call
+    syncCollapsedSectionsProperty() or a toggle would be forgotten on the
+    next workflow save."""
+    toggle = source.split("function toggleCategoryCollapse(state, category)", 1)[1]
+    toggle = toggle.split("\n/**", 1)[0]
+    assert toggle.count("syncCollapsedSectionsProperty(state)") == 2
+
+    restore = source.split(
+        "function restoreCategoryCollapseAfterDoubleClick(state, category)", 1
+    )[1]
+    restore = restore.split("\n}\n", 1)[0]
+    assert "syncCollapsedSectionsProperty(state)" in restore
+
+    rename_result = source.split("function applyRenameResult(", 1)[1].split("\n// ---", 1)[0]
+    assert "syncCollapsedSectionsProperty(state)" in rename_result
+    # still pins the two literal lines test_rename_result_updates_every_home_of_the_old_name
+    # depends on -- the write-through is additive, not a replacement.
+    assert "state.collapsedCategories.delete(name)" in rename_result
+    assert "state.collapsedCategories.add(renameTo)" in rename_result
+
+    save_category_start = source.index(
+        "async function performSaveCategory(state, { force = false } = {})"
+    )
+    save_category_slice = source[save_category_start : save_category_start + 3000]
+    assert "if (renameTo && state.collapsedCategories.delete(name)) {" in save_category_slice
+    assert "state.collapsedCategories.add(renameTo)" in save_category_slice
+    assert "syncCollapsedSectionsProperty(state)" in save_category_slice
+
+
+def test_collapse_state_is_a_cache_over_the_property_not_its_own_source(source: str) -> None:
+    """`state.collapsedCategories` must never be treated as authoritative on
+    its own any more -- createState()'s own comment (and the file header)
+    say so, and the render-time reads (renderList/buildCategoryHeaderRow)
+    stay untouched `.has()` calls, unaffected by where the Set's contents
+    actually come from."""
+    create_state = source.split("collapsedCategories: new Set(),", 1)[0][-900:]
+    assert "render-time CACHE over that property now" in create_state
+    assert "applyCollapsedSectionsFromProperty()" in create_state
+
+
+def test_collapse_persistence_never_reaches_for_localstorage(source: str) -> None:
+    """The owner ask is specifically to persist WITH THE WORKFLOW (a node
+    property, serialized with the graph) -- not a browser-local stash that
+    would desync between machines or a re-imported workflow. This file must
+    not introduce ANY localStorage usage to get there."""
+    assert "localStorage" not in source
+
+
+def test_collapsed_sections_export_list_is_additive(source: str) -> None:
+    """Every export this file shipped before this round must still be
+    there -- prompt_builder.js and controller.js import a subset of these
+    by name (tests/test_prompt_builder_js.py, tests/test_pll_bridge_js.py)
+    -- and the three new pure helpers are exported alongside them."""
+    pre_existing = (
+        "export function attachNotebookWidget(node)",
+        "export function pickServerFolder(options = {})",
+        "export function notebookCacheGet(file)",
+        "export function notebookCacheSet(file, payload, mtime)",
+        "export function isUnchangedResponse(data)",
+        "export function parsePinned(raw)",
+        "export function pinnedDrift(pin, entryTextByName, libraryLoaded = true)",
+        "export function pinnedBadgeText(pin, status)",
+    )
+    for signature in pre_existing:
+        assert signature in source, signature
+    for signature in (
+        "export function parseCollapsedSections(raw)",
+        "export function toggleCollapsedSection(list, name)",
+        "export function isSectionCollapsed(list, name)",
+    ):
+        assert signature in source, signature
+    assert source.count("\nexport function ") == len(pre_existing) + 3
