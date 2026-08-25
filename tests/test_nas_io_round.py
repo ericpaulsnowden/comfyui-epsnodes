@@ -813,3 +813,79 @@ async def test_post_sets_open_folder_unreachable_library_is_400_naming_the_folde
     body = await resp.json()
     assert "unreachable" in body["error"] and "blocker" in body["error"]
     assert calls == []
+
+
+# ------------------- v0.80.1: gvfs/FUSE rename-over-existing fallback
+
+
+class TestGvfsReplaceFallback:
+    """Owner's Linux box saves to a gvfs SMB mount, where os.replace onto an
+    EXISTING target raises FileExistsError (FUSE quirk; POSIX rename would
+    replace). Both atomic writers must fall back to unlink+replace."""
+
+    @staticmethod
+    def _flaky_replace(monkeypatch, module):
+        import os as real_os
+
+        calls = {"n": 0}
+        original = real_os.replace
+
+        def replace(src, dst):
+            calls["n"] += 1
+            if calls["n"] == 1 and Path(dst).exists():
+                raise FileExistsError(17, "File exists", str(src), None, str(dst))
+            return original(src, dst)
+
+        monkeypatch.setattr(module.os, "replace", replace)
+        return calls
+
+    def test_context_writer_survives_eexist(self, tmp_path, monkeypatch) -> None:
+        from lora_library import context as ctx
+
+        target = tmp_path / "notes.md"
+        target.write_text("old", encoding="utf-8")
+        calls = self._flaky_replace(monkeypatch, ctx)
+        ctx._atomic_write_text(target, "new content")
+        assert target.read_text(encoding="utf-8") == "new content"
+        assert calls["n"] == 2  # failed once, fell back
+        assert not list(tmp_path.glob("*.tmp"))  # no temp litter
+
+    def test_context_writer_fresh_file_never_needs_the_fallback(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        from lora_library import context as ctx
+
+        target = tmp_path / "fresh.md"
+        calls = self._flaky_replace(monkeypatch, ctx)
+        ctx._atomic_write_text(target, "hello")
+        assert target.read_text(encoding="utf-8") == "hello"
+        assert calls["n"] == 1
+
+    def test_grid_store_writer_survives_eexist(self, tmp_path, monkeypatch) -> None:
+        from eps_image import image_grid_store as store
+
+        target = tmp_path / "manifest.json"
+        target.write_bytes(b"old")
+        calls = self._flaky_replace(monkeypatch, store)
+        store._atomic_write_bytes(target, b"new bytes")
+        assert target.read_bytes() == b"new bytes"
+        assert calls["n"] == 2
+        assert not list(tmp_path.glob("*.tmp"))
+
+    def test_rename_never_working_falls_back_to_a_direct_write(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        # A mount where rename NEVER works (even after the unlink): the
+        # last-resort direct write must leave the target present with the
+        # full new content -- never gone, never half of each.
+        from lora_library import context as ctx
+
+        target = tmp_path / "notes.md"
+        target.write_text("old", encoding="utf-8")
+
+        def always_eexist(src, dst):
+            raise FileExistsError(17, "File exists", str(src), None, str(dst))
+
+        monkeypatch.setattr(ctx.os, "replace", always_eexist)
+        ctx._atomic_write_text(target, "new")
+        assert target.read_text(encoding="utf-8") == "new"

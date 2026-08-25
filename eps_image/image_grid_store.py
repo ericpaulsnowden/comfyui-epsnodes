@@ -129,7 +129,29 @@ def _atomic_write_bytes(path: Path, data: bytes) -> None:
     try:
         with os.fdopen(fd, "wb") as fh:
             fh.write(data)
-        os.replace(tmp_name, path)
+        try:
+            os.replace(tmp_name, path)
+        except FileExistsError:
+        # gvfs/FUSE network mounts (owner's Linux box, 2026-08-25:
+        # /run/user/1000/gvfs/smb-share:...) reject rename-over-existing
+        # with EEXIST even though POSIX rename replaces -- so EVERY save to
+        # an already-existing file on such a mount failed. Fall back to
+        # unlink + replace: a tiny non-atomic window in which the target is
+        # briefly missing, strictly better than the save always failing.
+        # No data is at risk in the window -- the temp file next to the
+        # target already holds the complete new content, and a crash inside
+        # the window leaves that .tmp recoverable in the same directory.
+            with contextlib.suppress(FileNotFoundError):
+                os.unlink(path)
+            try:
+                os.replace(tmp_name, path)
+            except OSError:
+                # The target is unlinked at this point -- if the rename
+                # STILL fails, a direct write is the last resort that
+                # leaves the target present with the full new content
+                # (the outer cleanup would otherwise delete the temp too,
+                # losing both versions).
+                Path(path).write_bytes(data)
     except BaseException:
         with contextlib.suppress(OSError):
             os.unlink(tmp_name)

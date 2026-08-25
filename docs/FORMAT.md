@@ -53,6 +53,19 @@ One directory holds everything a user shares between machines:
   the target file's dominant line-ending style (§3.6). Never call
   `os.path.relpath` against ComfyUI dirs (cross-drive crash on Windows).
 
+**gvfs/FUSE mounts can't rename-over-existing (v0.80.1, owner traceback
+2026-08-25).** On the owner's Linux box the share is mounted via gvfs
+(`/run/user/1000/gvfs/smb-share:…`), where `os.replace` onto an EXISTING
+target raises `FileExistsError` even though POSIX rename replaces — so every
+save to an existing notebook there failed. Both atomic writers
+(`lora_library/context.py::_atomic_write_text`,
+`eps_image/image_grid_store.py::_atomic_write_bytes` — deliberate twins)
+now fall back: unlink the target, retry the rename, and if rename STILL
+fails, direct-write the new content so the target can never stay gone (the
+outer cleanup would otherwise delete the temp too, losing both versions).
+Ordinary filesystems never enter the fallback; the atomic path is
+unchanged there.
+
 **Library on a NAS (v0.74.0, 2026-08-22).** Every read of this folder may
 be a network round trip, so the server (a) performs every library-folder
 read/write from route handlers in a worker thread (`asyncio.to_thread`) — a
@@ -190,6 +203,17 @@ Writers re-emit the file from the parse, with these guarantees:
 - **Delete** removes the entry's heading + body. Deleting a category's last
   entry leaves the (now empty) category heading in place — categories are
   the user's prose, not derived state.
+- **Delete category** removes ONE `# heading` line and nothing else: the
+  block's §3.1 description and all of its entries merge into the block above
+  it, exactly as if that line had been erased by hand (entries append after
+  that block's own; the two descriptions concatenate with a blank line
+  between when both are non-empty). Deleting the FIRST category merges into
+  the implicit head region, i.e. uncategorizes its entries. No entry is ever
+  removed by this operation — it is "merge this section upward", and it is
+  the only write that can retire the emptied heading the rule above leaves
+  behind (owner report 2026-08-25). A repeated category name targets the
+  last block with that name; the head region itself has no heading to delete
+  and is refused.
 - A body line that itself starts with `# ` or `## ` (outside a fence) cannot
   be represented — it would read back as a boundary. **Since v0.48.1 saves
   containing one succeed anyway: the writer DEMOTES each such line by two
@@ -372,6 +396,7 @@ documented in full in its §6.x section). JSON in/out; errors are `{"error":
 | `POST /lora_library/notebook/entry` `{"file","name","text","category"?,"after"?,"rename_to"?,"base_mtime"?}` | create-or-update per §3.4/§3.5; `after` = insert a NEW entry directly below that entry (§3.4 Create after); `{"ok","mtime","entries"}` (fresh list) |
 | `POST /lora_library/notebook/move_category` `{"file","name","before"?,"base_mtime"?}` | §3.4 Move category: relocate the whole block before the named category, or to end-of-file when `before` omitted; unknown `name`/`before` ⇒ 404; §3.5 ⇒ 409; `{"ok","mtime","entries","categories"}` |
 | `POST /lora_library/notebook/delete` `{"file","name","base_mtime"?}` | `{"ok","mtime","entries"}` |
+| `POST /lora_library/notebook/delete_category` `{"file","name","base_mtime"?}` | §3.4 Delete category: remove that one `# heading` line, MERGING its §3.1 description and every entry it held into the block above it (the implicit head region when it was the first category, which uncategorizes them). Deletes no entry — unknown `name`, including the header-less head region, ⇒ 404; §3.5 ⇒ 409. → `{"ok","mtime","entries","categories","merged_into","entries_moved"}` |
 | `POST /lora_library/notebook/move` `{"file","name","before"?,"category"?,"base_mtime"?}` | §3.4 Move: exactly one of `before` (entry name to insert before) or `category` (append to that category's end; `""` = uncategorized/file-end rule) — both/neither ⇒ 400; unknown `name`/`before` ⇒ 404; §3.5 conflicts ⇒ 409; `{"ok","mtime","entries"}` |
 | `GET /lora_library/sets` | `{"sets": [{"slug","name","count"}]}` sorted by name |
 | `GET /lora_library/set?slug=` | the full §4 JSON + `"slug"` |
@@ -3613,6 +3638,23 @@ hotkeys). Zero matches renders a "No prompts match" row.
     selection is UI-only: it never touches the `entry` widget, the entry
     selection set, or the node's outputs. Empty categories render from the
     §5 `categories` list.
+
+    **Delete is contextual too (owner report 2026-08-25, "you can't delete
+    section headers")** — the ONE exception to "category selection is
+    UI-only", because the entry-only rule left an emptied heading nothing
+    could remove (§3.4's "categories are the user's prose" keeps it after
+    its last entry is deleted). With a header active, `🗑 Delete` deletes
+    THAT HEADER through §5 `/delete_category` and ignores the entry
+    selection entirely; the entries are NOT deleted, they merge into the
+    section above (§3.4 Delete category). Same two-click confirm as an
+    entry delete, but the armed status line names the destination and the
+    count before the second click ("Delete the "X" heading? Nothing is
+    deleted with it — its 3 entries move into "Y"."), and the result line
+    repeats them from the response's own `merged_into`/`entries_moved`.
+    Deleting the header leaves category mode: the editor drops back to
+    whatever entry was selected underneath, and the header's collapse key
+    is dropped from `Collapsed sections` so a later category reusing that
+    name doesn't come back collapsed.
   - Multi-select drag into a category (owner ask 2026-07-19): when 2+
     entries are selected, dragging any one of them moves the WHOLE
     selection to the drop target, in selection order (one §5 `/move` per
