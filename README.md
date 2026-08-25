@@ -352,6 +352,15 @@ favorites or recently-used anywhere in the ecosystem.
   recents**; and the Favorites view supports drag-reordering by the ≡
   handle — the order is shared across machines like the stars themselves.
 
+- **Drag the divider to split the panel (v0.78.0).** A grab bar between the
+  Selected list and the browser below it — drag to give either side more
+  room. The split saves with the workflow. Grabbing it while *Auto-grow
+  with selection* is on switches that off first (your hand is on the
+  height now), same as a corner drag.
+- **Send lives at the bottom (v0.78.0).** The send-to-loader row moved
+  below the browser, so the panel reads top-to-bottom: Selected, divider,
+  browse, send.
+
 ## EPS Apply LoRA Set (shipped)
 
 `EPSNodes → LoRA → EPS Apply LoRA Set`: pick a saved state from the dropdown and every

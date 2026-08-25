@@ -69,6 +69,30 @@
  * toggle only (§7.5's known-degraded renderer) -- never a heuristic that
  * could misread a load as a drag.
  *
+ * **Split divider + Send moved to the bottom (§6.13 M5, owner ask
+ * 2026-08-23: "a way to drag between the top and bottom areas to resize" /
+ * "move the send section to the bottom").** A slim `.eps-lp-split-divider`
+ * element now sits between the Selected section and the browse section
+ * below it; a pointer-captured drag on it (`wireSplitDivider`, the exact
+ * §7.5-safe shape `wireFavoriteDrag` already established) reads out as a
+ * FRACTION written to `PROP_SELECTED_SPLIT` (`Selected split`), clamped to
+ * [`SPLIT_FRACTION_MIN`, `SPLIT_FRACTION_MAX`] and applied as an inline
+ * override on `.eps-lp-selected-list` (`applySplit`) whenever auto-grow is
+ * OFF -- the pre-divider flat CSS `max-height: 50%` is now this node's own
+ * saved split. Since the fraction only means anything once the Selected
+ * list is actually capped, grabbing the divider while auto-grow is ON
+ * flips it OFF FIRST (`ensureFixedForDrag`) -- the same "the user's hand
+ * is on the height now" rule a corner drag already follows, just without
+ * the toast: the divider's own tooltip already says what dragging does.
+ * A `ResizeObserver` on the root element (`installSplitResizeObserver`,
+ * the notebook.js/controller.js pattern) reapplies the split whenever the
+ * node's own size changes the total available to redistribute; NEITHER
+ * mechanism ever calls `node.setSize` -- the divider only redistributes
+ * height the node already has, so `programmaticSetSize` and the
+ * manual-resize watch above never come into it. The Send row -- unchanged
+ * behaviour, only position -- is now the LAST section, below Selected and
+ * the browser, with only the collapsible status footer after it.
+ *
  * No window-level listeners: every interaction is a plain element-level
  * click/change/input, so §7.5's capture-phase requirement never comes up.
  * The M3 favorites drag included: pointerdown calls `setPointerCapture` on
@@ -122,12 +146,42 @@ const SELECTED_ROW_PX = 26
  * workflow saved fixed reloads fixed at its saved size. */
 export const PROP_AUTO_GROW = 'Auto-grow with selection'
 
+/** §6.13 M5 divider round (owner ask 2026-08-23: "a way to drag between
+ * the top and bottom areas to resize"): the node property holding the
+ * Selected/browse split as a FRACTION of the space the two share while
+ * `PROP_AUTO_GROW` is OFF -- a plain number, not pixels, so it survives a
+ * node resize or a different machine's font metrics. Registered at attach
+ * like `PROP_AUTO_GROW` (wireSplitProperty) -- a saved value wins later
+ * via configure. */
+export const PROP_SELECTED_SPLIT = 'Selected split'
+
+/** clampSplitFraction()'s usable range -- generous enough that either
+ * section can dominate, never so extreme that the other collapses to a
+ * sliver no wider than its own chrome. */
+export const SPLIT_FRACTION_MIN = 0.15
+export const SPLIT_FRACTION_MAX = 0.85
+
+/** The pre-divider CSS behaviour (`.eps-lp-fixed .eps-lp-selected-list`'s
+ * flat `max-height: 50%`) -- the fallback whenever the property is unset,
+ * unparseable, or NaN. */
+export const DEFAULT_SPLIT_FRACTION = 0.5
+
 /** Rows the Selected list keeps room for while auto-grow is OFF -- the
  * `getMinHeight` floor term (header + this many rows + browser minimum)
  * AND the `.eps-lp-fixed` CSS min-height, one constant so they agree. A
  * CONSTANT, not min(count, 2): the fixed floor must never rise above the
  * height the user set when a later apply brings rows in. */
 export const FIXED_SELECTED_ROWS = 2
+
+/** §6.13 M5: the divider's floor for the Selected (top) share while
+ * dragging -- identical to the `.eps-lp-fixed .eps-lp-selected-list` CSS
+ * min-height, so a drag can never pull the list smaller than the
+ * fixed-mode floor already guarantees. */
+const SPLIT_MIN_TOP_PX = FIXED_SELECTED_ROWS * SELECTED_ROW_PX
+
+/** The browse section's floor while dragging -- room for its search input
+ * plus a couple of rows, so the divider can never squash it to nothing. */
+const SPLIT_MIN_BOTTOM_PX = 60
 
 /** ~360px floor (§6.13) -- same Linux-font-overflow rationale as every
  * DOM-widget node in this pack (FORMAT.md §7.2); self-contained
@@ -390,6 +444,9 @@ const CSS_TEXT = `
 .eps-lp-section-header { flex: 0 0 auto; padding: 4px 6px 2px; font-size: 9.5px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; color: var(--descrip-text, #999); }
 .eps-lp-selected-list { flex: 0 0 auto; padding: 0 3px 4px; border-bottom: 1px solid var(--border-color, #444); }
 .eps-lp-fixed .eps-lp-selected-list { flex: 0 1 auto; min-height: ${FIXED_SELECTED_ROWS * SELECTED_ROW_PX}px; max-height: 50%; overflow-y: auto; overflow-x: hidden; }
+.eps-lp-split-divider { flex: 0 0 auto; height: 8px; cursor: row-resize; touch-action: none; position: relative; }
+.eps-lp-split-divider::before { content: ''; position: absolute; left: 6px; right: 6px; top: 3px; height: 1px; background: var(--border-color, #444); }
+.eps-lp-split-divider:hover::before, .eps-lp-split-divider-dragging::before { background: var(--input-text, #ccc); }
 .eps-lp-send { flex: 0 0 auto; display: flex; align-items: center; gap: 6px; padding: 4px 6px; border-bottom: 1px solid var(--border-color, #444); }
 .eps-lp-send-label { flex: 0 0 auto; color: var(--descrip-text, #999); cursor: help; }
 .eps-lp-pll-select { flex: 1 1 auto; min-width: 0; background: var(--comfy-menu-bg, #262626); border: 1px solid var(--border-color, #444); color: var(--input-text, #ccc); border-radius: 3px; padding: 1px 3px; font-size: 11px; font-family: inherit; }
@@ -525,6 +582,60 @@ export function isManualResize(node, canvas, programmatic) {
   return canvas?.resizing_node === node
 }
 
+/**
+ * Clamps a raw `PROP_SELECTED_SPLIT` value to [SPLIT_FRACTION_MIN,
+ * SPLIT_FRACTION_MAX]. Missing/blank (`raw == null` covers both `null` and
+ * `undefined`, the `autoGrowFromValue` precedent) reads as
+ * DEFAULT_SPLIT_FRACTION -- not "an explicit 0 clamped up" -- since a
+ * never-set property means nothing was ever dragged, not that the user
+ * dragged it to the floor. Any other non-finite input (an unparseable
+ * string, a stray NaN from a zero-size mid-layout measurement) degrades
+ * the same way, so no caller can ever write NaN into a style or the node
+ * property.
+ * @param {unknown} raw @returns {number}
+ */
+export function clampSplitFraction(raw) {
+  if (raw == null || raw === '') return DEFAULT_SPLIT_FRACTION
+  const num = typeof raw === 'number' ? raw : Number(raw)
+  if (!Number.isFinite(num)) return DEFAULT_SPLIT_FRACTION
+  return Math.min(SPLIT_FRACTION_MAX, Math.max(SPLIT_FRACTION_MIN, num))
+}
+
+/**
+ * Splits *totalPx* between the Selected (top) and browse (bottom) sections
+ * at *fraction* (clamped first), honoring both floors. When the total is
+ * too small to satisfy both floors at once (a near-zero widget height
+ * mid-layout, or a pathologically short node), the floors themselves scale
+ * down proportionally so the pair still sums to exactly *totalPx* and
+ * neither goes negative -- pure, so no caller can ever hand a NaN/negative
+ * height to a style write.
+ * @param {number} totalPx @param {number} fraction
+ * @param {number} [minTopPx] @param {number} [minBottomPx]
+ * @returns {{top: number, bottom: number}}
+ */
+export function splitHeights(totalPx, fraction, minTopPx = 0, minBottomPx = 0) {
+  const total = Number.isFinite(totalPx) && totalPx > 0 ? totalPx : 0
+  const minTop = Number.isFinite(minTopPx) && minTopPx > 0 ? minTopPx : 0
+  const minBottom = Number.isFinite(minBottomPx) && minBottomPx > 0 ? minBottomPx : 0
+  if (minTop + minBottom >= total) {
+    if (minTop + minBottom <= 0) return { top: 0, bottom: 0 }
+    const scale = total / (minTop + minBottom)
+    return { top: minTop * scale, bottom: minBottom * scale }
+  }
+  const f = clampSplitFraction(fraction)
+  let top = total * f
+  if (top < minTop) top = minTop
+  if (total - top < minBottom) top = total - minBottom
+  return { top, bottom: total - top }
+}
+
+/** THIS node's persisted split fraction (file header "Split divider"),
+ * clamped/defaulted the same way `shouldAutoGrow` reads `PROP_AUTO_GROW`.
+ * @param {object} node @returns {number} */
+export function splitFractionFromNode(node) {
+  return clampSplitFraction(node?.properties?.[PROP_SELECTED_SPLIT])
+}
+
 // --- State ---
 
 function createState(node, widget) {
@@ -545,6 +656,8 @@ function createState(node, widget) {
     searchQuery: '', // §6.13 M3 view-only filter -- transient, never serialized
     searchTimer: null, // v0.68.1: pending debounced search repaint (scheduleSearchRender)
     favDrag: null, // in-flight M3 favorites drag -- element-level, pointer-captured
+    splitDrag: null, // in-flight M5 split-divider drag -- same pointer-captured shape
+    splitResizeObserver: null, // M5: reapplies the split when state.root's own size changes
     loadToken: 0, // guards a stale/superseded fetch from clobbering fresher state
     favoriteToken: 0, // same guard for favorites round-trips (star toggle + M3 reorder)
     recentToken: 0, // and for the recents stamps + the M3 Clear-recents POST
@@ -557,6 +670,7 @@ function createState(node, widget) {
     highlightedFile: null, // browser row click-to-highlight (v0.64.0); second click adds
     selectedHeaderEl: null,
     selectedListEl: null,
+    splitDividerEl: null,
     sendRowEl: null,
     crumbsEl: null,
     listEl: null,
@@ -587,6 +701,14 @@ function buildUi(state) {
   injectStyles()
   state.selectedHeaderEl = el('div', { className: 'eps-lp-section-header' })
   state.selectedListEl = el('div', { className: 'eps-lp-selected-list' })
+  // §6.13 M5: the draggable Selected/browse split (file header "Split
+  // divider") -- sits exactly where the Send row used to, now that Send
+  // has moved to the bottom.
+  state.splitDividerEl = el('div', {
+    className: 'eps-lp-split-divider',
+    attrs: { title: 'Drag to resize — Selected vs. the browser below' }
+  })
+  wireSplitDivider(state)
   state.sendRowEl = el('div', { className: 'eps-lp-send' })
   state.crumbsEl = el('div', { className: 'eps-lp-crumbs' })
   state.listEl = el('div', { className: 'eps-lp-list' })
@@ -626,14 +748,19 @@ function buildUi(state) {
     state.listEl
   ])
   state.statusRowEl = el('div', { className: 'eps-lp-status' }, [state.statusTextEl, state.statusActionsEl])
+  // §6.13 M5: Selected -> divider -> browser -> Send -> status. Send is now
+  // the LAST section (owner ask 2026-08-23) -- only the collapsible status
+  // footer sits below it.
   state.root = el('div', { className: 'eps-lp-root' }, [
     state.selectedHeaderEl,
     state.selectedListEl,
-    state.sendRowEl,
+    state.splitDividerEl,
     browser,
+    state.sendRowEl,
     state.statusRowEl
   ])
   attachDomWidget(state)
+  installSplitResizeObserver(state)
   render(state) // initial paint -- "Loading loras…" until the fetch resolves
 }
 
@@ -1079,6 +1206,7 @@ function renderSelected(state) {
     for (const row of rows) state.selectedListEl.append(buildSelectedRowEl(state, row))
   }
   syncFixedClass(state) // re-derived every repaint, so a Properties flip or a restore can't leave it stale
+  applySplit(state) // §6.13 M5: re-derived every repaint too, same reasoning
   syncSelectedGrowth(state)
 }
 
@@ -1190,6 +1318,7 @@ function noteManualResize(state) {
     node.properties[PROP_AUTO_GROW] = false
   }
   syncFixedClass(state)
+  applySplit(state) // §6.13 M5: the last-saved split now governs, not the flat 50% default
   toast(
     'info',
     'LoRA Picker height is now fixed',
@@ -1228,7 +1357,239 @@ function wireAutoGrowProperty(state) {
  * restored `true` never lifts a just-restored size. */
 function applyAutoGrowChange(state, value, prevValue) {
   syncFixedClass(state)
+  applySplit(state) // §6.13 M5: clears the inline split override on a flip back to ON
   if (autoGrowFromValue(value) && !autoGrowFromValue(prevValue)) liftToFloor(state)
+}
+
+/**
+ * Registers `PROP_SELECTED_SPLIT` the same way `wireAutoGrowProperty`
+ * registers `PROP_AUTO_GROW` -- `addProperty` every attach (a saved value
+ * wins later via configure's property loop), `onPropertyChanged` CHAINED
+ * (never replaced -- this is the SECOND chain on the hook, after
+ * `wireAutoGrowProperty`'s own; the same stacking `installMinWidth` /
+ * `installManualResizeWatch` already do for `node.onResize`) so a
+ * Properties-panel edit -- or a restored value -- reapplies the split
+ * live.
+ */
+function wireSplitProperty(state) {
+  const node = state.node
+  if (typeof node.addProperty === 'function') {
+    node.addProperty(PROP_SELECTED_SPLIT, DEFAULT_SPLIT_FRACTION, 'number')
+  }
+  const original = node.onPropertyChanged
+  node.onPropertyChanged = function (name, value, prevValue) {
+    const result = original?.call(this, name, value, prevValue)
+    if (name === PROP_SELECTED_SPLIT) {
+      try {
+        applySplit(state)
+      } catch (error) {
+        api.warn('split property change failed', error)
+      }
+    }
+    return result
+  }
+}
+
+// --- §6.13 M5: draggable Selected/browse split (owner ask 2026-08-23) ---
+
+/**
+ * The Selected (top) section's live pixel share while auto-grow is OFF is
+ * measured from the DOM rather than tracked as a running total:
+ * `state.root`'s OWN box never changes size just because the split moves
+ * (only the two elements sharing it do), so total minus the four other
+ * fixed-height siblings (header, divider, send, status) is exact and
+ * immune to whatever inline override this file has already applied to
+ * `selectedListEl` from a previous split.
+ */
+function measureSplittableTotalPx(state) {
+  const root = state.root
+  if (!root) return 0
+  const total = root.clientHeight
+  if (!total) return 0 // not laid out yet -- the ResizeObserver retries once it is
+  const chrome =
+    (state.selectedHeaderEl?.offsetHeight || 0) +
+    (state.splitDividerEl?.offsetHeight || 0) +
+    (state.sendRowEl?.offsetHeight || 0) +
+    (state.statusRowEl?.offsetHeight || 0)
+  return Math.max(0, total - chrome)
+}
+
+/**
+ * Applies (or clears) the persisted split as an inline override on
+ * `state.selectedListEl`. ON = auto-grow owns the height (file header):
+ * inline overrides are cleared so the base `flex: 0 0 auto` (no cap, no
+ * scroll) CSS rule decides, exactly as before this round existed -- a
+ * fraction dragged while OFF must never leak into ON mode. OFF = the
+ * `.eps-lp-fixed` share is no longer a flat CSS 50% but this node's own
+ * fraction; a zero measurement (root not laid out yet) leaves the CSS 50%
+ * fallback in place rather than writing a bogus height. Called after
+ * every mode flip, on every Selected repaint, and by the ResizeObserver
+ * below whenever the node's own size changes the total to redistribute.
+ */
+function applySplit(state) {
+  if (!state.selectedListEl) return
+  if (!shouldAutoGrow(state.node)) {
+    const total = measureSplittableTotalPx(state)
+    if (total > 0) {
+      const { top } = splitHeights(total, splitFractionFromNode(state.node), SPLIT_MIN_TOP_PX, SPLIT_MIN_BOTTOM_PX)
+      state.selectedListEl.style.flexBasis = `${top}px`
+      state.selectedListEl.style.maxHeight = `${top}px`
+      return
+    }
+  }
+  state.selectedListEl.style.flexBasis = ''
+  state.selectedListEl.style.maxHeight = ''
+}
+
+/** Re-applies the split on any change to `state.root`'s OWN rendered size
+ * (a corner drag, the node's initial layout, a DOM-widget rescale) -- the
+ * notebook.js `filePanelResizeObserver` / controller.js `_statesLocObserver`
+ * pattern: an ELEMENT observer, not a window listener (§7.5 never comes
+ * up), harmless on a frontend without ResizeObserver (this file's usual
+ * degrade-gracefully posture). No disconnect: like the rest of `state`, it
+ * hangs off the node and dies with it (no module registry to leak). */
+function installSplitResizeObserver(state) {
+  if (typeof ResizeObserver !== 'function' || !state.root) return
+  const observer = new ResizeObserver(() => applySplit(state))
+  observer.observe(state.root)
+  state.splitResizeObserver = observer
+}
+
+/** The user grabbing the divider is the same "their hand is on the height
+ * now" signal a corner drag already is (file header's Height policy) --
+ * dragging only means something once the Selected list is actually capped,
+ * so a drag while auto-grow is ON flips it OFF first. Unlike
+ * `noteManualResize` this never toasts: the divider's own tooltip already
+ * says what dragging does, so there is nothing to explain after the fact. */
+function ensureFixedForDrag(state) {
+  const node = state.node
+  if (!shouldAutoGrow(node)) return
+  if (typeof node.setProperty === 'function') {
+    node.setProperty(PROP_AUTO_GROW, false)
+  } else {
+    node.properties = node.properties || {}
+    node.properties[PROP_AUTO_GROW] = false
+  }
+  syncFixedClass(state)
+  applySplit(state)
+}
+
+/** Writes the dragged fraction into the node property (serializes with the
+ * workflow, §6.13) -- `setProperty` when available so undo/dirty-tracking
+ * see it, the direct-assignment fallback otherwise (`wireAutoGrowProperty`'s
+ * exact posture). */
+function persistSplitFraction(state, fraction) {
+  const node = state.node
+  const clamped = clampSplitFraction(fraction)
+  if (typeof node.setProperty === 'function') {
+    node.setProperty(PROP_SELECTED_SPLIT, clamped)
+  } else {
+    node.properties = node.properties || {}
+    node.properties[PROP_SELECTED_SPLIT] = clamped
+  }
+}
+
+/**
+ * Wires the divider's drag gesture -- the §7.5-safe shape `wireFavoriteDrag`
+ * already established: pointerdown calls `setPointerCapture` on the
+ * divider itself, retargeting every later pointermove/pointerup/
+ * pointercancel there so plain element-level listeners see the whole
+ * gesture wherever the pointer wanders, and no window listener is ever
+ * involved. `stopPropagation` on pointerdown keeps the canvas from ever
+ * starting a node-drag out of this.
+ */
+function wireSplitDivider(state) {
+  const divider = state.splitDividerEl
+  divider.addEventListener('pointerdown', (event) => {
+    if (event.button > 0) return // primary button / touch / pen only
+    if (state.splitDrag) return // one gesture at a time
+    event.preventDefault()
+    event.stopPropagation()
+    try {
+      divider.setPointerCapture(event.pointerId)
+    } catch (error) {
+      api.warn('split divider: setPointerCapture failed; drag unavailable', error)
+      return
+    }
+    ensureFixedForDrag(state)
+    const drag = {
+      pointerId: event.pointerId,
+      startClientY: event.clientY,
+      startFraction: splitFractionFromNode(state.node),
+      totalPx: measureSplittableTotalPx(state),
+      liveFraction: null
+    }
+    state.splitDrag = drag
+    divider.classList.add('eps-lp-split-divider-dragging')
+
+    const onMove = (moveEvent) => {
+      if (moveEvent.pointerId !== drag.pointerId) return
+      moveSplitDivider(state, drag, moveEvent.clientY)
+    }
+    const onUp = (upEvent) => {
+      if (upEvent.pointerId !== drag.pointerId) return
+      detach()
+      finishSplitDrag(state, drag)
+    }
+    const onCancel = (cancelEvent) => {
+      if (cancelEvent.pointerId !== drag.pointerId) return
+      detach()
+      cancelSplitDrag(state)
+    }
+    const onLost = () => {
+      // Implicit capture release (e.g. a mid-drag repaint touching the
+      // divider) -- treat exactly like cancel; detach() removes this
+      // listener BEFORE releasing, so a normal finish never double-fires.
+      detach()
+      cancelSplitDrag(state)
+    }
+    function detach() {
+      divider.removeEventListener('pointermove', onMove)
+      divider.removeEventListener('pointerup', onUp)
+      divider.removeEventListener('pointercancel', onCancel)
+      divider.removeEventListener('lostpointercapture', onLost)
+      divider.classList.remove('eps-lp-split-divider-dragging')
+      try {
+        divider.releasePointerCapture(drag.pointerId)
+      } catch {
+        // Already released, or never captured.
+      }
+    }
+    divider.addEventListener('pointermove', onMove)
+    divider.addEventListener('pointerup', onUp)
+    divider.addEventListener('pointercancel', onCancel)
+    divider.addEventListener('lostpointercapture', onLost)
+  })
+}
+
+/** Live preview while the pointer moves: the fraction tracks *clientY*'s
+ * offset from the drag's start as a share of the measured total (frozen at
+ * drag start -- the node's own size never changes mid-drag, only the
+ * internal split does), clamped, and applied straight to the DOM. The node
+ * property is NOT written here (`persistSplitFraction` runs once, on drop)
+ * so a hundred pointermoves never spam onPropertyChanged/undo. */
+function moveSplitDivider(state, drag, clientY) {
+  if (drag.totalPx <= 0) return
+  const deltaFraction = (clientY - drag.startClientY) / drag.totalPx
+  drag.liveFraction = clampSplitFraction(drag.startFraction + deltaFraction)
+  const { top } = splitHeights(drag.totalPx, drag.liveFraction, SPLIT_MIN_TOP_PX, SPLIT_MIN_BOTTOM_PX)
+  state.selectedListEl.style.flexBasis = `${top}px`
+  state.selectedListEl.style.maxHeight = `${top}px`
+}
+
+/** Drop commit: persists the live fraction if the drag actually moved (a
+ * plain click with no movement leaves the saved value untouched). */
+function finishSplitDrag(state, drag) {
+  state.splitDrag = null
+  if (drag.liveFraction != null) persistSplitFraction(state, drag.liveFraction)
+}
+
+/** pointercancel / lost capture: abandon the gesture -- nothing was ever
+ * persisted mid-drag, so this is just re-applying the last COMMITTED
+ * fraction over whatever the live preview left on screen. */
+function cancelSplitDrag(state) {
+  state.splitDrag = null
+  applySplit(state)
 }
 
 /** One Selected row -- rendered from the widget value alone (file header);
@@ -2297,6 +2658,9 @@ export function attachPickerPanel(node) {
     // §6.13 height round: `Auto-grow with selection` (default true) +
     // the onPropertyChanged chain that keeps the CSS class honest.
     wireAutoGrowProperty(state)
+    // §6.13 M5: `Selected split` -- the divider's persisted fraction,
+    // chained onto the SAME onPropertyChanged hook (see wireSplitProperty).
+    wireSplitProperty(state)
     hideSelectionWidget(state)
     buildUi(state)
     wireConfigureReload(state)

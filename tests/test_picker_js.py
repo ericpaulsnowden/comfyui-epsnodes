@@ -214,6 +214,43 @@ AUTO_GROW_VALUE_CASES = [
     ("0", False),
 ]
 
+#: (JS source snippet for the raw `Selected split` value, expected
+#: clampSplitFraction()). Raw JS, like AUTO_GROW_VALUE_CASES, since
+#: `undefined`/`NaN` have no JSON spelling. Missing/blank reads as
+#: DEFAULT_SPLIT_FRACTION (0.5) -- not "an explicit 0 clamped up" to the
+#: floor -- since nothing was ever dragged; an explicit out-of-range number
+#: clamps to [SPLIT_FRACTION_MIN, SPLIT_FRACTION_MAX].
+SPLIT_FRACTION_CASES = [
+    ("0.5", 0.5),
+    ("0.15", 0.15),
+    ("0.85", 0.85),
+    ("0", 0.15),
+    ("1", 0.85),
+    ("-5", 0.15),
+    ("99", 0.85),
+    ("'0.3'", 0.3),
+    ("'junk'", 0.5),
+    ("undefined", 0.5),
+    ("null", 0.5),
+    ("NaN", 0.5),
+    ("''", 0.5),
+]
+
+#: ((totalPx, fraction, minTopPx, minBottomPx), expected {"top", "bottom"})
+#: -- splitHeights()'s floor-honoring split, including the degenerate case
+#: where the floors alone exceed the total (proportional scale-down, never
+#: negative).
+SPLIT_HEIGHTS_CASES = [
+    ((400, 0.5, 50, 50), {"top": 200, "bottom": 200}),
+    ((400, 0.05, 50, 50), {"top": 60, "bottom": 340}),  # fraction clamped up to 0.15 first
+    ((400, 2, 50, 50), {"top": 340, "bottom": 60}),  # fraction clamped down to 0.85 first
+    ((400, 0.15, 100, 50), {"top": 100, "bottom": 300}),  # top floor wins over the fraction
+    ((400, 0.85, 50, 120), {"top": 280, "bottom": 120}),  # bottom floor wins over the fraction
+    ((50, 0.5, 40, 60), {"top": 20, "bottom": 30}),  # degenerate: floors alone exceed the total
+    ((0, 0.5, 40, 60), {"top": 0, "bottom": 0}),
+    ((-100, 0.5, 10, 10), {"top": 0, "bottom": 0}),
+]
+
 #: ((autoGrow, count), expected selectedListFloorRows()) -- every row while
 #: ON, the constant FIXED_SELECTED_ROWS (2) while OFF, degenerate counts 0.
 FLOOR_ROWS_CASES = [
@@ -261,7 +298,10 @@ const out = {
     hasAutoGrowFromValue: typeof m.autoGrowFromValue === 'function',
     hasShouldAutoGrow: typeof m.shouldAutoGrow === 'function',
     hasSelectedListFloorRows: typeof m.selectedListFloorRows === 'function',
-    hasIsManualResize: typeof m.isManualResize === 'function'
+    hasIsManualResize: typeof m.isManualResize === 'function',
+    hasClampSplitFraction: typeof m.clampSplitFraction === 'function',
+    hasSplitHeights: typeof m.splitHeights === 'function',
+    hasSplitFractionFromNode: typeof m.splitFractionFromNode === 'function'
   },
   constants: {
     classId: m.CLASS_ID,
@@ -271,9 +311,24 @@ const out = {
     routeRecent: m.ROUTE_RECENT,
     routeClearRecents: m.ROUTE_CLEAR_RECENTS,
     propAutoGrow: m.PROP_AUTO_GROW,
-    fixedSelectedRows: m.FIXED_SELECTED_ROWS
+    fixedSelectedRows: m.FIXED_SELECTED_ROWS,
+    propSelectedSplit: m.PROP_SELECTED_SPLIT,
+    splitFractionMin: m.SPLIT_FRACTION_MIN,
+    splitFractionMax: m.SPLIT_FRACTION_MAX,
+    defaultSplitFraction: m.DEFAULT_SPLIT_FRACTION
   },
   autoGrowFromValue: [%(auto_grow_values)s].map((v) => m.autoGrowFromValue(v)),
+  clampSplitFraction: [%(split_fraction_values)s].map((v) => m.clampSplitFraction(v)),
+  splitHeights: %(split_heights_inputs)s.map(
+    ([total, fraction, minTop, minBottom]) => m.splitHeights(total, fraction, minTop, minBottom)
+  ),
+  splitFractionFromNode: {
+    noNode: m.splitFractionFromNode(null),
+    noProperties: m.splitFractionFromNode({}),
+    unset: m.splitFractionFromNode({ properties: {} }),
+    set: m.splitFractionFromNode({ properties: { [m.PROP_SELECTED_SPLIT]: 0.3 } }),
+    outOfRange: m.splitFractionFromNode({ properties: { [m.PROP_SELECTED_SPLIT]: 5 } })
+  },
   shouldAutoGrow: {
     noNode: m.shouldAutoGrow(null),
     noProperties: m.shouldAutoGrow({}),
@@ -336,6 +391,8 @@ def picker_api(tmp_path_factory: pytest.TempPathFactory) -> dict:
             "drill_inputs": json.dumps([args for args, _ in DRILL_PATH_CASES]),
             "auto_grow_values": ", ".join(js for js, _ in AUTO_GROW_VALUE_CASES),
             "floor_rows_inputs": json.dumps([list(args) for args, _ in FLOOR_ROWS_CASES]),
+            "split_fraction_values": ", ".join(js for js, _ in SPLIT_FRACTION_CASES),
+            "split_heights_inputs": json.dumps([list(args) for args, _ in SPLIT_HEIGHTS_CASES]),
         },
         encoding="utf-8",
     )
@@ -398,6 +455,10 @@ def test_module_exports_the_entry_point_and_pure_helpers(picker_api: dict) -> No
         "hasShouldAutoGrow": True,
         "hasSelectedListFloorRows": True,
         "hasIsManualResize": True,
+        # §6.13 M5 divider round (2026-08-23): the split-fraction pure helpers
+        "hasClampSplitFraction": True,
+        "hasSplitHeights": True,
+        "hasSplitFractionFromNode": True,
     }
 
 
@@ -767,13 +828,25 @@ class TestSendToLoaderM2:
     probe/grow/shrink/assign technique and the vocabulary contract against
     controller.js) is covered by tests/test_pll_bridge_js.py."""
 
-    def test_send_row_renders_between_selected_and_browser(self, source: str) -> None:
+    def test_send_row_renders_as_the_last_section(self, source: str) -> None:
+        """§6.13 M5 (owner ask 2026-08-23 "move the send section to the
+        bottom"): Send moved OUT from between Selected and the browser --
+        the split divider now sits there instead (TestSplitDividerRoundM5)
+        -- and is the panel's LAST section, with only the collapsible
+        status footer after it."""
         assert "state.sendRowEl = el('div', { className: 'eps-lp-send' })" in source
         build = _function_body(source, "buildUi(state)")
         selected = build.index("state.selectedListEl,")
-        send = build.index("state.sendRowEl,")
+        divider = build.index("state.splitDividerEl,")
         browser = build.index("browser,")
-        assert selected < send < browser, "root order must be Selected -> Send -> browser"
+        send = build.index("state.sendRowEl,")
+        # "state.statusRowEl" (no comma, the array's LAST element) also
+        # matches its own earlier assignment line -- search past `send` for
+        # its slot in the root array specifically.
+        status = send + build[send:].index("state.statusRowEl")
+        assert selected < divider < browser < send < status, (
+            "root order must be Selected -> divider -> browser -> Send -> status"
+        )
 
     def test_send_row_rebuilt_on_render_and_on_every_selection_write(self, source: str) -> None:
         """The full render rebuilds it; granular mutations (Add, remove)
@@ -1841,3 +1914,223 @@ class TestFixedHeightRound20260822:
         assert "if (!shouldAutoGrow(state.node)) return" in _function_body(
             source, "syncSelectedGrowth(state)"
         )
+
+
+class TestSplitDividerRoundM5:
+    """§6.13 M5 (owner ask 2026-08-23: "a way to drag between the top and
+    bottom areas to resize" / "move the send section to the bottom"). A
+    slim `.eps-lp-split-divider` sits between the Selected section and the
+    browse section below it; a pointer-captured drag reads out as a
+    fraction persisted to `PROP_SELECTED_SPLIT`, applied as an inline
+    override on the Selected list whenever auto-grow is OFF. Grabbing the
+    divider while auto-grow is ON flips it off first (the same "user's
+    hand" rule a corner drag already follows). The pure split math is
+    Node-driven via the picker_api probe; the DOM/gesture wiring is
+    source-pinned, this file's standing convention."""
+
+    @pytest.fixture(scope="class")
+    def source(self) -> str:
+        return PICKER_JS.read_text(encoding="utf-8")
+
+    # -- the pure helpers, driven under Node ---------------------------------
+
+    def test_split_property_name_and_fraction_constants(self, picker_api: dict) -> None:
+        constants = picker_api["constants"]
+        assert constants["propSelectedSplit"] == "Selected split"
+        assert constants["splitFractionMin"] == 0.15
+        assert constants["splitFractionMax"] == 0.85
+        assert constants["defaultSplitFraction"] == 0.5
+
+    def test_clamp_split_fraction_cases(self, picker_api: dict) -> None:
+        pairs = zip(SPLIT_FRACTION_CASES, picker_api["clampSplitFraction"], strict=True)
+        for (raw, expected), got in pairs:
+            assert got == expected, f"clampSplitFraction({raw}) -> {got!r}, wanted {expected!r}"
+
+    def test_split_heights_cases(self, picker_api: dict) -> None:
+        pairs = zip(SPLIT_HEIGHTS_CASES, picker_api["splitHeights"], strict=True)
+        for (args, expected), got in pairs:
+            assert got == expected, f"splitHeights{args} -> {got!r}, wanted {expected!r}"
+
+    def test_split_fraction_from_node_reads_the_property_and_defaults(
+        self, picker_api: dict
+    ) -> None:
+        assert picker_api["splitFractionFromNode"] == {
+            "noNode": 0.5,
+            "noProperties": 0.5,
+            "unset": 0.5,
+            "set": 0.3,
+            "outOfRange": 0.85,
+        }
+
+    # -- DOM placement --------------------------------------------------------
+
+    def test_divider_sits_between_selected_and_browser(self, source: str) -> None:
+        """The divider takes the exact DOM slot Send used to occupy, now
+        that Send moved to the bottom (see TestSendToLoaderM2's updated
+        test_send_row_renders_as_the_last_section for the full order)."""
+        assert "className: 'eps-lp-split-divider'" in source
+        build = _function_body(source, "buildUi(state)")
+        selected = build.index("state.selectedListEl,")
+        divider = build.index("state.splitDividerEl,")
+        browser = build.index("browser,")
+        assert selected < divider < browser
+
+    def test_divider_has_a_title_and_row_resize_cursor(self, source: str) -> None:
+        assert "title: 'Drag to resize" in source
+        assert ".eps-lp-split-divider { flex: 0 0 auto; height: 8px; cursor: row-resize;" in source
+
+    # -- pointer capture / cleanup ---------------------------------------------
+
+    def test_divider_drag_uses_pointer_capture_with_element_level_listeners(
+        self, source: str
+    ) -> None:
+        """The §7.5-safe shape wireFavoriteDrag already established:
+        setPointerCapture retargets the gesture at the divider itself, so
+        its OWN element-level listeners see the whole drag -- no window
+        involvement anywhere -- and every add is matched by a remove."""
+        body = _function_body(source, "wireSplitDivider(state)")
+        assert "divider.setPointerCapture(event.pointerId)" in body
+        for kind in ("pointermove", "pointerup", "pointercancel", "lostpointercapture"):
+            assert f"divider.addEventListener('{kind}'" in body
+            assert f"divider.removeEventListener('{kind}'" in body
+        assert "divider.releasePointerCapture(drag.pointerId)" in body
+
+    def test_divider_pointerdown_stops_propagation_before_capturing(self, source: str) -> None:
+        """Never let the canvas start a node-drag out of a divider grab."""
+        body = _function_body(source, "wireSplitDivider(state)")
+        assert "event.preventDefault()" in body
+        assert "event.stopPropagation()" in body
+        stop_at = body.index("event.stopPropagation()")
+        capture_at = body.index("divider.setPointerCapture(event.pointerId)")
+        assert stop_at < capture_at
+
+    def test_still_no_window_listeners_after_m5(self, source: str) -> None:
+        assert "window.addEventListener" not in source
+
+    # -- fixed-mode entry / no toast ------------------------------------------
+
+    def test_dragging_flips_auto_grow_off_first_without_a_toast(self, source: str) -> None:
+        """Dragging only means something once the Selected list is capped
+        -- grabbing the divider while auto-grow is ON is the same "user's
+        hand" signal a corner drag already is (noteManualResize), so it
+        flips the property off before the drag begins. Unlike the
+        corner-drag path this never toasts: the divider's own tooltip
+        already explains what dragging does."""
+        wire = _function_body(source, "wireSplitDivider(state)")
+        assert "ensureFixedForDrag(state)" in wire
+        ensure = _function_body(source, "ensureFixedForDrag(state)")
+        assert "if (!shouldAutoGrow(node)) return" in ensure
+        assert "node.setProperty(PROP_AUTO_GROW, false)" in ensure
+        assert "node.properties[PROP_AUTO_GROW] = false" in ensure  # no-setProperty fallback
+        assert "syncFixedClass(state)" in ensure
+        assert "applySplit(state)" in ensure
+        assert "toast(" not in ensure
+
+    # -- live preview + persistence on drop -----------------------------------
+
+    def test_move_computes_a_live_fraction_without_persisting(self, source: str) -> None:
+        """Every pointermove updates the DOM directly; the node property is
+        untouched until drop, so a drag can't spam onPropertyChanged/undo."""
+        move = _function_body(source, "moveSplitDivider(state, drag, clientY)")
+        assert "drag.liveFraction = clampSplitFraction(drag.startFraction + deltaFraction)" in move
+        expected_split_call = (
+            "splitHeights(drag.totalPx, drag.liveFraction, SPLIT_MIN_TOP_PX, SPLIT_MIN_BOTTOM_PX)"
+        )
+        assert expected_split_call in move
+        assert "state.selectedListEl.style.flexBasis" in move
+        assert "state.selectedListEl.style.maxHeight" in move
+        assert "persistSplitFraction" not in move
+
+    def test_drop_persists_the_live_fraction_through_set_property(self, source: str) -> None:
+        finish = _function_body(source, "finishSplitDrag(state, drag)")
+        expected_commit = (
+            "if (drag.liveFraction != null) persistSplitFraction(state, drag.liveFraction)"
+        )
+        assert expected_commit in finish
+        persist = _function_body(source, "persistSplitFraction(state, fraction)")
+        assert "node.setProperty(PROP_SELECTED_SPLIT, clamped)" in persist
+        # no-setProperty fallback
+        assert "node.properties[PROP_SELECTED_SPLIT] = clamped" in persist
+
+    def test_cancel_and_lost_capture_revert_without_persisting(self, source: str) -> None:
+        wire = _function_body(source, "wireSplitDivider(state)")
+        assert "cancelSplitDrag(state)" in wire
+        cancel = _function_body(source, "cancelSplitDrag(state)")
+        assert "applySplit(state)" in cancel
+        assert "persistSplitFraction" not in cancel
+
+    # -- restore / property registration --------------------------------------
+
+    def test_split_property_registered_and_chained_after_auto_grow(self, source: str) -> None:
+        """addProperty every attach (a saved value wins later via
+        configure) -- the exact `wireAutoGrowProperty`/`library_loras`
+        posture -- and `onPropertyChanged` is CHAINED (never replaced),
+        stacking a SECOND wrap on the same hook the way installMinWidth /
+        installManualResizeWatch already stack two wraps of onResize."""
+        wire = _function_body(source, "wireSplitProperty(state)")
+        assert "node.addProperty(PROP_SELECTED_SPLIT, DEFAULT_SPLIT_FRACTION, 'number')" in wire
+        assert "const original = node.onPropertyChanged" in wire
+        assert "const result = original?.call(this, name, value, prevValue)" in wire
+        assert "if (name === PROP_SELECTED_SPLIT)" in wire
+        assert "applySplit(state)" in wire
+        attach = _function_body(source, "attachPickerPanel(node)")
+        assert "wireSplitProperty(state)" in attach
+        auto_grow_at = attach.index("wireAutoGrowProperty(state)")
+        split_at = attach.index("wireSplitProperty(state)")
+        assert auto_grow_at < split_at
+
+    def test_apply_split_reapplies_on_every_selected_repaint_and_mode_flip(
+        self, source: str
+    ) -> None:
+        """The restore path: wireConfigureReload -> reloadFromWidget ->
+        render -> renderSelected -> applySplit re-derives the inline
+        override from whatever `Selected split` configure just restored --
+        no separate restore-specific code path needed, the same posture
+        syncFixedClass already has."""
+        assert "applySplit(state)" in _function_body(source, "renderSelected(state)")
+        assert "applySplit(state)" in _function_body(source, "noteManualResize(state)")
+        assert "applySplit(state)" in _function_body(
+            source, "applyAutoGrowChange(state, value, prevValue)"
+        )
+
+    def test_apply_split_clears_the_override_when_auto_grow_is_on(self, source: str) -> None:
+        """ON mode must never carry a stale fixed-mode height forward --
+        applySplit only writes an inline height while auto-grow is OFF and
+        a real measurement exists; every other path clears both properties
+        so the base (uncapped) CSS rule decides again."""
+        body = _function_body(source, "applySplit(state)")
+        assert "if (!shouldAutoGrow(state.node)) {" in body
+        assert "state.selectedListEl.style.flexBasis = ''" in body
+        assert "state.selectedListEl.style.maxHeight = ''" in body
+
+    def test_never_calls_set_size(self, source: str) -> None:
+        """The divider only redistributes height the node already has --
+        it must never touch node.setSize (which would also have to route
+        through programmaticSetSize, per the manual-resize watch's rule)."""
+        for fn in (
+            "applySplit(state)",
+            "measureSplittableTotalPx(state)",
+            "moveSplitDivider(state, drag, clientY)",
+            "ensureFixedForDrag(state)",
+            "wireSplitDivider(state)",
+            "installSplitResizeObserver(state)",
+        ):
+            assert ".setSize(" not in _function_body(source, fn), fn
+        # the module-wide raw-setSize count (installMinWidth's width lift +
+        # programmaticSetSize's own call) is therefore unchanged by this round
+        assert source.count(".setSize(") == 2
+
+    # -- reapplies on a node resize (ResizeObserver) ---------------------------
+
+    def test_resize_observer_reapplies_the_split_and_degrades_without_it(
+        self, source: str
+    ) -> None:
+        """notebook.js's filePanelResizeObserver / controller.js's
+        _statesLocObserver pattern: an ELEMENT observer (never a window
+        listener, §7.5 never comes up), guarded so a frontend without
+        ResizeObserver just keeps the panel's last-applied split."""
+        body = _function_body(source, "installSplitResizeObserver(state)")
+        assert "typeof ResizeObserver !== 'function'" in body
+        assert "new ResizeObserver(() => applySplit(state))" in body
+        assert "observer.observe(state.root)" in body
+        assert "installSplitResizeObserver(state)" in _function_body(source, "buildUi(state)")

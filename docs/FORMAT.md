@@ -2903,6 +2903,27 @@ model/CLIP/VAE from one checkpoint must never drift out of alignment.
 
 ## §6.13 `EPSLoraPicker` (display: "EPS LoRA Picker") — folder-scoped browse, favorites, recents → stack
 
+**Split divider + Send at the bottom (v0.78.0, owner asks 2026-08-23).**
+`.eps-lp-split-divider` sits between the Selected list (top) and the
+browser (below); root order is now selected-header → selected-list →
+divider → browser → send → status (the Send row is purely repositioned —
+same `renderSend` internals). Pointer-captured drag (the `wireFavoriteDrag`
+shape: capture on pointerdown, all four listeners retargeted at the divider
+and removed via one `detach()`; a synthetic pointer that cannot be captured
+warns and aborts — probe artifact, not a bug). Dragging while
+`Auto-grow with selection` is ON flips it OFF first (`ensureFixedForDrag` —
+the corner-drag "hand on the height" rule; no toast, the divider tooltip
+explains). The fraction persists as `node.properties['Selected split']`
+(clamped 0.15–0.85, default 0.5) — a PROPERTY, not a widget (§8-safe),
+restored through litegraph's own configure loop and re-applied by
+`applySplit`, which under auto-grow clears the inline override back to the
+base CSS so a dragged fraction never leaks into grow mode; a
+`ResizeObserver` on the root re-applies on node resizes. Pure helpers
+`clampSplitFraction`/`splitHeights` (floors scale down proportionally on
+degenerate totals, never negative)/`splitFractionFromNode` are the
+headless test surface.
+
+
 **Height policy (v0.73.0, owner report 2026-08-22: "it should not change
 the overall height of the node once a user sets it … the top section
 should scroll in those instances and split the height with the bottom
