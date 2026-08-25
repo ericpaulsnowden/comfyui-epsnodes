@@ -357,12 +357,34 @@ class TestMissingBlocks:
 
 
 class TestIsChanged:
-    def test_changes_when_the_file_is_rewritten(self, library_dir: Path) -> None:
-        _write_notebook(library_dir, "loras.md", "## A\nv1\n")
-        token1 = EPSPromptBuilder.IS_CHANGED(file="loras.md", blocks="[]", separator=", ")
-        _write_notebook(library_dir, "loras.md", "## A\nv2 different length\n")
-        token2 = EPSPromptBuilder.IS_CHANGED(file="loras.md", blocks="[]", separator=", ")
+    def test_changes_when_a_blocked_entrys_text_changes(self, library_dir: Path) -> None:
+        _write_notebook(library_dir, "loras.md", "## A\nv1\n## B\nother\n")
+        token1 = EPSPromptBuilder.IS_CHANGED(file="loras.md", blocks='["A"]', separator=", ")
+        _write_notebook(library_dir, "loras.md", "## A\nv2 different\n## B\nother\n")
+        token2 = EPSPromptBuilder.IS_CHANGED(file="loras.md", blocks='["A"]', separator=", ")
         assert token1 != token2
+
+    def test_stable_when_an_unblocked_entry_changes(self, library_dir: Path) -> None:
+        # v0.80.0 sweep-performance round: editing an entry no block
+        # references must not invalidate downstream sweep caches.
+        _write_notebook(library_dir, "loras.md", "## A\nv1\n## B\nother\n")
+        token1 = EPSPromptBuilder.IS_CHANGED(file="loras.md", blocks='["A"]', separator=", ")
+        _write_notebook(library_dir, "loras.md", "## A\nv1\n## B\nCHANGED a lot\n")
+        token2 = EPSPromptBuilder.IS_CHANGED(file="loras.md", blocks='["A"]', separator=", ")
+        assert token1 == token2
+
+    def test_zero_blocks_is_a_constant_with_no_file_dependency(
+        self, library_dir: Path
+    ) -> None:
+        # Zero blocks never touches the file (build()'s own shortcut), so
+        # the token is a constant -- file edits cannot re-run an empty node.
+        token1 = EPSPromptBuilder.IS_CHANGED(file="loras.md", blocks="[]", separator=", ")
+        assert token1 == "no-blocks"
+        _write_notebook(library_dir, "loras.md", "## A\nnew\n")
+        assert (
+            EPSPromptBuilder.IS_CHANGED(file="loras.md", blocks="[]", separator=", ")
+            == "no-blocks"
+        )
 
     def test_stable_across_calls_when_nothing_changed(self, library_dir: Path) -> None:
         _write_notebook(library_dir, "loras.md", "## A\nsame\n")
@@ -371,14 +393,14 @@ class TestIsChanged:
         assert token1 == token2
 
     def test_uses_a_missing_token_for_a_nonexistent_file(self) -> None:
-        token = EPSPromptBuilder.IS_CHANGED(file="loras.md", blocks="[]", separator=", ")
+        token = EPSPromptBuilder.IS_CHANGED(file="loras.md", blocks='["A"]', separator=", ")
         assert isinstance(token, str)
         assert "missing" in token
 
     def test_missing_then_created_file_changes_the_token(self, library_dir: Path) -> None:
-        before = EPSPromptBuilder.IS_CHANGED(file="loras.md", blocks="[]", separator=", ")
+        before = EPSPromptBuilder.IS_CHANGED(file="loras.md", blocks='["A"]', separator=", ")
         _write_notebook(library_dir, "loras.md", "## A\nnow exists\n")
-        after = EPSPromptBuilder.IS_CHANGED(file="loras.md", blocks="[]", separator=", ")
+        after = EPSPromptBuilder.IS_CHANGED(file="loras.md", blocks='["A"]', separator=", ")
         assert before != after
 
     def test_handles_no_context_without_raising(self) -> None:

@@ -127,6 +127,40 @@ class TestBakeSolo:
 
 
 class TestSaveRoundTrip:
+    def test_inplace_bake_restores_the_hidden_objects(
+        self, fake_folder_paths: Path
+    ) -> None:
+        # v0.80.0 (sweep-performance round): save() now bakes IN PLACE and
+        # restores in a finally instead of deep-copying per save. The hidden
+        # extra_pnginfo/prompt objects are SHARED across every mapped save()
+        # of a queue, so they must come out byte-identical -- while the PNG
+        # written mid-block still carries the baked chunks.
+        import copy
+
+        node = m.EPSSaveImage()
+        workflow = {
+            "nodes": [{"id": 5, "type": "EPSCrossSweep", "widgets_values": ["shoot", "multiply"]}]
+        }
+        prompt = {"5": {"class_type": "EPSCrossSweep", "inputs": {"solo_run": ""}}}
+        extra = {"workflow": workflow}
+        workflow_before = copy.deepcopy(workflow)
+        prompt_before = copy.deepcopy(prompt)
+        result = node.save(
+            [_image()],
+            filename_prefix="restore/check_m1_i1_t1",
+            run_info=json.dumps({"token": "m1_i1_t1", "node": "5", "run": 1, "total": 2}),
+            prompt=prompt,
+            extra_pnginfo=extra,
+        )
+        assert workflow == workflow_before
+        assert prompt == prompt_before
+        assert extra == {"workflow": workflow_before}
+        saved = result["ui"]["images"][0]
+        png = Image.open(fake_folder_paths / saved["subfolder"] / saved["filename"])
+        assert json.loads(png.text["prompt"])["5"]["inputs"]["solo_run"] == "m1_i1_t1"
+        baked_wf = json.loads(png.text["workflow"])
+        assert baked_wf["nodes"][0]["widgets_values"][-1] == "m1_i1_t1"
+
     def test_baked_chunks_land_in_the_png(self, fake_folder_paths: Path) -> None:
         node = m.EPSSaveImage()
         workflow = {

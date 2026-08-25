@@ -394,6 +394,11 @@ def find_node_in_workflow(workflow: Any, path_id: Any) -> dict[str, Any] | None:
     return node
 
 
+#: Sentinel for "this key/index did not exist before the bake" in an undo
+#: log (v0.80.0 mutate-and-restore path below).
+_UNSET = object()
+
+
 def _bake_widget(
     workflow: Any,
     prompt: Any,
@@ -402,6 +407,7 @@ def _bake_widget(
     class_type: str,
     widget: str,
     value: Any,
+    undo: list | None = None,
 ) -> bool:
     """Set *widget* = *value* on node *node_id* in BOTH chunks (in place --
     callers pass their deep copies): the workflow node's
@@ -419,6 +425,8 @@ def _bake_widget(
         while len(values) <= index:
             values.append(defaults[len(values)] if len(values) < len(defaults) else "")
         values[index] = value
+        if undo is not None:
+            undo.append((node, "widgets_values", node.get("widgets_values", _UNSET)))
         node["widgets_values"] = values
         landed = True
     if isinstance(prompt, dict):
@@ -426,6 +434,8 @@ def _bake_widget(
         if isinstance(entry, dict) and entry.get("class_type") == class_type:
             inputs = entry.setdefault("inputs", {})
             if isinstance(inputs, dict):
+                if undo is not None:
+                    undo.append((inputs, widget, inputs.get(widget, _UNSET)))
                 inputs[widget] = value
                 landed = True
     return landed
@@ -471,6 +481,64 @@ def bake_provenance(
         ):
             pinned_ids.append(str(pin_node_id))
     return workflow_out, prompt_out, baked, pinned_ids
+
+
+def bake_provenance_inplace(
+    workflow: Any,
+    prompt: Any,
+    run_info: dict[str, Any],
+    pins: dict[str, PinnedWidget] | None,
+    undo: list,
+) -> tuple[Any, Any, bool, list[str]]:
+    """:func:`bake_provenance` WITHOUT the two deep copies (v0.80.0
+    sweep-performance round): mutates *workflow*/*prompt* IN PLACE,
+    recording every write into *undo* so :func:`undo_bakes` can put the
+    originals back after the caller has serialized. Measured: the copies
+    were 72-95%% of the per-save bake (~40 ms of 55 ms at a 2 MB workflow;
+    ~12 s across a 300-save sweep) while the mutation itself is two widget
+    writes. ``save()`` wraps the serialize loop in ``try/finally
+    undo_bakes(undo)`` so the shared hidden ``extra_pnginfo`` objects are
+    byte-identical afterwards even on an exception mid-save -- the public
+    copying :func:`bake_provenance` keeps its never-mutates contract for
+    every other caller."""
+    token = run_info.get("token")
+    node_id = run_info.get("node")
+    baked = False
+    if isinstance(token, str) and node_id is not None:
+        baked = _bake_widget(
+            workflow, prompt, node_id, EPSCrossSweep, MULTIPLIER_CLASS,
+            SOLO_WIDGET, token, undo,
+        )
+    pinned_ids: list[str] = []
+    for pin_node_id, pin in (pins or {}).items():
+        node_class = _pinnable_class(pin.class_type)
+        if node_class is None:
+            logger.warning(
+                "EPS Save Image: cannot bake a pin for unknown class %r (node %s)",
+                pin.class_type,
+                pin_node_id,
+            )
+            continue
+        if _bake_widget(
+            workflow, prompt, pin_node_id, node_class, pin.class_type,
+            pin.widget, pin.value, undo,
+        ):
+            pinned_ids.append(str(pin_node_id))
+    return workflow, prompt, baked, pinned_ids
+
+
+def undo_bakes(undo: list) -> None:
+    """Reverse every write :func:`bake_provenance_inplace` recorded, newest
+    first (a container touched twice restores to its ORIGINAL value)."""
+    for container, key, old in reversed(undo):
+        try:
+            if old is _UNSET:
+                container.pop(key, None)
+            else:
+                container[key] = old
+        except Exception:
+            logger.exception("EPS Save Image: bake undo failed for %r", key)
+    undo.clear()
 
 
 def bake_solo(workflow: Any, prompt: Any, run_info: dict[str, Any]) -> tuple[Any, Any, bool]:
@@ -558,58 +626,67 @@ class EPSSaveImage:
             disable_metadata = False
 
         prefix = str(_unwrap(filename_prefix) or "EPS")
-        info = parse_run_info(run_info)
-        prompt_data = _unwrap(prompt)
-        extra = _unwrap(extra_pnginfo)
-        extra = dict(extra) if isinstance(extra, dict) else {}
-        baked = False
-        pinned_ids: list[str] = []
-        if info is not None:
-            # M3: capture BEFORE baking, from the stores, never failing the
-            # queue -- a capture error just means that node saves unpinned.
-            try:
-                pins = capture_pins(prompt_data, info)
-            except Exception:
-                logger.exception("EPS Save Image: pin capture failed; saving unpinned")
-                pins = {}
-            workflow_data = extra.get("workflow")
-            workflow_data, prompt_data, baked, pinned_ids = bake_provenance(
-                workflow_data, prompt_data, info, pins
-            )
-            if workflow_data is not None:
-                extra["workflow"] = workflow_data
-            if not baked:
-                logger.warning(
-                    "EPS Save Image: multiplier %r not found in the workflow/prompt; "
-                    "saving with the standard (un-soloed) chunks",
-                    info.get("node"),
+        # v0.80.0: every provenance write below is recorded here and
+        # reversed in the finally -- the hidden extra_pnginfo objects are
+        # shared across all of this queue's mapped save() calls and must
+        # come out byte-identical (bake_provenance_inplace's contract).
+        bake_undo: list = []
+        try:
+            info = parse_run_info(run_info)
+            prompt_data = _unwrap(prompt)
+            extra = _unwrap(extra_pnginfo)
+            extra = dict(extra) if isinstance(extra, dict) else {}
+            baked = False
+            pinned_ids: list[str] = []
+            if info is not None:
+                # M3: capture BEFORE baking, from the stores, never failing the
+                # queue -- a capture error just means that node saves unpinned.
+                try:
+                    pins = capture_pins(prompt_data, info)
+                except Exception:
+                    logger.exception("EPS Save Image: pin capture failed; saving unpinned")
+                    pins = {}
+                workflow_data = extra.get("workflow")
+                # v0.80.0: in place + undo, not deepcopy -- see
+                # bake_provenance_inplace. `extra["workflow"]` needs no
+                # replacement: the baked object IS the one already in `extra`.
+                workflow_data, prompt_data, baked, pinned_ids = bake_provenance_inplace(
+                    workflow_data, prompt_data, info, pins, bake_undo
                 )
-
-        output_dir = folder_paths.get_output_directory()
-        first = images[0]
-        full_output_folder, filename, counter, subfolder, _prefix = (
-            folder_paths.get_save_image_path(prefix, output_dir, first.shape[1], first.shape[0])
-        )
-        results: list[dict[str, Any]] = []
-        for batch_number, image in enumerate(images):
-            array = 255.0 * image.cpu().numpy()
-            img = Image.fromarray(np.clip(array, 0, 255).astype(np.uint8))
-            metadata = None
-            if not disable_metadata:
-                metadata = PngInfo()
-                if prompt_data is not None:
-                    metadata.add_text("prompt", json.dumps(prompt_data))
-                for key, value in extra.items():
-                    metadata.add_text(str(key), json.dumps(value))
-                if info is not None:
-                    metadata.add_text(
-                        EPS_RUN_CHUNK,
-                        json.dumps(
-                            {**info, "baked": baked, "pinned": pinned_ids, "format": 1}
-                        ),
+                if not baked:
+                    logger.warning(
+                        "EPS Save Image: multiplier %r not found in the workflow/prompt; "
+                        "saving with the standard (un-soloed) chunks",
+                        info.get("node"),
                     )
-            file = f"{filename.replace('%batch_num%', str(batch_number))}_{counter:05}_.png"
-            img.save(os.path.join(full_output_folder, file), pnginfo=metadata, compress_level=4)
-            results.append({"filename": file, "subfolder": subfolder, "type": "output"})
-            counter += 1
-        return {"ui": {"images": results}, "result": (images,)}
+
+            output_dir = folder_paths.get_output_directory()
+            first = images[0]
+            full_output_folder, filename, counter, subfolder, _prefix = (
+                folder_paths.get_save_image_path(prefix, output_dir, first.shape[1], first.shape[0])
+            )
+            results: list[dict[str, Any]] = []
+            for batch_number, image in enumerate(images):
+                array = 255.0 * image.cpu().numpy()
+                img = Image.fromarray(np.clip(array, 0, 255).astype(np.uint8))
+                metadata = None
+                if not disable_metadata:
+                    metadata = PngInfo()
+                    if prompt_data is not None:
+                        metadata.add_text("prompt", json.dumps(prompt_data))
+                    for key, value in extra.items():
+                        metadata.add_text(str(key), json.dumps(value))
+                    if info is not None:
+                        metadata.add_text(
+                            EPS_RUN_CHUNK,
+                            json.dumps(
+                                {**info, "baked": baked, "pinned": pinned_ids, "format": 1}
+                            ),
+                        )
+                file = f"{filename.replace('%batch_num%', str(batch_number))}_{counter:05}_.png"
+                img.save(os.path.join(full_output_folder, file), pnginfo=metadata, compress_level=4)
+                results.append({"filename": file, "subfolder": subfolder, "type": "output"})
+                counter += 1
+            return {"ui": {"images": results}, "result": (images,)}
+        finally:
+            undo_bakes(bake_undo)

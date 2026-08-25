@@ -31,8 +31,12 @@ only requires an execution path when there's an `OUTPUT_NODE` to reach), and
 caching (`NaN != NaN`; confirmed as the SAME sentinel `execution.py`'s own
 `IsChangedCache` falls back to on an `IS_CHANGED` exception, `node["is_changed"]
 = float("NaN")`) so caching never skips a Run. Together: exactly one
-execution -- at most one append of the current batch -- per queued prompt,
-in EITHER mode; `Emit` simply skips the append.
+execution -- at most one append of the current batch -- per queued prompt.
+`Emit` simply skips the append -- and BECAUSE it is side-effect-free, since
+v0.80.0 only Collect keeps the NaN sentinel: Emit's `IS_CHANGED` is the
+buffer's own state token (`store.buffer_token`, manifest mtime_ns+size), so
+a re-queue over an UNCHANGED buffer cross-prompt-caches the whole decode
+and everything downstream, while any append/delete/Clear still re-runs.
 
 **2026-07-22 owner fixes -- output-panel pollution + flow-through:**
 
@@ -285,9 +289,24 @@ class EPSImageGrid:
         }
 
     @classmethod
-    def IS_CHANGED(cls, **_kwargs: Any) -> float:
-        # Always "changed" -- see module docstring's execution-model note.
-        return float("nan")
+    def IS_CHANGED(cls, mode: Any = MODE_COLLECT, grid_uuid: Any = "", **_kwargs: Any):
+        # v0.80.0 (sweep-performance round) -- split by mode:
+        #  - Collect APPENDS (a side effect core's cache must never skip):
+        #    the NaN always-changed sentinel stays, exactly the module
+        #    docstring's original rationale.
+        #  - Emit is side-effect-free ("Emit simply skips the append") and
+        #    its output depends only on tracked inputs + BUFFER STATE,
+        #    which lives outside the input hash -- so the token IS the
+        #    buffer state (store.buffer_token: manifest mtime_ns+size).
+        #    An unchanged buffer now cross-prompt-caches the whole decode
+        #    (measured ~16 ms/frame, previously re-paid every queue) and
+        #    everything downstream of it; any append/delete/Clear flips
+        #    the token and re-runs. `image`/`focus` are ordinary tracked
+        #    inputs already in the cache key; hidden prompt/unique_id land
+        #    in **_kwargs.
+        if mode != MODE_EMIT:
+            return float("nan")
+        return f"emit:{store.buffer_token(str(grid_uuid or ''))}"
 
     def run(
         self,

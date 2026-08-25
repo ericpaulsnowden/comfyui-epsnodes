@@ -469,18 +469,56 @@ class TestPinnedM3:
             "captured": "c",
         }
 
-    def test_is_changed_folds_the_pin_in(self, library_dir: Path) -> None:
+    def test_is_changed_pinned_is_a_constant_and_ignores_the_file(
+        self, library_dir: Path
+    ) -> None:
+        # v0.80.0 contract: while pinned, IS_CHANGED is the constant
+        # "pinned" -- the pin JSON is a WIDGET, already inside core's
+        # input-hash key, so a pin change re-executes via the signature;
+        # and the FILE is irrelevant to a pinned node's output, so an
+        # on-disk edit must NOT re-run whole sweeps built on pins.
         _write_notebook(library_dir, "loras.md", "## A\nx\n")
         cls = nodes_notebook.LoraLibraryNotebook
         live = cls.IS_CHANGED(file="loras.md", entry="A")
         assert live == cls.IS_CHANGED(file="loras.md", entry="A", pinned="")
         pin_x = _pin([{"name": "A", "text": "x"}])
-        pin_y = _pin([{"name": "A", "text": "y"}])
         pinned = cls.IS_CHANGED(file="loras.md", entry="A", pinned=pin_x)
+        assert pinned == "pinned"
         assert pinned != live
-        other = cls.IS_CHANGED(file="loras.md", entry="A", pinned=pin_y)
-        assert other != pinned
-        assert cls.IS_CHANGED(file="loras.md", entry="A", pinned="") == live  # unpin = back to live
+        _write_notebook(library_dir, "loras.md", "## A\nEDITED\n## Z\nnew\n")
+        assert cls.IS_CHANGED(file="loras.md", entry="A", pinned=pin_x) == "pinned"
+        # unpinned sees the edit
+        assert cls.IS_CHANGED(file="loras.md", entry="A", pinned="") != live
+
+    def test_is_changed_tracks_selected_content_not_the_whole_file(
+        self, library_dir: Path
+    ) -> None:
+        # v0.80.0 sweep-performance round: editing an entry the selection
+        # does NOT include must not invalidate the token (previously the
+        # whole-file mtime did, re-running entire downstream sweeps).
+        _write_notebook(library_dir, "loras.md", "## A\nbodyA\n## B\nbodyB\n")
+        cls = nodes_notebook.LoraLibraryNotebook
+        before = cls.IS_CHANGED(file="loras.md", entry="A")
+        _write_notebook(library_dir, "loras.md", "## A\nbodyA\n## B\nCHANGED\n")
+        assert cls.IS_CHANGED(file="loras.md", entry="A") == before  # B is unselected
+        _write_notebook(library_dir, "loras.md", "## A\nCHANGED-A\n## B\nCHANGED\n")
+        assert cls.IS_CHANGED(file="loras.md", entry="A") != before  # A is selected
+
+    def test_is_changed_flips_when_a_selected_entry_appears_or_vanishes(
+        self, library_dir: Path
+    ) -> None:
+        _write_notebook(library_dir, "loras.md", "## A\nbodyA\n")
+        cls = nodes_notebook.LoraLibraryNotebook
+        missing = cls.IS_CHANGED(file="loras.md", entry="A\nGhost")
+        _write_notebook(library_dir, "loras.md", "## A\nbodyA\n## Ghost\nnow real\n")
+        assert cls.IS_CHANGED(file="loras.md", entry="A\nGhost") != missing
+
+    def test_is_changed_missing_file_token_recovers(self, library_dir: Path) -> None:
+        cls = nodes_notebook.LoraLibraryNotebook
+        gone = cls.IS_CHANGED(file="nope.md", entry="A")
+        assert gone.startswith("missing:")
+        _write_notebook(library_dir, "nope.md", "## A\nx\n")
+        assert cls.IS_CHANGED(file="nope.md", entry="A") != gone
 
     def test_resolve_selection_is_the_live_path_shared_with_save_image(
         self, library_dir: Path, context: LibraryContext

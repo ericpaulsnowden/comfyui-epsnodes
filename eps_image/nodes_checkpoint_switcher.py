@@ -342,6 +342,42 @@ def _load_checkpoint(name: str) -> tuple[Any, Any, Any]:
     return model, clip, vae
 
 
+def _offload_after_bulk_load(models: list, clips: list, vaes: list) -> int:
+    """Best-effort move of each loaded component's weights to its own
+    ``offload_device`` (see the call site's comment for the full VRAM
+    rationale). NEVER raises and never fails a load: every component is
+    wrapped individually, an unexpected object shape is simply skipped,
+    and an exception is logged at debug and swallowed -- worst case is
+    exactly today's behavior. Returns how many components actually moved.
+
+    Shapes handled: a MODEL is a ``ModelPatcher`` (has ``model`` +
+    ``offload_device`` directly); CLIP and VAE wrap theirs as
+    ``.patcher``. All three attribute names are long-stable public-ish
+    comfy surface, but everything is ``getattr``-guarded anyway."""
+    moved = 0
+    for component in (*models, *clips, *vaes):
+        try:
+            patcher = (
+                component
+                if getattr(component, "offload_device", None) is not None
+                else getattr(component, "patcher", None)
+            )
+            offload = getattr(patcher, "offload_device", None)
+            inner = getattr(patcher, "model", None)
+            if offload is not None and inner is not None and hasattr(inner, "to"):
+                current = getattr(patcher, "current_device", None)
+                if current is None or str(current) != str(offload):
+                    inner.to(offload)
+                    moved += 1
+        except Exception:
+            logger.debug(
+                "EPS Checkpoint Switcher: offload after bulk load skipped for %r",
+                type(component).__name__,
+                exc_info=True,
+            )
+    return moved
+
+
 class EPSCheckpointSwitcher:
     """Tick N checkpoints, get four index-aligned ``OUTPUT_IS_LIST`` lists
     (``model``, ``clip``, ``vae``, ``label``) -- one element per ticked
@@ -517,6 +553,30 @@ class EPSCheckpointSwitcher:
                 len(missing),
                 ", ".join(missing),
             )
+
+        # v0.80.0 (sweep-performance round): with SEVERAL checkpoints
+        # ticked, park every just-loaded weight on its offload (CPU)
+        # device before returning. Why: comfy.sd.load_state_dict_guess_
+        # config picks each load's INITIAL device from free-VRAM-at-that-
+        # instant (model_management.unet_inital_load_device), so the first
+        # checkpoints of a bulk load can land straight on the GPU -- and
+        # because a plain load never registers in model_management.
+        # current_loaded_models (only load_models_gpu does), core's
+        # free_memory can NEVER evict them: they'd squat on VRAM for the
+        # whole queue, shrinking what every sampler run gets (worst case
+        # forcing lowvram mode). Parking them restores the state sampling
+        # expects -- the sampler's own load_models_gpu brings each model in
+        # when its runs arrive, and the multiplier's model-major order
+        # keeps it resident across that model's whole stretch. A single
+        # ticked checkpoint keeps today's behavior untouched.
+        if len(models) >= 2:
+            moved = _offload_after_bulk_load(models, clips, vaes)
+            if moved:
+                logger.info(
+                    "EPS Checkpoint Switcher: parked %d loaded component(s) on "
+                    "their offload device ahead of the sweep",
+                    moved,
+                )
 
         if models:
             return (models, clips, vaes, labels)

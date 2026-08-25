@@ -164,19 +164,44 @@ class TestInputTypes:
 
 class TestIsChanged:
     def test_returns_nan_with_no_args(self) -> None:
+        # No args = the Collect default: appends are a side effect the
+        # cache must never skip.
         assert math.isnan(EPSImageGrid.IS_CHANGED())
 
-    def test_returns_nan_regardless_of_kwargs(self) -> None:
-        assert math.isnan(
-            EPSImageGrid.IS_CHANGED(
-                mode="Emit", image=None, grid_uuid=VALID_UUID, focus="0001.png"
-            )
+    def test_collect_two_calls_are_never_equal(self) -> None:
+        # NaN != NaN, so ComfyUI's cache can never see two Collect
+        # IS_CHANGED results as "the same".
+        assert EPSImageGrid.IS_CHANGED(mode="Collect") != EPSImageGrid.IS_CHANGED(
+            mode="Collect"
         )
 
-    def test_two_calls_are_never_equal(self) -> None:
-        # The whole point: NaN != NaN, so ComfyUI's cache can never see two
-        # IS_CHANGED results as "the same".
-        assert EPSImageGrid.IS_CHANGED() != EPSImageGrid.IS_CHANGED()
+    def test_emit_is_the_buffer_state_token_not_nan(self, fake_folder_paths: Path) -> None:
+        # v0.80.0: Emit is side-effect-free, so an UNCHANGED buffer must
+        # cross-prompt-cache -- the token is the manifest state, stable
+        # across calls, and it flips when the buffer changes.
+        token1 = EPSImageGrid.IS_CHANGED(
+            mode="Emit", image=None, grid_uuid=VALID_UUID, focus="0001.png"
+        )
+        token2 = EPSImageGrid.IS_CHANGED(
+            mode="Emit", image=None, grid_uuid=VALID_UUID, focus="0001.png"
+        )
+        assert isinstance(token1, str) and token1.startswith("emit:")
+        assert token1 == token2
+
+    def test_emit_token_flips_when_the_buffer_changes(self, fake_folder_paths: Path) -> None:
+        import torch
+
+        before = EPSImageGrid.IS_CHANGED(mode="Emit", grid_uuid=VALID_UUID)
+        store.append_batch(VALID_UUID, torch.zeros((1, 4, 4, 3)))
+        after = EPSImageGrid.IS_CHANGED(mode="Emit", grid_uuid=VALID_UUID)
+        assert before != after
+        # unchanged buffer -> stable again
+        assert EPSImageGrid.IS_CHANGED(mode="Emit", grid_uuid=VALID_UUID) == after
+
+    def test_emit_with_a_bogus_uuid_still_returns_a_string(self) -> None:
+        token = EPSImageGrid.IS_CHANGED(mode="Emit", grid_uuid="../nope")
+        assert isinstance(token, str)
+        assert "no-buffer" in token
 
 
 # -------------------------------------------------------------------- run()

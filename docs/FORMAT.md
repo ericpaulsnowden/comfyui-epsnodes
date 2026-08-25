@@ -418,6 +418,20 @@ execution — **the file is the truth; the UI is a view.**
 
 ### §6.1 `LoraLibraryNotebook` (display: "EPS Prompt Notebook")
 
+**Content-derived `IS_CHANGED` (v0.80.0 sweep-performance round).** Through
+v0.79.0 the token was the whole file's mtime+size — so editing ANY entry in
+a big library file, even one the node never selected, cascaded through
+core's recursive node signatures and re-ran entire downstream sweeps. Now
+`_selection_token`: a valid pin → the constant `"pinned"` (the pin JSON is
+a widget already in core's input-hash key, and the FILE is irrelevant while
+pinned — file edits no longer re-run pinned nodes at all); live → sha1 of
+resolved path + each SELECTED entry's name and current text (`<missing>`
+markers keep appear/disappear visible). Unselected entries change freely.
+`_load_notebook_cached` memoizes the parse by `(mtime_ns, size)` —
+re-`stat`ed every call, so cross-machine edits are never missed — and
+`resolve_selection` reads through it too.
+
+
 **Collapsed sections persist per workflow (v0.79.0, owner ask 2026-08-23:
 "I often group by type of workflow so I never want to see specific prompts
 in specific workflows but they keep opening up").** The panel's
@@ -1662,6 +1676,17 @@ is the functional core WITHOUT the grid.
 
 ## §6.6 `EPSImageGrid` (display: "EPS Image Grid") — accumulate + fan out
 
+**Emit cross-prompt-caches now (v0.80.0).** `IS_CHANGED` split by mode:
+Collect keeps the NaN always-changed sentinel (its append is a side effect
+the cache must never skip), but Emit — side-effect-free by design — returns
+`store.buffer_token(grid_uuid)` (manifest `mtime_ns:size`; coarse
+`no-buffer`/`no-manifest` degrades). A re-queue over an UNCHANGED buffer
+skips the whole decode (measured ~16 ms/frame — 3.2 s per queue at 200
+frames) plus everything downstream; any append/delete/Clear rewrites the
+manifest and re-runs. Distinct from §6.6's older `buffer_generation` (ms,
+thumbnail cache-busting only): this one gates EXECUTION, hence ns.
+
+
 **Focus narrows Emit (v0.77.0, owner ask 2026-08-23: "if you have a single
 image in focus (double click to make it large) the widget should only
 output that one image").** A hidden `focus` STRING widget — TAIL-appended
@@ -2850,6 +2875,24 @@ hand-bypassing groups. Roadmap: `research/roadmap-eps-distributor.md`.
 
 ## §6.12 `EPSCheckpointSwitcher` (display: "EPS Checkpoint Switcher") — tick N checkpoints, run N times
 
+**Bulk-load VRAM parking (v0.80.0 sweep-performance round).** With ≥2
+ticked checkpoints, `execute` ends by best-effort moving every loaded
+component's weights to its own `offload_device`
+(`_offload_after_bulk_load`; MODEL is the patcher itself, CLIP/VAE wrap
+theirs as `.patcher`). Why: `comfy.sd.load_state_dict_guess_config` picks
+each load's INITIAL device from free-VRAM-at-that-instant
+(`model_management.unet_inital_load_device`), so early checkpoints of a
+bulk load can land straight on the GPU — and since a plain load never
+registers in `current_loaded_models`, core's `free_memory` can NEVER evict
+them: they squat on VRAM for the whole queue (worst case forcing lowvram
+sampling). Every move is individually guarded (never raises, logs debug,
+skips odd shapes); one ticked checkpoint is untouched. Also documented by
+the same round's research: core holds CPU RAM ≈ N × checkpoint size for
+the whole queue (our list keeps the patchers alive; core's RAM-pressure
+eviction is structurally blind to live ModelPatcher entries) — inherent to
+the list design, roadmap `docs/ROADMAP-sweep-performance.md`.
+
+
 - **Separator-insensitive names (v0.71.0, §7.6; owner report 2026-08-22).**
   `selection` stores the SAVING machine's `folder_paths` spelling;
   `execute` and `VALIDATE_INPUTS` resolve each name through one rule —
@@ -3192,6 +3235,17 @@ apply/text helpers, so it drops in anywhere Apply LoRA Set does.
 
 ## §6.14 `EPSSaveImage` (display: "EPS Save Image") — Save Image with provenance baked in
 
+**In-place bake + undo (v0.80.0).** `save()` now uses
+`bake_provenance_inplace` + `undo_bakes` — mutate the shared hidden
+`extra_pnginfo`/`prompt` objects, serialize, restore in a `finally` —
+instead of two per-save `deepcopy`s (measured 72–95% of the bake: ~40 ms of
+55 ms per save at a 2 MB workflow, ~12 s across a 300-save sweep). Every
+`_bake_widget` write is recorded `(container, key, old|_UNSET)` and
+reversed newest-first, so the objects come out byte-identical even on an
+exception mid-save; the copying `bake_provenance` keeps its never-mutates
+contract for every other caller (tests pin both).
+
+
 NON-lora node in `eps_image/`, category "EPSNodes", class id `EPSSaveImage`
 frozen once shipped (§8). Provenance roadmap M2 (`docs/ROADMAP-run-
 provenance.md`; owner goal 2026-08-18: "drop a single image from a set
@@ -3268,6 +3322,14 @@ onto comfyui and recreate just that image"). Shipped v0.70.0.
   the chained `handleFile` wrap).
 
 ## §6.15 `EPSPromptBuilder` (display: "EPS Prompt Builder") — compose from the Notebook
+
+**Content-derived `IS_CHANGED` (v0.80.0, §6.1's rationale verbatim).**
+`_blocks_token`: zero blocks → the constant `"no-blocks"` (no file, no
+context — mirrors `_resolve_blocks`'s shortcut); otherwise sha1 of resolved
+path + each BLOCK's name and current text. Editing entries no block
+references no longer invalidates sweeps built on this node. Own
+`_load_notebook_cached` copy (own-your-helpers).
+
 
 New in v0.76.0 (owner spec 2026-08-23, four design choices confirmed the same
 day: notebook DROPDOWN as the file source; blocks are LIVE references;

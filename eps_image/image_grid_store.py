@@ -475,6 +475,27 @@ def buffer_generation(grid_uuid: str) -> int:
         return 0
 
 
+def buffer_token(grid_uuid: str) -> str:
+    """The buffer's cache-identity for ``EPSImageGrid.IS_CHANGED``'s
+    Emit-mode branch (v0.80.0 sweep-performance round): the manifest's
+    ``(mtime_ns, size)``. Every append/clone/delete rewrites the manifest
+    and a Clear removes it, so this changes exactly when a re-Emit would
+    produce different frames -- and an UNCHANGED buffer lets core's
+    prompt-to-prompt cache skip the whole decode (previously ~16 ms/frame,
+    every queue, forever). ns resolution rather than
+    :func:`buffer_generation`'s ms: this one gates EXECUTION, not just a
+    thumbnail URL. Invalid uuid / missing manifest return coarse tokens
+    that still change when that situation changes."""
+    directory = buffer_dir(grid_uuid)
+    if directory is None:
+        return f"no-buffer:{grid_uuid!r}"
+    try:
+        stat = _manifest_path(directory).stat()
+    except OSError:
+        return f"no-manifest:{directory}"
+    return f"{stat.st_mtime_ns}:{stat.st_size}"
+
+
 # ------------------------------------------- frame files + thumbnails
 # (2026-08-21 perf round -- see the module docstring's dated section and
 # ``routes_image_grid.py``'s ``GET /eps_image_grid/frame``.)

@@ -61,6 +61,38 @@ the same ComfyUI can end up in different modes — if the nodes look right on
 one machine and broken on another, check this setting first on the machine
 that looks broken.
 
+## Long runs: what the pack does for you, and two dials worth knowing
+
+A few hundred runs multiply every per-run cost, so the pack is built to keep
+its own overhead near zero and to protect ComfyUI's caches (v0.80.0 round —
+measured on a live 200-run sweep: the pack's whole per-run machinery,
+provenance-baked saves included, costs ~25–50 ms per run):
+
+- **Run order already minimizes model churn.** Model-major nesting (models
+  outermost, texts innermost) keeps each model resident on the GPU for its
+  whole stretch — see the Run Multiplier section.
+- **Editing your library no longer nukes the cache.** The Notebook and the
+  Prompt Builder now key their cache tokens on the *selected/blocked
+  entries' content*, not the whole file — polish an unrelated prompt in a
+  500-entry file and a re-queue skips everything unchanged. (A pinned
+  notebook ignores file edits entirely.)
+- **An unchanged Image Grid buffer re-queues for free** — Emit only re-runs
+  (and re-runs everything downstream) when the buffer actually changed.
+- **Multiple checkpoints load politely.** With several ticked, the
+  Checkpoint Switcher parks all loaded weights on the CPU before the sweep
+  starts, so idle models never squat on VRAM while another one samples.
+
+Two dials on *your* side that measurably matter at scale:
+
+- **Sampler live previews** re-render per step, per run — for a big
+  overnight sweep, set ComfyUI's preview method to *none* (or TAESD) in
+  Settings; it's the one per-run overhead that scales with steps × runs.
+- **Know what a one-word edit re-runs.** ComfyUI caches per *node*, not per
+  list element: change one selected text and every downstream node re-runs
+  for ALL combinations (that's core's design, not the pack's). Keep big
+  exploratory sweeps and small iteration sweeps in separate workflows and
+  the caches work for you.
+
 ## EPS Prompt Notebook (shipped)
 
 `EPSNodes → EPS Prompt Notebook`: a two-pane editor inside the node — entry

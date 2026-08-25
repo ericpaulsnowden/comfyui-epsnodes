@@ -684,3 +684,74 @@ class TestRegisteredInThePack:
         source = (REPO_ROOT / "__init__.py").read_text(encoding="utf-8")
         assert "eps_image.routes_checkpoint_switcher" in source
         assert "_checkpoint_switcher_routes.register()" in source
+
+
+# ------------------------------- v0.80.0 bulk-load offload (sweep perf round)
+
+
+class _FakeInner:
+    def __init__(self) -> None:
+        self.moved_to: list = []
+
+    def to(self, device) -> None:
+        self.moved_to.append(device)
+
+
+class _FakePatcher:
+    def __init__(self, offload="cpu") -> None:
+        self.offload_device = offload
+        self.model = _FakeInner()
+
+
+class _FakeClip:
+    def __init__(self) -> None:
+        self.patcher = _FakePatcher()
+
+
+class TestOffloadAfterBulkLoad:
+    def test_moves_models_and_wrapped_patchers(self) -> None:
+        from eps_image.nodes_checkpoint_switcher import _offload_after_bulk_load
+
+        m1, m2 = _FakePatcher(), _FakePatcher()
+        c1 = _FakeClip()
+        moved = _offload_after_bulk_load([m1, m2], [c1], [])
+        assert moved == 3
+        assert m1.model.moved_to == ["cpu"]
+        assert c1.patcher.model.moved_to == ["cpu"]
+
+    def test_never_raises_on_odd_shapes(self) -> None:
+        from eps_image.nodes_checkpoint_switcher import _offload_after_bulk_load
+
+        class Exploder:
+            @property
+            def offload_device(self):
+                raise RuntimeError("boom")
+
+        assert _offload_after_bulk_load([object(), Exploder()], [None], [42]) == 0
+
+    def test_skips_when_already_on_the_offload_device(self) -> None:
+        from eps_image.nodes_checkpoint_switcher import _offload_after_bulk_load
+
+        parked = _FakePatcher()
+        parked.current_device = "cpu"
+        assert _offload_after_bulk_load([parked], [], []) == 0
+        assert parked.model.moved_to == []
+
+    def test_single_checkpoint_execute_never_calls_it(self, monkeypatch) -> None:
+        # The call site is gated on len(models) >= 2 -- a single ticked
+        # checkpoint keeps today's behavior byte-for-byte.
+        import eps_image.nodes_checkpoint_switcher as mod
+
+        calls: list = []
+        monkeypatch.setattr(
+            mod, "_offload_after_bulk_load", lambda *a: calls.append(a) or 0
+        )
+        monkeypatch.setattr(
+            mod, "_load_checkpoint", lambda name: (_FakePatcher(), _FakeClip(), _FakeClip())
+        )
+        monkeypatch.setattr(mod, "_resolve_selection", lambda names: [(n, n) for n in names])
+        node = mod.EPSCheckpointSwitcher()
+        node.execute('["one.ckpt"]')
+        assert calls == []
+        node.execute('["one.ckpt", "two.ckpt"]')
+        assert len(calls) == 1

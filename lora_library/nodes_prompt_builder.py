@@ -81,6 +81,7 @@ touches model/clip weights, only markdown text.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 from pathlib import Path
@@ -301,16 +302,64 @@ def _file_token(path: Path) -> str:
     return f"{stat.st_mtime}:{stat.st_size}"
 
 
-def _builder_token(context: LibraryContext | None, file: str) -> str:
-    """*file*'s cache-busting token for :meth:`EPSPromptBuilder.IS_CHANGED`
-    -- the same shape as ``nodes_notebook._notebook_token`` minus the
-    per-entry component (this node has no single ``entry`` widget; every
-    OTHER declared input is already part of ComfyUI's own input-hash cache
-    key, per the module docstring)."""
+#: ``markdown_store.load_notebook`` memoized by (mtime_ns, size) --
+#: v0.80.0 sweep-performance round, this module's own copy of
+#: ``nodes_notebook._load_notebook_cached`` (own-your-helpers precedent).
+#: Re-validated against a fresh ``stat()`` every call; consumers only READ
+#: the parsed object. Cleared wholesale past 16 files.
+_PARSE_CACHE: dict[str, tuple[tuple[int, int], Any, float | None, str]] = {}
+
+
+def _load_notebook_cached(path: Path) -> tuple[Any, float | None, str]:
+    key = str(path)
+    try:
+        stat = path.stat()
+        sig = (stat.st_mtime_ns, stat.st_size)
+    except OSError:
+        _PARSE_CACHE.pop(key, None)
+        return markdown_store.load_notebook(path)
+    hit = _PARSE_CACHE.get(key)
+    if hit is not None and hit[0] == sig:
+        return hit[1], hit[2], hit[3]
+    parsed, mtime, line_ending = markdown_store.load_notebook(path)
+    if len(_PARSE_CACHE) > 16:
+        _PARSE_CACHE.clear()
+    _PARSE_CACHE[key] = (sig, parsed, mtime, line_ending)
+    return parsed, mtime, line_ending
+
+
+def _blocks_token(context: LibraryContext | None, file: str, blocks_raw: str) -> str:
+    """Content-derived ``IS_CHANGED`` token (v0.80.0 sweep-performance
+    round; the notebook's ``_selection_token`` rationale applies verbatim).
+    Through v0.79.0 this was the whole file's mtime+size, so editing ANY
+    entry -- even one no block references -- invalidated every sweep built
+    on this node. The token now hashes only what ``build()`` emits: the
+    resolved path plus each BLOCK's name and current text (``<missing>``
+    for an absent name). Zero blocks needs no file and no context at all
+    (mirrors ``_resolve_blocks``'s zero-blocks shortcut), so it returns a
+    constant. Every widget/link input is already inside core's own
+    input-hash key -- this only tracks the file CONTENT's contribution."""
+    names = _parse_blocks(blocks_raw)
+    if not names:
+        return "no-blocks"
     if context is None:
         return f"no-context:{file}"
-    path = context.resolve_notebook_file(file)
-    return f"{path}:{_file_token(path)}"
+    try:
+        path = context.resolve_notebook_file(file)
+    except OSError:
+        path = _peek_resolved_path(context, file)
+    parsed, mtime, _line_ending = _load_notebook_cached(path)
+    if mtime is None:
+        return f"missing:{path}"
+    digest = hashlib.sha1(str(path).encode("utf-8", "replace"))
+    for name in names:
+        found = markdown_store.get_entry(parsed, name)
+        text = (found or {}).get("text", "\x00<missing>")
+        digest.update(b"\x1f")
+        digest.update(str(name).encode("utf-8", "replace"))
+        digest.update(b"\x1e")
+        digest.update(str(text).encode("utf-8", "replace"))
+    return digest.hexdigest()
 
 
 class EPSPromptBuilder:
@@ -439,13 +488,13 @@ class EPSPromptBuilder:
         text: Any = None,
         name: Any = None,
     ) -> str:
-        # blocks/separator/text/name are already part of ComfyUI's own
-        # input-hash cache key -- only the notebook FILE's on-disk state
-        # needs folding in here (module docstring), so it's the only
-        # argument this actually uses; the rest exist only because core
-        # calls IS_CHANGED with every declared input that is present.
+        # v0.80.0: content-derived, not whole-file mtime -- see
+        # _blocks_token. blocks/separator/text/name are already part of
+        # ComfyUI's own input-hash cache key; this only has to track what
+        # the file's CONTENT contributes through the named blocks.
         file_value = _unwrap_scalar(file, DEFAULT_FILE)
-        return _builder_token(_context, file_value)
+        blocks_value = _unwrap_scalar(blocks, DEFAULT_BLOCKS)
+        return _blocks_token(_context, file_value, blocks_value)
 
     def build(
         self,

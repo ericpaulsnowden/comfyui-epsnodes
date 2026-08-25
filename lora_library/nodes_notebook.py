@@ -21,6 +21,7 @@ live rather than failing the queue.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 from pathlib import Path
@@ -62,6 +63,78 @@ def _notebook_token(context: LibraryContext | None, file: str, entry: str) -> st
         return f"no-context:{file}:{entry}"
     path = context.resolve_notebook_file(file)
     return f"{path}:{_file_token(path)}:{entry}"
+
+
+#: ``markdown_store.load_notebook`` results memoized by (mtime_ns, size) --
+#: v0.80.0 sweep-performance round: ``IS_CHANGED`` and ``read_entry`` both
+#: parse the file each queue; the memo makes that one parse, re-validated
+#: against a fresh ``stat()`` on every call so an on-disk edit (either
+#: machine) is never missed. Parsed notebooks are only ever READ by their
+#: consumers (``get_entry``/``list_entries``), so sharing one object is
+#: safe. Tiny by design: cleared wholesale past 16 files.
+_PARSE_CACHE: dict[str, tuple[tuple[int, int], Any, float | None, str]] = {}
+
+
+def _load_notebook_cached(path: Path) -> tuple[Any, float | None, str]:
+    key = str(path)
+    try:
+        stat = path.stat()
+        sig = (stat.st_mtime_ns, stat.st_size)
+    except OSError:
+        _PARSE_CACHE.pop(key, None)
+        return markdown_store.load_notebook(path)
+    hit = _PARSE_CACHE.get(key)
+    if hit is not None and hit[0] == sig:
+        return hit[1], hit[2], hit[3]
+    parsed, mtime, line_ending = markdown_store.load_notebook(path)
+    if len(_PARSE_CACHE) > 16:
+        _PARSE_CACHE.clear()
+    _PARSE_CACHE[key] = (sig, parsed, mtime, line_ending)
+    return parsed, mtime, line_ending
+
+
+def _selection_token(
+    context: LibraryContext | None, file: str, entry: str, pinned: str
+) -> str:
+    """Content-derived ``IS_CHANGED`` token (v0.80.0 sweep-performance
+    round). Through v0.79.0 this was the whole file's mtime+size -- so
+    editing ANY entry in a big library file, even one this node never
+    selected, changed the token, which cascaded through core's recursive
+    node signatures (``comfy_execution/caching.py`` ``get_node_signature``)
+    and re-ran ENTIRE downstream sweeps. The token now derives from what
+    this node actually EMITS:
+
+    - a valid pin -> the constant ``"pinned"``: the pin JSON itself is a
+      widget already inside core's input-hash key, and while pinned the
+      FILE is irrelevant to the output -- so file edits must not re-run a
+      pinned node at all;
+    - live -> a sha1 over the resolved path plus each SELECTED entry's
+      name and CURRENT text (``<missing>`` for an absent name, so an entry
+      appearing or disappearing still flips the token). Unselected entries
+      can change freely without invalidating a thing.
+
+    Missing file / unreachable dir / no context degrade to coarse string
+    tokens that still change when that situation changes."""
+    if parse_pinned(pinned) is not None:
+        return "pinned"
+    if context is None:
+        return f"no-context:{file}:{entry}"
+    try:
+        path = context.resolve_notebook_file(file)
+    except OSError:
+        path = _peek_resolved_path(context, file)
+    parsed, mtime, _line_ending = _load_notebook_cached(path)
+    if mtime is None:
+        return f"missing:{path}"
+    digest = hashlib.sha1(str(path).encode("utf-8", "replace"))
+    for name in _selected_names(entry):
+        found = markdown_store.get_entry(parsed, name)
+        text = (found or {}).get("text", "\x00<missing>")
+        digest.update(b"\x1f")
+        digest.update(name.encode("utf-8", "replace"))
+        digest.update(b"\x1e")
+        digest.update(str(text).encode("utf-8", "replace"))
+    return digest.hexdigest()
 
 
 #: FORMAT.md §6.1 ``pinned`` widget: the pin JSON ``format`` this build
@@ -205,7 +278,7 @@ def resolve_selection(
         # OSError.
         path = _peek_resolved_path(context, file)
 
-    parsed, mtime, _line_ending = markdown_store.load_notebook(path)
+    parsed, mtime, _line_ending = _load_notebook_cached(path)
     if mtime is None:
         hint = _unreachable_library_dir_hint(path)
         raise ValueError(
@@ -371,10 +444,12 @@ class LoraLibraryNotebook:
 
     @classmethod
     def IS_CHANGED(cls, file: str, entry: str, pinned: str = "") -> str:
-        # The pin value is folded in verbatim (M3): setting, changing or
-        # clearing a pin must re-execute even when the file token and the
-        # selection are unchanged.
-        return f"{_notebook_token(_context, file, entry)}:{pinned}"
+        # v0.80.0: content-derived, not whole-file mtime -- see
+        # _selection_token. The pin/entry/file WIDGET values are already in
+        # core's input-hash key, so a selection or pin change re-executes
+        # regardless of this token; this only has to track what the file's
+        # CONTENT contributes to the output.
+        return _selection_token(_context, file, entry, pinned)
 
     def read_entry(
         self, file: str, entry: str, pinned: str = ""
