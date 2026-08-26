@@ -151,6 +151,17 @@ MANUAL_EDIT_CASES = [
     (None, False),
 ]
 
+#: (state object, expected presetActionShouldStart() result) -- finding 3
+#: (2026-08-26 while-running round)'s in-flight guard predicate: a
+#: Save/Delete click may start iff no other Save/Delete request is already
+#: outstanding.
+PRESET_ACTION_SHOULD_START_CASES = [
+    ({"presetActionPending": False}, True),
+    ({"presetActionPending": True}, False),
+    ({}, True),  # flag absent = not pending
+    (None, False),
+]
+
 PROBE_JS = """
 import * as m from './extensions/comfyui-epsnodes/eps_image/resolution.js'
 
@@ -163,7 +174,8 @@ const out = {
     hasNormalizeSelectionOrder: typeof m.normalizeSelectionOrder === 'function',
     hasDropdownLabelFor: typeof m.dropdownLabelFor === 'function',
     hasPresetRowIndexFor: typeof m.presetRowIndexFor === 'function',
-    hasClearsPresetOnManualEdit: typeof m.clearsPresetOnManualEdit === 'function'
+    hasClearsPresetOnManualEdit: typeof m.clearsPresetOnManualEdit === 'function',
+    hasPresetActionShouldStart: typeof m.presetActionShouldStart === 'function'
   },
   selectionFromWidgetValue: [%(raw_values)s].map((v) => m.selectionFromWidgetValue(v)),
   toggleSelection: %(toggle_inputs)s.map(
@@ -176,7 +188,12 @@ const out = {
   presetRowIndexFor: %(row_index_inputs)s.map(
     ([widgets, name]) => m.presetRowIndexFor(widgets, name)
   ),
-  clearsPresetOnManualEdit: %(manual_edit_inputs)s.map((state) => m.clearsPresetOnManualEdit(state))
+  clearsPresetOnManualEdit: %(manual_edit_inputs)s.map(
+    (state) => m.clearsPresetOnManualEdit(state)
+  ),
+  presetActionShouldStart: %(action_pending_inputs)s.map(
+    (state) => m.presetActionShouldStart(state)
+  )
 }
 
 process.stdout.write(JSON.stringify(out))
@@ -220,6 +237,9 @@ def presets_api(tmp_path_factory: pytest.TempPathFactory) -> dict:
                 [[widgets, name] for widgets, name, _ in PRESET_ROW_INDEX_CASES]
             ),
             "manual_edit_inputs": json.dumps([state for state, _ in MANUAL_EDIT_CASES]),
+            "action_pending_inputs": json.dumps(
+                [state for state, _ in PRESET_ACTION_SHOULD_START_CASES]
+            ),
         },
         encoding="utf-8",
     )
@@ -283,6 +303,7 @@ def test_module_exports_the_presets_pure_helpers(presets_api: dict) -> None:
         "hasDropdownLabelFor": True,
         "hasPresetRowIndexFor": True,
         "hasClearsPresetOnManualEdit": True,
+        "hasPresetActionShouldStart": True,
     }
 
 
@@ -476,6 +497,93 @@ def test_delete_has_no_confirm_dialog(source: str) -> None:
 def test_delete_clears_the_deleted_name_from_selection(source: str) -> None:
     body = _function_body(source, "performDelete(node)")
     assert "commitSelection(node, state.selection.filter((entry) => entry !== active))" in body
+
+
+# ---------------------- Save/Delete in-flight guard (finding 3, 2026-08-26 round)
+#
+# An impatient second click mid-request used to reuse the stale
+# `state.mtime` a first request was still in the middle of updating,
+# manufacturing a bogus 409 ("changed elsewhere") on Save or a 404 on
+# Delete. Fixed with one shared `state.presetActionPending` flag: a second
+# click while one is pending is refused outright (not queued), and both
+# buttons are disabled + relabeled ("Saving…"/"Deleting…") for the
+# request's duration.
+
+
+def test_preset_action_should_start_cases(presets_api: dict) -> None:
+    for (state, expected), got in zip(
+        PRESET_ACTION_SHOULD_START_CASES, presets_api["presetActionShouldStart"], strict=True
+    ):
+        assert got == expected, (
+            f"presetActionShouldStart({state!r}) -> {got!r}, wanted {expected!r}"
+        )
+
+
+def test_save_and_delete_refuse_a_click_while_one_is_already_pending(source: str) -> None:
+    """The guard is the very FIRST statement after resolving `state`, in
+    both functions, strictly before any network call -- a refused click
+    can never reach `api.fetchApi`."""
+    save_body = _function_body(source, "performSave(node, name)")
+    assert "if (!state || !presetActionShouldStart(state)) return" in save_body
+    assert save_body.index("presetActionShouldStart") < save_body.index(
+        "api.fetchApi(PRESETS_SAVE_ROUTE"
+    )
+    delete_body = _function_body(source, "performDelete(node)")
+    assert "if (!state || !presetActionShouldStart(state)) return" in delete_body
+    assert delete_body.index("presetActionShouldStart") < delete_body.index(
+        "api.fetchApi(PRESETS_DELETE_ROUTE"
+    )
+
+
+def test_begin_preset_action_disables_both_buttons_and_relabels_the_active_one(
+    source: str,
+) -> None:
+    body = _function_body(source, "beginPresetAction(node, state, activeBtn, pendingLabel)")
+    assert "state.presetActionPending = true" in body
+    assert "for (const btn of [state.saveBtn, state.deleteBtn])" in body
+    assert "if (btn) btn.disabled = true" in body
+    assert "if (activeBtn) activeBtn.name = pendingLabel" in body
+
+
+def test_save_shows_saving_and_delete_shows_deleting(source: str) -> None:
+    save_body = _function_body(source, "performSave(node, name)")
+    assert "beginPresetAction(node, state, state.saveBtn, 'Saving…')" in save_body
+    delete_body = _function_body(source, "performDelete(node)")
+    assert "beginPresetAction(node, state, state.deleteBtn, 'Deleting…')" in delete_body
+
+
+def test_pending_state_is_always_restored_via_finally_not_conditionally(source: str) -> None:
+    """Every settle path -- success, a thrown error, and the 409 branch's
+    own early `return` alike -- must restore button state; `finally`
+    guarantees this regardless of which path a given request took."""
+    save_body = _function_body(source, "performSave(node, name)")
+    assert (
+        "} finally {\n    endPresetAction(node, state, state.saveBtn, originalLabel)\n  }"
+        in save_body
+    )
+    delete_body = _function_body(source, "performDelete(node)")
+    assert (
+        "} finally {\n    endPresetAction(node, state, state.deleteBtn, originalLabel)\n  }"
+        in delete_body
+    )
+
+
+def test_end_preset_action_rederives_delete_disabled_rather_than_flat_enabling(
+    source: str,
+) -> None:
+    body = _function_body(source, "endPresetAction(node, state, activeBtn, originalLabel)")
+    assert "state.presetActionPending = false" in body
+    assert "state.saveBtn.disabled = false" in body
+    assert "updateDeleteEnabled(node)" in body
+    # Delete's own disabled flag must never be flipped directly here --
+    # only through the selection-based helper above, so a selection change
+    # that happened during the request is respected, not papered over.
+    assert "state.deleteBtn.disabled" not in body
+
+
+def test_state_seeds_the_in_flight_flag_false(source: str) -> None:
+    attach = _function_body(source, "attachPresetsUi(node)")
+    assert "presetActionPending: false" in attach
 
 
 # ---------------------------------------------------------------- 409 conflicts

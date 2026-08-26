@@ -20,6 +20,7 @@ caught immediately.
 
 from __future__ import annotations
 
+import threading
 from pathlib import Path
 
 import pytest
@@ -874,6 +875,88 @@ async def test_feed_previews_matches_sidecar_names_case_insensitively(
     client = await aiohttp_client(make_app(context))
     body = await (await client.get("/lora_library/picker")).json()
     assert body["previews"] == ["detailer.safetensors"]
+
+
+# ------------------------------------------- 2026-08-26 while-running round
+# asyncio.to_thread coverage: GET /picker's list_loras() call (audited
+# alongside the already-threaded store call three lines below it), and the
+# preview/info resolve+lookup helpers (audited as three-and-eight sequential
+# synchronous filesystem calls per thumbnail), must run off the event loop.
+# A thread-identity spy proves the move; each test also re-checks the
+# response payload is byte-identical to the pre-threading synchronous shape
+# (already covered end to end by the tests above, re-asserted here so a
+# threading regression and a payload regression are never conflated).
+
+
+async def test_get_picker_list_loras_runs_off_the_event_loop(
+    context: LibraryContext, aiohttp_client, monkeypatch
+) -> None:
+    caller_ident = threading.get_ident()
+    seen: list[int] = []
+    original = context.list_loras
+
+    def spy() -> list[str]:
+        seen.append(threading.get_ident())
+        return original()
+
+    monkeypatch.setattr(context, "list_loras", spy)
+    client = await aiohttp_client(make_app(context))
+    resp = await client.get("/lora_library/picker")
+    assert resp.status == 200
+    body = await resp.json()
+    assert body["loras"] == FAKE_LORAS  # payload unchanged by the move to a worker thread
+    assert seen, "list_loras() was never called"
+    assert seen[0] != caller_ident, "list_loras() ran on the event-loop thread, not a worker"
+
+
+async def test_preview_resolve_chain_runs_off_the_event_loop(
+    context: LibraryContext, _resolved_context: Path, aiohttp_client, monkeypatch
+) -> None:
+    png_bytes = b"\x89PNG\r\n\x1a\nfake-png-bytes"
+    (_resolved_context / "detailer.png").write_bytes(png_bytes)
+
+    caller_ident = threading.get_ident()
+    seen: list[int] = []
+    original = routes_lora_picker._resolve_preview
+
+    def spy(ctx: LibraryContext, file_value: str):
+        seen.append(threading.get_ident())
+        return original(ctx, file_value)
+
+    monkeypatch.setattr(routes_lora_picker, "_resolve_preview", spy)
+    client = await aiohttp_client(make_app(context))
+    resp = await client.get(
+        "/lora_library/picker/preview", params={"file": "detailer.safetensors"}
+    )
+    assert resp.status == 200
+    assert await resp.read() == png_bytes  # byte-identical payload
+    assert seen, "_resolve_preview() was never called"
+    assert seen[0] != caller_ident, "_resolve_preview() ran on the event-loop thread, not a worker"
+
+
+async def test_info_resolve_chain_runs_off_the_event_loop(
+    context: LibraryContext, _resolved_context: Path, aiohttp_client, monkeypatch
+) -> None:
+    (_resolved_context / "detailer.txt").write_text("  detail, sharp  ", encoding="utf-8")
+
+    caller_ident = threading.get_ident()
+    seen: list[int] = []
+    original = routes_lora_picker._resolve_trigger_words
+
+    def spy(ctx: LibraryContext, file_value: str):
+        seen.append(threading.get_ident())
+        return original(ctx, file_value)
+
+    monkeypatch.setattr(routes_lora_picker, "_resolve_trigger_words", spy)
+    client = await aiohttp_client(make_app(context))
+    resp = await client.get("/lora_library/picker/info", params={"file": "detailer.safetensors"})
+    assert resp.status == 200
+    body = await resp.json()
+    assert body == {"trigger_words": "detail, sharp"}  # byte-identical payload
+    assert seen, "_resolve_trigger_words() was never called"
+    assert (
+        seen[0] != caller_ident
+    ), "_resolve_trigger_words() ran on the event-loop thread, not a worker"
 
 
 async def test_feed_previews_survives_a_missing_directory(

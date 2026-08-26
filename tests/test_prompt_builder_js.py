@@ -434,6 +434,33 @@ def test_dnd_events_stop_propagation_so_they_never_leak_to_the_canvas(source: st
     assert dnd.count("event.stopPropagation()") >= 2
 
 
+def test_right_pane_render_defers_while_a_drag_is_active(source: str) -> None:
+    """Finding 6 (2026-08-26 while-running round): a poll-triggered reload
+    landing mid-drag used to replaceChildren() the very row the user has a
+    native HTML5 drag on. renderRightPane() now defers itself while
+    state.dragFromIndex is set, and wireRowDrag's dragend flushes exactly
+    one render if anything was skipped meanwhile. The left pane is
+    deliberately NOT gated -- it may keep updating during a drag."""
+    right = _body(source, "renderRightPane(state)")
+    assert right.strip().startswith("if (state.dragFromIndex != null) {")
+    assert "state.rightPaneRenderPending = true" in right
+    assert "state.rightPaneRenderPending = false" in right
+    row_drag = _body(source, "wireRowDrag(state, row, idx)")
+    assert "if (state.rightPaneRenderPending) renderRightPane(state)" in row_drag
+    left = _body(source, "renderLeftPane(state)")
+    assert "dragFromIndex" not in left
+
+
+def test_drop_path_clears_drag_before_rendering_so_it_is_never_deferred(source: str) -> None:
+    """The DROP handler must null out dragFromIndex BEFORE triggering the
+    render that follows a reorder (commitReorder -> writeBlocksWidget ->
+    renderRightPane) -- otherwise the user's own drop would be the thing
+    that gets deferred."""
+    dnd = _body(source, "wireRightListDnD(state)")
+    drop = dnd.split("addEventListener('drop'", 1)[1]
+    assert drop.index("state.dragFromIndex = null") < drop.index("commitReorder(state, from, raw)")
+
+
 def test_poll_is_change_gated_with_no_unconditional_dirty_canvas(source: str) -> None:
     """The poll tick itself must never call setDirtyCanvas -- only the write
     helpers it may indirectly trigger do, and only when a value actually
@@ -507,12 +534,71 @@ def test_teardown_clears_poll_and_attach_timers(source: str) -> None:
 
 
 def test_reload_entries_reuses_notebooks_session_cache_and_known_mtime(source: str) -> None:
+    """2026-08-26 while-running round (findings 4 + 5): the actual network
+    call moved from a literal `api.getJson('/lora_library/notebook', params)`
+    into the module-scope shared `sharedReloadFetch(file, knownMtime)` (see
+    the tests below for its own single-flight + TTL contract) -- reloadEntries
+    itself still owns the session-cache paint + known_mtime DECISION, just not
+    the request that goes out."""
     reload_fn = _body(source, "reloadEntries(state)")
     assert "notebookCacheGet(file)" in reload_fn
     assert "notebookCacheSet(file, data" in reload_fn
     assert "isUnchangedResponse(data)" in reload_fn
-    assert "params.known_mtime = String(state.paintedMtime)" in reload_fn
-    assert "include_text: '1'" in reload_fn
+    assert (
+        "(showing || paintedFromCache) && typeof state.paintedMtime === 'number' "
+        "? state.paintedMtime : null"
+        in reload_fn
+    )
+    assert "data = await sharedReloadFetch(file, knownMtime)" in reload_fn
+    shared = _body(source, "sharedReloadFetch(file, knownMtime)")
+    assert "include_text: '1'" in shared
+    assert "params.known_mtime = String(knownMtime)" in shared
+
+
+def test_shared_reload_fetch_is_single_flight_and_short_ttl_per_file(source: str) -> None:
+    """Finding 5: every Builder node mirroring the same notebook `file` used
+    to fire its own concurrent GET on every poll tick. sharedReloadFetch
+    joins an already-outstanding request for that file, and a just-finished
+    one stays servable for a short TTL so a same-tick fanout across nodes
+    costs one request, not N."""
+    shared = _body(source, "sharedReloadFetch(file, knownMtime)")
+    assert "entriesFetchCache.get(file)" in shared
+    assert "Date.now() - cached.fetchedAt < ENTRIES_FETCH_TTL_MS" in shared
+    assert "entriesFetchInFlight.get(file)" in shared
+    assert "if (inFlight) return inFlight" in shared
+    assert "entriesFetchInFlight.set(file, promise)" in shared
+    assert "entriesFetchInFlight.delete(file)" in shared
+    assert "const entriesFetchCache = new Map()" in source
+    assert "const entriesFetchInFlight = new Map()" in source
+    assert "const ENTRIES_FETCH_TTL_MS = 1500" in source
+
+
+def test_poll_tick_skips_while_a_reload_is_already_in_flight(source: str) -> None:
+    """Finding 4: a single node's own tick must not stack a second
+    concurrent reloadEntries() while a previous tick's fetch is still
+    outstanding -- mid-run the server can easily take longer than POLL_MS to
+    answer."""
+    tick = _body(source, "onPollTick(state)")
+    assert "if (state.pollReloadInFlight) return" in tick
+    assert "state.pollReloadInFlight = reloadEntries(state)" in tick
+    assert "state.pollReloadInFlight = null" in tick
+    assert "pollReloadInFlight: null" in source  # state field exists
+
+
+def test_hidden_tab_skips_ticks_and_flushes_once_on_visibilitychange(source: str) -> None:
+    """Finding 4's second half: a background tab must not poll a GIL-busy
+    server, but coming back to the tab should not wait up to POLL_MS for the
+    next tick -- one flush fires immediately via visibilitychange, guarded by
+    the same in-flight check onPollTick already has."""
+    install = _body(source, "installPoll(state)")
+    assert "if (document.hidden) return" in install
+    assert "state.visibilityHandler = () => {" in install
+    assert "document.addEventListener('visibilitychange', state.visibilityHandler)" in install
+    assert "onPollTick(state)" in install
+    teardown = _body(source, "teardown(state)")
+    assert (
+        "document.removeEventListener('visibilitychange', state.visibilityHandler)" in teardown
+    )
 
 
 def test_discovery_walks_the_whole_workflow_rooted_at_app_graph(source: str) -> None:

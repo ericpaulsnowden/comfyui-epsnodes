@@ -23,6 +23,7 @@ throwaway ``aiohttp.web.Application`` -- no ComfyUI needed either way).
 
 from __future__ import annotations
 
+import asyncio
 import logging
 
 from aiohttp import web
@@ -37,7 +38,13 @@ def register_routes(routes: web.RouteTableDef) -> None:
     async def get_checkpoints(request: web.Request) -> web.Response:
         import folder_paths  # ComfyUI's own module; only importable inside ComfyUI
 
-        return web.json_response({"checkpoints": folder_paths.get_filename_list("checkpoints")})
+        # 2026-08-26 while-running round: folder_paths.get_filename_list()
+        # walks the checkpoints dir(s) synchronously (a real stat/scandir
+        # pass, not a cached lookup) -- off the loop like every other
+        # filesystem call in this pack's routes (routes_image_grid.py's
+        # to_thread precedent).
+        checkpoints = await asyncio.to_thread(folder_paths.get_filename_list, "checkpoints")
+        return web.json_response({"checkpoints": checkpoints})
 
 
 def build_routes() -> web.RouteTableDef:

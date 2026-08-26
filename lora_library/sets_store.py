@@ -10,6 +10,7 @@ importable-without-ComfyUI seam as ``context.py`` (see its module docstring).
 
 from __future__ import annotations
 
+import copy
 import fnmatch
 import json
 import logging
@@ -305,15 +306,41 @@ def load_set(context: LibraryContext, slug: str) -> dict | None:
     unreachable library folder raises the same class (via
     :func:`_require_sets_dir`) — every caller already handles it: the
     routes 400, ``nodes_sets`` warns and passes through.
+
+    PER-FILE LOAD cache (audit 2026-08-26 while-running round, finding 2):
+    this used to open+parse the file on EVERY call, including the pin-drift
+    check every pinned Apply-Set node fires and the controller's own reads
+    -- on a NAS mid-run that is a full network round trip plus a JSON parse
+    for a file that, most of the time, has not changed since the last read.
+    The STAT still happens on every call (never skipped -- that is the
+    freshness check); only the read+parse+:func:`normalize_set` validation
+    is skipped when the file's ``(mtime_ns, size)`` matches ``_load_cache``.
+    Returns a deep copy either way (cache hit or miss), so this keeps the
+    same "independent object per call, safe to mutate" contract every
+    caller already relies on (:func:`list_sets`' own docstring states the
+    identical guarantee for its summaries).
     """
     _require_sets_dir(context)
     path = set_path(context, slug)
     try:
-        with open(path, encoding="utf-8") as fh:
-            raw = json.load(fh)
+        file_stat = path.stat()
     except FileNotFoundError:
         # A set that isn't there may mean the FOLDER isn't there any more
         # (NAS round 2026-08-22): make the next sets_dir() look for real.
+        context.forget_ensured_dirs()
+        return None
+    except OSError as exc:
+        raise SetValidationError(f"could not read set {slug!r}: {exc}") from exc
+    file_key = (file_stat.st_mtime_ns, file_stat.st_size)
+    cached = _load_cache.get(path)
+    if cached is not None and cached[0] == file_key:
+        return copy.deepcopy(cached[1])
+    try:
+        with open(path, encoding="utf-8") as fh:
+            raw = json.load(fh)
+    except FileNotFoundError:
+        # Vanished between the stat above and this open (a delete racing
+        # us) -- same "folder may be gone too" treatment as above.
         context.forget_ensured_dirs()
         return None
     except OSError as exc:
@@ -328,7 +355,9 @@ def load_set(context: LibraryContext, slug: str) -> dict | None:
     # nothing is lost.
     except ValueError as exc:
         raise SetValidationError(f"set {slug!r} could not be read: {exc}") from exc
-    return normalize_set(raw)
+    normalized = normalize_set(raw)
+    _load_cache[path] = (file_key, copy.deepcopy(normalized))
+    return normalized
 
 
 def save_set(context: LibraryContext, set_data: dict, slug: str | None = None) -> tuple[str, dict]:
@@ -353,7 +382,33 @@ def save_set(context: LibraryContext, set_data: dict, slug: str | None = None) -
     text = json.dumps(normalized, indent=2, ensure_ascii=False) + "\n"
     path = set_path(context, slug)
     _atomic_write_text(path, text)
-    _forget_listing(sets_dir, path)
+    # 2026-08-26 while-running round (findings 1 + 2): WARM every cache this
+    # write affects instead of just forgetting it. routes_sets.py's
+    # POST /lora_library/set handler tails a fresh `list_sets()` onto this
+    # call to build its response -- before this round that always meant a
+    # cold rescan of every set file (a guaranteed second NAS round trip on
+    # top of the write itself), because `_forget_listing` evicted the whole
+    # listing memo unconditionally. Now: the per-file ENTRY cache
+    # (list_sets' own scan-skip) and the per-file LOAD cache (load_set's
+    # parse-skip, finding 2) are both keyed on (mtime_ns, size), which one
+    # fresh stat gives us for free right after the write -- and the LISTING
+    # cache is patched in place (see _splice_listing_cache) rather than
+    # evicted wholesale, so a warm listing STAYS warm across a save.
+    summary = {"slug": slug, "name": normalized["name"], "count": len(normalized["loras"])}
+    try:
+        file_stat = path.stat()
+        file_key = (file_stat.st_mtime_ns, file_stat.st_size)
+        _entry_cache[path] = (file_key, dict(summary))
+        _load_cache[path] = (file_key, copy.deepcopy(normalized))
+    except OSError:
+        # Vanishingly unlikely (the write above just succeeded) but not
+        # impossible on a flaky NAS -- fall back to forgetting both memos
+        # outright rather than risk caching a stale/guessed key. The
+        # listing splice below still runs off the summary we already know,
+        # independent of whether this stat landed.
+        _entry_cache.pop(path, None)
+        _load_cache.pop(path, None)
+    _splice_listing_cache(context, sets_dir, slug, summary)
     return slug, normalized
 
 
@@ -369,11 +424,20 @@ def delete_set(context: LibraryContext, slug: str) -> bool:
         path.unlink()
     except FileNotFoundError:
         # Listed a moment ago but gone now: the file, or the whole folder
-        # (NAS round 2026-08-22) -- forget both memos.
+        # (NAS round 2026-08-22) -- forget both memos outright. Unlike the
+        # happy path below, there is no freshly-known state to splice in
+        # here (we don't know WHY it's gone), so this stays the "forget,
+        # don't guess" fallback finding 1's acceptable-alternative wording
+        # describes.
         _forget_listing(sets_dir, path)
         context.forget_ensured_dirs()
         return False
-    _forget_listing(sets_dir, path)
+    # 2026-08-26 while-running round (finding 1): drop just this slug from
+    # the cached listing (splice) instead of evicting the whole thing --
+    # same reasoning as save_set's warm-cache treatment just above it.
+    _entry_cache.pop(path, None)
+    _load_cache.pop(path, None)
+    _splice_listing_cache(context, sets_dir, slug, None)
     return True
 
 
@@ -389,8 +453,7 @@ def delete_set(context: LibraryContext, slug: str) -> bool:
 #      created, deleted or renamed inside it -- which is exactly what the
 #      atomic temp+replace save does (verified on APFS by
 #      tests/test_nas_io_round.py), so a save/delete from ANOTHER process or
-#      machine is noticed by the one `stat` the fast path costs. This
-#      process's own save/delete forgets the entry outright.
+#      machine is noticed by the one `stat` the fast path costs.
 #   2. PER-FILE layer, keyed on (path, the FILE's mtime_ns, size): the
 #      parsed summary. Consulted during a rescan, so only files that
 #      actually changed are re-read.
@@ -411,6 +474,18 @@ def delete_set(context: LibraryContext, slug: str) -> bool:
 # INPUT_TYPES). The dicts are only ever read/replaced whole under the GIL,
 # so a lost race costs a redundant parse, never a torn value; the rescan
 # itself is serialized by a lock so a tab-switch burst scans once.
+#
+# 2026-08-26 while-running round (findings 1 + 2): THIS process's own
+# save/delete used to forget the LISTING entry outright (forcing the very
+# next `list_sets()` call -- which routes_sets.py's save/delete handlers
+# both make, to build their own response -- into a guaranteed full rescan,
+# on top of the write that had just happened). `save_set`/`delete_set` now
+# SPLICE the one changed slug into an already-cached listing instead
+# (`_splice_listing_cache`), re-sorted with the exact same key `_scan_sets`
+# uses (`_listing_sort_key`) so the result is provably identical to a fresh
+# scan's order -- not merely "close enough" -- whenever a listing was
+# already cached. A THIRD layer, `_load_cache`, backs `load_set` itself
+# (finding 2: no caller-facing GET had ever been cached before this round).
 
 #: How long a cached listing is trusted without re-stat'ing each file.
 LISTING_RESCAN_S = 30.0
@@ -419,29 +494,112 @@ LISTING_RESCAN_S = 30.0
 _listing_cache: dict[Path, tuple[int, float, list[dict]]] = {}
 #: set file path -> ((file mtime_ns, size), summary).
 _entry_cache: dict[Path, tuple[tuple[int, int], dict]] = {}
+#: set file path -> ((file mtime_ns, size), normalized set dict) -- backs
+#: `load_set` (finding 2, 2026-08-26 while-running round). A separate map
+#: from `_entry_cache` on purpose: that one holds the small LISTING summary
+#: (`{slug, name, count}`), this one the FULL normalized set (`loras`/
+#: `loaders`/`trigger_words`/`notes`) `GET /lora_library/set` actually
+#: needs -- different shapes, different callers, no reason to force one
+#: cache to serve both.
+_load_cache: dict[Path, tuple[tuple[int, int], dict]] = {}
 #: layout file path -> ((file mtime_ns, size), raw parsed JSON).
 _layout_cache: dict[Path, tuple[tuple[int, int], object]] = {}
 _rescan_lock = threading.Lock()
 
 
 def clear_caches() -> None:
-    """Forget every listing/per-file/layout memo (test seam + explicit
+    """Forget every listing/per-file/load/layout memo (test seam + explicit
     invalidation)."""
     _listing_cache.clear()
     _entry_cache.clear()
+    _load_cache.clear()
     _layout_cache.clear()
 
 
 def _forget_listing(sets_dir: Path, path: Path | None = None) -> None:
-    """This process changed *sets_dir* (a save/delete): drop its listing
-    memo, and *path*'s per-file memo when given."""
+    """This process changed *sets_dir* under anomalous circumstances (a
+    delete that found the file already gone -- see :func:`delete_set`):
+    drop its listing memo outright, and *path*'s per-file memos (entry +
+    load) when given. The happy-path save/delete calls no longer route
+    through here (they splice/warm instead -- :func:`_splice_listing_cache`,
+    findings 1+2 of the 2026-08-26 while-running round); this stays the
+    "forget, don't guess" fallback for when there's nothing accurate to
+    preserve.
+    """
     _listing_cache.pop(sets_dir, None)
     if path is not None:
         _entry_cache.pop(path, None)
+        _load_cache.pop(path, None)
 
 
 def _copy_summaries(summaries: list[dict]) -> list[dict]:
     return [dict(entry) for entry in summaries]
+
+
+def _listing_sort_key(entry: dict) -> tuple[str, str]:
+    """The listing's sort key: name (casefolded), then slug. Shared between
+    :func:`_scan_sets` (a full rescan) and :func:`_splice_listing_cache` (a
+    warm-cache patch after this process's own save/delete) so the two can
+    never silently drift apart -- finding 1's order-parity guarantee rests
+    entirely on both sorting by this ONE function, not two copies of the
+    same tuple that could someday diverge.
+    """
+    return (entry["name"].casefold(), entry["slug"])
+
+
+def _splice_listing_cache(
+    context: LibraryContext, sets_dir: Path, slug: str, summary: dict | None
+) -> None:
+    """Patch an already-cached LISTING in place after THIS process's own
+    save/delete, instead of forcing the immediate follow-up ``list_sets()``
+    call (routes_sets.py's save/delete handlers both tail one onto their
+    response, per FORMAT.md §5) to pay for a full rescan of every set file
+    (audit 2026-08-26 while-running round, finding 1: before this,
+    ``save_set``/``delete_set`` unconditionally evicted the whole listing
+    memo, so that follow-up call was a GUARANTEED cold rescan -- a second
+    NAS round trip stacked directly on top of the write itself, on every
+    single save/delete).
+
+    *summary* is the freshly-written ``{"slug", "name", "count"}`` for a
+    save, or ``None`` for a delete (drop *slug*'s entry, add nothing). The
+    result is re-sorted with :func:`_listing_sort_key` -- the exact key
+    ``_scan_sets`` sorts its own output with -- so, GIVEN an already-accurate
+    cached listing, splicing in the one entry that changed produces a list
+    that is byte-for-byte what a fresh full scan would produce, not merely
+    a reasonable approximation: every summary besides *slug*'s is untouched
+    from a listing that was already correct, and a single deterministic
+    sort over the same key can only ever land in one order.
+
+    No-op when nothing is cached yet (cold start, the previous entry aged
+    out past ``LISTING_RESCAN_S``, or a dir-mtime mismatch already evicted
+    it) — there is no accurate base to splice into, so the next
+    ``list_sets()`` call scans fresh exactly as it always did in that case
+    (no regression, just no speedup either).
+    """
+    cached = _listing_cache.get(sets_dir)
+    if cached is None:
+        return
+    _old_dir_key, _scanned_at, summaries = cached
+    spliced = [entry for entry in summaries if entry["slug"] != slug]
+    if summary is not None:
+        spliced.append(dict(summary))
+    spliced.sort(key=_listing_sort_key)
+    try:
+        # The atomic temp+replace write/unlink we're reacting to already
+        # touched sets_dir's own mtime (see the section comment above), so
+        # this stat is the NEW dir_key -- without re-stamping it here, the
+        # very next list_sets() call would see today's mtime disagree with
+        # the STALE one still stored alongside our splice and rescan anyway,
+        # defeating the whole point.
+        dir_key = _sets_dir_mtime_ns(context, sets_dir)
+    except OSError:
+        # The directory vanished between the write we're reacting to and
+        # this stat -- nothing safe to splice; let it go cold so the next
+        # list_sets() call's own OSError handling (an empty listing,
+        # logged) takes over exactly as if this splice never ran.
+        _listing_cache.pop(sets_dir, None)
+        return
+    _listing_cache[sets_dir] = (dir_key, time.monotonic(), spliced)
 
 
 def _sets_dir_mtime_ns(context: LibraryContext, sets_dir: Path) -> int:
@@ -511,7 +669,10 @@ def _scan_sets(context: LibraryContext, sets_dir: Path) -> list[dict]:
     # Prune memos for files that are no longer in this folder.
     for stale in [p for p in _entry_cache if p.parent == sets_dir and p not in seen]:
         _entry_cache.pop(stale, None)
-    summaries.sort(key=lambda entry: (entry["name"].casefold(), entry["slug"]))
+    # Shared with _splice_listing_cache's warm-cache patch (findings 1 + 2,
+    # 2026-08-26 while-running round) -- see _listing_sort_key's docstring
+    # for why that sharing is the whole basis of its order-parity guarantee.
+    summaries.sort(key=_listing_sort_key)
     return summaries
 
 

@@ -36,7 +36,9 @@ from __future__ import annotations
 import asyncio
 import ipaddress
 import logging
+import os
 import socket
+from collections import OrderedDict
 from pathlib import Path
 from typing import Any
 
@@ -245,6 +247,103 @@ def _resolve_request_source(request: web.Request) -> tuple[Path | None, str | No
     return resolved, error, True
 
 
+async def _resolve_request_source_off_loop(
+    request: web.Request,
+) -> tuple[Path | None, str | None, bool]:
+    """2026-08-26 while-running round (finding 1): `asyncio.to_thread`
+    wrapper around :func:`_resolve_request_source` -- the resolution logic
+    itself is UNCHANGED, only where it runs. Every step in that chain is a
+    synchronous filesystem call (`_validate_video_path`'s `Path.resolve()`,
+    `_resolve_input_ref`'s `exists_annotated_filepath`/
+    `get_annotated_filepath` + `is_file()`, and this function's own
+    `is_file()` check), and on a gvfs/NAS-mounted video path those can block
+    on the network -- inline, that stalls every other route AND the
+    websocket, same failure mode `video.probe`'s 2026-08-21 offload
+    (below) already fixed for the decode itself. It matters more here: the
+    browser re-enters `/eps_frame_saver/stream` on EVERY HTTP Range request
+    while scrubbing the `<video>` element, so this chain runs far more than
+    once per page load, not once per node.
+
+    `asyncio.to_thread` (not the older `run_in_executor` call this file used
+    for `video.probe` alone) matches the pack-wide idiom for this exact
+    shape (`routes_resolution_presets.py`, `routes_notebook.py`,
+    `routes_sets.py`, `lora_library/routes.py` -- all cited in their own
+    module docstrings).
+
+    Callers MUST still run the loopback gate (`_needs_loopback` +
+    `request_is_loopback`) BEFORE awaiting this -- gate-first order (the
+    2026-08-21 audit's own fix) is unchanged: that gate is cheap and
+    entirely local (a header check, then at worst a throwaway UDP bind), so
+    it stays on the loop; only the filesystem-touching resolution chain
+    moves off it.
+    """
+    return await asyncio.to_thread(_resolve_request_source, request)
+
+
+#: Finding 2 (2026-08-26 while-running round): tier 3 of `video.probe`'s
+#: frame-count cascade (`frame_saver_video._frame_count_cascade`'s last
+#: resort) decodes the WHOLE file to count frames -- for a fragmented/
+#: streamed container (no `stream.frames`, no usable duration metadata) that
+#: is the only path there is, and it re-runs from scratch on every probe
+#: request for the SAME clip: a fresh player attach, a second Frame Saver
+#: node reading the same path, a plain page reload all cost a full re-decode
+#: with no memo. Kept at route level (this module), not in
+#: `frame_saver_video.py`, per this round's scope: `video.probe` itself
+#: stays a pure, cache-free function.
+#:
+#: Keyed on ``(resolved path, mtime_ns, size)`` -- the stat backing that key
+#: is re-checked on EVERY call (never trusted from a previous request), so
+#: an edited file is a fresh key and re-probes automatically; there is no
+#: wall-clock TTL layered on top because the key itself already IS the
+#: staleness check, not a guess. `_PROBE_CACHE_MAX` bounds memory on a
+#: long-running server; eviction is plain LRU via `OrderedDict` (a hit moves
+#: its key to the end, a miss beyond the cap drops the oldest). Concurrent
+#: misses for the same key can both decode and both write -- a redundant
+#: decode, never a torn/corrupt entry (dict operations are atomic under the
+#: GIL) -- the same tolerance `lora_library/sets_store.py`'s per-file cache
+#: documents for its own lock-free reads.
+_PROBE_CACHE_MAX = 16
+_probe_cache: OrderedDict[tuple[str, int, int], dict[str, Any]] = OrderedDict()
+
+
+def _probe_cache_clear() -> None:
+    """Test seam / explicit invalidation (mirrors `lora_library.routes_
+    lora_picker._previews_cache_clear`'s identical idiom)."""
+    _probe_cache.clear()
+
+
+def _probe_cached(path: str) -> dict[str, Any]:
+    """`video.probe(path)`, memoized by ``(path, mtime_ns, size)`` -- see
+    :data:`_probe_cache`'s own docstring for the key/eviction contract.
+
+    Must run entirely inside the caller's `asyncio.to_thread` hop (never
+    called directly from the event loop): the `os.stat` that builds the key
+    is itself a blocking filesystem call, same NAS/gvfs hazard as finding
+    1's resolution chain, so a stat-then-probe pair sharing one thread hop
+    keeps this off the loop end to end rather than only for the decode.
+
+    Raises:
+        ValueError: *path* vanished between resolution and this call (a
+            `stat` failure is folded into the same clean-400 shape
+            `video.probe` itself uses -- see that function's own contract),
+            or `video.probe` itself raised.
+    """
+    try:
+        stat = os.stat(path)
+    except OSError as exc:
+        raise ValueError(f"could not stat video file: {path} ({exc})") from exc
+    key = (path, stat.st_mtime_ns, stat.st_size)
+    cached = _probe_cache.get(key)
+    if cached is not None:
+        _probe_cache.move_to_end(key)
+        return cached
+    info = video.probe(path)
+    _probe_cache[key] = info
+    if len(_probe_cache) > _PROBE_CACHE_MAX:
+        _probe_cache.popitem(last=False)
+    return info
+
+
 def register_routes(routes: web.RouteTableDef) -> None:
     """Attach the probe + stream routes to *routes* (FORMAT.md §6.7)."""
 
@@ -260,21 +359,25 @@ def register_routes(routes: web.RouteTableDef) -> None:
                 "reading a video file only works in a browser on the machine "
                 "ComfyUI runs on",
             )
-        resolved, error, _needs = _resolve_request_source(request)
+        # 2026-08-26 while-running round (finding 1): off the event loop --
+        # see `_resolve_request_source_off_loop`'s own docstring.
+        resolved, error, _needs = await _resolve_request_source_off_loop(request)
         if error is not None:
             return error_response(400, error)
         try:
-            # Off the event loop (audit 2026-08-21): probe's worst tier
-            # decodes the whole file (fragmented mp4 / mpegts, or no frame
-            # count metadata) and even tier 1 is a blocking av.open --
-            # inline, it stalled every other route and the websocket.
-            info = await asyncio.get_running_loop().run_in_executor(
-                None, video.probe, str(resolved)
-            )
+            # Off the event loop (audit 2026-08-21), memoized (2026-08-26
+            # while-running round, finding 2 -- see `_probe_cached`):
+            # probe's worst tier decodes the whole file (fragmented mp4 /
+            # mpegts, or no frame count metadata) and even tier 1 is a
+            # blocking av.open -- inline, it stalled every other route and
+            # the websocket; re-decoding on every repeat request for the
+            # same clip made that worse than it needed to be.
+            info = await asyncio.to_thread(_probe_cached, str(resolved))
         except ValueError as exc:
-            # video.probe() wraps every av/ffmpeg failure into a ValueError
-            # naming the path (module docstring) -- a bad/unreadable/
-            # codec-less file is always a clean 400 here, never a 500.
+            # video.probe() (and _probe_cached's own stat) wraps every
+            # av/ffmpeg/OS failure into a ValueError naming the path
+            # (module docstring) -- a bad/unreadable/codec-less/vanished
+            # file is always a clean 400 here, never a 500.
             return error_response(400, str(exc))
         return web.json_response(info)
 
@@ -286,7 +389,11 @@ def register_routes(routes: web.RouteTableDef) -> None:
                 "the video preview only works in a browser on the machine "
                 "ComfyUI runs on",
             )
-        resolved, error, _needs = _resolve_request_source(request)
+        # 2026-08-26 while-running round (finding 1): off the event loop --
+        # the browser re-enters THIS route on every HTTP Range request
+        # while scrubbing the <video> element, so this chain runs far more
+        # than once per page load; see `_resolve_request_source_off_loop`.
+        resolved, error, _needs = await _resolve_request_source_off_loop(request)
         if error is not None:
             return error_response(400, error)
         # aiohttp's FileResponse handles Range/If-Modified-Since/ETag itself

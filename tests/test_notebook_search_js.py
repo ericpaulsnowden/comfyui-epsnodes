@@ -109,8 +109,11 @@ def test_mutations_keep_the_search_corpus_current() -> None:
         "performSave(state, { force = false } = {})"
     )
     assert "noteEntryText(state, name, '')" in _body("confirmNewEntry(state, rawName)")
-    assert "forgetEntryText(state, name)" in _body(
-        "performDeleteRun(state, names, startIndex, { force = false } = {})"
+    # Finding 4 (2026-08-26 responsiveness round): performDeleteRun is now a
+    # single batch request, forgetting every deleted name's cached text in a
+    # loop rather than once per sequential request.
+    assert "for (const name of names) forgetEntryText(state, name)" in _body(
+        "performDeleteRun(state, names, { force = false } = {})"
     )
     assert "if (kind === 'entry') renameEntryText(state, name, renameTo)" in _body(
         "applyRenameResult(state, kind, name, renameTo, data)"

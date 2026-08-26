@@ -40,6 +40,17 @@ Every ``lora_picker_store`` call runs via ``asyncio.to_thread`` (NAS round
 file lives in the library folder, a network round trip on a NAS, and the
 feed is requested by every picker node on every tab switch. Error mapping
 around each call is unchanged.
+
+2026-08-26 while-running round: every other filesystem-touching call in
+this file now runs the same way -- ``context.list_loras()`` in ``GET
+picker`` (a real directory walk, previously synchronous on the loop right
+next to the store call above), and the resolve+lookup chains in
+``preview``/``info`` (``_resolve_installed_lora``'s scan, the
+``resolve_lora_path`` re-check, and either the sibling-image stats or the
+sidecar ``read_text``), each bundled into ONE ``asyncio.to_thread`` call
+via :func:`_resolve_preview` / :func:`_resolve_trigger_words` so a
+GIL-busy mid-run server and a slow gvfs NAS folder no longer serialize
+every visible thumbnail/trigger-word request behind the render loop.
 """
 
 from __future__ import annotations
@@ -103,6 +114,48 @@ def _resolve_installed_lora(context: LibraryContext, file_value: object) -> str 
     if context.resolve_lora_path(resolved_name) is None:
         return None
     return resolved_name
+
+
+def _resolve_preview(context: LibraryContext, file_value: str) -> tuple[str | None, Path | None]:
+    """2026-08-26 while-running round: the WHOLE resolve+find chain for
+    ``GET picker/preview`` -- ``_resolve_installed_lora`` (a full §4-lenient
+    scan), the re-check ``context.resolve_lora_path`` call, and
+    :func:`_find_preview_image`'s up-to-8 sequential ``is_file()`` stats --
+    run as ONE synchronous unit so the route below can hand the whole thing
+    to a single ``asyncio.to_thread`` instead of blocking the loop three
+    times per thumbnail. The re-check is NOT dropped, only moved: this
+    module's own docstring's "re-checked rather than trusted" posture holds
+    exactly as before, just off the loop now too.
+
+    Returns ``(resolved_name, preview_path)``: *resolved_name* is ``None``
+    when the name can't be resolved/confirmed at all (both read the same
+    404 to the caller); *preview_path* is ``None`` when resolution
+    succeeded but no sidecar image exists.
+    """
+    resolved_name = _resolve_installed_lora(context, file_value)
+    if resolved_name is None:
+        return None, None
+    resolved_path = context.resolve_lora_path(resolved_name)
+    if resolved_path is None:
+        return None, None
+    return resolved_name, _find_preview_image(Path(resolved_path))
+
+
+def _resolve_trigger_words(context: LibraryContext, file_value: str) -> tuple[str | None, str]:
+    """2026-08-26 while-running round: the same one-helper treatment as
+    :func:`_resolve_preview`, for ``GET picker/info`` -- the resolve chain
+    plus ``nodes_picker._sidecar_trigger_text``'s own sync ``read_text``,
+    together as one synchronous unit for a single ``asyncio.to_thread``.
+
+    Returns ``(resolved_name, trigger_words)``; *resolved_name* is ``None``
+    on an unresolvable name (404), never on a merely-absent sidecar (that's
+    ``""``, the normal case -- see ``_sidecar_trigger_text``'s own
+    docstring).
+    """
+    resolved_name = _resolve_installed_lora(context, file_value)
+    if resolved_name is None:
+        return None, ""
+    return resolved_name, nodes_picker._sidecar_trigger_text(context, resolved_name)
 
 
 def _find_preview_image(resolved: Path) -> Path | None:
@@ -204,7 +257,13 @@ def register(context: LibraryContext, routes: web.RouteTableDef) -> None:
 
     @routes.get("/lora_library/picker")
     async def get_picker(_request: web.Request) -> web.Response:
-        loras = context.list_loras()
+        # 2026-08-26 while-running round: list_loras() is a real filesystem
+        # walk (a gvfs NAS lora folder makes it slow), and this route is hit
+        # by every picker node on every tab switch -- it ran synchronously
+        # on the loop while the store call three lines below was already
+        # to_thread'd, so a GIL-busy mid-run server serialized behind it
+        # anyway. Same treatment as every other lora_picker_store call.
+        loras = await asyncio.to_thread(context.list_loras)
         state, mtime = await asyncio.to_thread(store.load_state, context)
         return web.json_response(
             {
@@ -280,18 +339,16 @@ def register(context: LibraryContext, routes: web.RouteTableDef) -> None:
         if not file_value.strip():
             return error_response(400, "missing 'file' query parameter")
 
-        resolved_name = _resolve_installed_lora(context, file_value)
+        # 2026-08-26 while-running round: the resolve (a full §4-lenient
+        # scan), the re-check, and up to 8 sequential is_file() stats all
+        # ran synchronously on the loop, once per visible thumbnail --
+        # _resolve_preview bundles the whole chain into one to_thread call.
+        # The re-check itself is unchanged, just moved inside the helper
+        # (this module's own "re-checked rather than trusted" docstring
+        # posture still holds).
+        resolved_name, preview = await asyncio.to_thread(_resolve_preview, context, file_value)
         if resolved_name is None:
             return error_response(404, f"no installed lora named {file_value!r}")
-
-        # _resolve_installed_lora already confirmed resolve_lora_path
-        # succeeds for resolved_name -- re-checked (rather than trusted)
-        # since a host callable could in principle answer differently
-        # across two calls; None here still means "not found", never a 500.
-        resolved_path = context.resolve_lora_path(resolved_name)
-        if resolved_path is None:
-            return error_response(404, f"no installed lora named {file_value!r}")
-        preview = _find_preview_image(Path(resolved_path))
         if preview is None:
             return error_response(404, f"no preview image for {file_value!r}")
 
@@ -307,14 +364,16 @@ def register(context: LibraryContext, routes: web.RouteTableDef) -> None:
         if not file_value.strip():
             return error_response(400, "missing 'file' query parameter")
 
-        resolved_name = _resolve_installed_lora(context, file_value)
+        # 2026-08-26 while-running round: same one-helper to_thread
+        # treatment as `preview` above -- the resolve chain plus the sync
+        # sidecar `read_text` (nodes_picker's own reader, reused not
+        # copied: same UTF-8-best-effort, stripped, 4096-char-capped text
+        # the node's `trigger_words` output already reads for this lora).
+        resolved_name, trigger_words = await asyncio.to_thread(
+            _resolve_trigger_words, context, file_value
+        )
         if resolved_name is None:
             return error_response(404, f"no installed lora named {file_value!r}")
-
-        # Reuses nodes_picker's own sidecar reader (not copied) -- same
-        # UTF-8-best-effort, stripped, 4096-char-capped text the node's
-        # `trigger_words` output already reads for this exact lora.
-        trigger_words = nodes_picker._sidecar_trigger_text(context, resolved_name)
         return web.json_response({"trigger_words": trigger_words})
 
     @routes.post("/lora_library/picker/favorites_order")

@@ -1045,6 +1045,127 @@ async def test_post_delete_remote_outside_library_dir_is_403(
     assert "Foo" in outside.read_text(encoding="utf-8")
 
 
+# --------------------------------------- POST /notebook/delete batch (`names`)
+# Finding 4 (2026-08-26 responsiveness round): performDeleteRun now sends
+# ONE request for a multi-select delete instead of N sequential ones.
+
+
+async def test_post_delete_names_removes_every_entry_in_one_write(
+    context: LibraryContext, aiohttp_client
+) -> None:
+    client = await aiohttp_client(make_app(context))
+    for n in ("Foo", "Bar", "Baz"):
+        await client.post(
+            "/lora_library/notebook/entry", json={"file": "loras.md", "name": n, "text": n}
+        )
+    resp = await client.post(
+        "/lora_library/notebook/delete",
+        json={"file": "loras.md", "names": ["Foo", "Baz"]},
+    )
+    assert resp.status == 200
+    body = await resp.json()
+    assert body["ok"] is True
+    assert body["names"] == ["Foo", "Baz"]
+    assert body["entries"] == [{"name": "Bar", "category": ""}]
+
+
+async def test_post_delete_name_response_never_gains_a_names_field(
+    context: LibraryContext, aiohttp_client
+) -> None:
+    # Back-compat pin: an old single-`name` caller's response shape must
+    # stay byte-for-byte what it always was.
+    client = await aiohttp_client(make_app(context))
+    await client.post(
+        "/lora_library/notebook/entry", json={"file": "loras.md", "name": "Foo", "text": "x"}
+    )
+    resp = await client.post(
+        "/lora_library/notebook/delete", json={"file": "loras.md", "name": "Foo"}
+    )
+    body = await resp.json()
+    assert "names" not in body
+    assert set(body) == {"ok", "mtime", "entries"}
+
+
+async def test_post_delete_names_unknown_entry_writes_nothing(
+    context: LibraryContext, aiohttp_client
+) -> None:
+    # All-or-nothing: the store only ever saves once, at the very end, so an
+    # unknown name anywhere in the batch must leave EVERY named entry intact
+    # -- including the ones before it in the list.
+    client = await aiohttp_client(make_app(context))
+    for n in ("Foo", "Bar"):
+        await client.post(
+            "/lora_library/notebook/entry", json={"file": "loras.md", "name": n, "text": n}
+        )
+    resp = await client.post(
+        "/lora_library/notebook/delete",
+        json={"file": "loras.md", "names": ["Foo", "does-not-exist"]},
+    )
+    assert resp.status == 404
+    listing = await (
+        await client.get("/lora_library/notebook", params={"file": "loras.md"})
+    ).json()
+    assert {e["name"] for e in listing["entries"]} == {"Foo", "Bar"}
+
+
+async def test_post_delete_names_empty_list_is_400(
+    context: LibraryContext, aiohttp_client
+) -> None:
+    client = await aiohttp_client(make_app(context))
+    resp = await client.post(
+        "/lora_library/notebook/delete", json={"file": "loras.md", "names": []}
+    )
+    assert resp.status == 400
+
+
+async def test_post_delete_names_non_string_member_is_400(
+    context: LibraryContext, aiohttp_client
+) -> None:
+    client = await aiohttp_client(make_app(context))
+    resp = await client.post(
+        "/lora_library/notebook/delete", json={"file": "loras.md", "names": ["Foo", 5]}
+    )
+    assert resp.status == 400
+
+
+async def test_post_delete_names_takes_priority_over_name(
+    context: LibraryContext, aiohttp_client
+) -> None:
+    client = await aiohttp_client(make_app(context))
+    for n in ("Foo", "Bar"):
+        await client.post(
+            "/lora_library/notebook/entry", json={"file": "loras.md", "name": n, "text": n}
+        )
+    resp = await client.post(
+        "/lora_library/notebook/delete",
+        json={"file": "loras.md", "name": "Bar", "names": ["Foo"]},
+    )
+    body = await resp.json()
+    assert body["names"] == ["Foo"]
+    assert {e["name"] for e in body["entries"]} == {"Bar"}
+
+
+async def test_post_delete_names_stale_base_mtime_is_409_and_file_untouched(
+    context: LibraryContext, aiohttp_client
+) -> None:
+    client = await aiohttp_client(make_app(context))
+    created = None
+    for n in ("Foo", "Bar"):
+        created = await client.post(
+            "/lora_library/notebook/entry", json={"file": "loras.md", "name": n, "text": n}
+        )
+    real_mtime = (await created.json())["mtime"]
+    resp = await client.post(
+        "/lora_library/notebook/delete",
+        json={"file": "loras.md", "names": ["Foo", "Bar"], "base_mtime": real_mtime - 100.0},
+    )
+    assert resp.status == 409
+    listing = await (
+        await client.get("/lora_library/notebook", params={"file": "loras.md"})
+    ).json()
+    assert {e["name"] for e in listing["entries"]} == {"Foo", "Bar"}
+
+
 # ----------------------------------------------------- POST /notebook/move
 
 
@@ -1284,6 +1405,141 @@ async def test_post_move_matching_base_mtime_succeeds(
         json={"file": "loras.md", "name": "E2", "before": "E1", "base_mtime": real_mtime},
     )
     assert resp.status == 200
+
+
+# ----------------------------------------- POST /notebook/move batch (`names`)
+# Finding 4 (2026-08-26 responsiveness round): performMoveRun now sends ONE
+# request for a multiselect drag instead of N sequential ones, applying the
+# SAME `before`/`category` target to every name in order -- mirroring the
+# old sequential-request semantics exactly, just server-side.
+
+
+async def test_post_move_names_before_reproduces_sequential_semantics(
+    context: LibraryContext, aiohttp_client
+) -> None:
+    client = await aiohttp_client(make_app(context))
+    for n in ("E1", "E2", "E3", "E4"):
+        await client.post(
+            "/lora_library/notebook/entry",
+            json={"file": "loras.md", "name": n, "text": n, "category": "Cat A"},
+        )
+    # Dragging [E3, E4] to land just before E1, in selection order -- the
+    # same result the panel's old N-request loop produced.
+    resp = await client.post(
+        "/lora_library/notebook/move",
+        json={"file": "loras.md", "names": ["E3", "E4"], "before": "E1"},
+    )
+    assert resp.status == 200
+    body = await resp.json()
+    assert body["names"] == ["E3", "E4"]
+    assert body["entries"] == [
+        {"name": "E3", "category": "Cat A"},
+        {"name": "E4", "category": "Cat A"},
+        {"name": "E1", "category": "Cat A"},
+        {"name": "E2", "category": "Cat A"},
+    ]
+
+
+async def test_post_move_names_category_appends_in_selection_order(
+    context: LibraryContext, aiohttp_client
+) -> None:
+    client = await aiohttp_client(make_app(context))
+    await client.post(
+        "/lora_library/notebook/entry",
+        json={"file": "loras.md", "name": "Dst", "text": "d", "category": "Cat B"},
+    )
+    for n in ("E1", "E2"):
+        await client.post(
+            "/lora_library/notebook/entry",
+            json={"file": "loras.md", "name": n, "text": n, "category": "Cat A"},
+        )
+    resp = await client.post(
+        "/lora_library/notebook/move",
+        json={"file": "loras.md", "names": ["E1", "E2"], "category": "Cat B"},
+    )
+    assert resp.status == 200
+    body = await resp.json()
+    assert body["entries"] == [
+        {"name": "Dst", "category": "Cat B"},
+        {"name": "E1", "category": "Cat B"},
+        {"name": "E2", "category": "Cat B"},
+    ]
+
+
+async def test_post_move_name_response_never_gains_a_names_field(
+    context: LibraryContext, aiohttp_client
+) -> None:
+    client = await aiohttp_client(make_app(context))
+    for n in ("E1", "E2"):
+        await client.post(
+            "/lora_library/notebook/entry", json={"file": "loras.md", "name": n, "text": n}
+        )
+    resp = await client.post(
+        "/lora_library/notebook/move", json={"file": "loras.md", "name": "E2", "before": "E1"}
+    )
+    body = await resp.json()
+    assert "names" not in body
+    assert set(body) == {"ok", "mtime", "entries"}
+
+
+async def test_post_move_names_unknown_entry_writes_nothing(
+    context: LibraryContext, aiohttp_client
+) -> None:
+    client = await aiohttp_client(make_app(context))
+    for n in ("E1", "E2"):
+        await client.post(
+            "/lora_library/notebook/entry",
+            json={"file": "loras.md", "name": n, "text": n, "category": "Cat A"},
+        )
+    resp = await client.post(
+        "/lora_library/notebook/move",
+        json={"file": "loras.md", "names": ["E1", "does-not-exist"], "category": "Cat A"},
+    )
+    assert resp.status == 404
+    listing = await (
+        await client.get("/lora_library/notebook", params={"file": "loras.md"})
+    ).json()
+    # Unchanged: E1 was not actually moved anywhere (a no-op target here
+    # either way), but the point is nothing was written for the failure.
+    assert [e["name"] for e in listing["entries"]] == ["E1", "E2"]
+
+
+async def test_post_move_names_empty_list_is_400(
+    context: LibraryContext, aiohttp_client
+) -> None:
+    client = await aiohttp_client(make_app(context))
+    resp = await client.post(
+        "/lora_library/notebook/move",
+        json={"file": "loras.md", "names": [], "category": ""},
+    )
+    assert resp.status == 400
+
+
+async def test_post_move_names_stale_base_mtime_is_409_and_file_untouched(
+    context: LibraryContext, aiohttp_client
+) -> None:
+    client = await aiohttp_client(make_app(context))
+    created = None
+    for n in ("E1", "E2", "E3"):
+        created = await client.post(
+            "/lora_library/notebook/entry",
+            json={"file": "loras.md", "name": n, "text": n, "category": "Cat A"},
+        )
+    real_mtime = (await created.json())["mtime"]
+    resp = await client.post(
+        "/lora_library/notebook/move",
+        json={
+            "file": "loras.md",
+            "names": ["E3", "E2"],
+            "before": "E1",
+            "base_mtime": real_mtime - 100.0,
+        },
+    )
+    assert resp.status == 409
+    listing = await (
+        await client.get("/lora_library/notebook", params={"file": "loras.md"})
+    ).json()
+    assert [e["name"] for e in listing["entries"]] == ["E1", "E2", "E3"]
 
 
 # ------------------------------------------- POST /notebook/delete_category
@@ -2094,3 +2350,55 @@ async def test_get_notebook_include_text_adds_bodies_opt_in(
     by_name = {e["name"]: e for e in rich["entries"]}
     assert by_name["Alpha"]["text"] == "cinematic light"
     assert by_name["Beta"]["text"] == "studio portrait"
+
+
+async def test_get_notebook_include_text_adds_category_descriptions_opt_in(
+    context: LibraryContext, aiohttp_client
+) -> None:
+    """Finding 5 (2026-08-26 responsiveness round): `include_text=1` also
+    bundles every category's §3.1 description, so the panel's category-mode
+    click can populate from the SAME payload the list itself came from
+    instead of a second `GET /notebook/category` round trip. Additive only
+    -- without `include_text=1` the payload's `categories` field keeps its
+    original flat-list-of-names shape byte-for-byte."""
+    client = await aiohttp_client(make_app(context))
+    await client.post(
+        "/lora_library/notebook/category",
+        json={"file": "loras.md", "name": "Cat A", "description": "warm light"},
+    )
+    await client.post(
+        "/lora_library/notebook/category", json={"file": "loras.md", "name": "Cat B"}
+    )
+
+    plain = await (await client.get("/lora_library/notebook", params={"file": "loras.md"})).json()
+    assert plain["categories"] == ["Cat A", "Cat B"]
+    assert "category_descriptions" not in plain
+
+    rich = await (
+        await client.get(
+            "/lora_library/notebook", params={"file": "loras.md", "include_text": "1"}
+        )
+    ).json()
+    assert rich["categories"] == ["Cat A", "Cat B"]
+    assert rich["category_descriptions"] == {"Cat A": "warm light", "Cat B": ""}
+
+
+async def test_get_notebook_include_text_category_descriptions_matches_the_dedicated_route(
+    context: LibraryContext, aiohttp_client
+) -> None:
+    client = await aiohttp_client(make_app(context))
+    await client.post(
+        "/lora_library/notebook/category",
+        json={"file": "loras.md", "name": "Cat A", "description": "line one\nline two"},
+    )
+    rich = await (
+        await client.get(
+            "/lora_library/notebook", params={"file": "loras.md", "include_text": "1"}
+        )
+    ).json()
+    dedicated = await (
+        await client.get(
+            "/lora_library/notebook/category", params={"file": "loras.md", "name": "Cat A"}
+        )
+    ).json()
+    assert rich["category_descriptions"]["Cat A"] == dedicated["description"]

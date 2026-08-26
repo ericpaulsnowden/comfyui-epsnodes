@@ -2093,9 +2093,68 @@ function openSaveDialog(node, event) {
   promptPresetName(node, prefill, (name) => performSave(node, name), event)
 }
 
+// --------------------------------------------- M3: Save/Delete in-flight guard
+
+/** 2026-08-26 while-running round (finding 3): an impatient second click on
+ * Save or Delete mid-request reused the stale `state.mtime` the FIRST
+ * request was still in the middle of updating, manufacturing a bogus 409
+ * ("changed elsewhere") on a racing second Save, or a 404 on a racing
+ * Delete -- nothing had actually changed on the backend, the first request
+ * just hadn't landed yet. ONE shared flag (`state.presetActionPending`),
+ * not one per button: Save and Delete both mutate the same on-disk preset
+ * store, so only one may ever be outstanding regardless of which button
+ * started it. Pure predicate, mirroring `clearsPresetOnManualEdit`'s
+ * probeable style above, so this file's probe can pin it directly.
+ *
+ * Deliberately NOT `frame_saver.js`'s `probeToken`/this file's own
+ * `loadToken` idiom: those supersede a stale in-flight request with a
+ * newer one (the newest result always wins). A save/delete has no such
+ * "latest wins" story -- there is nothing to supersede -- so a second
+ * click while one is pending is simply refused, per this round's own
+ * "ignored, not queued" instruction.
+ * @param {{presetActionPending?: boolean}} state
+ * @returns {boolean}
+ */
+export function presetActionShouldStart(state) {
+  return !!(state && !state.presetActionPending)
+}
+
+/** Marks a Save/Delete request in flight: disables BOTH buttons (only one
+ * of Save/Delete may ever run at a time -- see `presetActionShouldStart`)
+ * and relabels *activeBtn* (the one actually clicked) with *pendingLabel*
+ * ("Saving…"/"Deleting…", matching `lora_library/notebook.js`'s identical
+ * in-progress wording). Returns *activeBtn*'s ORIGINAL label so
+ * `endPresetAction` can restore it exactly, rather than hard-coding
+ * "Save"/"Delete" back in. */
+function beginPresetAction(node, state, activeBtn, pendingLabel) {
+  state.presetActionPending = true
+  for (const btn of [state.saveBtn, state.deleteBtn]) {
+    if (btn) btn.disabled = true
+  }
+  const originalLabel = activeBtn ? activeBtn.name : null
+  if (activeBtn) activeBtn.name = pendingLabel
+  node.setDirtyCanvas(true, true)
+  return originalLabel
+}
+
+/** Restores button state once a Save/Delete request settles -- success,
+ * error, or the 409 branch's early return alike, since callers always
+ * reach this through `finally`, never conditionally. Delete's disabled
+ * state is RE-DERIVED through `updateDeleteEnabled` (its own
+ * selection-based gate), never just flipped back to enabled: a Delete
+ * click that happened to run while the selection changed underneath it
+ * must not leave Delete wrongly clickable afterward. */
+function endPresetAction(node, state, activeBtn, originalLabel) {
+  state.presetActionPending = false
+  if (activeBtn && originalLabel != null) activeBtn.name = originalLabel
+  if (state.saveBtn) state.saveBtn.disabled = false // Save has no selection-based gate of its own
+  updateDeleteEnabled(node)
+  node.setDirtyCanvas(true, true)
+}
+
 async function performSave(node, name) {
   const state = presetsState(node)
-  if (!state) return
+  if (!state || !presetActionShouldStart(state)) return // finding 3: a click mid-request is ignored, not queued
   const values = {}
   for (const field of PRESET_FIELD_NAMES) {
     const widget = widgetByName(node, field)
@@ -2108,6 +2167,7 @@ async function performSave(node, name) {
   // with no fetch/save/delete having resolved yet, there is no baseline to
   // conflict against.
   if (typeof state.mtime === 'number') body.base_mtime = state.mtime
+  const originalLabel = beginPresetAction(node, state, state.saveBtn, 'Saving…')
   try {
     const response = await api.fetchApi(PRESETS_SAVE_ROUTE, {
       method: 'POST',
@@ -2139,6 +2199,8 @@ async function performSave(node, name) {
   } catch (error) {
     console.warn(PREFIX, 'preset save failed', error)
     toast(node, 'error', `Could not save preset: ${(error && error.message) || error}`)
+  } finally {
+    endPresetAction(node, state, state.saveBtn, originalLabel)
   }
 }
 
@@ -2146,11 +2208,12 @@ async function performSave(node, name) {
 
 async function performDelete(node) {
   const state = presetsState(node)
-  if (!state) return
+  if (!state || !presetActionShouldStart(state)) return // finding 3: a click mid-request is ignored, not queued
   const active = state.selection.length === 1 ? state.selection[0] : null
   if (!active) return // belt-and-suspenders with widget.disabled -- see createDeleteButton
   const body = { name: active }
   if (typeof state.mtime === 'number') body.base_mtime = state.mtime
+  const originalLabel = beginPresetAction(node, state, state.deleteBtn, 'Deleting…')
   try {
     const response = await api.fetchApi(PRESETS_DELETE_ROUTE, {
       method: 'POST',
@@ -2181,6 +2244,8 @@ async function performDelete(node) {
   } catch (error) {
     console.warn(PREFIX, 'preset delete failed', error)
     toast(node, 'error', `Could not delete preset: ${(error && error.message) || error}`)
+  } finally {
+    endPresetAction(node, state, state.deleteBtn, originalLabel)
   }
 }
 
@@ -2411,7 +2476,8 @@ function attachPresetsUi(node) {
       selection: selectionFromWidgetValue(widget.value),
       loaded: false,
       loadToken: 0,
-      applying: false // v0.67.1: true only while applyPresetValues writes the fields
+      applying: false, // v0.67.1: true only while applyPresetValues writes the fields
+      presetActionPending: false // 2026-08-26: true only while a Save/Delete request is in flight
     }
     node._epsPresets = state
     wireManualEditClearsSelection(node, state)

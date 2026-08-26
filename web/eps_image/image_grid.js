@@ -3604,6 +3604,45 @@ const lastKnownProgressState = new WeakMap()
 //: guards, e.g. `attachedNodes`).
 let executionRefreshListenerInstalled = false
 
+//: 2026-08-26 while-running round: nodes whose finished-run refresh was
+//: deferred because the TAB was backgrounded (`document.hidden`) at the
+//: moment they finished -- flushed once, for every queued node, the moment
+//: the tab is visible again (`installVisibilityRefreshFlush` below). Same
+//: coalesce-don't-drop idiom `scheduleRefresh`'s own `pendingForce` already
+//: uses, just one level up: queued NODES instead of a queued fetch. A plain
+//: `Set` (not a `WeakMap`/`WeakSet`) on purpose -- it must be enumerable to
+//: flush, and it never holds anything for long: every entry is drained and
+//: the set cleared the moment visibility returns, so this is not a
+//: standing reference the way `lastKnownProgressState` is.
+const pendingHiddenRefresh = new Set()
+
+//: Guards the module-scope `visibilitychange` listener the same way
+//: `executionRefreshListenerInstalled` guards the progress one.
+let visibilityRefreshFlushInstalled = false
+
+/**
+ * Installs ONE module-scope `visibilitychange` listener that flushes
+ * `pendingHiddenRefresh` the moment the tab stops being hidden -- the other
+ * half of the 2026-08-26 visibility backoff below. Never drops a queued
+ * node: every entry queued while backgrounded gets its forced refresh
+ * exactly once, as soon as there's someone to see it.
+ */
+function installVisibilityRefreshFlush() {
+  if (visibilityRefreshFlushInstalled) return
+  visibilityRefreshFlushInstalled = true
+
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden || pendingHiddenRefresh.size === 0) return
+    const nodes = [...pendingHiddenRefresh]
+    pendingHiddenRefresh.clear()
+    for (const node of nodes) {
+      void scheduleRefresh(node, { force: true }).then((refreshed) =>
+        warnIfEmptyAfterRun(node, refreshed) // see its docstring (2026-07-24)
+      )
+    }
+  })
+}
+
 /**
  * Installs ONE module-scope `api.addEventListener('progress_state', ...)`
  * listener (not one per node -- every live EPSImageGrid node is checked
@@ -3615,6 +3654,7 @@ let executionRefreshListenerInstalled = false
 function installExecutionRefreshListener() {
   if (executionRefreshListenerInstalled) return
   executionRefreshListenerInstalled = true
+  installVisibilityRefreshFlush()
 
   api.addEventListener('progress_state', (event) => {
     const nodes = event?.detail?.nodes
@@ -3637,9 +3677,20 @@ function installExecutionRefreshListener() {
         // `installExecutedMerge` (their docstrings have the mechanism).
         // ONE `/list` per finished run (2026-08-21): the empty-buffer warning
         // reads the reconcile's result instead of fetching again.
-        void scheduleRefresh(node, { force: true }).then((refreshed) =>
-          warnIfEmptyAfterRun(node, refreshed) // see its docstring (2026-07-24)
-        )
+        //
+        // 2026-08-26: while the tab is BACKGROUNDED, queue this node
+        // instead of firing -- no point spending a forced fetch (network +
+        // a decode/redraw once applied) on a repaint nobody can see, and it
+        // just adds load to a server that may already be GIL-busy mid-run.
+        // `installVisibilityRefreshFlush` above fires it, for every queued
+        // node, the moment the tab is visible again.
+        if (document.hidden) {
+          pendingHiddenRefresh.add(node)
+        } else {
+          void scheduleRefresh(node, { force: true }).then((refreshed) =>
+            warnIfEmptyAfterRun(node, refreshed) // see its docstring (2026-07-24)
+          )
+        }
       }
     }
   })

@@ -155,6 +155,49 @@ def test_current_value_is_always_one_of_the_options(source: str) -> None:
     assert "return valuesIncluding(widget.value)" in installed
 
 
+class TestPinDriftFanoutDedup:
+    """2026-08-26 while-running round, finding 3: every pinned Apply-Set
+    node used to run its OWN `GET /lora_library/set?slug=` drift check on
+    `configure()` -- N nodes pinned to the SAME slug (the WAN hi+lo pattern)
+    fired N identical requests, piling onto a GIL-busy/NAS-slow server mid-
+    run. A short-TTL + in-flight cache keyed by slug, cloned from
+    refreshSetsCache's `fetchInFlight` idiom, lets every node pinned to one
+    slug share a single request."""
+
+    @pytest.fixture(scope="class")
+    def source(self) -> str:
+        return SETS_JS.read_text(encoding="utf-8")
+
+    def test_cache_and_in_flight_maps_exist_at_module_scope(self, source: str) -> None:
+        assert "const pinDriftCache = new Map()" in source
+        assert "const pinDriftInFlight = new Map()" in source
+        assert "const PIN_DRIFT_CACHE_TTL_MS = 5000" in source
+
+    def test_fetch_pin_drift_joins_in_flight_and_serves_a_fresh_ttl_hit(self, source: str) -> None:
+        body = _function_body(source, "fetchPinDrift(state)")
+        # TTL hit: served without touching the network.
+        assert "const cached = pinDriftCache.get(slug)" in body
+        assert "Date.now() - cached.fetchedAt < PIN_DRIFT_CACHE_TTL_MS" in body
+        assert "pending = Promise.resolve(cached.data)" in body
+        # In-flight: a second caller for the same slug joins rather than
+        # duplicates the request.
+        assert "let pending = pinDriftInFlight.get(slug)" in body
+        assert "} else if (!pending) {" in body
+        assert "pinDriftInFlight.set(slug, pending)" in body
+        assert "pinDriftInFlight.delete(slug)" in body
+        # The actual request is still the single, easy-to-audit call site
+        # every other pin-drift test (test_m3_pinning_js.py) already pins.
+        assert "api.getJson('/lora_library/set', { slug })" in body
+        assert "pinDriftCache.set(slug, { data: result, fetchedAt: Date.now() })" in body
+
+    def test_sets_changed_clears_the_pin_drift_cache_too(self, source: str) -> None:
+        """A CRUD just changed a set on disk -- the first drift check after
+        it must be exact, not served from a pre-CRUD TTL entry."""
+        body = _function_body(source, "initSetsFreshness()")
+        assert "pinDriftCache.clear()" in body
+        assert "pinDriftInFlight.clear()" in body
+
+
 def test_library_folder_change_announces_sets_changed() -> None:
     """Browse… round (2026-08-22): the State Controller can now MOVE the
     library folder (its states-location Browse…), which changes the set

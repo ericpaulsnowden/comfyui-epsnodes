@@ -499,6 +499,19 @@ function installMinWidth(node, minWidth) {
   }
 }
 
+/**
+ * Finding 6 (2026-08-26 responsiveness round, api.js's opt-in
+ * `getJson`/`postJson` `timeoutMs`): every notebook WRITE (entry/category
+ * create-or-update, move, delete) passes this so a GIL-busy ComfyUI server
+ * or a dropped/slow NAS mount can't wedge `state.busy` (and the Save
+ * button) behind a fetch that never settles -- see
+ * recoverFromWriteTimeout(). 30s is deliberately generous: it has to
+ * comfortably outlast a real, merely-slow write (the whole point is only
+ * catching a request that will never come back), never race one that's
+ * still legitimately in flight.
+ */
+const WRITE_TIMEOUT_MS = 30000
+
 /** How long the Delete button stays in "Are you sure?" mode. */
 const DELETE_CONFIRM_MS = 4000
 
@@ -1271,6 +1284,11 @@ function createState(node, fileWidget, entryWidget, pinnedWidget = null) {
     // selection, widgets, or the file.
     searchQuery: '',
     entryTextByName: {},
+    // Finding 5 (2026-08-26 responsiveness round): category descriptions
+    // from the SAME include_text=1 payload (`category_descriptions`),
+    // mirroring `entryTextByName` above -- see
+    // noteCategoryDescription()/loadCategoryDescription().
+    categoryDescriptionByName: {},
     // v0.68.1: name -> lowercased `name\nbody` haystack, built once per load
     // (buildSearchCorpus) so a keystroke doesn't re-lowercase every body;
     // and the pending debounced search repaint (scheduleSearchRender).
@@ -2103,6 +2121,12 @@ function updateFilePanelPath(state) {
 
 async function onOpenFolderClick(state) {
   if (!state.resolvedFile) return
+  // Finding 7 (2026-08-26 responsiveness round): acknowledge the click
+  // IMMEDIATELY, same idiom as openBrowsePicker()'s onPickFile below ("2026-
+  // 07-27... acknowledge the click IMMEDIATELY") -- a GIL-busy server can
+  // make this round trip take a while, and without an instant status change
+  // a slow-to-resolve click reads exactly like a dead one.
+  setStatus(state, 'Opening folder…')
   try {
     await api.postJson('/lora_library/notebook/open_folder', { file: state.resolvedFile })
   } catch (error) {
@@ -2609,6 +2633,11 @@ function syncNotebookCache(state, data) {
       text: state.entryTextByName[entry.name] ?? ''
     })),
     categories: Array.isArray(state.categories) ? state.categories : [],
+    // Finding 5 (2026-08-26 responsiveness round): rides along so a cached
+    // paint (reloadNow()'s instant repaint from THIS session's own cache)
+    // restores category-mode's cache-served read too, same as `entries[].text`
+    // above does for entry mode.
+    category_descriptions: { ...state.categoryDescriptionByName },
     problems: Array.isArray(prev?.payload?.problems) ? prev.payload.problems : []
   }
   state.paintedMtime = mtime
@@ -2635,6 +2664,42 @@ function renameEntryText(state, from, to) {
   const body = state.entryTextByName[from]
   forgetEntryText(state, from)
   noteEntryText(state, to, body)
+}
+
+/** Whether `name`'s body is already known from the last include_text=1 load
+ * (finding 1, 2026-08-26 responsiveness round) -- when true, loadEntryText()
+ * populates the editor SYNCHRONOUSLY from it instead of round-tripping, so
+ * the row highlight and the textarea can never visibly disagree while a
+ * fetch is in flight. `hasOwnProperty` (not `name in ...`/truthiness) is
+ * deliberate: an entry with an empty body is still a HIT. */
+function hasCachedEntryText(state, name) {
+  return Object.prototype.hasOwnProperty.call(state.entryTextByName, name)
+}
+
+/** noteEntryText()'s category-mode sibling (finding 5, 2026-08-26
+ * responsiveness round): keeps `state.categoryDescriptionByName` (populated
+ * from the same include_text=1 payload's new `category_descriptions` field
+ * -- see applyNotebookPayload()) current across every category write, so a
+ * later category click can be cache-served too. */
+function noteCategoryDescription(state, name, description) {
+  if (typeof name !== 'string' || !name) return
+  state.categoryDescriptionByName[name] = typeof description === 'string' ? description : ''
+}
+
+function forgetCategoryDescription(state, name) {
+  delete state.categoryDescriptionByName[name]
+}
+
+function renameCategoryDescription(state, from, to) {
+  if (from === to) return
+  const description = state.categoryDescriptionByName[from]
+  forgetCategoryDescription(state, from)
+  noteCategoryDescription(state, to, description)
+}
+
+/** hasCachedEntryText()'s category-mode sibling. */
+function hasCachedCategoryDescription(state, name) {
+  return Object.prototype.hasOwnProperty.call(state.categoryDescriptionByName, name)
 }
 
 // ---------------------------------------------------------------------------
@@ -2753,6 +2818,15 @@ async function applyNotebookPayload(state, file, data) {
     state.entries.map((entry) => [entry.name, typeof entry.text === 'string' ? entry.text : ''])
   )
   buildSearchCorpus(state) // v0.68.1: lowercase once per load, not per keystroke
+  // Finding 5 (2026-08-26 responsiveness round): category descriptions ride
+  // the SAME include_text=1 payload now (routes_notebook.py's
+  // `category_descriptions`), so category-mode clicks can be cache-served
+  // exactly like entryTextByName above -- a plain object (not present on an
+  // older backend / a non-include_text response) folds to `{}`.
+  state.categoryDescriptionByName =
+    data.category_descriptions && typeof data.category_descriptions === 'object'
+      ? { ...data.category_descriptions }
+      : {}
   // FORMAT.md §5/§7.2: named categories in file order, incl. empty ones —
   // see renderList()'s merge of this against `entries`.
   state.categories = Array.isArray(data.categories) ? data.categories : []
@@ -2823,6 +2897,32 @@ async function loadActiveEditor(state) {
   } else {
     resetEditorDom(state)
   }
+}
+
+/**
+ * Shared timeout-recovery branch for every notebook write (finding 6,
+ * 2026-08-26 responsiveness round). A write that hits its `WRITE_TIMEOUT_MS`
+ * abort (api.js's `postJson(..., { timeoutMs })`) may still have LANDED on
+ * disk -- the GIL-busy server or the slow NAS mount can outlive the client
+ * abort without the write itself having failed -- so recovery RELOADS
+ * instead of assuming failure, unlike every other error branch in this
+ * file. Callers check `error?.timeout` FIRST, ahead of the usual `409`
+ * branch (an aborted fetch never carries a `.status`), and skip their own
+ * error handling on a `true` return; `state.busy`/button state is already
+ * cleared by the caller before this runs, same convention every catch block
+ * here already follows.
+ * @returns {Promise<boolean>} whether *error* was a timeout (already handled)
+ */
+async function recoverFromWriteTimeout(state, error) {
+  if (!error?.timeout) return false
+  toast('error', 'Request timed out', 'Timed out — reloading to check what landed.')
+  setStatus(state, 'Timed out — reloading to check what landed…')
+  try {
+    await reloadNow(state)
+  } catch (reloadError) {
+    api.warn('notebook reload after write timeout failed', reloadError)
+  }
+  return true
 }
 
 /**
@@ -3023,6 +3123,23 @@ function populateEditor(state, text, mtime, name) {
  * @returns {Promise<'ok'|'failed'|'stale'>}
  */
 async function loadEntryText(state, name) {
+  // Cache-served fast path (finding 1, 2026-08-26 responsiveness round,
+  // audited HIGH: "entry click round trip is redundant AND paints
+  // inconsistently"). `state.entryTextByName`/`state.paintedMtime` already
+  // hold this exact name's text/mtime from the include_text=1 list load
+  // that populated `state.entries` -- a GET here was pure latency, and
+  // worse, the row highlight painted at once (setSelection, synchronous)
+  // while the textarea visibly lagged the round trip. Populating
+  // synchronously from the SAME data both fixes the round trip and makes
+  // the two paints structurally unable to disagree. The GET below survives
+  // ONLY as a fallback for a name genuinely absent from the cache -- should
+  // never happen (every name in `state.entries` got a `text` field), but a
+  // stale/hand-built state deserves a real load over a silent no-op.
+  if (hasCachedEntryText(state, name)) {
+    ++state.selectToken // invalidate any older in-flight fetch, same as below
+    populateEditor(state, state.entryTextByName[name], state.paintedMtime, name)
+    return 'ok'
+  }
   const loadToken = state.loadToken
   const selectToken = ++state.selectToken
   let data
@@ -3039,10 +3156,17 @@ async function loadEntryText(state, name) {
   return 'ok'
 }
 
-/** Category-mode sibling of loadEntryText() above — same token-guard/return
- * contract, fetching the §5 category route instead (FORMAT.md §7.2
- * amendment). */
+/** Category-mode sibling of loadEntryText() above — same cache-first fast
+ * path (finding 5, 2026-08-26 responsiveness round: `category_descriptions`
+ * now rides the same include_text=1 payload — see applyNotebookPayload()),
+ * same token-guard/return contract, falling back to the §5 category route
+ * only for a name genuinely absent from the cache. */
 async function loadCategoryDescription(state, name) {
+  if (hasCachedCategoryDescription(state, name)) {
+    ++state.selectToken
+    populateEditor(state, state.categoryDescriptionByName[name], state.paintedMtime, name)
+    return 'ok'
+  }
   const loadToken = state.loadToken
   const selectToken = ++state.selectToken
   let data
@@ -3944,7 +4068,7 @@ function finishDrag(state, drag) {
   }
   const names = dragMoveNames(state, drag)
   if (names.length > 1) {
-    performMoveRun(state, names, target, 0).catch((error) => api.warn('move failed', error))
+    performMoveRun(state, names, target).catch((error) => api.warn('move failed', error))
     return
   }
   if (isNoopMove(state, drag.name, target)) return
@@ -4106,6 +4230,99 @@ function isNoopMove(state, draggedName, target) {
 }
 
 /**
+ * Client-side mirror of markdown_store.move_entry's before/category
+ * placement, applied to the panel's own `entries` array ({name, category}
+ * objects, file order) — finding 3 (2026-08-26 responsiveness round): a
+ * drop used to sit at its OLD position until the round trip answered,
+ * which read as "snapped back until the server answers." Called BEFORE
+ * the request so the row visibly lands in its new slot at once; the
+ * response (or, on failure, the existing conflict/error reload paths —
+ * they already restore) reconciles with disk truth afterward. Returns a
+ * NEW array (never mutates `entries`); falls back to `entries` UNCHANGED
+ * when `name`/`target.before` can't be found locally (shouldn't happen —
+ * the drop target came from a rendered row — but the request/response
+ * cycle still lands the true result either way).
+ */
+function reorderEntriesLocally(entries, name, target) {
+  const index = entries.findIndex((entry) => entry.name === name)
+  if (index === -1) return entries
+  const next = entries.slice()
+  const [moved] = next.splice(index, 1)
+  if (target.kind === 'before') {
+    const beforeIndex = next.findIndex((entry) => entry.name === target.before)
+    if (beforeIndex === -1) return entries
+    next.splice(beforeIndex, 0, { ...moved, category: next[beforeIndex].category })
+    return next
+  }
+  // 'category': append to the END of that category's run of entries
+  // (mirrors markdown_store.move_entry's dst_block.entries.append), or the
+  // very end of the file when the category has no entries here yet.
+  let insertAt = next.length
+  for (let i = next.length - 1; i >= 0; i--) {
+    if ((next[i].category || '') === (target.category || '')) {
+      insertAt = i + 1
+      break
+    }
+  }
+  next.splice(insertAt, 0, { ...moved, category: target.category || '' })
+  return next
+}
+
+/** reorderEntriesLocally()'s sibling for a multiselect drag
+ * (performMoveRun): applies the SAME target to every name in selection
+ * order, mirroring both the panel's own drag semantics and the finding-4
+ * batch route's own per-name loop (routes_notebook.py's
+ * post_notebook_move), so the optimistic order matches what the batch
+ * response will confirm. */
+function reorderEntriesLocallyMany(entries, names, target) {
+  let next = entries
+  for (const name of names) next = reorderEntriesLocally(next, name, target)
+  return next
+}
+
+/** reorderEntriesLocally()'s category-block sibling for
+ * performMoveCategory: relocates a WHOLE category's entries together with
+ * its heading. renderList() renders a category's rows by walking `entries`
+ * in LOCKSTEP with `categories`' own order (each category consumes its
+ * contiguous run before the next begins) — reordering `categories` alone
+ * without moving this block would visually scramble the list until the
+ * response landed. `target.kind` is `'before'`/`'end'` here
+ * (computeCategoryDropTarget()'s shape), unlike an entry target's
+ * `'before'`/`'category'`. */
+function reorderCategoryEntriesLocally(entries, category, target) {
+  const moved = entries.filter((entry) => (entry.category || '') === category)
+  if (!moved.length) return entries // nothing to relocate -- categories reorder alone reads fine
+  const rest = entries.filter((entry) => (entry.category || '') !== category)
+  let insertAt = rest.length
+  if (target.kind === 'before') {
+    const beforeIndex = rest.findIndex((entry) => (entry.category || '') === target.before)
+    if (beforeIndex !== -1) insertAt = beforeIndex
+  }
+  const next = rest.slice()
+  next.splice(insertAt, 0, ...moved)
+  return next
+}
+
+/** reorderEntriesLocally()'s sibling over `state.categories` (a flat name
+ * list) for performMoveCategory — mirrors markdown_store.move_category's
+ * before/end placement. A repeated category name (hand-edited file) targets
+ * the LAST occurrence, same convention the store itself documents. */
+function reorderCategoriesLocally(categories, name, target) {
+  const index = categories.lastIndexOf(name)
+  if (index === -1) return categories
+  const next = categories.slice()
+  next.splice(index, 1)
+  if (target.kind === 'before') {
+    const beforeIndex = next.lastIndexOf(target.before)
+    if (beforeIndex === -1) return categories
+    next.splice(beforeIndex, 0, name)
+    return next
+  }
+  next.push(name)
+  return next
+}
+
+/**
  * Commits one drag-drop as a single §5 `/notebook/move`. A 409 surfaces
  * through the same conflict UI Save/Delete use (Reload / Overwrite, where
  * Overwrite retries this exact move with the mtime check skipped); any
@@ -4120,6 +4337,10 @@ async function performMove(state, name, target, { force = false } = {}) {
     return
   }
   if (state.busy) return
+  // Optimistic reorder (finding 3): land the row at its new slot BEFORE the
+  // round trip -- see reorderEntriesLocally()'s own doc for the rollback story.
+  state.entries = reorderEntriesLocally(state.entries, name, target)
+  renderList(state)
   state.busy = true
   updateSaveButtonEnabled(state)
   updateDeleteButtonEnabled(state)
@@ -4130,7 +4351,9 @@ async function performMove(state, name, target, { force = false } = {}) {
     else body.category = target.category
     if (!force && typeof state.baseMtime === 'number') body.base_mtime = state.baseMtime
 
-    const data = await api.postJson('/lora_library/notebook/move', body)
+    const data = await api.postJson('/lora_library/notebook/move', body, {
+      timeoutMs: WRITE_TIMEOUT_MS
+    })
     state.busy = false
     state.entries = Array.isArray(data.entries) ? data.entries : state.entries
     // The move just wrote the file, advancing its mtime — the active
@@ -4149,7 +4372,9 @@ async function performMove(state, name, target, { force = false } = {}) {
     state.busy = false
     updateSaveButtonEnabled(state)
     updateDeleteButtonEnabled(state)
-    if (error?.status === 409) {
+    if (await recoverFromWriteTimeout(state, error)) {
+      // handled: reloaded to check what landed
+    } else if (error?.status === 409) {
       showConflict(state, 'File changed on disk', {
         onReload: () => reloadNow(state),
         onOverwrite: () => performMove(state, name, target, { force: true })
@@ -4169,65 +4394,68 @@ async function performMove(state, name, target, { force = false } = {}) {
 /**
  * Multiselect drag into a category (FORMAT.md §7.2 amendment, owner ask
  * 2026-07-19): performMove()'s sibling for moving MULTIPLE entries as one
- * unit — `names` (selection order) each get their own §5 `/notebook/move`
- * against the SAME `target`, sequentially, refreshing `base_mtime` between
- * requests so the run can't self-conflict. Re-using one `target` for every
- * entry — rather than recomputing it per-step — is what keeps the moved
- * block's relative order intact: a `before` target lands each subsequent
- * entry immediately ahead of that same sibling (so the entry moved LAST
- * ends up closest to it), and a `category` target appends each subsequent
- * entry after the previous one's new position — either way, processing in
- * selection order reproduces selection order at the destination. Mirrors
- * performDeleteRun()'s sequential-with-conflict-resume shape: a 409 stops
- * the run exactly where it is (everything moved so far stays moved) and
- * shows the standard Reload/Overwrite conflict UI, Overwrite resuming at
- * the failed index with that one request's `base_mtime` check skipped.
+ * unit. Finding 4 (2026-08-26 responsiveness round): ONE §5 batch
+ * `/notebook/move` request now moves every name in `names` (selection
+ * order) to the SAME `target`, replacing what used to be N sequential
+ * single-name POSTs — one disk write, one mtime bump, applying the SAME
+ * `target` to every name in order (routes_notebook.py's post_notebook_move
+ * batch docstring does the identical per-name loop server-side now, so the
+ * result is byte-identical to the old sequential run). The store's
+ * single-write nature makes a failure ALL-OR-NOTHING: unlike the old
+ * sequential run, a 409 or an unknown name means NOTHING moved, so there is
+ * no "resume at index" left to do — Overwrite just retries the SAME full
+ * `names` list with the mtime check skipped. Finding 3: the panel's own
+ * `entries` order is spliced to the intended result BEFORE the request (see
+ * reorderEntriesLocallyMany()), so the drop lands visually at once instead
+ * of snapping back until the response arrives.
  */
-async function performMoveRun(state, names, target, startIndex, { force = false } = {}) {
+async function performMoveRun(state, names, target, { force = false } = {}) {
   if (pinnedRefuse(state)) return // M3
   if (writesBlocked(state)) {
     showLoadError(state)
     return
   }
+  state.entries = reorderEntriesLocallyMany(state.entries, names, target)
+  renderList(state)
   state.busy = true
   updateSaveButtonEnabled(state)
   updateDeleteButtonEnabled(state)
   setStatus(state, `Moving ${names.length} entries…`)
 
-  for (let index = startIndex; index < names.length; index++) {
-    const name = names[index]
-    let data
-    try {
-      const body = { file: state.file, name }
-      if (target.kind === 'before') body.before = target.before
-      else body.category = target.category
-      const skipCheck = force && index === startIndex
-      if (!skipCheck && typeof state.baseMtime === 'number') body.base_mtime = state.baseMtime
-      data = await api.postJson('/lora_library/notebook/move', body)
-    } catch (error) {
-      state.busy = false
-      updateSaveButtonEnabled(state)
-      updateDeleteButtonEnabled(state)
-      if (error?.status === 409) {
-        showConflict(state, 'File changed on disk', {
-          onReload: () => reloadNow(state),
-          onOverwrite: () => performMoveRun(state, names, target, index, { force: true })
-        })
-      } else {
-        api.warn('failed to move notebook entry', error)
-        try {
-          await reloadNow(state)
-        } catch (reloadError) {
-          api.warn('notebook reload after move failure failed', reloadError)
-        }
-        setStatus(state, `Move failed: ${error.message}`)
+  let data
+  try {
+    const body = { file: state.file, names }
+    if (target.kind === 'before') body.before = target.before
+    else body.category = target.category
+    if (!force && typeof state.baseMtime === 'number') body.base_mtime = state.baseMtime
+    data = await api.postJson('/lora_library/notebook/move', body, {
+      timeoutMs: WRITE_TIMEOUT_MS
+    })
+  } catch (error) {
+    state.busy = false
+    updateSaveButtonEnabled(state)
+    updateDeleteButtonEnabled(state)
+    if (await recoverFromWriteTimeout(state, error)) return
+    if (error?.status === 409) {
+      showConflict(state, 'File changed on disk', {
+        onReload: () => reloadNow(state),
+        onOverwrite: () => performMoveRun(state, names, target, { force: true })
+      })
+    } else {
+      api.warn('failed to move notebook entries', error)
+      try {
+        await reloadNow(state)
+      } catch (reloadError) {
+        api.warn('notebook reload after move failure failed', reloadError)
       }
-      return
+      setStatus(state, `Move failed: ${error.message}`)
     }
-    state.entries = Array.isArray(data.entries) ? data.entries : state.entries
-    state.baseMtime = typeof data.mtime === 'number' ? data.mtime : state.baseMtime
-    syncNotebookCache(state, data) // session cache (file header)
+    return
   }
+
+  state.entries = Array.isArray(data.entries) ? data.entries : state.entries
+  state.baseMtime = typeof data.mtime === 'number' ? data.mtime : state.baseMtime
+  syncNotebookCache(state, data) // session cache (file header)
 
   state.busy = false
   // Same reasoning as performMove()'s own tail: a move never adds/removes
@@ -4253,6 +4481,15 @@ async function performMoveCategory(state, category, target, { force = false } = 
     return
   }
   if (state.busy) return
+  // Optimistic reorder (finding 3, 2026-08-26 responsiveness round): move
+  // the header AND its entries' block together, before the round trip --
+  // see reorderCategoryEntriesLocally()'s doc for why both have to move
+  // together for renderList() to stay coherent while the request is in
+  // flight. On failure, the existing conflict/error reload paths below
+  // already restore disk truth.
+  state.categories = reorderCategoriesLocally(state.categories, category, target)
+  state.entries = reorderCategoryEntriesLocally(state.entries, category, target)
+  renderList(state)
   state.busy = true
   updateSaveButtonEnabled(state)
   updateDeleteButtonEnabled(state)
@@ -4262,7 +4499,9 @@ async function performMoveCategory(state, category, target, { force = false } = 
     if (target.kind === 'before') body.before = target.before
     if (!force && typeof state.baseMtime === 'number') body.base_mtime = state.baseMtime
 
-    const data = await api.postJson('/lora_library/notebook/move_category', body)
+    const data = await api.postJson('/lora_library/notebook/move_category', body, {
+      timeoutMs: WRITE_TIMEOUT_MS
+    })
     state.busy = false
     state.entries = Array.isArray(data.entries) ? data.entries : state.entries
     state.categories = Array.isArray(data.categories) ? data.categories : state.categories
@@ -4276,7 +4515,9 @@ async function performMoveCategory(state, category, target, { force = false } = 
     state.busy = false
     updateSaveButtonEnabled(state)
     updateDeleteButtonEnabled(state)
-    if (error?.status === 409) {
+    if (await recoverFromWriteTimeout(state, error)) {
+      // handled: reloaded to check what landed
+    } else if (error?.status === 409) {
       showConflict(state, 'File changed on disk', {
         onReload: () => reloadNow(state),
         onOverwrite: () => performMoveCategory(state, category, target, { force: true })
@@ -4634,7 +4875,9 @@ async function commitInlineRename(state) {
   } catch (error) {
     state.busy = false
     updateSaveButtonEnabled(state)
-    if (error?.status === 409) {
+    if (await recoverFromWriteTimeout(state, error)) {
+      // no-op: recoverFromWriteTimeout() already reloaded to check what landed
+    } else if (error?.status === 409) {
       // Same §3.5 surface Save/Move use. Overwrite re-runs the rename with
       // the mtime check dropped; the editor is already closed, so the retry
       // carries the name through explicitly rather than re-reading the DOM.
@@ -4661,29 +4904,43 @@ async function commitInlineRename(state) {
   }
 }
 
-/** POSTs an entry rename, writing the entry's own on-disk text back
- * unchanged — see commitInlineRename()'s "Rename-ONLY on purpose". */
+/**
+ * POSTs an entry rename, writing the entry's own on-disk text back
+ * unchanged — see commitInlineRename()'s "Rename-ONLY on purpose". ONE
+ * request (finding 2, 2026-08-26 responsiveness round: this used to GET the
+ * entry first purely to read back the text it was about to resend right
+ * back). `state.entryTextByName[name]` already holds it — the same
+ * include_text=1 cache loadEntryText()'s own fast path reads (finding 1) —
+ * and `name` here is a ROW being renamed, not necessarily the editor's
+ * active entry, so `state.baseMtime` (which only ever describes the ACTIVE
+ * entry) would be the wrong mtime source; `state.paintedMtime` is the whole
+ * FILE's own mtime as of the last list load, which is what every entry's
+ * §3.5 check actually needs to cover the window since that load — same
+ * reasoning performSave()'s one-request Save path already established.
+ */
 async function renameEntryRequest(state, name, renameTo, force) {
-  const current = await fetchEntry(state, name)
-  const body = { file: state.file, name, text: current?.text ?? '', rename_to: renameTo }
-  // The mtime comes from the GET we just did, so the §3.5 check covers the
-  // window between reading the text and writing it back.
-  if (!force && typeof current?.mtime === 'number') body.base_mtime = current.mtime
-  return api.postJson('/lora_library/notebook/entry', body)
-}
-
-/** Category sibling of renameEntryRequest(): the §5 category route's field
- * is `description` rather than `text`. */
-async function renameCategoryRequest(state, name, renameTo, force) {
-  const current = await fetchCategory(state, name)
   const body = {
     file: state.file,
     name,
-    description: current?.description ?? '',
+    text: state.entryTextByName[name] ?? '',
     rename_to: renameTo
   }
-  if (!force && typeof current?.mtime === 'number') body.base_mtime = current.mtime
-  return api.postJson('/lora_library/notebook/category', body)
+  if (!force && typeof state.paintedMtime === 'number') body.base_mtime = state.paintedMtime
+  return api.postJson('/lora_library/notebook/entry', body, { timeoutMs: WRITE_TIMEOUT_MS })
+}
+
+/** Category sibling of renameEntryRequest(): the §5 category route's field
+ * is `description` rather than `text`, read from the finding-5 cache
+ * (`state.categoryDescriptionByName`) instead of a GET. */
+async function renameCategoryRequest(state, name, renameTo, force) {
+  const body = {
+    file: state.file,
+    name,
+    description: state.categoryDescriptionByName[name] ?? '',
+    rename_to: renameTo
+  }
+  if (!force && typeof state.paintedMtime === 'number') body.base_mtime = state.paintedMtime
+  return api.postJson('/lora_library/notebook/category', body, { timeoutMs: WRITE_TIMEOUT_MS })
 }
 
 /**
@@ -4698,8 +4955,11 @@ function applyRenameResult(state, kind, name, renameTo, data) {
   if (Array.isArray(data?.entries)) state.entries = data.entries
   if (Array.isArray(data?.categories)) state.categories = data.categories
   if (typeof data?.mtime === 'number') state.baseMtime = data.mtime
-  // Session cache (file header): the body travels with the entry's new name.
+  // Session cache (file header): the body/description travels with the
+  // renamed entry/category (finding 5, 2026-08-26 responsiveness round adds
+  // the category half -- see noteCategoryDescription()'s call sites).
   if (kind === 'entry') renameEntryText(state, name, renameTo)
+  else renameCategoryDescription(state, name, renameTo)
   syncNotebookCache(state, data)
 
   if (kind === 'category') {
@@ -4877,7 +5137,9 @@ async function confirmNewEntry(state, rawName) {
     if (state.activeCategory == null && state.activeName) {
       body.after = state.activeName
     }
-    const data = await api.postJson('/lora_library/notebook/entry', body)
+    const data = await api.postJson('/lora_library/notebook/entry', body, {
+      timeoutMs: WRITE_TIMEOUT_MS
+    })
     state.busy = false
     state.entries = Array.isArray(data.entries) ? data.entries : state.entries
     state.exists = true
@@ -4903,6 +5165,7 @@ async function confirmNewEntry(state, rawName) {
     setStatus(state, `Created "${name}".`)
   } catch (error) {
     state.busy = false
+    if (await recoverFromWriteTimeout(state, error)) return
     api.warn('failed to create notebook entry', error)
     setStatus(state, `Could not create "${name}": ${error.message}`)
   }
@@ -4931,16 +5194,17 @@ async function confirmNewCategory(state, name) {
   state.busy = true
   setStatus(state, 'Creating category…')
   try {
-    const data = await api.postJson('/lora_library/notebook/category', {
-      file: state.file,
-      name,
-      description: ''
-    })
+    const data = await api.postJson(
+      '/lora_library/notebook/category',
+      { file: state.file, name, description: '' },
+      { timeoutMs: WRITE_TIMEOUT_MS }
+    )
     state.busy = false
     state.entries = Array.isArray(data.entries) ? data.entries : state.entries
     state.categories = Array.isArray(data.categories) ? data.categories : state.categories
     state.exists = true
-    syncNotebookCache(state, data) // session cache (file header)
+    noteCategoryDescription(state, name, '') // session cache (file header): created empty
+    syncNotebookCache(state, data)
     closeNewEntryRow(state)
 
     // A new category is created with an empty description and already
@@ -4954,6 +5218,7 @@ async function confirmNewCategory(state, name) {
     setStatus(state, `Created category "${name}".`)
   } catch (error) {
     state.busy = false
+    if (await recoverFromWriteTimeout(state, error)) return
     api.warn('failed to create notebook category', error)
     setStatus(state, `Could not create category "${name}": ${error.message}`)
   }
@@ -4992,7 +5257,7 @@ function onDeleteClick(state) {
     performDeleteCategory(state).catch((error) => api.warn('category delete failed', error))
     return
   }
-  performDeleteRun(state, [...state.selection], 0).catch((error) => api.warn('delete failed', error))
+  performDeleteRun(state, [...state.selection]).catch((error) => api.warn('delete failed', error))
 }
 
 /** "Are you sure?" (one entry) or "Are you sure? (3)" (owner amendment
@@ -5045,72 +5310,68 @@ function cancelDeleteConfirm(state) {
 }
 
 /**
- * Deletes `names` sequentially over the single-entry §5 delete route,
- * starting at `startIndex` (>0 only on a post-conflict Overwrite resume —
- * see below). Each successful response's `mtime` becomes the NEXT
- * request's `base_mtime`, and each deleted name is dropped from the
- * selection right away using the exact rule this file always used for a
- * single delete ("Delete acts on the ACTIVE entry only": hand `active` to
- * the last other still-selected name, or clear it if none remain) —
- * applied once per name here, which naturally converges to "clear
- * selection" by the time the whole batch is gone, since nothing outside
- * this run ever ADDS to `state.selection` while it's in flight (see the
- * file header's "Multi-delete" paragraph).
+ * Deletes every name in `names` in ONE §5 batch delete request (finding 4,
+ * 2026-08-26 responsiveness round: this used to be N sequential single-name
+ * POSTs, one disk write + one mtime bump each; now one disk write total —
+ * see routes_notebook.py's post_notebook_delete batch docstring). The
+ * store's single-write nature makes a failure ALL-OR-NOTHING: unlike the
+ * old sequential run, a 409 or an unknown name means NOTHING was deleted,
+ * so there is no "resume at index" left to do — Overwrite just retries the
+ * SAME full `names` list with the mtime check skipped.
  *
- * A 409 stops the run right where it is — everything deleted so far stays
- * deleted and is already reflected in `state.selection`/the `entry` widget
- * — and shows the same Reload/Overwrite conflict UI Save/Move already use;
- * Overwrite re-enters this same function at the failed index with
- * `force: true` (that ONE request skips `base_mtime`), then continues
- * normally through the rest of `names`.
+ * On success, every deleted name is dropped from the selection at once
+ * using the exact rule this file always used for a single delete ("Delete
+ * acts on the ACTIVE entry only": hand `active` to the last other
+ * still-selected name, or clear it if none remain) — see the file header's
+ * "Multi-delete" paragraph.
  */
-async function performDeleteRun(state, names, startIndex, { force = false } = {}) {
+async function performDeleteRun(state, names, { force = false } = {}) {
   state.busy = true
   updateSaveButtonEnabled(state)
   updateDeleteButtonEnabled(state)
   setStatus(state, names.length > 1 ? `Deleting ${names.length} entries…` : 'Deleting…')
 
-  for (let index = startIndex; index < names.length; index++) {
-    const name = names[index]
-    let data
-    try {
-      const body = { file: state.file, name }
-      const skipCheck = force && index === startIndex
-      if (!skipCheck && typeof state.baseMtime === 'number') body.base_mtime = state.baseMtime
-      data = await api.postJson('/lora_library/notebook/delete', body)
-    } catch (error) {
-      state.busy = false
-      updateSaveButtonEnabled(state)
-      updateDeleteButtonEnabled(state)
-      if (error?.status === 409) {
-        showConflict(state, 'File changed on disk', {
-          onReload: () => reloadNow(state),
-          onOverwrite: () => performDeleteRun(state, names, index, { force: true })
-        })
-      } else {
-        api.warn('failed to delete notebook entry', error)
-        setStatus(state, `Delete failed: ${error.message}`)
-      }
-      return
+  let data
+  try {
+    const body = { file: state.file, names }
+    if (!force && typeof state.baseMtime === 'number') body.base_mtime = state.baseMtime
+    data = await api.postJson('/lora_library/notebook/delete', body, {
+      timeoutMs: WRITE_TIMEOUT_MS
+    })
+  } catch (error) {
+    state.busy = false
+    updateSaveButtonEnabled(state)
+    updateDeleteButtonEnabled(state)
+    if (await recoverFromWriteTimeout(state, error)) return
+    if (error?.status === 409) {
+      showConflict(state, 'File changed on disk', {
+        onReload: () => reloadNow(state),
+        onOverwrite: () => performDeleteRun(state, names, { force: true })
+      })
+    } else {
+      api.warn('failed to delete notebook entries', error)
+      setStatus(state, `Delete failed: ${error.message}`)
     }
+    return
+  }
 
-    state.entries = Array.isArray(data.entries) ? data.entries : state.entries
-    state.baseMtime = typeof data.mtime === 'number' ? data.mtime : state.baseMtime
-    forgetEntryText(state, name) // session cache (file header)
-    syncNotebookCache(state, data)
+  state.entries = Array.isArray(data.entries) ? data.entries : state.entries
+  state.baseMtime = typeof data.mtime === 'number' ? data.mtime : state.baseMtime
+  for (const name of names) forgetEntryText(state, name) // session cache (file header)
+  syncNotebookCache(state, data)
 
-    const previousActive = state.activeName
-    const nextSelection = state.selection.filter((n) => n !== name)
-    const nextActive = previousActive === name ? lastOrNull(nextSelection) : previousActive
-    setSelection(state, nextSelection, nextActive)
+  const deleted = new Set(names)
+  const previousActive = state.activeName
+  const nextSelection = state.selection.filter((n) => !deleted.has(n))
+  const nextActive = deleted.has(previousActive) ? lastOrNull(nextSelection) : previousActive
+  setSelection(state, nextSelection, nextActive)
 
-    if (nextActive !== previousActive) {
-      if (nextActive == null) {
-        resetEditorDom(state)
-      } else {
-        const result = await loadEntryText(state, nextActive)
-        if (result === 'failed') resetEditorDom(state)
-      }
+  if (nextActive !== previousActive) {
+    if (nextActive == null) {
+      resetEditorDom(state)
+    } else {
+      const result = await loadEntryText(state, nextActive)
+      if (result === 'failed') resetEditorDom(state)
     }
   }
 
@@ -5149,12 +5410,16 @@ async function performDeleteCategory(state, { force = false } = {}) {
   try {
     const body = { file: state.file, name: category }
     if (!force && typeof state.baseMtime === 'number') body.base_mtime = state.baseMtime
-    data = await api.postJson('/lora_library/notebook/delete_category', body)
+    data = await api.postJson('/lora_library/notebook/delete_category', body, {
+      timeoutMs: WRITE_TIMEOUT_MS
+    })
   } catch (error) {
     state.busy = false
     updateSaveButtonEnabled(state)
     updateDeleteButtonEnabled(state)
-    if (error?.status === 409) {
+    if (await recoverFromWriteTimeout(state, error)) {
+      // handled: reloaded to check what landed
+    } else if (error?.status === 409) {
       showConflict(state, 'File changed on disk', {
         onReload: () => reloadNow(state),
         onOverwrite: () => performDeleteCategory(state, { force: true })
@@ -5171,7 +5436,8 @@ async function performDeleteCategory(state, { force = false } = {}) {
   state.baseMtime = typeof data.mtime === 'number' ? data.mtime : state.baseMtime
   state.entries = Array.isArray(data.entries) ? data.entries : state.entries
   state.categories = Array.isArray(data.categories) ? data.categories : state.categories
-  syncNotebookCache(state, data) // session cache (file header)
+  forgetCategoryDescription(state, category) // session cache (file header): the heading is gone
+  syncNotebookCache(state, data)
 
   if (state.collapsedCategories.delete(category)) syncCollapsedSectionsProperty(state)
 
@@ -5252,7 +5518,9 @@ async function performSave(state, { force = false } = {}) {
     if (renameTo) body.rename_to = renameTo
     if (!force && typeof state.baseMtime === 'number') body.base_mtime = state.baseMtime
 
-    const data = await api.postJson('/lora_library/notebook/entry', body)
+    const data = await api.postJson('/lora_library/notebook/entry', body, {
+      timeoutMs: WRITE_TIMEOUT_MS
+    })
     state.busy = false
     // The DISK-truth parts of the response are folded in UNCONDITIONALLY --
     // before the selection-moved-on early return below (2026-07-30, LAN-
@@ -5327,7 +5595,9 @@ async function performSave(state, { force = false } = {}) {
   } catch (error) {
     state.busy = false
     updateSaveButtonEnabled(state)
-    if (error?.status === 409) {
+    if (await recoverFromWriteTimeout(state, error)) {
+      // handled: reloaded to check what landed
+    } else if (error?.status === 409) {
       showConflict(state, 'File changed on disk', {
         onReload: () => reloadNow(state),
         onOverwrite: () => performSave(state, { force: true })
@@ -5380,12 +5650,23 @@ async function performSaveCategory(state, { force = false } = {}) {
     if (renameTo) body.rename_to = renameTo
     if (!force && typeof state.baseMtime === 'number') body.base_mtime = state.baseMtime
 
-    const data = await api.postJson('/lora_library/notebook/category', body)
+    const data = await api.postJson('/lora_library/notebook/category', body, {
+      timeoutMs: WRITE_TIMEOUT_MS
+    })
     state.busy = false
     // Disk truth first, unconditionally -- performSave()'s 2026-07-30 rule.
     state.baseMtime = typeof data.mtime === 'number' ? data.mtime : state.baseMtime
     state.entries = Array.isArray(data.entries) ? data.entries : state.entries
     state.categories = Array.isArray(data.categories) ? data.categories : state.categories
+    // §3.4 demote-don't-refuse fold, same rules as performSave() above --
+    // `data.description` is the STORED (demoted, trimmed) text when any
+    // heading line was adjusted. Computed here (ahead of the moved-on early
+    // return below) since the description cache (finding 5, 2026-08-26
+    // responsiveness round) has to stay current either way -- a later
+    // category click reads it whether or not THIS category is still active.
+    const storedDescription = typeof data.description === 'string' ? data.description : description
+    if (renameTo) renameCategoryDescription(state, name, renameTo)
+    noteCategoryDescription(state, renameTo || name, storedDescription)
     syncNotebookCache(state, data) // session cache (file header)
     if (renameTo && state.collapsedCategories.delete(name)) {
       // Collapse tracks by NAME -- migrate the key whether or not the user
@@ -5400,10 +5681,6 @@ async function performSaveCategory(state, { force = false } = {}) {
       updateSaveButtonEnabled(state)
       return
     }
-    // §3.4 demote-don't-refuse fold, same rules as performSave() above --
-    // `data.description` is the STORED (demoted, trimmed) text when any
-    // heading line was adjusted.
-    const storedDescription = typeof data.description === 'string' ? data.description : description
     if (storedDescription !== description && state.textarea.value === description) {
       state.textarea.value = storedDescription
     }
@@ -5427,7 +5704,9 @@ async function performSaveCategory(state, { force = false } = {}) {
   } catch (error) {
     state.busy = false
     updateSaveButtonEnabled(state)
-    if (error?.status === 409) {
+    if (await recoverFromWriteTimeout(state, error)) {
+      // handled: reloaded to check what landed
+    } else if (error?.status === 409) {
       showConflict(state, 'File changed on disk', {
         onReload: () => reloadNow(state),
         onOverwrite: () => performSaveCategory(state, { force: true })

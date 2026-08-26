@@ -578,10 +578,18 @@ def test_list_sets_parses_once_then_answers_from_the_cache(
     context: LibraryContext, monkeypatch
 ) -> None:
     _three_sets(context)
+    # 2026-08-26 while-running round: save_set WARMS the per-file caches for
+    # the file it just wrote, so a listing right after in-process saves
+    # parses NOTHING -- the cold path only exists for files written by
+    # another process/machine (or after clear_caches).
     counter = _ParseCounter(monkeypatch)
     first = sets_store.list_sets(context)
     assert [e["name"] for e in first] == ["Apple", "Mango", "Zebra"]
-    assert sorted(counter.slugs) == ["apple", "mango", "zebra"]
+    assert counter.slugs == []  # warmed by the saves themselves
+    sets_store.clear_caches()
+    cold = sets_store.list_sets(context)
+    assert cold == first
+    assert sorted(counter.slugs) == ["apple", "mango", "zebra"]  # the real cold cost
     second = sets_store.list_sets(context)
     assert second == first
     assert len(counter.slugs) == 3  # no new parse
@@ -600,12 +608,16 @@ def test_save_and_delete_in_this_process_invalidate_and_reparse_only_the_changed
     sets_store.save_set(context, {"name": "Kiwi", "loras": []})
     listed = sets_store.list_sets(context)
     assert [e["slug"] for e in listed] == ["apple", "kiwi", "mango", "zebra"]
-    assert counter.slugs == ["kiwi"]  # per-file layer: the three others were not re-read
+    # 2026-08-26 while-running round: an in-process save both SPLICES the
+    # listing cache and WARMS the per-file caches from the dict it just
+    # wrote -- so not even the changed file re-parses, and the other three
+    # certainly don't.
+    assert counter.slugs == []
     counter.slugs.clear()
     sets_store.save_set(context, {"name": "Apple renamed", "loras": []}, slug="apple")
     listed = sets_store.list_sets(context)
     assert next(e["name"] for e in listed if e["slug"] == "apple") == "Apple renamed"
-    assert counter.slugs == ["apple"]
+    assert counter.slugs == []
     counter.slugs.clear()
     assert sets_store.delete_set(context, "zebra") is True
     assert [e["slug"] for e in sets_store.list_sets(context)] == ["apple", "kiwi", "mango"]
@@ -733,10 +745,10 @@ def test_load_layout_reads_the_file_once_per_mtime_and_rides_the_cached_listing(
 def test_clear_caches_forgets_everything(context: LibraryContext, monkeypatch) -> None:
     _three_sets(context)
     counter = _ParseCounter(monkeypatch)
-    sets_store.list_sets(context)
+    sets_store.list_sets(context)  # warm from the saves: 0 parses
     sets_store.clear_caches()
-    sets_store.list_sets(context)
-    assert len(counter.slugs) == 6
+    sets_store.list_sets(context)  # cold after the clear: 3 parses
+    assert len(counter.slugs) == 3
 
 
 # ============================== 5. sets open_folder + sets_dir/is_default_library

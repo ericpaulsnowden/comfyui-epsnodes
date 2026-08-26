@@ -37,10 +37,12 @@ export function apiUrl(path) {
  * the response is non-2xx.
  * @param {string} path - e.g. `/lora_library/sets`
  * @param {Record<string, string>} [params]
+ * @param {{timeoutMs?: number}} [options] - opt-in request timeout (finding
+ * 6, 2026-08-26 responsiveness round) — see fetchWithTimeout() below.
  */
-export async function getJson(path, params) {
+export async function getJson(path, params, options) {
   const query = params ? `?${new URLSearchParams(params)}` : ''
-  const response = await api.fetchApi(`${path}${query}`)
+  const response = await fetchWithTimeout(`${path}${query}`, undefined, options)
   return unwrap(response)
 }
 
@@ -48,14 +50,62 @@ export async function getJson(path, params) {
  * POST JSON to a lora_library route (FORMAT.md §5).
  * @param {string} path
  * @param {object} body
+ * @param {{timeoutMs?: number}} [options] - opt-in request timeout (finding
+ * 6, 2026-08-26 responsiveness round) — see fetchWithTimeout() below.
  */
-export async function postJson(path, body) {
-  const response = await api.fetchApi(path, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body ?? {})
-  })
+export async function postJson(path, body, options) {
+  const response = await fetchWithTimeout(
+    path,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body ?? {})
+    },
+    options
+  )
   return unwrap(response)
+}
+
+/**
+ * `api.fetchApi()` with an OPT-IN timeout (finding 6, 2026-08-26
+ * responsiveness round, owner-adjacent report: a save/move/delete can wedge
+ * the Notebook's `state.busy` forever behind a hung fetch when the
+ * ComfyUI server is GIL-busy running a workflow, or the library sits on a
+ * slow/dropped NAS mount). `options.timeoutMs`, when a number, aborts the
+ * in-flight request after that many ms via `AbortController` and rejects
+ * with an `Error` carrying `.timeout = true`, so a caller can tell a
+ * timeout apart from a genuine server error (`.status`) or a network
+ * failure (neither set) — see notebook.js's `recoverFromWriteTimeout()`.
+ *
+ * DEFAULT BEHAVIOR IS UNCHANGED (controller.js also imports `getJson`/
+ * `postJson`, and this file is strictly additive/opt-in for that reason —
+ * see the file header): every existing call site passes no third argument,
+ * `options` is `undefined`, `timeoutMs` is not a number, and this function
+ * calls `api.fetchApi(path, fetchOptions)` -- IDENTICAL to what `getJson`/
+ * `postJson` called directly before this round, byte-for-byte, no
+ * `AbortController` ever constructed, no options object ever added or
+ * changed.
+ * @param {string} path
+ * @param {RequestInit} [fetchOptions]
+ * @param {{timeoutMs?: number}} [options]
+ */
+async function fetchWithTimeout(path, fetchOptions, options) {
+  const timeoutMs = options?.timeoutMs
+  if (typeof timeoutMs !== 'number') return api.fetchApi(path, fetchOptions)
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), timeoutMs)
+  try {
+    return await api.fetchApi(path, { ...fetchOptions, signal: controller.signal })
+  } catch (error) {
+    if (controller.signal.aborted) {
+      const timeoutError = new Error(`request to ${path} timed out after ${timeoutMs}ms`)
+      timeoutError.timeout = true
+      throw timeoutError
+    }
+    throw error
+  } finally {
+    clearTimeout(timer)
+  }
 }
 
 async function unwrap(response) {

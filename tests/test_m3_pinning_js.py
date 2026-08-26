@@ -842,7 +842,7 @@ class TestNotebookPinWiring:
         [
             "performSave(state, { force = false } = {})",
             "performMove(state, name, target, { force = false } = {})",
-            "performMoveRun(state, names, target, startIndex, { force = false } = {})",
+            "performMoveRun(state, names, target, { force = false } = {})",
             "performMoveCategory(state, category, target, { force = false } = {})",
             "confirmNewEntry(state, rawName)",
             "commitInlineRename(state)",

@@ -832,3 +832,259 @@ class TestInputRefMode:
         )
         assert response.status == 400
         assert "requires a running ComfyUI" in (await response.json())["error"]
+
+
+# ================================================== 2026-08-26 while-running round
+#
+# Two audited mid-run responsiveness findings: (1) the shared resolution
+# chain (`_validate_video_path`/`_resolve_input_ref`/`_resolve_request_
+# source`) ran synchronously on the event loop, re-entered on EVERY HTTP
+# Range request while a viewer scrubs the <video> element; (2) the probe
+# route's worst-case decode-and-count tier re-ran from scratch on every
+# repeat probe of the same, unchanged clip.
+
+
+class TestResolveOffLoop:
+    """Finding 1: `_resolve_request_source_off_loop` is a pure
+    `asyncio.to_thread` wrapper around the pre-existing, unchanged
+    `_resolve_request_source` -- same result, just off the event loop."""
+
+    async def test_matches_the_synchronous_version_and_runs_off_thread(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        import threading
+
+        seen: dict[str, str] = {}
+        clip = tmp_path / "c.mp4"
+        clip.write_bytes(b"x")
+        request = SimpleNamespace(query={"path": str(clip)})
+        real = routes_frame_saver._resolve_request_source
+
+        def spy(req):
+            seen["thread"] = threading.current_thread().name
+            return real(req)
+
+        monkeypatch.setattr(routes_frame_saver, "_resolve_request_source", spy)
+        got = await routes_frame_saver._resolve_request_source_off_loop(request)
+        assert seen["thread"] != threading.main_thread().name
+        assert got == real(request)
+
+    async def test_error_case_also_runs_off_thread(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import threading
+
+        seen: dict[str, str] = {}
+        request = SimpleNamespace(query={})  # missing 'path' -- an error tuple
+        real = routes_frame_saver._resolve_request_source
+
+        def spy(req):
+            seen["thread"] = threading.current_thread().name
+            return real(req)
+
+        monkeypatch.setattr(routes_frame_saver, "_resolve_request_source", spy)
+        resolved, error, _needs = await routes_frame_saver._resolve_request_source_off_loop(
+            request
+        )
+        assert resolved is None
+        assert error is not None
+        assert seen["thread"] != threading.main_thread().name
+
+
+class TestBothRoutesResolveOffLoop:
+    """Finding 1, end to end through the real HTTP routes: both handlers now
+    await `_resolve_request_source_off_loop` instead of calling
+    `_resolve_request_source` inline -- pinned via a spy on the underlying
+    function (real logic still runs, just relocated), plus an equality
+    check against the OLD, direct-call response shape so behavior stays
+    byte-identical."""
+
+    async def test_probe_route_resolves_off_thread_with_unchanged_response(
+        self, client, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import threading
+
+        seen: dict[str, str] = {}
+        path = _seeded_clip(CLIP_RED)
+        real = routes_frame_saver._resolve_request_source
+
+        def spy(req):
+            seen["thread"] = threading.current_thread().name
+            return real(req)
+
+        monkeypatch.setattr(routes_frame_saver, "_resolve_request_source", spy)
+        response = await client.get("/eps_frame_saver/probe", params={"path": path})
+        assert response.status == 200
+        assert seen["thread"] != threading.main_thread().name
+        assert (await response.json()) == frame_saver_video.probe(path)
+
+    async def test_stream_route_resolves_off_thread_with_unchanged_response(
+        self, client, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import threading
+
+        seen: dict[str, str] = {}
+        path = _seeded_clip(CLIP_RED)
+        real = routes_frame_saver._resolve_request_source
+
+        def spy(req):
+            seen["thread"] = threading.current_thread().name
+            return real(req)
+
+        monkeypatch.setattr(routes_frame_saver, "_resolve_request_source", spy)
+        response = await client.get("/eps_frame_saver/stream", params={"path": path})
+        assert response.status == 200
+        assert seen["thread"] != threading.main_thread().name
+        body = await response.read()
+        assert len(body) == Path(path).stat().st_size
+
+    async def test_remote_gate_still_runs_before_any_resolve_for_both_routes(
+        self, client, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Gate-first order (2026-08-21 audit) must survive the finding-1
+        # refactor: a remote path-mode caller is refused before the
+        # off-loop resolution chain is ever awaited.
+        calls: list[str] = []
+
+        def spy(req):
+            calls.append("resolved")
+            return None, "boom", True
+
+        monkeypatch.setattr(routes_frame_saver, "_resolve_request_source", spy)
+        for route in ("/eps_frame_saver/probe", "/eps_frame_saver/stream"):
+            response = await client.get(
+                route, params={"path": "/definitely/not/here.mp4"}, headers=REMOTE_HEADERS
+            )
+            assert response.status == 403
+        assert calls == []
+
+
+class TestProbeCache:
+    """Finding 2: `_probe_cached` memoizes `video.probe` by
+    ``(path, mtime_ns, size)`` -- capped at `_PROBE_CACHE_MAX` entries,
+    LRU-evicted, always re-stat'd so an edited file is a fresh key."""
+
+    @pytest.fixture(autouse=True)
+    def _clear_cache(self):
+        routes_frame_saver._probe_cache_clear()
+        yield
+        routes_frame_saver._probe_cache_clear()
+
+    def test_second_call_for_the_same_unchanged_file_reuses_the_result(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        clip = tmp_path / "c.mp4"
+        clip.write_bytes(b"0123")
+        calls: list[str] = []
+
+        def fake_probe(path: str) -> dict:
+            calls.append(path)
+            return {"fps": 24.0, "frame_count": 16, "width": 320, "height": 180}
+
+        monkeypatch.setattr(routes_frame_saver.video, "probe", fake_probe)
+        first = routes_frame_saver._probe_cached(str(clip))
+        second = routes_frame_saver._probe_cached(str(clip))
+        assert first == second
+        assert calls == [str(clip)]  # ONE decode, not two
+
+    def test_edited_file_is_a_fresh_key_and_re_probes(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        clip = tmp_path / "c.mp4"
+        clip.write_bytes(b"0123")
+        calls: list[str] = []
+        monkeypatch.setattr(
+            routes_frame_saver.video,
+            "probe",
+            lambda path: (calls.append(path), {"n": len(calls)})[1],
+        )
+        routes_frame_saver._probe_cached(str(clip))
+        clip.write_bytes(b"0123456789")  # new size -> new key regardless of mtime granularity
+        routes_frame_saver._probe_cached(str(clip))
+        assert len(calls) == 2
+
+    def test_cache_is_capped_and_evicts_the_oldest_entry(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(routes_frame_saver.video, "probe", lambda path: {"path": path})
+        cap = routes_frame_saver._PROBE_CACHE_MAX
+        clip_paths = []
+        for index in range(cap + 1):
+            clip = tmp_path / f"c{index:03d}.mp4"
+            clip.write_bytes(str(index).encode())
+            clip_paths.append(str(clip))
+            routes_frame_saver._probe_cached(clip_paths[-1])
+        assert len(routes_frame_saver._probe_cache) == cap
+        oldest_stat = Path(clip_paths[0]).stat()
+        oldest_key = (clip_paths[0], oldest_stat.st_mtime_ns, oldest_stat.st_size)
+        assert oldest_key not in routes_frame_saver._probe_cache
+        newest_stat = Path(clip_paths[-1]).stat()
+        newest_key = (clip_paths[-1], newest_stat.st_mtime_ns, newest_stat.st_size)
+        assert newest_key in routes_frame_saver._probe_cache
+
+    def test_a_cache_hit_is_moved_to_the_end_so_it_survives_eviction(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(routes_frame_saver.video, "probe", lambda path: {"path": path})
+        cap = routes_frame_saver._PROBE_CACHE_MAX
+        clip_paths = []
+        for index in range(cap):
+            clip = tmp_path / f"c{index:03d}.mp4"
+            clip.write_bytes(str(index).encode())
+            clip_paths.append(str(clip))
+            routes_frame_saver._probe_cached(clip_paths[-1])
+        # Re-probe the OLDEST entry (a cache hit) -- it should now be the
+        # LEAST likely to be evicted next, not the most.
+        routes_frame_saver._probe_cached(clip_paths[0])
+        overflow = tmp_path / "overflow.mp4"
+        overflow.write_bytes(b"overflow")
+        routes_frame_saver._probe_cached(str(overflow))
+        oldest_stat = Path(clip_paths[0]).stat()
+        oldest_key = (clip_paths[0], oldest_stat.st_mtime_ns, oldest_stat.st_size)
+        assert oldest_key in routes_frame_saver._probe_cache
+        # The entry that was truly least-recently-used (index 1, never
+        # re-touched) is the one evicted instead.
+        second_stat = Path(clip_paths[1]).stat()
+        second_key = (clip_paths[1], second_stat.st_mtime_ns, second_stat.st_size)
+        assert second_key not in routes_frame_saver._probe_cache
+
+    def test_missing_file_stat_failure_is_a_clean_value_error(self) -> None:
+        with pytest.raises(ValueError, match="could not stat"):
+            routes_frame_saver._probe_cached("/no/such/place/nope.mp4")
+
+    async def test_probe_route_reuses_the_result_across_two_requests(
+        self, client, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        clip = tmp_path / "c.mp4"
+        clip.write_bytes(b"0123")
+        calls: list[str] = []
+
+        def fake_probe(path: str) -> dict:
+            calls.append(path)
+            return {"fps": 24.0, "frame_count": 16, "width": 320, "height": 180}
+
+        monkeypatch.setattr(routes_frame_saver.video, "probe", fake_probe)
+        first = await client.get("/eps_frame_saver/probe", params={"path": str(clip)})
+        second = await client.get("/eps_frame_saver/probe", params={"path": str(clip)})
+        assert first.status == second.status == 200
+        assert (await first.json()) == (await second.json())
+        assert calls == [str(clip)]
+
+    async def test_probe_route_re_decodes_after_the_file_is_edited(
+        self, client, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        clip = tmp_path / "c.mp4"
+        clip.write_bytes(b"0123")
+        calls: list[str] = []
+
+        def fake_probe(path: str) -> dict:
+            calls.append(path)
+            return {"fps": 24.0, "frame_count": 16, "width": 320, "height": 180}
+
+        monkeypatch.setattr(routes_frame_saver.video, "probe", fake_probe)
+        first = await client.get("/eps_frame_saver/probe", params={"path": str(clip)})
+        assert first.status == 200
+        clip.write_bytes(b"0123456789abcdef")
+        second = await client.get("/eps_frame_saver/probe", params={"path": str(clip)})
+        assert second.status == 200
+        assert len(calls) == 2

@@ -152,15 +152,19 @@ def test_inline_rename_is_rename_only_and_never_writes_the_body(source: str) -> 
     target's CURRENT ON-DISK text back. Taking it from the textarea would
     commit unsaved body edits the user never asked to save — and, when the
     renamed row is not the one loaded in the editor, would clobber that
-    entry's body with a DIFFERENT entry's text."""
+    entry's body with a DIFFERENT entry's text. Finding 2 (2026-08-26
+    responsiveness round) reads that text from the include_text=1 cache
+    (`state.entryTextByName`/`state.categoryDescriptionByName`) instead of a
+    fresh GET before the POST -- same disk-loaded-not-live-textarea
+    guarantee, one request instead of two."""
     block = source.split("async function renameEntryRequest(", 1)[1]
     block = block.split("\n/**", 1)[0]
-    assert "await fetchEntry(state, name)" in block, "must read the entry's own text"
-    assert "text: current?.text ?? ''" in block
+    assert "state.entryTextByName[name] ?? ''" in block, "must read the entry's own cached text"
     assert "state.textarea" not in block, "the textarea must never be the source"
+    assert "fetchEntry" not in block, "finding 2: no GET before the rename POST"
     cat = source.split("async function renameCategoryRequest(", 1)[1].split("\n/**", 1)[0]
-    assert "await fetchCategory(state, name)" in cat
-    assert "description: current?.description ?? ''" in cat
+    assert "state.categoryDescriptionByName[name] ?? ''" in cat
+    assert "fetchCategory" not in cat, "finding 2: no GET before the rename POST"
 
 
 def test_inline_rename_conflict_retry_actually_drops_the_stale_mtime(source: str) -> None:
@@ -793,9 +797,9 @@ def test_every_successful_load_and_mutating_response_updates_the_cache(source: s
         "performSaveCategory(state, { force = false } = {})",
         "confirmNewEntry(state, rawName)",
         "confirmNewCategory(state, name)",
-        "performDeleteRun(state, names, startIndex, { force = false } = {})",
+        "performDeleteRun(state, names, { force = false } = {})",
         "performMove(state, name, target, { force = false } = {})",
-        "performMoveRun(state, names, target, startIndex, { force = false } = {})",
+        "performMoveRun(state, names, target, { force = false } = {})",
         "performMoveCategory(state, category, target, { force = false } = {})",
         "applyRenameResult(state, kind, name, renameTo, data)",
     ):
@@ -1027,3 +1031,385 @@ def test_collapsed_sections_export_list_is_additive(source: str) -> None:
     for signature in added_this_round:
         assert signature in source, signature
     assert source.count("\nexport function ") == len(pre_existing) + len(added_this_round)
+
+
+# ---------------------------------------------------------------------------
+# 2026-08-26 responsiveness round -- an audited set of mid-run round-trip
+# fixes: entry/category clicks now populate from the include_text=1 cache
+# instead of re-fetching (findings 1/5), drag-to-reorder is optimistic
+# (finding 3), multi-move/multi-delete send ONE batch request (finding 4,
+# its backend half in test_routes_notebook.py), every write carries an
+# opt-in api.js timeout so it can't wedge `state.busy` forever (finding 6),
+# and the Open folder click acknowledges at once (finding 7).
+# ---------------------------------------------------------------------------
+
+
+def test_finding1_entry_click_is_cache_served(source: str) -> None:
+    """HIGH: a plain click used to GET an entry it already had the text for
+    (the SAME include_text=1 list load that painted the row), and the row
+    highlight (synchronous) visibly outran the textarea (the round trip)
+    every time. loadEntryText() now populates synchronously from that same
+    cache whenever the name is already known; the GET survives only as a
+    fallback for a name genuinely absent from it."""
+    assert "function hasCachedEntryText(state, name) {" in source
+    assert (
+        "Object.prototype.hasOwnProperty.call(state.entryTextByName, name)"
+        in _body(source, "hasCachedEntryText(state, name)")
+    )
+    body = _body(source, "loadEntryText(state, name)")
+    assert "if (hasCachedEntryText(state, name)) {" in body
+    cached = body.split("if (hasCachedEntryText(state, name)) {", 1)[1].split("\n  }", 1)[0]
+    assert (
+        "populateEditor(state, state.entryTextByName[name], state.paintedMtime, name)" in cached
+    )
+    assert "return 'ok'" in cached
+    assert "await fetchEntry(state, name)" in body, "the GET must survive as a fallback"
+
+
+def test_finding5_category_click_is_cache_served(source: str) -> None:
+    """`category_descriptions` now rides the same include_text=1 payload
+    (routes_notebook.py), and loadCategoryDescription() reads it the exact
+    same cache-first way loadEntryText() reads entry bodies."""
+    assert "function hasCachedCategoryDescription(state, name) {" in source
+    body = _body(source, "loadCategoryDescription(state, name)")
+    assert "if (hasCachedCategoryDescription(state, name)) {" in body
+    cached = body.split("if (hasCachedCategoryDescription(state, name)) {", 1)[1]
+    cached = cached.split("\n  }", 1)[0]
+    assert (
+        "populateEditor(state, state.categoryDescriptionByName[name], state.paintedMtime, name)"
+        in cached
+    )
+    assert "await fetchCategory(state, name)" in body, "the GET must survive as a fallback"
+
+
+def test_finding5_category_descriptions_ride_the_include_text_payload(source: str) -> None:
+    apply_body = _body(source, "applyNotebookPayload(state, file, data)")
+    assert "data.category_descriptions" in apply_body
+    assert "state.categoryDescriptionByName =" in apply_body
+    assert "categoryDescriptionByName: {}," in source  # createState() default
+
+
+def test_finding5_category_cache_stays_current_across_writes(source: str) -> None:
+    # Mirrors the entry-text-cache discipline test_notebook_search_js.py
+    # already pins (test_mutations_keep_the_search_corpus_current) -- the
+    # description cache must never go stale relative to what was written.
+    assert "noteCategoryDescription(state, name, '')" in _body(
+        source, "confirmNewCategory(state, name)"
+    )
+    assert "forgetCategoryDescription(state, category)" in _body(
+        source, "performDeleteCategory(state, { force = false } = {})"
+    )
+    save_cat = _body(source, "performSaveCategory(state, { force = false } = {})")
+    assert "noteCategoryDescription(state, renameTo || name, storedDescription)" in save_cat
+    assert "renameCategoryDescription(state, name, renameTo)" in _body(
+        source, "applyRenameResult(state, kind, name, renameTo, data)"
+    )
+
+
+def test_finding2_rename_reads_the_cache_not_a_fresh_get(source: str) -> None:
+    # Companion to test_inline_rename_is_rename_only_and_never_writes_the_body
+    # above -- pinned here as its own finding: one request, not two.
+    entry_req = _body(source, "renameEntryRequest(state, name, renameTo, force)")
+    assert "state.entryTextByName[name] ?? ''" in entry_req
+    assert "fetchEntry" not in entry_req
+    assert "state.paintedMtime === 'number'" in entry_req
+    cat_req = _body(source, "renameCategoryRequest(state, name, renameTo, force)")
+    assert "state.categoryDescriptionByName[name] ?? ''" in cat_req
+    assert "fetchCategory" not in cat_req
+
+
+def test_finding3_move_is_optimistic_before_the_request(source: str) -> None:
+    """HIGH: a drag-drop used to sit at its OLD position until the response
+    answered ("snapped back until the server answers"). The panel's own
+    `entries`/`categories` are now spliced to the intended result BEFORE
+    `state.busy`/the request, and renderList() repaints at once."""
+    cases = (
+        (
+            "performMove(state, name, target, { force = false } = {})",
+            "state.entries = reorderEntriesLocally(state.entries, name, target)",
+        ),
+        (
+            "performMoveRun(state, names, target, { force = false } = {})",
+            "state.entries = reorderEntriesLocallyMany(state.entries, names, target)",
+        ),
+        (
+            "performMoveCategory(state, category, target, { force = false } = {})",
+            "state.categories = reorderCategoriesLocally(state.categories, category, target)",
+        ),
+    )
+    for signature, reorder_call in cases:
+        block = _body(source, signature)
+        assert reorder_call in block, signature
+        reorder_at = block.index(reorder_call)
+        render_at = block.index("renderList(state)")
+        busy_at = block.index("state.busy = true")
+        assert reorder_at < render_at < busy_at, signature
+
+
+def test_finding3_rollback_reuses_the_existing_reload_paths(source: str) -> None:
+    """No NEW rollback logic: a failed move already fell back to reloadNow()
+    (the non-409 branch) or the Reload/Overwrite conflict UI (the 409
+    branch) before this round; both still restore disk truth over the
+    optimistic guess -- see the finding's "on failure roll back through the
+    existing conflict/error reload paths" instruction."""
+    for signature in (
+        "performMove(state, name, target, { force = false } = {})",
+        "performMoveRun(state, names, target, { force = false } = {})",
+        "performMoveCategory(state, category, target, { force = false } = {})",
+    ):
+        block = _body(source, signature)
+        assert "onReload: () => reloadNow(state)" in block, signature
+        assert "await reloadNow(state)" in block, signature
+
+
+def test_finding3_category_move_relocates_its_entries_block_too(source: str) -> None:
+    # renderList() walks `entries` in lockstep with `categories`' own order,
+    # so reordering `categories` alone (without moving that category's own
+    # entries) would visually scramble the list until the response landed.
+    body = _body(source, "reorderCategoryEntriesLocally(entries, category, target)")
+    assert "entries.filter((entry) => (entry.category || '') === category)" in body
+    assert "if (!moved.length) return entries" in body
+
+
+def test_finding4_move_run_sends_one_batch_request(source: str) -> None:
+    """performMoveRun used to loop `api.postJson` once per name; it now
+    sends ONE request carrying the whole `names` array (the backend batch
+    half is in test_routes_notebook.py)."""
+    body = _body(source, "performMoveRun(state, names, target, { force = false } = {})")
+    assert "const body = { file: state.file, names }" in body
+    assert body.count("api.postJson(") == 1
+
+
+def test_finding4_delete_run_sends_one_batch_request(source: str) -> None:
+    body = _body(source, "performDeleteRun(state, names, { force = false } = {})")
+    assert "const body = { file: state.file, names }" in body
+    assert body.count("api.postJson(") == 1
+
+
+def test_finding4_no_resume_at_index_left_anywhere(source: str) -> None:
+    # All-or-nothing batch semantics mean there is nothing left to "resume
+    # at index" -- Overwrite just retries the SAME full `names` list.
+    move_run = _body(source, "performMoveRun(state, names, target, { force = false } = {})")
+    assert "onOverwrite: () => performMoveRun(state, names, target, { force: true })" in move_run
+    delete_run = _body(source, "performDeleteRun(state, names, { force = false } = {})")
+    assert "onOverwrite: () => performDeleteRun(state, names, { force: true })" in delete_run
+    assert "startIndex" not in source
+
+
+def test_finding4_call_sites_no_longer_pass_a_start_index(source: str) -> None:
+    assert "performMoveRun(state, names, target).catch(" in source
+    assert "performMoveRun(state, names, target, 0)" not in source
+    assert "performDeleteRun(state, [...state.selection]).catch(" in source
+    assert "performDeleteRun(state, [...state.selection], 0)" not in source
+
+
+def test_finding6_write_timeout_constant_and_recovery_helper(source: str) -> None:
+    assert "const WRITE_TIMEOUT_MS = 30000" in source
+    body = _body(source, "recoverFromWriteTimeout(state, error)")
+    assert "if (!error?.timeout) return false" in body
+    assert "await reloadNow(state)" in body
+    assert "return true" in body
+
+
+def test_finding6_every_write_path_passes_the_timeout_and_checks_it_first(source: str) -> None:
+    # Every notebook WRITE must (a) pass { timeoutMs: WRITE_TIMEOUT_MS } to
+    # its api.postJson call and (b) check recoverFromWriteTimeout() in its
+    # catch block, ahead of the usual 409 branch.
+    for signature in (
+        "performSave(state, { force = false } = {})",
+        "performSaveCategory(state, { force = false } = {})",
+        "confirmNewEntry(state, rawName)",
+        "confirmNewCategory(state, name)",
+        "performDeleteRun(state, names, { force = false } = {})",
+        "performMove(state, name, target, { force = false } = {})",
+        "performMoveRun(state, names, target, { force = false } = {})",
+        "performMoveCategory(state, category, target, { force = false } = {})",
+        "performDeleteCategory(state, { force = false } = {})",
+        "renameEntryRequest(state, name, renameTo, force)",
+        "renameCategoryRequest(state, name, renameTo, force)",
+    ):
+        block = _body(source, signature)
+        assert "timeoutMs: WRITE_TIMEOUT_MS" in block, signature
+    # The rename request functions don't handle their own errors -- their
+    # shared caller does, in ONE catch block covering both.
+    commit = _body(source, "commitInlineRename(state)")
+    assert "recoverFromWriteTimeout(state, error)" in commit
+    for signature in (
+        "performSave(state, { force = false } = {})",
+        "performSaveCategory(state, { force = false } = {})",
+        "confirmNewEntry(state, rawName)",
+        "confirmNewCategory(state, name)",
+        "performDeleteRun(state, names, { force = false } = {})",
+        "performMove(state, name, target, { force = false } = {})",
+        "performMoveRun(state, names, target, { force = false } = {})",
+        "performMoveCategory(state, category, target, { force = false } = {})",
+        "performDeleteCategory(state, { force = false } = {})",
+    ):
+        assert "recoverFromWriteTimeout(state, error)" in _body(source, signature), signature
+
+
+def test_finding6_timeout_check_precedes_the_409_branch(source: str) -> None:
+    # An aborted fetch never carries `.status`, so the timeout check has to
+    # run BEFORE the 409 branch or a timeout could fall through and be
+    # misreported as a generic failure.
+    for signature in (
+        "performSave(state, { force = false } = {})",
+        "performMove(state, name, target, { force = false } = {})",
+        "performDeleteRun(state, names, { force = false } = {})",
+    ):
+        block = _body(source, signature)
+        timeout_at = block.index("recoverFromWriteTimeout(state, error)")
+        conflict_at = block.index("error?.status === 409")
+        assert timeout_at < conflict_at, signature
+
+
+def test_finding7_open_folder_acknowledges_the_click_at_once(source: str) -> None:
+    body = _body(source, "onOpenFolderClick(state)")
+    assert "setStatus(state, 'Opening folder…')" in body
+    status_at = body.index("setStatus(state, 'Opening folder…')")
+    request_at = body.index("api.postJson('/lora_library/notebook/open_folder'")
+    assert status_at < request_at
+
+
+# --------------------------------------- api.js: opt-in timeout (finding 6)
+
+
+API_SOURCE = API_JS.read_text(encoding="utf-8")
+
+API_TIMEOUT_PROBE_JS = """
+import { getJson, postJson } from './extensions/comfyui-epsnodes/lora_library/api.js'
+import { api } from './scripts/api.js'
+
+const calls = []
+
+function abortableHang(path, options) {
+  calls.push({ path, options })
+  return new Promise((_resolve, reject) => {
+    options.signal.addEventListener('abort', () => {
+      const err = new Error('The operation was aborted')
+      err.name = 'AbortError'
+      reject(err)
+    })
+  })
+}
+
+function instantOk(path, options) {
+  calls.push({ path, options })
+  return Promise.resolve({ ok: true, status: 200, json: async () => ({ ok: true }) })
+}
+
+const out = {}
+
+// Default path, no options: byte-identical call shape to before this round.
+api.fetchApi = instantOk
+calls.length = 0
+await getJson('/x', { a: '1' })
+out.getDefaultArgCount = calls[0].options === undefined ? 1 : 2
+out.getDefaultHasSignal = calls[0].options !== undefined && 'signal' in calls[0].options
+
+calls.length = 0
+await postJson('/y', { b: 2 })
+out.postDefaultOptions = {
+  method: calls[0].options.method,
+  hasHeaders: !!calls[0].options.headers,
+  hasBody: typeof calls[0].options.body === 'string',
+  hasSignal: 'signal' in calls[0].options
+}
+
+// Opt-in timeout: a hanging fetchApi eventually rejects with .timeout = true,
+// and the underlying call DID carry an AbortSignal.
+api.fetchApi = abortableHang
+calls.length = 0
+try {
+  await postJson('/z', { c: 3 }, { timeoutMs: 30 })
+  out.postTimeoutResult = 'resolved (BUG)'
+} catch (error) {
+  out.postTimeoutResult = { timeout: error.timeout === true, hasMessage: !!error.message }
+}
+out.postTimeoutCallHadSignal = calls[0].options.signal instanceof AbortSignal
+
+calls.length = 0
+try {
+  await getJson('/w', undefined, { timeoutMs: 20 })
+  out.getTimeoutResult = 'resolved (BUG)'
+} catch (error) {
+  out.getTimeoutResult = { timeout: error.timeout === true }
+}
+
+// A NON-timeout error (e.g. a genuine network failure) must not be
+// mislabeled -- .timeout stays unset/false.
+api.fetchApi = () => Promise.reject(new Error('network down'))
+try {
+  await postJson('/v', {}, { timeoutMs: 5000 })
+  out.genuineErrorResult = 'resolved (BUG)'
+} catch (error) {
+  out.genuineErrorResult = { timeout: Boolean(error.timeout), message: error.message }
+}
+
+process.stdout.write(JSON.stringify(out))
+"""
+
+
+@pytest.fixture(scope="module")
+def api_timeout_probe(tmp_path_factory: pytest.TempPathFactory) -> dict:
+    """Runs API_TIMEOUT_PROBE_JS against the REAL api.js in a served-layout
+    tmp dir (same convention as `cache_api` above) -- finding 6's opt-in
+    timeout, exercised for real under Node rather than only source-pinned."""
+    if NODE is None:
+        pytest.skip("node (JS runtime) not installed")
+    layout = tmp_path_factory.mktemp("api_timeout_web_root")
+    module_dir = layout / "extensions" / "comfyui-epsnodes" / "lora_library"
+    module_dir.mkdir(parents=True)
+    for src in (API_JS, VERSION_JS):
+        shutil.copyfile(src, module_dir / src.name)
+    scripts = layout / "scripts"
+    scripts.mkdir(parents=True, exist_ok=True)
+    (scripts / "api.js").write_text(
+        "export const api = { fetchApi: () => {}, apiURL: (p) => p, addEventListener: () => {} }\n",
+        encoding="utf-8",
+    )
+    (scripts / "app.js").write_text("export const app = {}\n", encoding="utf-8")
+    probe = layout / "probe.mjs"
+    probe.write_text(API_TIMEOUT_PROBE_JS, encoding="utf-8")
+    result = subprocess.run(
+        [NODE, str(probe)], capture_output=True, text=True, timeout=60, cwd=layout
+    )
+    assert result.returncode == 0, f"probe failed:\n{result.stderr}"
+    return json.loads(result.stdout)
+
+
+def test_api_default_calls_are_byte_identical_to_before_this_round(
+    api_timeout_probe: dict,
+) -> None:
+    """The proof-of-no-default-change: with no `options` argument,
+    `getJson` still calls `api.fetchApi(path)` with no second argument at
+    all (not even `undefined` wrapped in a new object), and `postJson`
+    still sends exactly its old three-key body -- no `signal`."""
+    assert api_timeout_probe["getDefaultArgCount"] == 1
+    assert api_timeout_probe["getDefaultHasSignal"] is False
+    assert api_timeout_probe["postDefaultOptions"] == {
+        "method": "POST",
+        "hasHeaders": True,
+        "hasBody": True,
+        "hasSignal": False,
+    }
+
+
+def test_api_opt_in_timeout_aborts_and_marks_the_error(api_timeout_probe: dict) -> None:
+    assert api_timeout_probe["postTimeoutResult"] == {"timeout": True, "hasMessage": True}
+    assert api_timeout_probe["postTimeoutCallHadSignal"] is True
+    assert api_timeout_probe["getTimeoutResult"] == {"timeout": True}
+
+
+def test_api_genuine_errors_are_never_mislabeled_as_timeouts(api_timeout_probe: dict) -> None:
+    result = api_timeout_probe["genuineErrorResult"]
+    assert result["timeout"] is False
+    assert result["message"] == "network down"
+
+
+def test_api_source_states_the_no_default_change_guarantee(api_timeout_probe: dict) -> None:
+    # Belt-and-braces source pin alongside the behavioral probe above.
+    assert "DEFAULT BEHAVIOR IS UNCHANGED" in API_SOURCE
+    assert "if (typeof timeoutMs !== 'number') return api.fetchApi(path, fetchOptions)" in (
+        API_SOURCE
+    )

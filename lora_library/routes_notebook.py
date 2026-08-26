@@ -123,6 +123,37 @@ def _parse_known_mtime(raw: object) -> float | None:
         return None
 
 
+def _parse_names(body: dict) -> tuple[list[str] | None, bool, web.Response | None]:
+    """FORMAT.md §5 batch amendment (finding 4, 2026-08-26 responsiveness
+    round): ``/notebook/move`` and ``/notebook/delete`` each accept EITHER
+    the original single ``name`` (a string) or a new ``names`` (a non-empty
+    list of strings) for one atomic multi-entry write — see those handlers
+    below. ``names`` takes priority when both are given. Returns
+    ``(name_list, is_batch, None)`` on success — *is_batch* says whether the
+    CALLER used ``names``, so the handler knows whether to echo a ``names``
+    field back (an old single-``name`` caller's response shape must stay
+    byte-for-byte unchanged) — or ``(None, <ignored>, error_response)`` on a
+    validation failure.
+    """
+    names = body.get("names")
+    if names is not None:
+        if (
+            not isinstance(names, list)
+            or not names
+            or not all(isinstance(n, str) and n.strip() for n in names)
+        ):
+            return (
+                None,
+                True,
+                error_response(400, "'names' must be a non-empty list of non-blank strings"),
+            )
+        return [n.strip() for n in names], True, None
+    name = body.get("name")
+    if not isinstance(name, str) or not name.strip():
+        return None, False, error_response(400, "'name' is required")
+    return [name.strip()], False, None
+
+
 def _file_mtime(path: Path) -> float | None:
     """*path*'s mtime, or ``None`` when it can't be stat'd (missing file,
     unreachable mount) -- the one ``stat`` the unchanged short-circuit costs."""
@@ -193,6 +224,28 @@ def register(context: LibraryContext, routes: web.RouteTableDef) -> None:
         # the panel's own reload cycle so it can never go stale relative to
         # what the list shows. Opt-in so every existing caller's payload is
         # byte-identical.
+        # Same opt-in (finding 5, 2026-08-26 responsiveness round): the
+        # panel's category-mode click used to cost its own
+        # `GET /notebook/category` round trip purely to read the §3.1
+        # description this same load already parsed. `category_descriptions`
+        # rides only under `include_text=1`, so a caller that never asked
+        # for text keeps the exact old response shape. Keyed by name (a
+        # hand-edited repeat collapses to the LAST one, same convention
+        # get_category_description() itself documents) rather than folded
+        # into `categories` (a flat name list every existing caller already
+        # depends on) — additive, never a shape change to an existing field.
+        response = {
+            "file": str(path),
+            "exists": mtime is not None,
+            "mtime": mtime,
+            "entries": entries,
+            # FORMAT.md §5: names in file order, INCLUDING empty
+            # categories — the one thing `entries` alone can't reveal. A
+            # missing file parses to zero blocks-with-headings, so this
+            # is already `[]` without any special-casing here.
+            "categories": markdown_store.list_categories(parsed),
+            "problems": parsed.problems,
+        }
         if request.query.get("include_text") == "1":
             entries = [
                 {
@@ -203,20 +256,12 @@ def register(context: LibraryContext, routes: web.RouteTableDef) -> None:
                 }
                 for entry in entries
             ]
-        return web.json_response(
-            {
-                "file": str(path),
-                "exists": mtime is not None,
-                "mtime": mtime,
-                "entries": entries,
-                # FORMAT.md §5: names in file order, INCLUDING empty
-                # categories — the one thing `entries` alone can't reveal. A
-                # missing file parses to zero blocks-with-headings, so this
-                # is already `[]` without any special-casing here.
-                "categories": markdown_store.list_categories(parsed),
-                "problems": parsed.problems,
+            response["entries"] = entries
+            response["category_descriptions"] = {
+                name: markdown_store.get_category_description(parsed, name) or ""
+                for name in response["categories"]
             }
-        )
+        return web.json_response(response)
 
     @routes.get("/lora_library/notebook/category")
     async def get_notebook_category(request: web.Request) -> web.Response:
@@ -410,6 +455,18 @@ def register(context: LibraryContext, routes: web.RouteTableDef) -> None:
 
     @routes.post("/lora_library/notebook/delete")
     async def post_notebook_delete(request: web.Request) -> web.Response:
+        """FORMAT.md §5's delete row — now also the BATCH delete row
+        (finding 4, 2026-08-26 responsiveness round): a ``names`` list
+        deletes every one of them against the SAME loaded document with ONE
+        disk write and ONE mtime bump, replacing what the panel used to do
+        as N sequential single-name POSTs (performDeleteRun). All-or-nothing
+        comes for free from the store's own shape — nothing is written until
+        ``save_notebook`` runs once at the very end, so an unknown name
+        anywhere in the list 404s before ANY entry is removed. The single
+        ``name`` (a string) shape keeps working byte-for-byte as before; the
+        response only grows a ``names`` field when the CALLER used the batch
+        shape, so an old client's response is untouched either way.
+        """
         try:
             body = await request.json()
         except Exception:  # broad: malformed body is a client error
@@ -421,9 +478,9 @@ def register(context: LibraryContext, routes: web.RouteTableDef) -> None:
         if err is not None:
             return err
 
-        name = body.get("name")
-        if not isinstance(name, str) or not name.strip():
-            return error_response(400, "'name' is required")
+        names, is_batch, err = _parse_names(body)
+        if err is not None:
+            return err
         base_mtime = body.get("base_mtime")
         if base_mtime is not None and not isinstance(base_mtime, (int, float)):
             return error_response(400, "'base_mtime' must be a number")
@@ -439,21 +496,39 @@ def register(context: LibraryContext, routes: web.RouteTableDef) -> None:
         except markdown_store.ConflictError as exc:
             return web.json_response({"error": str(exc), "mtime": exc.current_mtime}, status=409)
 
-        if not markdown_store.remove_entry(parsed, name):
-            return error_response(404, f"no such entry {name!r} in {path}")
+        for entry_name in names:
+            if not markdown_store.remove_entry(parsed, entry_name):
+                return error_response(404, f"no such entry {entry_name!r} in {path}")
 
         new_mtime = await asyncio.to_thread(
             markdown_store.save_notebook, path, parsed, line_ending
         )
-        return web.json_response(
-            {"ok": True, "mtime": new_mtime, "entries": markdown_store.list_entries(parsed)}
-        )
+        response = {
+            "ok": True,
+            "mtime": new_mtime,
+            "entries": markdown_store.list_entries(parsed),
+        }
+        if is_batch:
+            response["names"] = names
+        return web.json_response(response)
 
     @routes.post("/lora_library/notebook/move")
     async def post_notebook_move(request: web.Request) -> web.Response:
         """FORMAT.md §5's move row / §3.4 Move — exactly one of ``before``/
         ``category`` (else 400); unknown ``name``/``before`` is 404; §3.5
-        conflicts are 409. Same shape as ``post_notebook_entry`` above."""
+        conflicts are 409. Same shape as ``post_notebook_entry`` above.
+
+        Also the BATCH move row (finding 4, 2026-08-26 responsiveness
+        round): a ``names`` list moves every one of them to the SAME
+        ``before``/``category`` target, IN ORDER, against the SAME loaded
+        document — ONE disk write, mirroring the panel's own sequential
+        drag-a-multiselect semantics (performMoveRun: one target, applied
+        name-by-name) exactly, just server-side instead of N round trips.
+        All-or-nothing: an unknown name anywhere in the list 404s before
+        anything is written. The single ``name`` (a string) shape is
+        unchanged; the response only grows a ``names`` field for a caller
+        that used the batch shape.
+        """
         try:
             body = await request.json()
         except Exception:  # broad: malformed body is a client error
@@ -465,9 +540,9 @@ def register(context: LibraryContext, routes: web.RouteTableDef) -> None:
         if err is not None:
             return err
 
-        name = body.get("name")
-        if not isinstance(name, str) or not name.strip():
-            return error_response(400, "'name' is required")
+        names, is_batch, err = _parse_names(body)
+        if err is not None:
+            return err
         before = body.get("before")
         if before is not None and not isinstance(before, str):
             return error_response(400, "'before' must be a string")
@@ -492,16 +567,22 @@ def register(context: LibraryContext, routes: web.RouteTableDef) -> None:
             return web.json_response({"error": str(exc), "mtime": exc.current_mtime}, status=409)
 
         try:
-            markdown_store.move_entry(parsed, name, before=before, category=category)
+            for entry_name in names:
+                markdown_store.move_entry(parsed, entry_name, before=before, category=category)
         except markdown_store.EntryNotFoundError as exc:
             return error_response(404, str(exc))
 
         new_mtime = await asyncio.to_thread(
             markdown_store.save_notebook, path, parsed, line_ending
         )
-        return web.json_response(
-            {"ok": True, "mtime": new_mtime, "entries": markdown_store.list_entries(parsed)}
-        )
+        response = {
+            "ok": True,
+            "mtime": new_mtime,
+            "entries": markdown_store.list_entries(parsed),
+        }
+        if is_batch:
+            response["names"] = names
+        return web.json_response(response)
 
     @routes.post("/lora_library/notebook/move_category")
     async def post_notebook_move_category(request: web.Request) -> web.Response:

@@ -1239,6 +1239,56 @@ def test_progress_listener_chains_the_warning_onto_the_single_forced_list() -> N
     assert "warnIfEmptyAfterRun(node, refreshed)" in body
 
 
+# ---- visibility backoff (2026-08-26 while-running round) ----
+# While the tab is backgrounded, a finished-run refresh is queued instead of
+# fired, then flushed once (for every queued node) on `visibilitychange` --
+# the same coalesce-don't-drop idiom `scheduleRefresh`'s own `pendingForce`
+# already uses, one level up.
+
+
+def test_finished_run_is_queued_not_fetched_while_the_tab_is_hidden() -> None:
+    body = _function_body("function installExecutionRefreshListener")
+    assert "if (document.hidden) {" in body
+    assert "pendingHiddenRefresh.add(node)" in body
+    # the forced-refresh branch must still be the `else`, unchanged
+    # otherwise -- a visible tab's behavior is not this round's finding.
+    else_branch = body.split("pendingHiddenRefresh.add(node)", 1)[1]
+    assert "scheduleRefresh(node, { force: true }).then(" in else_branch
+    assert "warnIfEmptyAfterRun(node, refreshed)" in else_branch
+
+
+def test_visibility_flush_is_installed_once_alongside_the_progress_listener() -> None:
+    body = _function_body("function installExecutionRefreshListener")
+    assert "if (executionRefreshListenerInstalled) return" in body
+    assert "installVisibilityRefreshFlush()" in body
+
+
+def test_visibility_flush_drains_every_queued_node_exactly_once() -> None:
+    body = _function_body("function installVisibilityRefreshFlush")
+    assert "if (visibilityRefreshFlushInstalled) return" in body
+    assert "document.addEventListener('visibilitychange', () => {" in body
+    assert "if (document.hidden || pendingHiddenRefresh.size === 0) return" in body
+    # snapshot-then-clear -- a node queued DURING the flush (a fresh
+    # 'finished' arriving in the same tick) is not silently dropped by a
+    # clear() racing the iteration, and the set never grows unbounded.
+    assert "const nodes = [...pendingHiddenRefresh]" in body
+    assert "pendingHiddenRefresh.clear()" in body
+    clear_index = body.index("pendingHiddenRefresh.clear()")
+    loop_index = body.index("for (const node of nodes)")
+    assert clear_index < loop_index
+    assert "scheduleRefresh(node, { force: true }).then(" in body
+    assert "warnIfEmptyAfterRun(node, refreshed)" in body
+
+
+def test_pending_hidden_refresh_is_a_plain_enumerable_set() -> None:
+    """Must be enumerable to flush (unlike this file's WeakMap/WeakSet
+    one-shot guards elsewhere), so it has to be a plain `Set`, not a
+    `WeakSet` -- pinned directly since that's an easy, silent regression
+    (a `WeakSet` swap would fail only at the `[...pendingHiddenRefresh]`
+    spread, not at any call site)."""
+    assert "const pendingHiddenRefresh = new Set()" in _SOURCE
+
+
 def test_executed_merge_schedules_no_list_of_its_own() -> None:
     # core sends `executed` BEFORE `finish_progress` (execution.py), so the
     # progress listener's forced /list always follows the merge -- a second

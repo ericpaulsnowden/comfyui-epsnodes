@@ -50,6 +50,7 @@ pytest.importorskip("PIL")
 
 import io
 import sys
+import threading
 import time
 import types
 
@@ -60,6 +61,19 @@ from eps_image import image_grid_store as store
 from eps_image import routes_image_grid
 
 VALID_UUID = "a1b2c3d4-e5f6-47a8-9b0c-d1e2f3a4b5c6"
+
+
+@pytest.fixture(autouse=True)
+def _reset_mtime_cache():
+    """``with_frame_mtimes``'s decorated-ref cache is process-lifetime and
+    keyed on ``grid_uuid`` (2026-08-26 while-running round) -- reset it
+    around every test in this file so two tests reusing ``VALID_UUID``/
+    ``OTHER_VALID_UUID`` against DIFFERENT throwaway buffers can never share
+    a stale entry (mirrors ``test_image_grid_store.py``'s identical
+    fixture)."""
+    store._mtime_cache_clear()
+    yield
+    store._mtime_cache_clear()
 
 
 @pytest.fixture
@@ -649,3 +663,172 @@ class TestFrameRoute:
         assert (store.buffer_dir(VALID_UUID) / store.THUMBS_DIRNAME).is_dir()
         await client.post("/eps_image_grid/clear", json={"uuid": VALID_UUID})
         assert not store.buffer_dir(VALID_UUID).exists()
+
+
+# ------------------------------------------ off-the-event-loop (2026-08-26)
+# Mid-run responsiveness audit: every filesystem/CPU-bound store call these
+# routes make now runs through ``asyncio.to_thread`` -- pinned here by
+# recording which OS thread actually executed each wrapped store function.
+# Response payloads are asserted byte-identical to what the happy-path
+# classes above already pin, so a regression here can never silently also
+# change what's returned.
+
+
+class _ThreadRecorder:
+    """Wraps a function, recording which OS thread ran each call before
+    delegating to the original -- mirrors ``test_nas_io_round.py``'s
+    identical helper (duplicated here rather than imported: that module
+    isn't one of this pack's ``eps_image`` route tests)."""
+
+    def __init__(self, original) -> None:
+        self.original = original
+        self.threads: list[int] = []
+
+    def __call__(self, *args, **kwargs):
+        self.threads.append(threading.get_ident())
+        return self.original(*args, **kwargs)
+
+
+class TestRoutesRunOffTheEventLoop:
+    async def test_add_route_offloads_append_and_mtime_decoration(
+        self, client, fake_input_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        loop_thread = threading.get_ident()
+        _write_fake_upload(fake_input_dir, "pasted.png")
+        append_recorder = _ThreadRecorder(store.append_uploaded_image)
+        mtime_recorder = _ThreadRecorder(store.with_frame_mtimes)
+        monkeypatch.setattr(store, "append_uploaded_image", append_recorder)
+        monkeypatch.setattr(store, "with_frame_mtimes", mtime_recorder)
+
+        response = await client.post(
+            "/eps_image_grid/add", json={"uuid": VALID_UUID, "filename": "pasted.png"}
+        )
+
+        assert response.status == 200
+        assert len((await response.json())["images"]) == 1
+        assert append_recorder.threads and all(t != loop_thread for t in append_recorder.threads)
+        assert mtime_recorder.threads and all(t != loop_thread for t in mtime_recorder.threads)
+
+    async def test_clear_route_offloads_the_rmtree(
+        self, client, fake_input_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        loop_thread = threading.get_ident()
+        _write_fake_upload(fake_input_dir, "a.png")
+        await client.post("/eps_image_grid/add", json={"uuid": VALID_UUID, "filename": "a.png"})
+        clear_recorder = _ThreadRecorder(store.clear)
+        monkeypatch.setattr(store, "clear", clear_recorder)
+
+        response = await client.post("/eps_image_grid/clear", json={"uuid": VALID_UUID})
+
+        assert response.status == 200
+        assert (await response.json())["cleared"] is True
+        assert clear_recorder.threads and all(t != loop_thread for t in clear_recorder.threads)
+
+    async def test_remove_route_offloads_remove_and_mtime_decoration(
+        self, client, fake_input_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        loop_thread = threading.get_ident()
+        _write_fake_upload(fake_input_dir, "a.png")
+        add_response = await client.post(
+            "/eps_image_grid/add", json={"uuid": VALID_UUID, "filename": "a.png"}
+        )
+        [ref] = (await add_response.json())["images"]
+        remove_recorder = _ThreadRecorder(store.remove_frame)
+        mtime_recorder = _ThreadRecorder(store.with_frame_mtimes)
+        monkeypatch.setattr(store, "remove_frame", remove_recorder)
+        monkeypatch.setattr(store, "with_frame_mtimes", mtime_recorder)
+
+        response = await client.post(
+            "/eps_image_grid/remove", json={"uuid": VALID_UUID, "filename": ref["filename"]}
+        )
+
+        assert response.status == 200
+        assert (await response.json())["images"] == []
+        assert remove_recorder.threads and all(t != loop_thread for t in remove_recorder.threads)
+        assert mtime_recorder.threads and all(t != loop_thread for t in mtime_recorder.threads)
+
+    async def test_clone_route_offloads_clone_and_mtime_decoration(
+        self, client, fake_input_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        loop_thread = threading.get_ident()
+        _write_fake_upload(fake_input_dir, "a.png")
+        await client.post("/eps_image_grid/add", json={"uuid": VALID_UUID, "filename": "a.png"})
+        clone_recorder = _ThreadRecorder(store.clone_buffer)
+        mtime_recorder = _ThreadRecorder(store.with_frame_mtimes)
+        monkeypatch.setattr(store, "clone_buffer", clone_recorder)
+        monkeypatch.setattr(store, "with_frame_mtimes", mtime_recorder)
+
+        response = await client.post(
+            "/eps_image_grid/clone", json={"from": VALID_UUID, "to": OTHER_VALID_UUID}
+        )
+
+        assert response.status == 200
+        assert len((await response.json())["refs"]) == 1
+        assert clone_recorder.threads and all(t != loop_thread for t in clone_recorder.threads)
+        assert mtime_recorder.threads and all(t != loop_thread for t in mtime_recorder.threads)
+
+    async def test_list_route_offloads_mtime_decoration(
+        self, client, fake_input_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        loop_thread = threading.get_ident()
+        _write_fake_upload(fake_input_dir, "a.png")
+        await client.post("/eps_image_grid/add", json={"uuid": VALID_UUID, "filename": "a.png"})
+        mtime_recorder = _ThreadRecorder(store.with_frame_mtimes)
+        monkeypatch.setattr(store, "with_frame_mtimes", mtime_recorder)
+
+        response = await client.get("/eps_image_grid/list", params={"uuid": VALID_UUID})
+
+        assert response.status == 200
+        assert len((await response.json())["refs"]) == 1
+        assert mtime_recorder.threads and all(t != loop_thread for t in mtime_recorder.threads)
+
+    async def test_frame_route_non_preview_branch_offloads_frame_path(
+        self, client, fake_input_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The gap this round closes: the ``preview`` branch (next test)
+        was already off-loop; this plain-PNG branch was not."""
+        loop_thread = threading.get_ident()
+        _write_fake_upload(fake_input_dir, "big.png", size=(10, 10))
+        add_response = await client.post(
+            "/eps_image_grid/add", json={"uuid": VALID_UUID, "filename": "big.png"}
+        )
+        [ref] = (await add_response.json())["images"]
+        frame_path_recorder = _ThreadRecorder(store.frame_path)
+        monkeypatch.setattr(store, "frame_path", frame_path_recorder)
+
+        response = await client.get(
+            "/eps_image_grid/frame", params={"uuid": VALID_UUID, "filename": ref["filename"]}
+        )
+
+        assert response.status == 200
+        assert response.headers["Content-Type"].startswith("image/png")
+        assert frame_path_recorder.threads and all(
+            t != loop_thread for t in frame_path_recorder.threads
+        )
+
+    async def test_frame_route_preview_branch_still_offloads_thumbnail_path(
+        self, client, fake_input_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Direct thread-identity coverage for the branch that was already
+        offloaded before this round -- added alongside the non-preview
+        branch's new one above so both halves of the route are pinned the
+        same way."""
+        loop_thread = threading.get_ident()
+        _write_fake_upload(fake_input_dir, "big.png", size=(10, 10))
+        add_response = await client.post(
+            "/eps_image_grid/add", json={"uuid": VALID_UUID, "filename": "big.png"}
+        )
+        [ref] = (await add_response.json())["images"]
+        thumbnail_recorder = _ThreadRecorder(store.thumbnail_path)
+        monkeypatch.setattr(store, "thumbnail_path", thumbnail_recorder)
+
+        response = await client.get(
+            "/eps_image_grid/frame",
+            params={"uuid": VALID_UUID, "filename": ref["filename"], "preview": "webp;80"},
+        )
+
+        assert response.status == 200
+        assert response.headers["Content-Type"].startswith("image/webp")
+        assert thumbnail_recorder.threads and all(
+            t != loop_thread for t in thumbnail_recorder.threads
+        )

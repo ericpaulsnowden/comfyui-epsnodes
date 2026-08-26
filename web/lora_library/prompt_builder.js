@@ -112,6 +112,71 @@ const STYLE_TAG_ID = 'eps-prompt-builder-styles'
 /** Nodes we've already attached to — guards against a double `nodeCreated`. */
 const attachedNodes = new WeakSet()
 
+/**
+ * 2026-08-26 while-running round (findings 4 + 5): mid-run the server is
+ * GIL-busy and the library may sit on a slow NAS mount, so this panel's own
+ * `POLL_MS` cadence stacked badly two different ways:
+ *  - finding 4: a single node's own tick could start a new `reloadEntries`
+ *    while the PREVIOUS tick's fetch for that same node was still
+ *    outstanding (a slow server can easily take longer than POLL_MS to
+ *    answer), piling concurrent requests from ONE node onto the worst
+ *    possible moment;
+ *  - finding 5: every Builder node mirroring the SAME notebook file polled
+ *    independently, so N nodes on one file fired N near-simultaneous GETs
+ *    for identical data every tick.
+ * Finding 4 is handled per-node in `onPollTick` (`state.pollReloadInFlight`,
+ * below). Finding 5 is handled here: a module-scope single-flight + short
+ * TTL cache keyed by `file`, shared by every Builder instance -- each
+ * instance still applies/repaints from whatever payload the shared fetch
+ * resolves with, exactly as if it had fetched it itself. TTL is short
+ * (well under POLL_MS) purely to absorb a same-tick fanout across nodes;
+ * it is not a substitute for the server's own `known_mtime` short-circuit,
+ * which is still what keeps an UNCHANGED file cheap tick over tick.
+ */
+const ENTRIES_FETCH_TTL_MS = 1500
+/** file -> {data, fetchedAt} -- a fresh successful GET /lora_library/notebook. */
+const entriesFetchCache = new Map()
+/** file -> in-flight GET promise (resolves/rejects exactly like
+ * `api.getJson`) -- joined by every Builder instance sharing that file. */
+const entriesFetchInFlight = new Map()
+
+/**
+ * GET `/lora_library/notebook` for *file*, shared across every Builder
+ * instance mirroring it (finding 5) and across a single node's own
+ * overlapping ticks (finding 4, composed with `state.pollReloadInFlight`).
+ * *knownMtime* only shapes the request that actually goes OUT -- a caller
+ * that joins an in-flight fetch or a fresh TTL hit gets whatever that
+ * fetch was already sent with. That is safe here specifically because
+ * every caller derives its own `known_mtime` from the SAME shared session
+ * cache (`notebookCacheGet`/`notebookCacheSet`, imported from notebook.js)
+ * before deciding what to send -- two callers within the TTL window can
+ * only disagree on `known_mtime` if one of them is about to read that very
+ * cache and land on the same value anyway, so sharing the resolved answer
+ * never serves a caller a staler view than it would have painted itself.
+ * @param {string} file @param {number|null} knownMtime
+ */
+function sharedReloadFetch(file, knownMtime) {
+  const cached = entriesFetchCache.get(file)
+  if (cached && Date.now() - cached.fetchedAt < ENTRIES_FETCH_TTL_MS) {
+    return Promise.resolve(cached.data)
+  }
+  const inFlight = entriesFetchInFlight.get(file)
+  if (inFlight) return inFlight
+  const params = { file, include_text: '1' }
+  if (typeof knownMtime === 'number') params.known_mtime = String(knownMtime)
+  const promise = api
+    .getJson('/lora_library/notebook', params)
+    .then((data) => {
+      entriesFetchCache.set(file, { data, fetchedAt: Date.now() })
+      return data
+    })
+    .finally(() => {
+      entriesFetchInFlight.delete(file)
+    })
+  entriesFetchInFlight.set(file, promise)
+  return promise
+}
+
 // ---------------------------------------------------------------------------
 // Pure helpers — no DOM, no node — exported for tests/test_prompt_builder_js.py.
 // ---------------------------------------------------------------------------
@@ -556,8 +621,22 @@ function createState(node, fileWidget, blocksWidget) {
     configureReloaded: false,
     attachLoadTimer: null,
     pollTimer: null,
+    // Finding 4 (2026-08-26 while-running round): the in-flight
+    // reloadEntries() promise a POLL tick started, or null — onPollTick
+    // skips a tick outright while this is set rather than stacking a
+    // second concurrent request. Not touched by non-poll callers
+    // (attach/configure/manual selection), which always run their own
+    // reload regardless of a poll's own outstanding fetch.
+    pollReloadInFlight: null,
+    // The `visibilitychange` listener installed by installPoll(), so
+    // teardown() can remove it (finding 4's "flush one on visibilitychange").
+    visibilityHandler: null,
     dragFromIndex: null,
     dropMarkerRow: null,
+    // Finding 6: a poll landed while a native HTML5 block drag was in
+    // progress and renderRightPane() deferred itself — flushed once on
+    // dragend (wireRowDrag below).
+    rightPaneRenderPending: false,
     // DOM refs, filled in by buildUi().
     root: null,
     domWidget: null,
@@ -695,6 +774,9 @@ function wireNodeCleanup(state) {
 function teardown(state) {
   if (state.pollTimer) clearInterval(state.pollTimer)
   if (state.attachLoadTimer) clearTimeout(state.attachLoadTimer)
+  if (state.visibilityHandler) {
+    document.removeEventListener('visibilitychange', state.visibilityHandler)
+  }
   state.loadToken += 1
 }
 
@@ -738,6 +820,18 @@ function installPoll(state) {
     if (document.hidden) return
     onPollTick(state)
   }, POLL_MS)
+  // Finding 4 (2026-08-26 while-running round): ticks are skipped outright
+  // while the tab is hidden (above) — a background tab must not add to a
+  // GIL-busy server's load. That leaves the panel showing whatever was last
+  // painted for up to POLL_MS after the tab comes back; flush ONE reload
+  // the moment it's visible again instead of waiting for the next tick.
+  // `onPollTick`'s own `pollReloadInFlight` guard covers a flush racing an
+  // already-scheduled tick, so this never doubles up.
+  state.visibilityHandler = () => {
+    if (document.hidden) return
+    onPollTick(state)
+  }
+  document.addEventListener('visibilitychange', state.visibilityHandler)
 }
 
 /** Deliberately does nothing unconditional: rescanNotebooks() only rebuilds
@@ -746,12 +840,21 @@ function installPoll(state) {
  * an unchanged file never re-renders or dirties the canvas either — no bare
  * per-tick `setDirtyCanvas` call lives in this function. */
 function onPollTick(state) {
+  // Finding 4: a previous tick's (or the visibilitychange flush's) reload
+  // hasn't landed yet — mid-run the server can easily take longer than
+  // POLL_MS to answer, so skip rather than stack a second concurrent
+  // request; the next tick (or a later flush) tries again.
+  if (state.pollReloadInFlight) return
   try {
     rescanNotebooks(state)
   } catch (error) {
     api.warn('prompt builder canvas rescan failed', error)
   }
-  reloadEntries(state).catch((error) => api.warn('prompt builder poll reload failed', error))
+  state.pollReloadInFlight = reloadEntries(state)
+    .catch((error) => api.warn('prompt builder poll reload failed', error))
+    .finally(() => {
+      state.pollReloadInFlight = null
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -878,14 +981,16 @@ async function reloadEntries(state) {
     applyEntriesPayload(state, file, cached.payload)
   }
 
-  const params = { file, include_text: '1' }
-  if ((showing || paintedFromCache) && typeof state.paintedMtime === 'number') {
-    params.known_mtime = String(state.paintedMtime)
-  }
+  const knownMtime =
+    (showing || paintedFromCache) && typeof state.paintedMtime === 'number' ? state.paintedMtime : null
 
   let data
   try {
-    data = await api.getJson('/lora_library/notebook', params)
+    // Finding 5: shared across every Builder node mirroring `file`, plus
+    // finding 4's own per-node in-flight guard around the poll path (see
+    // onPollTick) — see sharedReloadFetch's own header for why joining a
+    // fetch sent with a slightly different `known_mtime` is still safe.
+    data = await sharedReloadFetch(file, knownMtime)
   } catch (error) {
     if (token !== state.loadToken) return
     api.warn('failed to load notebook entries for the prompt builder', error)
@@ -976,6 +1081,22 @@ function onRemoveBlockClick(state, idx) {
 }
 
 function renderRightPane(state) {
+  if (state.dragFromIndex != null) {
+    // Finding 6 (2026-08-26 while-running round): a poll-triggered reload
+    // landing mid-drag would otherwise replaceChildren() the very row the
+    // user has a native HTML5 drag on, killing the gesture. Defer — the
+    // left pane still updates freely (reloadEntries() -> applyEntriesPayload
+    // calls renderLeftPane() unconditionally, only this call is gated) —
+    // and wireRowDrag's `dragend` handler flushes exactly one render below
+    // once the drag ends, so nothing painted during the drag is lost, only
+    // delayed. The DROP path itself is unaffected: the container's own
+    // `drop` handler clears `dragFromIndex` BEFORE calling commitReorder()
+    // (-> writeBlocksWidget -> this function), so that render always runs
+    // immediately, never deferred.
+    state.rightPaneRenderPending = true
+    return
+  }
+  state.rightPaneRenderPending = false
   state.rightListEl.replaceChildren()
   const blocks = state.blocks
 
@@ -1053,6 +1174,12 @@ function wireRowDrag(state, row, idx) {
     row.classList.remove('eps-pb-row-dragging')
     state.dragFromIndex = null
     clearDropMarker(state)
+    // Finding 6: flush a render renderRightPane() deferred while this drag
+    // was active (a poll landed mid-drag, or a drop elsewhere never fired —
+    // dragend always fires regardless of whether drop did). A successful
+    // DROP already rendered synchronously before dragend runs (see
+    // commitReorder's call chain), so this is normally a no-op then.
+    if (state.rightPaneRenderPending) renderRightPane(state)
   })
 }
 

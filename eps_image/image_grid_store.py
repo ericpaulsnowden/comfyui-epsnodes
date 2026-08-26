@@ -72,6 +72,25 @@ re-encodes the FULL-resolution frame (``server.py``: ``Image.open`` +
 ``img.save``, no resize), so a 100-frame grid was 100 full-res images
 drawn per repaint. :func:`frame_path` is the shared manifest-listed-only
 gate in front of both.
+
+**2026-08-26 while-running round (mid-run responsiveness audit):**
+:func:`with_frame_mtimes` itself was the next O(N) cost -- it stat'd EVERY
+frame file on EVERY call, and every ref-returning route calls it, which the
+panel hits once per FINISHED RUN during a sweep. It now caches its
+decorated output per ``grid_uuid``, keyed on :func:`buffer_generation` (the
+same manifest-mtime token every other cache-freshness check here already
+uses): while the generation is unchanged the stat loop is skipped
+entirely, and every write op (:func:`append_batch`,
+:func:`append_uploaded_image`, :func:`remove_frame`, :func:`clear`,
+:func:`clone_buffer`) drops that uuid's cache entry so a stale decorated
+list can never be served. The cache itself stays small on its own -- see
+:data:`_MTIME_CACHE_MAX_UUIDS`. Every route that calls it now does so
+through ``asyncio.to_thread`` (``routes_image_grid.py``), matching this
+round's other filesystem-touching handlers -- see that module's own dated
+docstring section for the HTTP-side half of this round, including
+``GET /eps_image_grid/frame``'s non-preview branch, which previously ran
+:func:`frame_path` synchronously on the loop even though its ``preview``
+sibling was already offloaded.
 """
 
 from __future__ import annotations
@@ -83,6 +102,7 @@ import os
 import re
 import shutil
 import tempfile
+from collections import OrderedDict
 from pathlib import Path
 from typing import Any
 
@@ -287,6 +307,7 @@ def append_batch(grid_uuid: str, image_batch: Any) -> list[dict]:
         frames.append(name)
 
     _save_manifest(directory, manifest)
+    _mtime_cache_invalidate(grid_uuid)  # 2026-08-26: a write must drop any cached decoration
     return _refs_for(grid_uuid, frames)
 
 
@@ -398,6 +419,7 @@ def append_uploaded_image(
     _atomic_write_bytes(directory / name, png_bytes)
     frames.append(name)
     _save_manifest(directory, manifest)
+    _mtime_cache_invalidate(grid_uuid)  # 2026-08-26: a write must drop any cached decoration
     return _refs_for(grid_uuid, frames)
 
 
@@ -448,6 +470,7 @@ def remove_frame(grid_uuid: str, filename: str) -> list[dict]:
         return _refs_for(grid_uuid, frames)
     manifest["frames"] = [name for name in frames if name != filename]
     _save_manifest(directory, manifest)
+    _mtime_cache_invalidate(grid_uuid)  # 2026-08-26: a write must drop any cached decoration
     try:
         (directory / filename).unlink()
     except OSError:
@@ -587,6 +610,69 @@ def _frame_mtime_ms(path: Path) -> int:
         return 0
 
 
+# ------------------------------------------- with_frame_mtimes cache (2026-08-26)
+# (mid-run responsiveness audit -- see the module docstring's dated section.)
+
+#: How many distinct grid_uuids' decorated-ref lists to keep at once. Small
+#: on purpose: one entry is one buffer's worth of refs (a handful of dicts,
+#: not the frames themselves), and a session rarely has more than a few
+#: EPSImageGrid nodes open across however many workflows were touched --
+#: this just stops an unbounded server session from accumulating one entry
+#: per grid_uuid ever seen forever. Eviction is plain LRU (:class:`OrderedDict`,
+#: oldest-untouched-first) via :func:`_mtime_cache_put`.
+_MTIME_CACHE_MAX_UUIDS = 64
+
+#: grid_uuid -> (generation, [filename, ...], decorated refs). The filename
+#: list is a cheap (no filesystem) sanity check that the cached decoration
+#: was built from the SAME frame sequence a same-generation caller is now
+#: asking about, on top of the generation match itself.
+_mtime_cache: OrderedDict[str, tuple[int, list[Any], list[dict]]] = OrderedDict()
+
+
+def _mtime_cache_get(grid_uuid: str, generation: int, names: list[Any]) -> list[dict] | None:
+    entry = _mtime_cache.get(grid_uuid)
+    if entry is None or entry[0] != generation or entry[1] != names:
+        return None
+    _mtime_cache.move_to_end(grid_uuid)
+    return entry[2]
+
+
+def _mtime_cache_put(
+    grid_uuid: str, generation: int, names: list[Any], decorated: list[dict]
+) -> None:
+    _mtime_cache[grid_uuid] = (generation, names, decorated)
+    _mtime_cache.move_to_end(grid_uuid)
+    while len(_mtime_cache) > _MTIME_CACHE_MAX_UUIDS:
+        _mtime_cache.popitem(last=False)  # evict the least-recently-used uuid
+
+
+def _mtime_cache_invalidate(grid_uuid: str) -> None:
+    """Drop *grid_uuid*'s cached decoration, if any -- called from every
+    write op (append/remove/clear/clone) so a stale entry can never survive
+    past the write that made it stale. Belt-and-suspenders on top of the
+    generation-keying above (a write always advances the manifest mtime
+    too, so a lookup after one would miss on its own) -- explicit here so
+    the "write ops invalidate" contract doesn't depend on wall-clock
+    resolution at all, matching :func:`buffer_generation`'s own documented
+    ms-collision caveat rather than trusting it never bites this cache too.
+    """
+    _mtime_cache.pop(grid_uuid, None)
+
+
+def _mtime_cache_clear() -> None:
+    """Test-only: drop every cached decoration for every uuid.
+
+    Production code never calls this -- individual write ops invalidate
+    just their own uuid (:func:`_mtime_cache_invalidate`). This exists
+    purely for test isolation: the cache is process-lifetime by design, and
+    different tests reusing the same ``grid_uuid`` string (this pack's own
+    ``VALID_UUID``/``OTHER_VALID_UUID`` fixtures) against DIFFERENT
+    throwaway buffers could otherwise share a stale entry if two fast tests
+    land on the same millisecond-resolution generation.
+    """
+    _mtime_cache.clear()
+
+
 def with_frame_mtimes(grid_uuid: str, refs: list[dict]) -> list[dict]:
     """*refs* (the ``ui.images`` triples :func:`_refs_for` builds) with a
     per-frame ``"mtime"`` added -- that frame FILE's mtime in integer
@@ -606,15 +692,35 @@ def with_frame_mtimes(grid_uuid: str, refs: list[dict]) -> list[dict]:
     ``/add``, ``/remove``, ``/clone``); NOT the node's ``ui.images`` (core's
     shape, untouched) -- the frontend adopts the key from the next
     ``/list`` without a reload.
+
+    **2026-08-26 while-running round:** this was itself an O(N) filesystem
+    pass -- one ``stat()`` per frame, on EVERY call, and every ref-returning
+    route calls it, which the panel hits once per FINISHED RUN during a
+    sweep. Now cached per *grid_uuid*, keyed on :func:`buffer_generation`
+    (plus a cheap filename-list check, see :func:`_mtime_cache_get`): while
+    the buffer's generation hasn't moved, the cached decorated list from the
+    previous call is returned outright and the stat loop never runs. Every
+    write op invalidates its own uuid's entry (:func:`_mtime_cache_invalidate`),
+    so a stale decoration can never be served. Callers on the event loop
+    should still run this through ``asyncio.to_thread`` on a miss (the
+    cache lookup itself is cheap, but the miss path is the same stat loop
+    as before) -- see ``routes_image_grid.py``.
     """
+    generation = buffer_generation(grid_uuid)
+    names = [ref.get("filename") if isinstance(ref, dict) else None for ref in refs]
+    cached = _mtime_cache_get(grid_uuid, generation, names)
+    if cached is not None:
+        return cached
+
     directory = buffer_dir(grid_uuid)
     decorated: list[dict] = []
-    for ref in refs:
+    for ref, name in zip(refs, names, strict=True):
         mtime = 0
-        name = ref.get("filename") if isinstance(ref, dict) else None
         if directory is not None and _is_bare_frame_name(name):
             mtime = _frame_mtime_ms(directory / name)
         decorated.append({**ref, "mtime": mtime})
+
+    _mtime_cache_put(grid_uuid, generation, names, decorated)
     return decorated
 
 
@@ -642,8 +748,13 @@ def thumbnail_path(
     (clock skew on a synced/NAS output dir) would otherwise regenerate on
     every single request. Written with the same temp + ``os.replace`` as
     every other file here, so two concurrent first requests for one frame
-    simply both produce the same bytes. CPU work -- the route runs this off
-    the event loop (``asyncio.to_thread``).
+    simply both produce the same bytes. CPU work -- ``GET /eps_image_grid/
+    frame``'s ``preview`` branch runs THIS CALL off the event loop
+    (``asyncio.to_thread``). (2026-08-26: that route's OTHER branch --
+    :func:`frame_path`, the full-PNG path -- used to run synchronously on
+    the loop despite this docstring's wording reading as if the whole route
+    were already covered; it is now offloaded too, symmetrically -- see
+    ``routes_image_grid.py``.)
     """
     source = frame_path(grid_uuid, filename)
     if source is None:
@@ -780,6 +891,7 @@ def clear(grid_uuid: str) -> bool:
     if directory is None or not directory.exists():
         return False
     shutil.rmtree(directory, ignore_errors=True)
+    _mtime_cache_invalidate(grid_uuid)  # 2026-08-26: a write must drop any cached decoration
     return True
 
 
@@ -839,4 +951,5 @@ def clone_buffer(src_uuid: str, dst_uuid: str) -> list[dict]:
         return []
 
     _save_manifest(dst_dir, {"format": CURRENT_FORMAT, "frames": copied})
+    _mtime_cache_invalidate(dst_uuid)  # 2026-08-26: a write must drop any cached decoration
     return list_refs(dst_uuid)

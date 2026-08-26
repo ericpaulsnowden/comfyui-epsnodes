@@ -448,7 +448,10 @@ function renderList(state) {
     const message = el('div', { className: 'epscs-error-text', text: state.error })
     const retryBtn = el('button', { className: 'epscs-retry-btn', text: 'Retry' })
     retryBtn.addEventListener('click', () => {
-      loadCheckpoints(state).catch((error) => console.warn(PREFIX, 'retry failed', error))
+      // `true` -- Retry must bypass the shared fetch below and hit the
+      // server again, not just re-await whatever (possibly stale-failed)
+      // promise every other panel is also sharing.
+      loadCheckpoints(state, true).catch((error) => console.warn(PREFIX, 'retry failed', error))
     })
     state.listEl.append(el('div', { className: 'epscs-error-row' }, [message, retryBtn]))
     renderCount(state)
@@ -584,29 +587,63 @@ function onRowToggle(state, name, checked) {
   renderList(state)
 }
 
-async function loadCheckpoints(state) {
+// 2026-08-26 while-running round: every attached EPSCheckpointSwitcher panel
+// used to fire its OWN `GET /eps_ckpt/checkpoints` on attach -- a workflow
+// with N switcher nodes meant N identical requests landing on the server at
+// once. `checkpointsPromise` dedups them: the first `attach()` (or Retry) on
+// the page starts the fetch, every other panel that asks while it is still
+// in flight (or already resolved) just awaits the SAME promise. Same shape
+// as `cross_sweep.js`'s `listFlagsPromise` (module-scope, created lazily,
+// reused). Unlike that one, a rejection here must not poison the module
+// forever -- this route's list can matter for a fresh node dropped in later
+// in the session -- so a failed fetch clears the slot before rethrowing:
+// the NEXT caller (a newly-attached node, or Retry) starts a clean new
+// fetch rather than replaying a stale error from a request nobody retried.
+let checkpointsPromise = null
+
+/** Resolves with the fetched checkpoint list (server order); rejects with
+ * the same `Error` shape `loadCheckpoints` has always thrown from a failed
+ * fetch, so its per-panel error+Retry UI is unaffected -- only the network
+ * call itself is shared. *force* discards any in-flight/cached promise
+ * (Retry's `loadCheckpoints(state, true)`), so that one click always
+ * reaches the server, and every panel that reads this after it resolves
+ * sees the fresh answer too. */
+function fetchCheckpointsShared(force) {
+  if (force || !checkpointsPromise) {
+    checkpointsPromise = (async () => {
+      try {
+        const response = await api.fetchApi(ROUTE)
+        let data = null
+        try {
+          data = await response.json()
+        } catch {
+          throw new Error(`Unexpected response (HTTP ${response.status})`)
+        }
+        if (!response.ok) {
+          throw new Error(
+            data && typeof data.error === 'string' ? data.error : `HTTP ${response.status}`
+          )
+        }
+        return Array.isArray(data?.checkpoints)
+          ? data.checkpoints.filter((entry) => typeof entry === 'string')
+          : []
+      } catch (error) {
+        checkpointsPromise = null // don't wedge every future attach on one bad request
+        throw error
+      }
+    })()
+  }
+  return checkpointsPromise
+}
+
+async function loadCheckpoints(state, force = false) {
   state.error = null
   const token = ++state.loadToken
   renderList(state) // shows "Loading checkpoints…" (state.loaded may already be true on a retry)
 
   try {
-    const response = await api.fetchApi(ROUTE)
+    const list = await fetchCheckpointsShared(force)
     if (token !== state.loadToken) return // superseded by a newer fetch
-
-    let data = null
-    try {
-      data = await response.json()
-    } catch {
-      throw new Error(`Unexpected response (HTTP ${response.status})`)
-    }
-    if (!response.ok) {
-      throw new Error(data && typeof data.error === 'string' ? data.error : `HTTP ${response.status}`)
-    }
-
-    const list = Array.isArray(data?.checkpoints)
-      ? data.checkpoints.filter((entry) => typeof entry === 'string')
-      : []
-    if (token !== state.loadToken) return
 
     state.checkpoints = list
     state.checkpointSet = new Set(list)

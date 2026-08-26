@@ -1570,3 +1570,274 @@ class TestOptimisticDeleteV20260825:
     def test_deleting_toast_names_the_state(self, controller_source: str) -> None:
         do_delete = _method_body(controller_source, "async _doDelete(entry)")
         assert 'this._toast(\'info\', NODE_TITLE, `Deleting "${entry.name}"…`)' in do_delete
+
+
+class TestOptimisticSaveAndPushV20260826:
+    """Owner report 2026-08-26: "Saving and pushing a state in a lora state
+    controller can take upwards of 10-20 seconds when a complex workflow is
+    running." His library is a slow NAS and ComfyUI is GIL-busy mid-run, so
+    every round trip can run long -- the fix is the SAME optimistic-UI shape
+    `TestOptimisticDeleteV20260825` above validates for delete, extended to
+    Save/New State (`_doCapture()`/`_captureComposite()`), Save State on an
+    existing row (`_doUpdate()`/`_updateComposite()`), and Push State's
+    background loader_slot sync (`_doPush()`)."""
+
+    # ---------------------------------------------------------- pure helpers
+
+    def test_provisional_slug_is_locally_invented_never_posted(
+        self, controller_source: str
+    ) -> None:
+        body = _method_body(controller_source, "_nextProvisionalSlug()")
+        assert body.strip() == (
+            "return `pending-${Date.now().toString(36)}-${this._saveProvisionalSeq++}`"
+        )
+
+    def test_compare_set_entries_sorts_by_name_then_slug(self, controller_source: str) -> None:
+        body = _function_body(controller_source, "compareSetEntries(a, b)")
+        assert "(a.name || '').toLowerCase()" in body
+        assert "(b.name || '').toLowerCase()" in body
+        assert "if (an !== bn) return an < bn ? -1 : 1" in body
+        assert "return a.slug < b.slug ? -1 : a.slug > b.slug ? 1 : 0" in body
+
+    # -------------------------------------------------------- create (Save/New)
+
+    def test_begin_optimistic_create_paints_synchronously_before_any_network_call(
+        self, controller_source: str
+    ) -> None:
+        begin = _method_body(controller_source, "_beginOptimisticCreate(name, rowCount)")
+        assert "await" not in begin  # entirely local -- nothing here touches the network
+        assert "const provisionalSlug = this._nextProvisionalSlug()" in begin
+        assert "const previousSelectedSlug = this._selectedSlug" in begin
+        assert "this._saveInFlightSlugs.add(provisionalSlug)" in begin
+        assert (
+            "const entry = { slug: provisionalSlug, name, count: rowCount, "
+            "label: `${name} (saving…)` }" in begin
+        )
+        assert "this._setsCache = [...this._setsCache, entry].sort(compareSetEntries)" in begin
+        assert "this._setsSignature = JSON.stringify(this._setsCache)" in begin
+        assert "this._renderStateList()" in begin
+        assert "this._selectEntry(entry, { loadName: false })" in begin
+        assert "this._clearNameField()" in begin
+        assert 'this._toast(\'info\', NODE_TITLE, `Saving "${name}"…`)' in begin
+        assert "return { provisionalSlug, previousSelectedSlug }" in begin
+        # cache mutation, selection and the name-field clear all happen
+        # BEFORE the toast that tells the user a save is starting
+        cache_at = begin.index("this._setsCache = [...this._setsCache, entry]")
+        select_at = begin.index("this._selectEntry(entry")
+        clear_at = begin.index("this._clearNameField()")
+        toast_at = begin.index("this._toast('info'")
+        assert cache_at < select_at < clear_at < toast_at
+
+    def test_rollback_optimistic_create_restores_selection_and_typed_name(
+        self, controller_source: str
+    ) -> None:
+        rollback = _method_body(
+            controller_source,
+            "_rollbackOptimisticCreate(provisionalSlug, previousSelectedSlug, name, error)",
+        )
+        assert (
+            "this._setsCache = this._setsCache.filter((s) => s.slug !== provisionalSlug)"
+            in rollback
+        )
+        assert "this._selectEntry(previous, { loadName: false })" in rollback
+        assert "this._selectedSlug = null" in rollback
+        assert "this._setSetValueSilently('')" in rollback
+        assert "this._w.name.value = name" in rollback
+        assert "this._w.name.callback?.(name)" in rollback
+        assert (
+            'this._toast(\'error\', NODE_TITLE, `Could not save "${name}": '
+            "${error?.message || error}`)" in rollback
+        )
+
+    def test_do_capture_paints_optimistically_then_posts_in_a_try_catch_finally(
+        self, controller_source: str
+    ) -> None:
+        do_capture = _method_body(controller_source, "async _doCapture()")
+        begin_at = do_capture.index(
+            "const { provisionalSlug, previousSelectedSlug } = this._beginOptimisticCreate("
+        )
+        post_at = do_capture.index("await api.postJson('/lora_library/set'")
+        assert begin_at < post_at  # optimistic paint happens before the network call
+        try_block = do_capture.split("try {", 1)[1].split("} catch (error) {", 1)[0]
+        assert "this._applySetsResponse(response)" in try_block
+        assert "announceSetsChanged()" in try_block
+        assert "this._selectSetBySlug(response.slug)" in try_block
+        assert "this._clearNameField()" in try_block  # re-clears after selecting reloads it
+        assert "const saved = this._setsCache.find((s) => s.slug === response.slug)" in try_block
+        assert (
+            "this._toast('success', NODE_TITLE, `Saved \"${saved?.name ?? name}\": "
+            "${summarizeRowsForToast(loras)}`)" in try_block
+        )
+        catch_block = do_capture.split("} catch (error) {", 1)[1].split("} finally {", 1)[0]
+        assert (
+            "this._rollbackOptimisticCreate(provisionalSlug, previousSelectedSlug, name, error)"
+            in catch_block
+        )
+        assert do_capture.count("this._saveInFlightSlugs.delete(provisionalSlug)") == 1
+        assert "} finally {" in do_capture
+        # no separate read-back GET -- the round trip this round drops
+        assert "GET" not in do_capture
+        assert do_capture.count("api.postJson") == 1
+        assert do_capture.count("api.getJson") == 0
+
+    def test_capture_composite_still_makes_exactly_one_post_and_drops_the_readback(
+        self, controller_source: str
+    ) -> None:
+        composite = _method_body(controller_source, "async _captureComposite(targets, name)")
+        assert composite.count("await api.postJson") == 1
+        assert composite.count("api.getJson") == 0
+        assert (
+            "const { provisionalSlug, previousSelectedSlug } = this._beginOptimisticCreate("
+            "name, loadersRows[0]?.length || 0)" in composite
+        )
+        begin_at = composite.index("this._beginOptimisticCreate(")
+        post_at = composite.index("await api.postJson")
+        assert begin_at < post_at
+        assert (
+            "this._rollbackOptimisticCreate(provisionalSlug, previousSelectedSlug, name, error)"
+            in composite
+        )
+        assert composite.count("this._saveInFlightSlugs.delete(provisionalSlug)") == 1
+
+    # -------------------------------------------------------- update (Save)
+
+    def test_begin_optimistic_update_replaces_the_cache_entry_synchronously(
+        self, controller_source: str
+    ) -> None:
+        begin = _method_body(controller_source, "_beginOptimisticUpdate(entry, newName, rowCount)")
+        assert "await" not in begin
+        assert "this._saveInFlightSlugs.add(entry.slug)" in begin
+        assert "const name = newName ?? entry.name" in begin
+        assert (
+            "const updated = { slug: entry.slug, name, count: rowCount, "
+            "label: name || entry.slug }" in begin
+        )
+        assert (
+            "this._setsCache = this._setsCache.map((s) => (s.slug === entry.slug ? updated : s))"
+            ".sort(compareSetEntries)" in begin
+        )
+        assert "this._selectEntry(updated, { loadName: false })" in begin
+        assert 'this._toast(\'info\', NODE_TITLE, `Saving "${name}"…`)' in begin
+        assert "return entry" in begin  # the OLD entry, for rollback
+
+    def test_rollback_optimistic_update_restores_the_old_entry(
+        self, controller_source: str
+    ) -> None:
+        rollback = _method_body(controller_source, "_rollbackOptimisticUpdate(previous, error)")
+        assert (
+            "this._setsCache = this._setsCache.map((s) => "
+            "(s.slug === previous.slug ? previous : s)).sort(compareSetEntries)" in rollback
+        )
+        assert "this._selectEntry(previous, { loadName: false })" in rollback
+        assert (
+            'this._toast(\'error\', NODE_TITLE, `Could not save "${previous.name}": '
+            "${error?.message || error}`)" in rollback
+        )
+
+    def test_do_update_reapplies_locally_before_the_optimistic_save_begins(
+        self, controller_source: str
+    ) -> None:
+        do_update = _method_body(controller_source, "async _doUpdate()")
+        apply_at = do_update.index("applySetToTargets(targets, { loras })")
+        begin_at = do_update.index("this._beginOptimisticUpdate(entry, newName, loras.length)")
+        get_at = do_update.index("await api.getJson('/lora_library/set'")
+        post_at = do_update.index("await api.postJson('/lora_library/set'")
+        # graph mutation, then the optimistic paint, THEN the network -- in
+        # that order, none of the network calls gate the first two
+        assert apply_at < begin_at < get_at < post_at
+        try_block = do_update.split("try {", 1)[1]
+        catch_block = try_block.split("} catch (error) {", 1)[1].split("} finally {", 1)[0]
+        assert "this._rollbackOptimisticUpdate(previous, error)" in catch_block
+        assert do_update.count("this._saveInFlightSlugs.delete(savedSlug)") == 1
+        assert "} finally {" in do_update
+        # exactly the two round trips this method has always made -- the
+        # best-effort GET, then the write -- no third read-back fetch
+        assert do_update.count("api.getJson") == 1
+        assert do_update.count("api.postJson") == 1
+
+    def test_update_composite_same_reordering_and_round_trip_count(
+        self, controller_source: str
+    ) -> None:
+        composite = _method_body(
+            controller_source, "async _updateComposite(targets, entry, newName)"
+        )
+        apply_at = composite.index("applySetToTargets(targets, {")
+        begin_at = composite.index(
+            "this._beginOptimisticUpdate(entry, newName, loadersRows[0]?.length || 0)"
+        )
+        get_at = composite.index("await api.getJson('/lora_library/set'")
+        post_at = composite.index("await api.postJson('/lora_library/set'")
+        assert apply_at < begin_at < get_at < post_at
+        assert "this._rollbackOptimisticUpdate(previous, error)" in composite
+        assert composite.count("this._saveInFlightSlugs.delete(savedSlug)") == 1
+        assert composite.count("api.getJson") == 1
+        assert composite.count("api.postJson") == 1
+
+    # ----------------------------------------------- applySetsResponse guard
+
+    def test_applied_sets_response_preserves_in_flight_saves(self, controller_source: str) -> None:
+        """A poll response landing mid-save must not drop a create's not-yet-
+        real provisional row, nor regress an update's local edit back to a
+        stale pre-write snapshot."""
+        apply = _method_body(controller_source, "_applySetsResponse(data)")
+        assert "const localBySlug = new Map(" in apply
+        assert (
+            "previousCache.filter((s) => this._saveInFlightSlugs.has(s.slug))"
+            ".map((s) => [s.slug, s])" in apply
+        )
+        assert "const remoteSlugs = new Set(list.map((s) => s.slug))" in apply
+        assert "const local = localBySlug.get(s.slug)" in apply
+        assert "if (local) return local" in apply
+        assert "this._saveInFlightSlugs.has(entry.slug)" in apply
+        assert "!remoteSlugs.has(entry.slug)" in apply
+        assert "built.push(entry)" in apply
+        assert (
+            "this._setsCache = carriedProvisional ? built.sort(compareSetEntries) : built" in apply
+        )
+        # local-wins swap and the provisional carry-forward both happen
+        # BEFORE the change-gated signature/render at the end
+        local_at = apply.index("const local = localBySlug.get(s.slug)")
+        carry_at = apply.index("built.push(entry)")
+        signature_at = apply.index("const signature = JSON.stringify(this._setsCache)")
+        assert local_at < signature_at
+        assert carry_at < signature_at
+
+    # ------------------------------------------------------------------ push
+
+    def test_do_push_toasts_immediately_then_syncs_loaders_in_the_background(
+        self, controller_source: str
+    ) -> None:
+        do_push = _method_body(controller_source, "async _doPush()")
+        assert "const count = pushStateToNodes(applyNodes, entry.slug)" in do_push
+        push_at = do_push.index("pushStateToNodes(applyNodes, entry.slug)")
+        toast_at = do_push.index("this._toast(", push_at)
+        sync_at = do_push.index("await this._syncLoaderSlotsForPush(applyNodes, entry.slug)")
+        # the broadcast and its toast both land BEFORE the sync is awaited
+        assert push_at < toast_at < sync_at
+        assert "syncing loaders…" in do_push
+        try_block = do_push.split("try {", 1)[1].split("} catch (error) {", 1)[0]
+        assert (
+            "const changed = await this._syncLoaderSlotsForPush(applyNodes, entry.slug)"
+            in try_block
+        )
+        assert "if (changed > 0) {" in try_block
+        assert "Synced loader_slot for" in try_block
+        catch_block = do_push.split("} catch (error) {", 1)[1]
+        assert "Pushed, but syncing loader slots failed" in catch_block
+
+    def test_sync_loader_slots_for_push_returns_the_changed_count(
+        self, controller_source: str
+    ) -> None:
+        sync = _method_body(controller_source, "async _syncLoaderSlotsForPush(applyNodes, slug)")
+        assert "if (!Array.isArray(full?.loaders) || !full.loaders.length) return 0" in sync
+        assert "let changed = 0" in sync
+        assert "if (pushLoaderSlotForTag(node)) changed++" in sync
+        assert sync.rstrip().endswith("return changed")
+
+    def test_push_loader_slot_for_tag_reports_whether_it_changed_anything(
+        self, controller_source: str
+    ) -> None:
+        body = _function_body(controller_source, "pushLoaderSlotForTag(node)")
+        assert body.count("return false") == 3
+        assert "slotWidget.value = index" in body
+        assert body.rstrip().endswith("return true")

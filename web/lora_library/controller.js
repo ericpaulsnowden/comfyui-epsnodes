@@ -1932,6 +1932,26 @@ function summarizeRowsForToast(rows) {
 }
 
 /**
+ * Owner report 2026-08-26 (optimistic save/update, see `_beginOptimisticCreate()`/
+ * `_beginOptimisticUpdate()`): the same order `sets_store.list_sets()` sorts
+ * by — name, casefolded, then slug — used to re-sort `_setsCache` locally
+ * whenever it gains or renames a row the last server response never placed
+ * (an optimistic create's provisional row, or an in-place rename), so a
+ * poll landing right after never visibly reshuffles the list. JS
+ * `.toLowerCase()` is not a byte-perfect stand-in for Python's
+ * `str.casefold()` on every Unicode edge case, but it agrees for every name
+ * this pack's own UI can produce, and a rare mismatch here is purely
+ * cosmetic (list order), never data loss — the next real server response
+ * (which IS sorted server-side) resolves it.
+ */
+function compareSetEntries(a, b) {
+  const an = (a.name || '').toLowerCase()
+  const bn = (b.name || '').toLowerCase()
+  if (an !== bn) return an < bn ? -1 : 1
+  return a.slug < b.slug ? -1 : a.slug > b.slug ? 1 : 0
+}
+
+/**
  * APPLY (FORMAT.md §6.3). Rewrites `node`'s rows to match `setData.loras`
  * exactly: count, order, on/off, strengths. Missing-on-this-machine loras are
  * still written (rgthree shows its own missing-lora state — that's the
@@ -2180,19 +2200,26 @@ function pushStateToNodes(nodes, slug) {
  * file's own header cites for workflow-load (`configure()`'s
  * `widget.value = ...`) — see `pushStateToNode()`'s own fallback branch for
  * the same idiom applied to a widget WITH a meaningful callback.
+ *
+ * Owner report 2026-08-26: returns whether this call actually changed
+ * `loader_slot` (`true`) or left `node` completely alone (`false`, every
+ * early-return case above plus the already-correct case) — `_syncLoaderSlotsForPush()`
+ * sums this across every pushed node so `_doPush()` knows whether its
+ * follow-up toast has anything worth saying.
  */
 function pushLoaderSlotForTag(node) {
   const tagWidget = (node.widgets || []).find((w) => w && w.name === MIRRORS_WIDGET_NAME)
   const tagValue = tagWidget ? String(tagWidget.value || '') : MIRRORS_ANY_VALUE
-  if (tagValue === MIRRORS_ANY_VALUE) return
+  if (tagValue === MIRRORS_ANY_VALUE) return false
   const index = pllAscendingIndexById(pllIdFromLabel(tagValue))
-  if (index == null) return
+  if (index == null) return false
   const slotWidget = (node.widgets || []).find(
     (w) => w && w.name === APPLY_SET_LOADER_SLOT_WIDGET_NAME
   )
-  if (!slotWidget || slotWidget.value === index) return
+  if (!slotWidget || slotWidget.value === index) return false
   slotWidget.value = index
   node.setDirtyCanvas(true, true)
+  return true
 }
 
 // ---------------------------------------------------- two-pane state picker
@@ -2694,6 +2721,25 @@ export function registerControllerNode() {
         // flight at once (a second confirm during the first's slow NAS
         // write) must each keep their own guard.
         this._deleteInFlightSlugs = new Set()
+        // Owner report 2026-08-26 ("Saving and pushing a state ... can take
+        // upwards of 10-20 seconds when a complex workflow is running" — a
+        // slow NAS library plus a GIL-busy ComfyUI process mid-run, so every
+        // round trip this file makes can run long): `_deleteInFlightSlugs`'s
+        // pattern turned around for an INSERT/EDIT instead of a REMOVE. A
+        // CREATE (`_beginOptimisticCreate()`) adds a locally-invented
+        // PROVISIONAL slug here — the real slug is only known once its POST
+        // resolves, so the row can never legally appear in a `data.sets`
+        // snapshot under this slug; an UPDATE (`_beginOptimisticUpdate()`)
+        // adds the entry's own REAL slug instead, since an update's slug
+        // never changes. Either way, `_applySetsResponse()` reads this set
+        // to keep the optimistic local row from being DROPPED (create) or
+        // REGRESSED to a stale pre-write snapshot (update) by a shared-poll
+        // response that lands mid-save — see that method's own comment.
+        // Cleared in each caller's `finally`, exactly like
+        // `_deleteInFlightSlugs` above.
+        this._saveInFlightSlugs = new Set()
+        // Monotonic counter feeding `_nextProvisionalSlug()` — see there.
+        this._saveProvisionalSeq = 0
 
         // FORMAT.md §6.3: "Show status" — boolean, default false, revealed
         // via the node's right-click Properties Panel. Must exist before
@@ -4046,14 +4092,43 @@ export function registerControllerNode() {
         // covers the shared poller, another controller's fan-out, and this
         // node's own explicit refetches alike (`_deleteInFlightSlugs`, the
         // drag machinery's in-flight-token guard, applied here).
-        this._setsCache = list
+        //
+        // Owner report 2026-08-26: same idea, turned around for a Save/
+        // Update/New State still in flight (`_saveInFlightSlugs`, this
+        // constructor's own comment). `localBySlug` snapshots THIS node's
+        // current cache for every in-flight slug BEFORE it's rebuilt below:
+        // an UPDATE's real slug IS present in `list` (the server still has
+        // the OLD name/count on disk until the write lands) — swapping in
+        // the local copy here stops a stale poll from regressing the
+        // just-edited name/count back to what the file still says; a
+        // CREATE's provisional slug can never appear in `list` at all (the
+        // server has no file for it yet) — carried forward from the
+        // current cache in the loop just below instead, then the whole
+        // list is re-sorted since a carried-forward row was never placed
+        // by the server's own name-then-slug order (`compareSetEntries()`).
+        const previousCache = this._setsCache
+        const localBySlug = new Map(
+          previousCache.filter((s) => this._saveInFlightSlugs.has(s.slug)).map((s) => [s.slug, s])
+        )
+        const remoteSlugs = new Set(list.map((s) => s.slug))
+        const built = list
           .filter((s) => !this._deleteInFlightSlugs.has(s.slug))
           .map((s) => {
+            const local = localBySlug.get(s.slug)
+            if (local) return local
             let label = s.name || s.slug
             if (seenLabels.has(label)) label = `${label} (${s.slug})`
             seenLabels.add(label)
             return { slug: s.slug, name: s.name, count: s.count, label }
           })
+        let carriedProvisional = false
+        for (const entry of previousCache) {
+          if (this._saveInFlightSlugs.has(entry.slug) && !remoteSlugs.has(entry.slug)) {
+            built.push(entry)
+            carriedProvisional = true
+          }
+        }
+        this._setsCache = carriedProvisional ? built.sort(compareSetEntries) : built
         // FORMAT.md §6.3 (2026-07-21): keep the two-pane list in sync with
         // the cache on every rebuild — a capture/update/delete response, the
         // sets-changed event, or the shared poll (`runSharedSetsFetch()`,
@@ -4670,44 +4745,168 @@ export function registerControllerNode() {
       }
 
       /**
-       * FORMAT.md §6.3 2026-07-19c read-back toast: GET the just-written
-       * state back (§5 `GET /lora_library/set?slug=`) and toast what the
-       * FILE holds, not what the caller thinks it sent — see the file
-       * header's item (4) for why. `verb` matches the existing toast
-       * vocabulary ("Saved"/"Updated"/2026-07-22's "Saved + renamed to",
-       * which composes with the quoted `saved.name` right after it into
-       * "Saved + renamed to "New Name": ..."); `extraNote` is the existing
-       * multi-target capture-source suffix, unchanged in shape.
+       * Owner report 2026-08-26 (this method replaces the old
+       * `_toastRowsSaved()`/`_toastCompositeRowsSaved()` read-back — see the
+       * removal note on `_beginOptimisticCreate()` below for the full
+       * before/after). A locally-invented slug for a create's optimistic
+       * row: never sent to the server (the REAL slug is only known once
+       * the create POST resolves — `_applySetsResponse()` rebuilds
+       * `_setsCache` from the response's own listing, which carries it),
+       * and — by construction, the `pending-` prefix plus a monotonic
+       * counter — can never collide with a real slug
+       * `sets_store.save_set()` would ever derive from a user-chosen name
+       * (FORMAT.md §4's `slugify()` + `-2`/`-3`… dedup never produces this
+       * shape).
        */
-      async _toastRowsSaved(verb, slug, extraNote) {
-        try {
-          const saved = await api.getJson('/lora_library/set', { slug })
-          const summary = summarizeRowsForToast(saved.loras)
-          this._toast('success', NODE_TITLE, `${verb} "${saved.name}": ${summary}${extraNote || ''}`)
-        } catch (error) {
-          api.warn(`${NODE_TITLE}: read-back after ${verb} failed`, error)
-          this._toast('warn', NODE_TITLE, `${verb}, but reading it back to confirm failed — see console.`)
-        }
+      _nextProvisionalSlug() {
+        return `pending-${Date.now().toString(36)}-${this._saveProvisionalSeq++}`
       }
 
       /**
-       * FORMAT.md §4.1/§6.3 composite read-back toast (2026-07-20): same
-       * read-the-file-back philosophy as `_toastRowsSaved()` above, but
-       * formats a PER-LOADER summary — the spec's own example, "Saved
-       * 'WAN': L0 detailer 0.8 / L1 detailer 0.3" — by running
-       * `summarizeRowsForToast()` (unchanged, reused as-is) over each
-       * loader's rows and slash-joining the per-loader segments.
+       * Owner report 2026-08-26 ("Saving and pushing a state ... can take
+       * upwards of 10-20 seconds when a complex workflow is running" — his
+       * library is a slow NAS and the ComfyUI process is GIL-busy mid-run,
+       * so every round trip below can run long): same optimistic-UI shape
+       * `_doDelete()` established for the 2026-08-25 delete report (its own
+       * doc comment below), turned around for an INSERT instead of a
+       * REMOVE, and shared by both create paths (`_doCapture()`'s
+       * single-target half and `_captureComposite()`). Runs entirely
+       * SYNCHRONOUSLY — the rows are already captured LOCALLY by the time
+       * either caller reaches here (`captureRows()` never touches the
+       * network) — so this always finishes and paints before the create
+       * POST even fires: invents a slug (`_nextProvisionalSlug()`), marks
+       * it in-flight (`_saveInFlightSlugs`, this constructor's own
+       * comment), inserts a provisional row and re-sorts `_setsCache` into
+       * the backend's own name-then-slug order (`compareSetEntries()`, so
+       * a poll landing right after never visibly reshuffles the list),
+       * paints it, selects it, clears the name field (the existing New
+       * State contract — see `_doCapture()`'s own comment below for why
+       * that has to happen AFTER selecting), and toasts what is ABOUT to
+       * happen rather than what already did. The provisional row's LABEL
+       * carries a "(saving…)" suffix — its NAME does not (the same
+       * `.label`-carries-decoration-`.name`-stays-pure split
+       * `_applySetsResponse()`'s own "(slug)" dedup suffix already uses) —
+       * so it can never collide with a real row's label during the
+       * in-flight window, and `entryDisplayName()` (which reads `.name`)
+       * never shows the decoration if something re-selects it. Returns
+       * `{ provisionalSlug, previousSelectedSlug }` for
+       * `_rollbackOptimisticCreate()`'s failure path below.
+       *
+       * The old `_toastRowsSaved()`/`_toastCompositeRowsSaved()` this round
+       * REMOVES made a THIRD round trip (`GET /lora_library/set?slug=`,
+       * FORMAT.md §5) purely to toast what the file held rather than what
+       * was sent. Their own doc comments named two reasons: (1) confirm a
+       * server-side rename/heal, and (2) — the original 2026-07-19c/
+       * 2026-07-20 motivation — catch `captureRows()` misreading strengths
+       * on an rgthree fork this pack hasn't seen. Neither needs a fetch any
+       * more: (1) is folded into the success reconcile below — the create/
+       * update POST's own response already carries the full, authoritative
+       * listing (`_applySetsResponse(response)`), so the just-saved row's
+       * real name is one local lookup away, no second request; (2) is
+       * covered by `captureRows()`'s OWN `console.debug`/`console.table`
+       * trail (added 2026-07-20 specifically so "the very next mismatch
+       * report already has this trail in the console with zero setup") plus
+       * `coerceStrength()`'s `console.warn` on a genuinely non-numeric
+       * value — both run at CAPTURE time, independent of any toast — and by
+       * reading `sets_store._normalize_row()`/`normalize_set()`, the only
+       * server-side transform of a row is the identical `Number()`
+       * coercion `captureRows()` already performs client-side, so the local
+       * `loras` array this method's callers already hold is byte-equivalent
+       * to what the file ends up with in every case that GET could ever
+       * have caught. Trading a rare toast-level diagnostic nicety (the
+       * console trail remains) for the owner's explicit speed ask is the
+       * right call here.
        */
-      async _toastCompositeRowsSaved(verb, slug) {
-        try {
-          const saved = await api.getJson('/lora_library/set', { slug })
-          const loaders = Array.isArray(saved.loaders) ? saved.loaders : []
-          const summary = loaders.map((loader, i) => `L${i} ${summarizeRowsForToast(loader.loras)}`).join(' / ')
-          this._toast('success', NODE_TITLE, `${verb} "${saved.name}": ${summary}`)
-        } catch (error) {
-          api.warn(`${NODE_TITLE}: read-back after ${verb} failed`, error)
-          this._toast('warn', NODE_TITLE, `${verb}, but reading it back to confirm failed — see console.`)
+      _beginOptimisticCreate(name, rowCount) {
+        const provisionalSlug = this._nextProvisionalSlug()
+        const previousSelectedSlug = this._selectedSlug
+        this._saveInFlightSlugs.add(provisionalSlug)
+        const entry = { slug: provisionalSlug, name, count: rowCount, label: `${name} (saving…)` }
+        this._setsCache = [...this._setsCache, entry].sort(compareSetEntries)
+        this._setsSignature = JSON.stringify(this._setsCache)
+        this._renderStateList()
+        this._selectEntry(entry, { loadName: false })
+        this._clearNameField()
+        this._toast('info', NODE_TITLE, `Saving "${name}"…`)
+        return { provisionalSlug, previousSelectedSlug }
+      }
+
+      /**
+       * `_beginOptimisticCreate()`'s failure half, shared by both create
+       * paths: drop the provisional row, restore whatever was selected
+       * before this create began (or clear selection outright — the same
+       * emptied-library fallback `_doDelete()` uses below when nothing is
+       * left to fall back to), give the typed name back (this method
+       * cleared the field on the optimistic assumption the save would
+       * succeed — a failure should not ALSO cost the user their typed
+       * name, so this restores it the same value+callback+dirty way
+       * `_clearNameField()` clears it), and toast loudly — silent refusal
+       * is a bug, the same v0.81.0 posture `_doDelete()` established.
+       */
+      _rollbackOptimisticCreate(provisionalSlug, previousSelectedSlug, name, error) {
+        this._setsCache = this._setsCache.filter((s) => s.slug !== provisionalSlug)
+        this._setsSignature = JSON.stringify(this._setsCache)
+        const previous = previousSelectedSlug ? this._setsCache.find((s) => s.slug === previousSelectedSlug) : null
+        if (previous) {
+          this._selectEntry(previous, { loadName: false })
+        } else {
+          this._selectedSlug = null
+          this._setSetValueSilently('')
         }
+        this._renderStateList()
+        if (this._w.name) {
+          this._w.name.value = name
+          try {
+            this._w.name.callback?.(name)
+          } catch (callbackError) {
+            api.warn(`${NODE_TITLE}: name widget callback threw`, callbackError)
+          }
+          this.setDirtyCanvas(true, true)
+        }
+        this._toast('error', NODE_TITLE, `Could not save "${name}": ${error?.message || error}`)
+      }
+
+      /**
+       * Save State's optimistic half (owner report 2026-08-26) — same idea
+       * as `_beginOptimisticCreate()` above, for an EXISTING row. Unlike a
+       * create, an update's slug never changes ("Save renames in place",
+       * file header section B), so there is no provisional slug to invent:
+       * `entry.slug` itself is marked in-flight in the SAME
+       * `_saveInFlightSlugs` set, which is what stops a stale poll
+       * snapshot — captured before this update's write lands — from
+       * regressing the name/count painted here back to what the file still
+       * says on disk (`_applySetsResponse()`'s `localBySlug` guard, its own
+       * comment). `_setsCache` entries are always REPLACED, never mutated
+       * in place, everywhere else in this file — kept consistent here too.
+       * Re-sorts (a rename can move the row), repaints, keeps the SAME row
+       * selected (still the same slug, so this is a highlight repaint of a
+       * row that already existed, not a new selection), and toasts.
+       * Returns the OLD entry for `_rollbackOptimisticUpdate()`'s failure
+       * path.
+       */
+      _beginOptimisticUpdate(entry, newName, rowCount) {
+        this._saveInFlightSlugs.add(entry.slug)
+        const name = newName ?? entry.name
+        const updated = { slug: entry.slug, name, count: rowCount, label: name || entry.slug }
+        this._setsCache = this._setsCache.map((s) => (s.slug === entry.slug ? updated : s)).sort(compareSetEntries)
+        this._setsSignature = JSON.stringify(this._setsCache)
+        this._renderStateList()
+        this._selectEntry(updated, { loadName: false })
+        this._toast('info', NODE_TITLE, `Saving "${name}"…`)
+        return entry
+      }
+
+      /**
+       * `_beginOptimisticUpdate()`'s failure half: puts the row back EXACTLY
+       * as it read before — the same "restore exactly" rule `_doDelete()`
+       * uses for its own rollback — and toasts loudly.
+       */
+      _rollbackOptimisticUpdate(previous, error) {
+        this._setsCache = this._setsCache.map((s) => (s.slug === previous.slug ? previous : s)).sort(compareSetEntries)
+        this._setsSignature = JSON.stringify(this._setsCache)
+        this._selectEntry(previous, { loadName: false })
+        this._renderStateList()
+        this._toast('error', NODE_TITLE, `Could not save "${previous.name}": ${error?.message || error}`)
       }
 
       /**
@@ -4726,6 +4925,17 @@ export function registerControllerNode() {
        * path below the guard is UNCHANGED from before this addition (the
        * owner-validated path) — this is a pure ADDITION gated on
        * `targets.length > 1`, so that path never runs through new code.
+       *
+       * Owner report 2026-08-26: the optimistic paint/select/clear-name/
+       * toast now happens up front, synchronously, via
+       * `_beginOptimisticCreate()` (its own doc comment has the full
+       * before/after) — the ONLY thing that still awaits the network is the
+       * create POST itself, wrapped in a `try`/`catch`/`finally` shaped
+       * exactly like `_doDelete()`'s below: reconcile from the response's
+       * own listing on success, `_rollbackOptimisticCreate()` on failure,
+       * always clear the in-flight mark. `_setStatusText()` moved earlier
+       * too — it was always purely local (the "Show status" line), so
+       * there is no reason it should wait on anything.
        */
       async _doCapture() {
         const targets = resolveTargetNodes(this._w.target?.value)
@@ -4743,26 +4953,35 @@ export function registerControllerNode() {
 
         const source = targets[0]
         const loras = await captureRows(source, { debugCapture: !!this.properties[PROP_DEBUG_CAPTURE] })
-        const response = await api.postJson('/lora_library/set', {
-          set: { format: 1, name, loras, trigger_words: '', notes: '' }
-        })
-        this._applySetsResponse(response)
-        announceSetsChanged()
-        this._selectSetBySlug(response.slug)
-        // Deliberately AFTER _selectSetBySlug(): selecting now loads the
-        // selected state's name into the `name` field (2026-07-21b,
-        // `_selectEntry()`), and New State's contract is that the field
-        // ends EMPTY — owner: New State "keeps working as before" — so this
-        // explicit clear must have the last word. (Pressing New State again
-        // right away therefore still auto-names "State N" instead of
-        // minting a same-named copy.)
-        this._clearNameField()
         // FORMAT.md §6.3: "Show status" names the capture-source loader id +
-        // row count on every capture/save.
+        // row count on every capture/save — local, so it runs before the
+        // optimistic paint below rather than waiting on the save.
         this._setStatusText(
           `Captured ${loras.length} row${loras.length === 1 ? '' : 's'} from ${source.title || source.type} #${source.id}.`
         )
-        await this._toastRowsSaved('Saved', response.slug, '')
+        const { provisionalSlug, previousSelectedSlug } = this._beginOptimisticCreate(name, loras.length)
+        try {
+          const response = await api.postJson('/lora_library/set', {
+            set: { format: 1, name, loras, trigger_words: '', notes: '' }
+          })
+          this._applySetsResponse(response)
+          announceSetsChanged()
+          this._selectSetBySlug(response.slug)
+          // Deliberately AFTER _selectSetBySlug(): selecting now loads the
+          // selected state's name into the `name` field (2026-07-21b,
+          // `_selectEntry()`), and New State's contract is that the field
+          // ends EMPTY — owner: New State "keeps working as before" — so
+          // this explicit clear must have the last word. (Pressing New
+          // State again right away therefore still auto-names "State N"
+          // instead of minting a same-named copy.)
+          this._clearNameField()
+          const saved = this._setsCache.find((s) => s.slug === response.slug)
+          this._toast('success', NODE_TITLE, `Saved "${saved?.name ?? name}": ${summarizeRowsForToast(loras)}`)
+        } catch (error) {
+          this._rollbackOptimisticCreate(provisionalSlug, previousSelectedSlug, name, error)
+        } finally {
+          this._saveInFlightSlugs.delete(provisionalSlug)
+        }
       }
 
       /**
@@ -4776,6 +4995,18 @@ export function registerControllerNode() {
        * `loaders[0]` (both per FORMAT.md §4.1 — the backend's own
        * `normalize_set()` also enforces the mirror on save/load, so this is
        * belt-and-suspenders, not the only place it happens).
+       *
+       * Owner report 2026-08-26: same optimistic-create treatment as
+       * `_doCapture()`'s single-target half above — see
+       * `_beginOptimisticCreate()`'s doc comment. This already made only
+       * ONE POST for every loader (the composite payload below), so there
+       * was nothing to collapse there; the round trip this round drops is
+       * the composite read-back (`_toastCompositeRowsSaved()`, removed).
+       * The provisional row's `count` is `loadersRows[0].length` — the same
+       * `loras` mirror `normalize_set()` computes server-side (FORMAT.md
+       * §4.1: "the top-level `loras` mirror is ALWAYS recomputed from
+       * `loaders[0]`"), so it reads correctly even before the response
+       * confirms it.
        */
       async _captureComposite(targets, name) {
         const debugCapture = !!this.properties[PROP_DEBUG_CAPTURE]
@@ -4791,19 +5022,28 @@ export function registerControllerNode() {
           trigger_words: '',
           notes: ''
         }
-        const response = await api.postJson('/lora_library/set', { set })
-        this._applySetsResponse(response)
-        announceSetsChanged()
-        this._selectSetBySlug(response.slug)
-        // Deliberately AFTER _selectSetBySlug() — same New State epilogue
-        // rule as _doCapture()'s, see the comment there (2026-07-21b).
-        this._clearNameField()
         this._setStatusText(
           `Captured ${targets.length} loaders: ` +
             targets.map((_node, i) => `L${i} ${loadersRows[i].length} row${loadersRows[i].length === 1 ? '' : 's'}`).join(', ') +
             '.'
         )
-        await this._toastCompositeRowsSaved('Saved', response.slug)
+        const { provisionalSlug, previousSelectedSlug } = this._beginOptimisticCreate(name, loadersRows[0]?.length || 0)
+        try {
+          const response = await api.postJson('/lora_library/set', { set })
+          this._applySetsResponse(response)
+          announceSetsChanged()
+          this._selectSetBySlug(response.slug)
+          // Deliberately AFTER _selectSetBySlug() — same New State epilogue
+          // rule as _doCapture()'s, see the comment there (2026-07-21b).
+          this._clearNameField()
+          const saved = this._setsCache.find((s) => s.slug === response.slug)
+          const summary = loadersRows.map((rows, i) => `L${i} ${summarizeRowsForToast(rows)}`).join(' / ')
+          this._toast('success', NODE_TITLE, `Saved "${saved?.name ?? name}": ${summary}`)
+        } catch (error) {
+          this._rollbackOptimisticCreate(provisionalSlug, previousSelectedSlug, name, error)
+        } finally {
+          this._saveInFlightSlugs.delete(provisionalSlug)
+        }
       }
 
       /**
@@ -4859,6 +5099,23 @@ export function registerControllerNode() {
        * from a best-effort GET of the selected state's own file (a rename
        * now keeps its own metadata, same as an overwrite always did — there
        * is no "spin-off" left to inherit anything).
+       *
+       * Owner report 2026-08-26: `applySetToTargets()`/`_probeAndUpdateStatus()`/
+       * `_setStatusText()` moved earlier — all three are purely local/
+       * synchronous (unchanged in what they do), so there is no reason they
+       * should wait on a network round trip that hasn't even started yet;
+       * this is also what makes Save State's "visibly take" guarantee (see
+       * the inline comment below) show up INSTANTLY instead of after the
+       * save settles. `_beginOptimisticUpdate()` then paints the cache
+       * edit (its own doc comment has the before/after), and the
+       * GET-existing + POST pair this method has always made now run in a
+       * `try`/`catch`/`finally` exactly like `_doCapture()`'s above —
+       * `_rollbackOptimisticUpdate()` on failure, in-flight mark always
+       * cleared. No new round trips: still exactly the two this method
+       * always made (best-effort GET, then the write), just no longer
+       * gating the first paint, and the third (read-back) round trip is
+       * gone — see `_beginOptimisticCreate()`'s doc comment for why that's
+       * safe to drop.
        */
       async _doUpdate() {
         const targets = resolveTargetNodes(this._w.target?.value)
@@ -4881,30 +5138,6 @@ export function registerControllerNode() {
 
         const source = targets[0]
         const loras = await captureRows(source, { debugCapture: !!this.properties[PROP_DEBUG_CAPTURE] })
-        // Preserve the existing trigger_words/notes; only the rows (and,
-        // 2026-07-22, optionally the name — see this method's doc comment)
-        // change on Save — best-effort GET, falls back to rows-only.
-        let name = entry.name
-        let trigger_words = ''
-        let notes = ''
-        try {
-          const existing = await api.getJson('/lora_library/set', { slug: entry.slug })
-          name = existing.name ?? name
-          trigger_words = existing.trigger_words ?? ''
-          notes = existing.notes ?? ''
-        } catch (error) {
-          api.warn(`${NODE_TITLE}: could not read existing set before update; overwriting rows only`, error)
-        }
-        const set = { format: 1, name: newName ?? name, loras, trigger_words, notes }
-        // 2026-07-22 reversal (file header, section B): ALWAYS the slug-form
-        // POST now — a changed name rides along in `set.name` inside the
-        // very same request that carries the rows, instead of switching to
-        // the no-slug create form `New State` uses. The slug never changes.
-        const response = await api.postJson('/lora_library/set', { slug: entry.slug, set })
-        const savedSlug = entry.slug
-        this._applySetsResponse(response)
-        announceSetsChanged()
-        this._selectSetBySlug(savedSlug)
         // FORMAT.md §6.3 strength-persistence fix, cause A (unchanged by
         // 2026-07-19c): re-apply the just-saved rows to every target
         // immediately, unconditionally. Redundant for the single-target
@@ -4924,11 +5157,49 @@ export function registerControllerNode() {
         this._setStatusText(
           `Captured ${loras.length} row${loras.length === 1 ? '' : 's'} from ${source.title || source.type} #${source.id}.`
         )
-        // 2026-07-22: a rename gets its own lead phrase, composing with the
-        // read-back's own quoted (post-save, so already-new) name into
-        // `Saved + renamed to "New Name": ...`; an unrenamed Save keeps the
-        // byte-identical "Updated" verb/text from before this reversal.
-        await this._toastRowsSaved(newName ? 'Saved + renamed to' : 'Updated', savedSlug, '')
+        const savedSlug = entry.slug
+        const previous = this._beginOptimisticUpdate(entry, newName, loras.length)
+        try {
+          // Preserve the existing trigger_words/notes; only the rows (and,
+          // 2026-07-22, optionally the name — see this method's doc
+          // comment) change on Save — best-effort GET, falls back to
+          // rows-only.
+          let name = entry.name
+          let trigger_words = ''
+          let notes = ''
+          try {
+            const existing = await api.getJson('/lora_library/set', { slug: savedSlug })
+            name = existing.name ?? name
+            trigger_words = existing.trigger_words ?? ''
+            notes = existing.notes ?? ''
+          } catch (error) {
+            api.warn(`${NODE_TITLE}: could not read existing set before update; overwriting rows only`, error)
+          }
+          const set = { format: 1, name: newName ?? name, loras, trigger_words, notes }
+          // 2026-07-22 reversal (file header, section B): ALWAYS the
+          // slug-form POST now — a changed name rides along in `set.name`
+          // inside the very same request that carries the rows, instead of
+          // switching to the no-slug create form `New State` uses. The
+          // slug never changes.
+          const response = await api.postJson('/lora_library/set', { slug: savedSlug, set })
+          this._applySetsResponse(response)
+          announceSetsChanged()
+          this._selectSetBySlug(savedSlug)
+          const saved = this._setsCache.find((s) => s.slug === savedSlug)
+          // 2026-07-22: a rename gets its own lead phrase, composing with
+          // the quoted (post-save, so already-new) name into `Saved +
+          // renamed to "New Name": ...`; an unrenamed Save keeps the
+          // byte-identical "Updated" verb/text from before that reversal.
+          this._toast(
+            'success',
+            NODE_TITLE,
+            `${newName ? 'Saved + renamed to' : 'Updated'} "${saved?.name ?? (newName ?? name)}": ${summarizeRowsForToast(loras)}`
+          )
+        } catch (error) {
+          this._rollbackOptimisticUpdate(previous, error)
+        } finally {
+          this._saveInFlightSlugs.delete(savedSlug)
+        }
       }
 
       /**
@@ -4946,6 +5217,17 @@ export function registerControllerNode() {
        * slug-form `{ slug: entry.slug, set }`, format-2 as before; a
        * non-null `newName` only changes what `set.name` carries. Same
        * selected slug either way, current rows, existing metadata.
+       *
+       * Owner report 2026-08-26: same reordering as `_doUpdate()`'s
+       * single-target half above — the local re-apply/status work moves
+       * before the network calls, `_beginOptimisticUpdate()` paints the
+       * cache edit, and the GET-existing + POST pair run in a `try`/
+       * `catch`/`finally` with `_rollbackOptimisticUpdate()` on failure.
+       * `applySetToTargets()` gets a lightweight `{ loaders, loras }` here
+       * instead of the full `set` — it never read `.name`/`.trigger_words`/
+       * `.notes` anyway (see its own definition), and those fields aren't
+       * known yet at this earlier point (the GET-existing call that
+       * resolves them hasn't run).
        */
       async _updateComposite(targets, entry, newName) {
         const debugCapture = !!this.properties[PROP_DEBUG_CAPTURE]
@@ -4953,46 +5235,57 @@ export function registerControllerNode() {
         for (const node of targets) {
           loadersRows.push(await captureRows(node, { debugCapture }))
         }
-        let name = entry.name
-        let trigger_words = ''
-        let notes = ''
-        try {
-          const existing = await api.getJson('/lora_library/set', { slug: entry.slug })
-          name = existing.name ?? name
-          trigger_words = existing.trigger_words ?? ''
-          notes = existing.notes ?? ''
-        } catch (error) {
-          api.warn(`${NODE_TITLE}: could not read existing set before update; overwriting rows only`, error)
-        }
-        const set = {
-          format: 2,
-          name: newName ?? name,
-          loaders: loadersRows.map((rows) => ({ loras: rows })),
-          loras: loadersRows[0] || [],
-          trigger_words,
-          notes
-        }
-        const response = await api.postJson('/lora_library/set', { slug: entry.slug, set })
-        const savedSlug = entry.slug
-        this._applySetsResponse(response)
-        announceSetsChanged()
-        this._selectSetBySlug(savedSlug)
         // Re-apply immediately — same rationale the single-target half
         // documents above (keeps every OTHER target in sync, makes Save
         // State visibly "take"); composite-aware apply (loaders[i] ->
-        // targets[i] by ascending id, same rule `_doApply()` uses) via the
-        // just-built `set` payload, echoing back exactly what was just
-        // captured.
-        applySetToTargets(targets, set)
+        // targets[i] by ascending id, same rule `_doApply()` uses).
+        applySetToTargets(targets, { loaders: loadersRows.map((rows) => ({ loras: rows })), loras: loadersRows[0] || [] })
         this._probeAndUpdateStatus()
         this._setStatusText(
           `Captured ${targets.length} loaders: ` +
             targets.map((_node, i) => `L${i} ${loadersRows[i].length} row${loadersRows[i].length === 1 ? '' : 's'}`).join(', ') +
             '.'
         )
-        // 2026-07-22: same rename-verb decision as the single-target path
-        // (`_doUpdate()`) — both halves must read consistently.
-        await this._toastCompositeRowsSaved(newName ? 'Saved + renamed to' : 'Updated', savedSlug)
+        const savedSlug = entry.slug
+        const previous = this._beginOptimisticUpdate(entry, newName, loadersRows[0]?.length || 0)
+        try {
+          let name = entry.name
+          let trigger_words = ''
+          let notes = ''
+          try {
+            const existing = await api.getJson('/lora_library/set', { slug: savedSlug })
+            name = existing.name ?? name
+            trigger_words = existing.trigger_words ?? ''
+            notes = existing.notes ?? ''
+          } catch (error) {
+            api.warn(`${NODE_TITLE}: could not read existing set before update; overwriting rows only`, error)
+          }
+          const set = {
+            format: 2,
+            name: newName ?? name,
+            loaders: loadersRows.map((rows) => ({ loras: rows })),
+            loras: loadersRows[0] || [],
+            trigger_words,
+            notes
+          }
+          const response = await api.postJson('/lora_library/set', { slug: savedSlug, set })
+          this._applySetsResponse(response)
+          announceSetsChanged()
+          this._selectSetBySlug(savedSlug)
+          const saved = this._setsCache.find((s) => s.slug === savedSlug)
+          const summary = loadersRows.map((rows, i) => `L${i} ${summarizeRowsForToast(rows)}`).join(' / ')
+          // 2026-07-22: same rename-verb decision as the single-target path
+          // (`_doUpdate()`) — both halves must read consistently.
+          this._toast(
+            'success',
+            NODE_TITLE,
+            `${newName ? 'Saved + renamed to' : 'Updated'} "${saved?.name ?? (newName ?? name)}": ${summary}`
+          )
+        } catch (error) {
+          this._rollbackOptimisticUpdate(previous, error)
+        } finally {
+          this._saveInFlightSlugs.delete(savedSlug)
+        }
       }
 
       /**
@@ -5082,6 +5375,24 @@ export function registerControllerNode() {
        * `["None"] + sorted slugs` (lora_library/nodes_sets.py
        * `_slug_options()`), and its frontend cache (sets.js
        * `refreshSetsCache`) mirrors that: slugs only, never names/labels.
+       *
+       * Owner report 2026-08-26: `pushStateToNodes()` above is the CORE
+       * broadcast — every Apply node's `set` widget, the only thing a
+       * queued run actually reads from this push — and stays exactly where
+       * it was: synchronous, first, unconditional. It is `_syncLoaderSlotsForPush()`
+       * below that could stall for seconds (a GET, on the same slow-NAS/
+       * GIL-busy server the owner reported), so the success toast now fires
+       * IMMEDIATELY after the broadcast instead of waiting on it, and the
+       * sync runs after in its own `try`/`catch` — loud on failure now
+       * (previously silent-log-only; see that method's doc comment for why
+       * that changes here) and with its OWN follow-up toast, but only when
+       * there is something worth saying (a format-1 push, the common case,
+       * changes nothing here and stays silent — same toast economy
+       * `_doDelete()` established). Nothing about this reordering weakens
+       * the "never touches the `set` widget Push State's core broadcast
+       * depends on" guarantee `_syncLoaderSlotsForPush()`'s own doc comment
+       * already made — that guarantee is about WHAT it touches, unaffected
+       * by WHEN it runs.
        */
       async _doPush() {
         const entry = this._selectedSetEntry()
@@ -5098,20 +5409,32 @@ export function registerControllerNode() {
           return
         }
         const count = pushStateToNodes(applyNodes, entry.slug)
-        // FORMAT.md §6.2/§6.3 (2026-07-20, §4.1 nice-to-have): best-effort
-        // loader_slot sync for composite states — see
-        // `_syncLoaderSlotsForPush()`/`pushLoaderSlotForTag()`. Wrapped in
-        // `_guardedAsync` so a failure here (a slow/failed GET, an
-        // unexpected response shape) can NEVER affect the push above, which
-        // has already completed by this line — this is strictly additive,
-        // never a precondition for the toast below or the broadcast itself.
-        await this._guardedAsync('push loader_slot sync', () => this._syncLoaderSlotsForPush(applyNodes, entry.slug))
         const scopeNote = pushingAll ? '' : ` (target: "${targetValue}")`
         this._toast(
           'success',
           NODE_TITLE,
-          `Pushed "${entry.name}" to ${count} EPS Apply LoRA Set node${count === 1 ? '' : 's'}${scopeNote}.`
+          `Pushed "${entry.name}" to ${count} EPS Apply LoRA Set node${count === 1 ? '' : 's'}${scopeNote} — syncing loaders…`
         )
+        // FORMAT.md §6.2/§6.3 (2026-07-20, §4.1 nice-to-have): best-effort
+        // loader_slot sync for composite states — see
+        // `_syncLoaderSlotsForPush()`/`pushLoaderSlotForTag()`. The broadcast
+        // above has already completed by this line and can never be
+        // affected by what happens below; this settles with its own
+        // follow-up toast (success only when it changed something, warn on
+        // failure) instead of the toast above waiting on it.
+        try {
+          const changed = await this._syncLoaderSlotsForPush(applyNodes, entry.slug)
+          if (changed > 0) {
+            this._toast(
+              'success',
+              NODE_TITLE,
+              `Synced loader_slot for ${changed} EPS Apply LoRA Set node${changed === 1 ? '' : 's'}.`
+            )
+          }
+        } catch (error) {
+          api.warn(`${NODE_TITLE}: push loader_slot sync failed`, error)
+          this._toast('warn', NODE_TITLE, `Pushed, but syncing loader slots failed — see console.`)
+        }
       }
 
       /**
@@ -5124,15 +5447,28 @@ export function registerControllerNode() {
        * loader_slot and type 1" step. Deliberately skipped ENTIRELY for a
        * format-1 state: nothing to slice, and `loader_slot` is spec'd to be
        * ignored there anyway, so there's no reason to touch a hidden widget
-       * the user never revealed for the common single-loader case — the
-       * validated Push State path for a format-1 state runs through zero
-       * new code beyond this one extra GET (see caller: any failure here is
-       * caught by `_guardedAsync` and never reaches the push itself).
+       * the user never revealed for the common single-loader case.
+       *
+       * Owner report 2026-08-26: returns the number of Apply nodes whose
+       * `loader_slot` this call actually changed (0 for a format-1 push, or
+       * a format-2 push where every slot already read correctly) so
+       * `_doPush()` can decide whether its follow-up toast has anything to
+       * say. Previously wrapped in `_guardedAsync` (silent-log-only on
+       * failure, by design — "chosen deliberately... to keep the validated
+       * core broadcast exactly as it was"); now a plain `try`/`catch` in
+       * the caller, since the caller's toast now promises "syncing
+       * loaders…" and a failure that never surfaces would be exactly the
+       * kind of silent divergence between the pane and the server this
+       * round is trying to eliminate elsewhere.
        */
       async _syncLoaderSlotsForPush(applyNodes, slug) {
         const full = await api.getJson('/lora_library/set', { slug })
-        if (!Array.isArray(full?.loaders) || !full.loaders.length) return // format-1: nothing to sync
-        for (const node of applyNodes) pushLoaderSlotForTag(node)
+        if (!Array.isArray(full?.loaders) || !full.loaders.length) return 0 // format-1: nothing to sync
+        let changed = 0
+        for (const node of applyNodes) {
+          if (pushLoaderSlotForTag(node)) changed++
+        }
+        return changed
       }
     }
 

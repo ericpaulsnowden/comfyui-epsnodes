@@ -192,6 +192,40 @@ CLAMP_CASES = [
     (None, 1),
 ]
 
+#: (a, b, expected feedContentEqual(a, b)) -- loadPicker's own content gate
+#: (2026-08-26 while-running round): a fresh GET's JSON.parse is a NEW
+#: object even when its content matches the instant-painted cache exactly,
+#: so `data !== painted` alone always forced a second full applyFeed. Each
+#: pair below is embedded as two SEPARATE JSON literals (never the same
+#: object reference in the probe), so these cases pin the CONTENT
+#: comparison specifically -- reference equality is covered separately by
+#: `feedContentEqualSameRef` in the probe.
+_FEED_BASE = {
+    "loras": ["a.safetensors", "b.safetensors"],
+    "previews": ["a.safetensors"],
+    "favorites": ["b.safetensors"],
+    "recents": [{"file": "a.safetensors", "ts": 1}, {"file": "b.safetensors", "ts": 2}],
+}
+FEED_CONTENT_EQUAL_CASES = [
+    (_FEED_BASE, dict(_FEED_BASE), True),  # same content, different objects -- the case that matters
+    (
+        _FEED_BASE,
+        {**_FEED_BASE, "recents": [{"file": "a.safetensors", "ts": 999}, {"file": "b.safetensors", "ts": 2}]},
+        True,  # timestamps ignored, same as sameFileOrder
+    ),
+    (_FEED_BASE, {**_FEED_BASE, "loras": ["a.safetensors", "b.safetensors", "c.safetensors"]}, False),
+    (_FEED_BASE, {**_FEED_BASE, "previews": []}, False),
+    (_FEED_BASE, {**_FEED_BASE, "favorites": []}, False),
+    (
+        _FEED_BASE,
+        {**_FEED_BASE, "recents": [{"file": "b.safetensors", "ts": 2}, {"file": "a.safetensors", "ts": 1}]},
+        False,  # order matters
+    ),
+    (_FEED_BASE, None, False),
+    (None, _FEED_BASE, False),
+    (None, None, True),
+]
+
 #: (JS source for the raw `Auto-grow with selection` property value,
 #: expected autoGrowFromValue()). Raw JS, like RAW_VALUE_CASES, because
 #: `undefined` has no JSON spelling. Missing/blank reads ON (a pre-round
@@ -301,7 +335,9 @@ const out = {
     hasIsManualResize: typeof m.isManualResize === 'function',
     hasClampSplitFraction: typeof m.clampSplitFraction === 'function',
     hasSplitHeights: typeof m.splitHeights === 'function',
-    hasSplitFractionFromNode: typeof m.splitFractionFromNode === 'function'
+    hasSplitFractionFromNode: typeof m.splitFractionFromNode === 'function',
+    // 2026-08-26 while-running round: loadPicker's content gate
+    hasFeedContentEqual: typeof m.feedContentEqual === 'function'
   },
   constants: {
     classId: m.CLASS_ID,
@@ -347,7 +383,12 @@ const out = {
   normalizeLoraName: m.normalizeLoraName('a\\\\b\\\\c.safetensors'),
   drillPathAfterReload: %(drill_inputs)s.map(
     ([prev, next, path, loras]) => m.drillPathAfterReload(prev, next, path, loras)
-  )
+  ),
+  feedContentEqual: %(feed_content_equal_inputs)s.map(([a, b]) => m.feedContentEqual(a, b)),
+  feedContentEqualSameRef: (() => {
+    const obj = { loras: [], previews: [], favorites: [], recents: [] }
+    return m.feedContentEqual(obj, obj)
+  })()
 }
 
 process.stdout.write(JSON.stringify(out))
@@ -393,6 +434,7 @@ def picker_api(tmp_path_factory: pytest.TempPathFactory) -> dict:
             "floor_rows_inputs": json.dumps([list(args) for args, _ in FLOOR_ROWS_CASES]),
             "split_fraction_values": ", ".join(js for js, _ in SPLIT_FRACTION_CASES),
             "split_heights_inputs": json.dumps([list(args) for args, _ in SPLIT_HEIGHTS_CASES]),
+            "feed_content_equal_inputs": json.dumps([[a, b] for a, b, _ in FEED_CONTENT_EQUAL_CASES]),
         },
         encoding="utf-8",
     )
@@ -459,7 +501,18 @@ def test_module_exports_the_entry_point_and_pure_helpers(picker_api: dict) -> No
         "hasClampSplitFraction": True,
         "hasSplitHeights": True,
         "hasSplitFractionFromNode": True,
+        "hasFeedContentEqual": True,
     }
+
+
+def test_feed_content_equal_cases(picker_api: dict) -> None:
+    """loadPicker's content gate (2026-08-26 while-running round): a
+    reference-different-but-content-identical feed must read equal, and a
+    real change in any of the four served arrays must not."""
+    pairs = zip(FEED_CONTENT_EQUAL_CASES, picker_api["feedContentEqual"], strict=True)
+    for (a, b, expected), got in pairs:
+        assert got is expected, f"feedContentEqual({a!r}, {b!r}) -> {got!r}, wanted {expected!r}"
+    assert picker_api["feedContentEqualSameRef"] is True
 
 
 def test_drill_path_after_reload_cases(picker_api: dict) -> None:
@@ -1170,6 +1223,31 @@ class TestM3:
         assert "words.length > COPY_TOAST_MAX_CHARS" in body
         assert "toast('success', 'EPS LoRA Picker', `Copied: ${shown}`)" in body
 
+    def test_copy_button_has_an_in_flight_guard_and_restores_on_settle(self, source: str) -> None:
+        """2026-08-26 while-running round: the 📋 click had no on-screen
+        feedback and no guard against a second click firing a second
+        request for the same file while the first was still in flight (a
+        GIL-busy server + a slow gvfs NAS sidecar read could take seconds).
+        The button itself is now the guard -- buildClearRecentsRowEl's own
+        `_armed` idiom (a flag living directly on the element), disabled +
+        marked for the request's own duration, restored in a `finally` no
+        matter how copyTriggerWords settles."""
+        body = _function_body(source, "buildLoraRowEl(state, file, displayLabel)")
+        click = body[body.index("copyBtn.addEventListener('click'") :]
+        click = click[: click.index("addBtn = el(")]
+        assert "if (copyBtn._copyPending) return" in click
+        assert "copyBtn._copyPending = true" in click
+        assert "copyBtn.disabled = true" in click
+        assert "const restoreText = copyBtn.textContent" in click
+        finally_leg = click[click.index(".finally(() => {") :]
+        assert "copyBtn._copyPending = false" in finally_leg
+        assert "copyBtn.disabled = false" in finally_leg
+        assert "copyBtn.textContent = restoreText" in finally_leg
+        # copyTriggerWords itself is untouched -- its own toasts already
+        # cover "loud on failure" (fetch error, clipboard failure); this
+        # round only adds the guard/feedback around the click.
+        assert "copyTriggerWords(state, file)" in click
+
     # ------------------------------------------------------ clear recents
 
     def test_clear_recents_is_armed_two_click_with_both_strings(self, source: str) -> None:
@@ -1610,8 +1688,10 @@ class TestPerfRoundV0681:
         load = _function_body(source, "loadPicker(state)")
         assert "const token = ++state.loadToken" in load
         assert "if (token !== state.loadToken) return" in load
-        # a TTL-served feed is the object the instant paint already applied
-        assert "if (data !== painted) applyFeed(state, data)" in load
+        # a TTL-served feed is the object the instant paint already applied,
+        # and a reference-different-but-content-identical fetch (2026-08-26
+        # content gate) is skipped the same way
+        assert "if (data !== painted && !feedContentEqual(data, painted)) applyFeed(state, data)" in load
 
     def test_search_is_debounced_but_escape_and_clear_stay_instant(self, source: str) -> None:
         assert "const SEARCH_DEBOUNCE_MS = 120" in source
@@ -1640,19 +1720,121 @@ class TestPerfRoundV0681:
         # the ROWS are capped
         assert "if (!loraMatchesSearch(rel, query)) continue" in body
 
+    def test_folder_browse_rows_are_capped_with_a_show_more_row(self, source: str) -> None:
+        """2026-08-26: SEARCH_RESULT_CAP's sibling for plain folder browsing
+        (no query active) -- an unbounded folder built one row (lazy `<img>`
+        included) per lora on every visit. Mirrors the search cap's own
+        shape: full match count kept, only the ROWS capped, a trailing row
+        says what was left out -- except this one is clickable and RAISES
+        the cap for that folder instead of just saying "keep typing"."""
+        assert "const FOLDER_RESULT_CAP = 200" in source
+        browser = _function_body(source, "renderBrowser(state)")
+        assert "state.folderCap.folder !== folder" in browser
+        assert "state.folderCap = { folder, limit: FOLDER_RESULT_CAP }" in browser
+        assert "listing.loras.slice(0, cap)" in browser
+        assert "buildShowMoreFolderRowEl(state, folder, remaining)" in browser
+        show_more = _function_body(source, "buildShowMoreFolderRowEl(state, folder, remaining)")
+        assert "state.folderCap = { folder, limit: state.folderCap.limit + FOLDER_RESULT_CAP }" in show_more
+        assert "renderBrowser(state)" in show_more
+
+    def test_folder_cap_resets_per_folder(self, source: str) -> None:
+        """A "Show more" click only raises the cap for the folder it was
+        clicked in -- navigating elsewhere and back starts over, the same
+        renderBrowser() key-check that gives it its scope."""
+        assert (
+            "folderCap: { folder: null, limit: FOLDER_RESULT_CAP }" in source
+        )  # createState's initial value
+
     def test_one_browser_repaint_per_add_owned_by_record_recent(self, source: str) -> None:
         """Add rebuilt the browser three times over (addLora, recordRecent's
-        optimistic update, and again on the POST response)."""
+        optimistic update, and again on the POST response). 2026-08-26: the
+        two remaining repaints are now TARGETED PATCHES
+        (patchAfterRecentChange), not renderBrowser() rebuilds -- Add/star
+        never change what rows the current folder/search view shows."""
         add = _function_body(source, "addLora(state, file)")
         assert "renderBrowser(state)" not in add
         assert "recordRecent(state, file)" in add
         recent = _function_body(source, "recordRecent(state, file)")
-        assert recent.count("renderBrowser(state)") == 2
+        assert "renderBrowser(state)" not in recent
+        assert recent.count("patchAfterRecentChange(state)") == 2
         # ...and the second (response) repaint is change-gated
         assert "if (recents.length && !sameFileOrder(recents, state.recents)) {" in recent
         same = _function_body(source, "sameFileOrder(a, b)")
         assert "a.length === b.length" in same
         assert "entry.file === b[i].file" in same
+
+    def test_recent_change_patches_badge_or_rebuilds_only_the_recent_view(
+        self, source: str
+    ) -> None:
+        """patchAfterRecentChange (2026-08-26): a recents stamp never
+        changes what rows a folder/favorites/search view shows -- only the
+        Recent view's OWN row order actually changes, so that is the one
+        case that still gets a full renderBrowser()."""
+        body = _function_body(source, "patchAfterRecentChange(state)")
+        assert "if (state.view === 'recent') {" in body
+        assert "renderBrowser(state)" in body
+        assert "patchCountBadges(state)" in body
+        # the badge-only leg must not itself fall through to a rebuild
+        recent_leg = body[: body.index("patchCountBadges(state)")]
+        assert recent_leg.count("renderBrowser(state)") == 1
+
+    def test_favorite_toggle_patches_star_icon_or_removes_the_favorites_row(
+        self, source: str
+    ) -> None:
+        """patchFavoriteChange (2026-08-26): starring/unstarring never
+        changes a folder/search/recent view's rows -- only that one row's
+        star icon and the ★ badge. Unstarring FROM the Favorites view is
+        the one real exception (the row itself must go), handled by
+        removing just that row rather than rebuilding the whole list. The
+        optimistic flip and the failure-path revert both go through the
+        patch; the ONE surviving renderBrowser() call is the POST response
+        leg, and only fires when the server's list actually DISAGREES with
+        the optimistic one already on screen (a genuine resync, not the
+        common case)."""
+        toggle = _function_body(source, "toggleFavorite(state, file, on)")
+        assert "patchFavoriteChange(state, file, on)" in toggle
+        assert "patchFavoriteChange(state, file, !on)" in toggle  # failure-path revert
+        assert toggle.count("renderBrowser(state)") == 1
+        resync = toggle[toggle.index("if (!sameStringArray(served, state.favorites)) {") :]
+        assert "renderBrowser(state)" in resync[:120]
+
+        body = _function_body(source, "patchFavoriteChange(state, file, on)")
+        assert "if (state.view === 'favorites' && !on) {" in body
+        assert "removeFavoritesRow(state, file)" in body
+        assert "patchStarIcon(state, file, on)" in body
+        assert "patchCountBadges(state)" in body
+
+        star = _function_body(source, "patchStarIcon(state, file, on)")
+        assert "state.starRowEls.get(file)" in star
+        assert "eps-lp-star-on" in star
+        assert "return false" in star  # the full-repaint fallback's own signal
+
+        remove = _function_body(source, "removeFavoritesRow(state, file)")
+        assert "state.favRowEls.findIndex" in remove
+        assert "state.favRowEls[idx].el.remove()" in remove
+        assert "No favorites yet" in remove
+
+    def test_star_row_els_tracked_for_every_row_ghosts_included(self, source: str) -> None:
+        """Unlike browserRowEls (installed rows only), starRowEls tracks
+        EVERY row buildLoraRowEl builds this paint -- a ghost favorite in
+        the Recent view can still have its star toggled and patched."""
+        body = _function_body(source, "buildLoraRowEl(state, file, displayLabel)")
+        assert "state.starRowEls.set(file, starBtn)" in body
+        gate = body.index("const ghost = !state.loraSet.has(file)")
+        set_at = body.index("state.starRowEls.set(file, starBtn)")
+        ghost_guard = body.index("if (!ghost) {")
+        assert gate < set_at < ghost_guard  # registered before the ghost-only gate
+
+    def test_count_badges_are_captured_and_patched_in_place(self, source: str) -> None:
+        browser = _function_body(source, "renderBrowser(state)")
+        assert "state.starRowEls = new Map()" in browser
+        assert "state.favBadgeEl = null" in browser
+        assert "state.recentBadgeEl = null" in browser
+        assert "state.favBadgeEl = favRow.querySelector('.eps-lp-row-label')" in browser
+        assert "state.recentBadgeEl = recentRow.querySelector('.eps-lp-row-label')" in browser
+        badges = _function_body(source, "patchCountBadges(state)")
+        assert "state.favBadgeEl.textContent" in badges
+        assert "state.recentBadgeEl.textContent" in badges
 
     def test_highlight_moves_by_class_toggle_over_a_per_render_row_map(self, source: str) -> None:
         body = _function_body(source, "setHighlightedFile(state, file)")

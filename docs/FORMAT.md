@@ -3875,6 +3875,55 @@ hook; no window listeners. Function-valued `options.values` are evaluated
 (§6.12). It never invents files: the model must exist on the other
 machine under the same relative name. Pins: `tests/test_path_heal_js.py`.
 
+## §7.7 The while-running round (v0.82.0, 2026-08-26)
+
+Owner: "Saving and pushing a state … can take 10-20 seconds when a complex
+workflow is running … check for opportunities across all plugins." Premise
+(measured): the server process is GIL-busy mid-run and the owner's library
+sits on a slow gvfs NAS, so ANY awaited round trip can take seconds — the
+cure is (a) never gate a paint on the network, (b) never do filesystem/CPU
+work on the aiohttp event loop, (c) never re-fetch what the panel already
+holds. One audited round, seven fix passes, per-surface details live in
+dated 2026-08-26 comments at each site:
+
+- **Controller (§6.2):** Save/Update/Push now paint-first like v0.81.0's
+  Delete — optimistic row with a provisional slug (`_saveInFlightSlugs`
+  guards `_applySetsResponse` against poller clobber), the read-back toast's
+  round trip folded into the POST response, Push's widget broadcast stays
+  synchronous (a queued run reads it) while the loader-slot sync follows the
+  toast.
+- **Notebook (§6.1):** entry clicks serve from `entryTextByName` (zero
+  requests — the include_text payload already had the text); include_text
+  now also carries `category_descriptions`; inline rename builds its POST
+  from cache (one request, not GET+POST); drags splice + repaint before the
+  POST; multi-move/delete send ONE batched request (`names: [...]` on §5's
+  /move and /delete — single-name responses byte-identical, batch =
+  all-or-nothing by construction); writes pass `{timeoutMs: 30000}` through
+  api.js's new OPT-IN timeout (default path byte-identical) and a timeout
+  reloads to show what landed instead of wedging `state.busy`.
+- **Sets store (§4):** save/delete SPLICE the listing cache (identical
+  `_listing_sort_key` proves order parity vs a fresh scan) and warm the
+  per-file caches from the dict just written — an in-process save costs
+  zero re-parses; `load_set` gained the `(mtime_ns,size)` cache; pin-drift
+  checks share one 5 s-TTL fetch per slug; the Builder's poll is
+  single-flight, cross-node-shared, hidden-tab-aware, and defers right-pane
+  re-render during a block drag.
+- **Picker (§6.13):** Add/star patch the DOM in place (no full rebuild, no
+  thumbnail re-requests); warm-cache double render content-gated
+  (`feedContentEqual`); folder rows capped at 200 with show-more (the
+  search cap's twin); 📋 has an in-flight guard; /picker, /preview and
+  /info moved their resolve/stat chains off-loop (re-check preserved).
+- **eps_image routes:** every image-grid route off-loop; `with_frame_mtimes`
+  cached by buffer generation; /eps_ckpt/checkpoints off-loop with a shared
+  frontend fetch promise (the `listFlagsPromise` shape); /eps/list_flags
+  memoized for the process lifetime; frame-saver path resolution off-loop in
+  probe AND stream (gate-first order kept) with a probe LRU keyed
+  `(path, mtime_ns, size)`; resolution preset Save/Delete carry an in-flight
+  guard so a double-click can't manufacture a 409.
+- **Sibling repos:** comfyui-photoshop-bridge shipped the same round as its
+  v0.5.74 (save/open/browse off-loop + cprb's 5 s fs-browse timeout);
+  comfyui-premiere-bridge needed nothing (hardened 2026-08-08).
+
 ## §8 Versioning & stability
 
 - Backend version: `lora_library/version.py` (source of truth); frontend:

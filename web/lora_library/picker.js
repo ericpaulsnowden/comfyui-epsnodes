@@ -220,6 +220,14 @@ const SEARCH_DEBOUNCE_MS = 120
  * library matching a one-letter query built 2000 rows per keystroke. */
 const SEARCH_RESULT_CAP = 200
 
+/** 2026-08-26 while-running round: SEARCH_RESULT_CAP's sibling for plain
+ * folder browsing (`listFolder`, no query active) -- audited as unbounded:
+ * a folder with thousands of loras built that many rows (lazy `<img>`s
+ * included) on every visit, GIL-busy-server or not. A trailing "Show more"
+ * row raises the cap for THAT FOLDER only (`state.folderCap`) and
+ * repaints; navigating to a different folder resets it back down. */
+const FOLDER_RESULT_CAP = 200
+
 /** Nodes we've already attached to -- guards a double `nodeCreated`. */
 const attachedNodes = new WeakSet()
 
@@ -665,6 +673,10 @@ function createState(node, widget) {
     searchInputEl: null,
     favRowEls: [], // favorites-view row order (file+el) for the M3 drag -- rebuilt each render
     browserRowEls: new Map(), // file -> installed browser row el, rebuilt each render (v0.68.1 highlight toggle)
+    starRowEls: new Map(), // 2026-08-26: file -> star button el for THIS paint (ghosts included) -- lets a star toggle patch the icon in place instead of a full renderBrowser
+    favBadgeEl: null, // 2026-08-26: the root browse view's "★ Favorites (n)" label, when on screen -- patched in place by patchCountBadges
+    recentBadgeEl: null, // 2026-08-26: the root browse view's "🕘 Recent (n)" label, when on screen -- same
+    folderCap: { folder: null, limit: FOLDER_RESULT_CAP }, // 2026-08-26: per-folder "Show more" cap -- resets to FOLDER_RESULT_CAP whenever the folder changes
     lastSelectedCount: null, // last painted Selected row count -- drives the node-growth delta
     programmaticResize: false, // true only inside programmaticSetSize -- the onResize wrap's "ours, not the user's" flag
     highlightedFile: null, // browser row click-to-highlight (v0.64.0); second click adds
@@ -980,7 +992,17 @@ async function loadPicker(state) {
   try {
     const data = await fetchFeed() // shared across every picker node (v0.68.1)
     if (token !== state.loadToken) return // superseded by a newer fetch
-    if (data !== painted) applyFeed(state, data)
+    // 2026-08-26 while-running round: `data` is a freshly-parsed JSON object
+    // even when a fresh GET's CONTENT is byte-identical to what the instant
+    // paint above already applied -- `data !== painted` was therefore
+    // always true for any non-TTL-served fetch, forcing a second full
+    // applyFeed (reloadFromWidget + a full renderBrowser included) on every
+    // single attach. GET /lora_library/picker's `mtime` field only tracks
+    // the favorites/recents STORE FILE's mtime (routes_lora_picker.py's
+    // `store.load_state`) -- it says nothing about `loras`/`previews`, so
+    // it can't gate this alone; feedContentEqual compares all four served
+    // arrays directly instead, and is the real content gate.
+    if (data !== painted && !feedContentEqual(data, painted)) applyFeed(state, data)
   } catch (error) {
     if (token !== state.loadToken) return
     // A cached paint already on screen stays: stale rows beat an error
@@ -1013,6 +1035,41 @@ function sanitizeRecents(raw) {
     out.push({ file: normalizeLoraName(entry.file), ts: typeof entry.ts === 'number' ? entry.ts : 0 })
   }
   return out
+}
+
+/** Order-sensitive string-array equality -- the plain-value half of
+ * feedContentEqual's comparison (favorites order matters, §6.13's
+ * drag-reorder feature; loras/previews order is server-stable). Non-arrays
+ * degrade to `[]`, same tolerance applyFeed already gives these fields.
+ * @param {unknown} a @param {unknown} b @returns {boolean} */
+function sameStringArray(a, b) {
+  const arrA = Array.isArray(a) ? a : []
+  const arrB = Array.isArray(b) ? b : []
+  return arrA.length === arrB.length && arrA.every((value, i) => value === arrB[i])
+}
+
+/**
+ * 2026-08-26 while-running round: true when *a* and *b* are `GET
+ * /lora_library/picker` payloads with the same MEANINGFUL content -- same
+ * `loras`/`previews`/`favorites` (order matters) and the same `recents`
+ * (file + order, via sameFileOrder; timestamps ignored). loadPicker's own
+ * comment explains why: a reference-different JSON parse of a
+ * byte-identical response is the common case (the instant cached paint vs.
+ * the fetch that immediately follows it), and must not count as a change
+ * worth a second full repaint. `mtime` is deliberately NOT used here -- it
+ * only tracks the favorites/recents store file (routes_lora_picker.py),
+ * never `loras`/`previews`, so it cannot gate this alone; comparing the
+ * four served arrays directly is the one gate that is always correct.
+ * @param {unknown} a @param {unknown} b @returns {boolean} */
+export function feedContentEqual(a, b) {
+  if (a === b) return true
+  if (!a || typeof a !== 'object' || !b || typeof b !== 'object') return false
+  return (
+    sameStringArray(a.loras, b.loras) &&
+    sameStringArray(a.previews, b.previews) &&
+    sameStringArray(a.favorites, b.favorites) &&
+    sameFileOrder(sanitizeRecents(a.recents), sanitizeRecents(b.recents))
+  )
 }
 
 /**
@@ -1097,10 +1154,13 @@ function addLora(state, file) {
   state.highlightedFile = file // the just-added row stays the current one
   writeSelectionWidget(state)
   renderSelected(state)
-  // v0.68.1: ONE browser repaint per Add, owned by recordRecent (it repaints
-  // anyway -- the 🕘 Recent count moved -- and that repaint paints this
-  // highlight). Add used to rebuild the browser three times over: here,
-  // in recordRecent's optimistic update, and again on the POST response.
+  // v0.68.1: the browser's own repaint is owned by recordRecent (it
+  // touches the browser anyway -- the 🕘 Recent count moved -- so painting
+  // this highlight there too avoided a second one). 2026-08-26: that
+  // "repaint" is now a targeted PATCH (see recordRecent/patchAfterRecent
+  // Change below), not a full renderBrowser() -- Add never changes what
+  // rows the current folder/search view shows, only the Recent count and
+  // (rarely) the Recent view's own row order.
   recordRecent(state, file)
 }
 
@@ -1122,13 +1182,15 @@ function flashSelectedRow(state, file) {
  * addLora), and the response repaint is change-gated -- the served list
  * normally equals the optimistic one (same file on top, same cap), so a
  * third full rebuild of the browser was the rule rather than the exception.
+ * 2026-08-26: that repaint is now patchAfterRecentChange, a targeted patch
+ * rather than a full renderBrowser() -- see its own header.
  */
 function recordRecent(state, file) {
   state.recents = [
     { file, ts: Date.now() / 1000 },
     ...state.recents.filter((entry) => entry.file !== file)
   ].slice(0, RECENTS_CAP)
-  renderBrowser(state) // the one optimistic repaint an Add gets (v0.68.1)
+  patchAfterRecentChange(state) // the one optimistic repaint an Add gets (v0.68.1)
   const token = ++state.recentToken
   api
     .postJson(ROUTE_RECENT, { files: [file] })
@@ -1138,37 +1200,138 @@ function recordRecent(state, file) {
       const recents = sanitizeRecents(data?.recents)
       if (recents.length && !sameFileOrder(recents, state.recents)) {
         state.recents = recents
-        renderBrowser(state)
+        patchAfterRecentChange(state)
       }
     })
     .catch((error) => api.warn('recording recent lora failed (non-blocking)', error))
 }
 
 /**
+ * 2026-08-26 while-running round: recordRecent's own repaint, patched
+ * rather than a full `renderBrowser()` -- a recents stamp never changes
+ * what rows the current folder/favorites/search view shows (Add/star's
+ * finding: the mutation the user just made doesn't touch that folder's
+ * contents), only the 🕘 Recent count badge, patched in place. The one
+ * exception is the Recent view ITSELF: sitting there while a file moves to
+ * (or stays at) the front is a real row-order change in the CURRENTLY
+ * VISIBLE list, so that one case still gets a full renderBrowser() -- correct
+ * over clever, and rare (recording a recent while already looking at the
+ * Recent view).
+ */
+function patchAfterRecentChange(state) {
+  if (state.view === 'recent') {
+    renderBrowser(state)
+    return
+  }
+  patchCountBadges(state)
+}
+
+/**
  * ★/☆: optimistic flip + POST, revert + toast on failure (§6.13).
  * Token-guarded: a stale response (or a stale failure's revert) after a
  * newer click is dropped rather than clobbering the newer state.
+ * 2026-08-26 while-running round: the flip patches the browser instead of
+ * a full renderBrowser() -- see patchFavoriteChange's own header.
  */
 async function toggleFavorite(state, file, on) {
   const previous = state.favorites.slice()
   state.favorites = on ? [...previous.filter((name) => name !== file), file] : previous.filter((name) => name !== file)
-  renderBrowser(state)
+  patchFavoriteChange(state, file, on)
   const token = ++state.favoriteToken
   try {
     const data = await api.postJson(ROUTE_FAVORITE, { file, on })
     if (token !== state.favoriteToken) return
     invalidateInFlightLoad(state)
     if (Array.isArray(data?.favorites)) {
-      state.favorites = data.favorites.filter((entry) => typeof entry === 'string').map(normalizeLoraName)
-      renderBrowser(state)
+      const served = data.favorites.filter((entry) => typeof entry === 'string').map(normalizeLoraName)
+      // Content-gated (2026-08-26): the served list normally already
+      // equals the optimistic flip above -- only a genuine disagreement
+      // (another machine's write landed in between) earns a full
+      // renderBrowser() resync.
+      if (!sameStringArray(served, state.favorites)) {
+        state.favorites = served
+        renderBrowser(state)
+      } else {
+        state.favorites = served
+      }
     }
   } catch (error) {
     if (token !== state.favoriteToken) return
     state.favorites = previous
-    renderBrowser(state)
+    patchFavoriteChange(state, file, !on) // revert the icon/row back in place
     api.warn('favorite toggle failed', error)
     toast('error', 'EPS LoRA Picker', `Favorite not saved: ${error?.message || error}`)
   }
+}
+
+/**
+ * 2026-08-26 while-running round: toggleFavorite's own repaint, patched
+ * rather than a full `renderBrowser()` -- starring/unstarring a lora never
+ * changes which rows a folder/search/recent view shows (favorites status
+ * isn't a filter there), so only that ONE row's star icon plus the
+ * "★ Favorites (n)" badge need to change. The one real exception is the
+ * Favorites view itself: unstarring FROM there removes a row the view is
+ * defined by, so that case removes the one row instead (removeFavoritesRow)
+ * -- still a targeted patch, not a rebuild, just of a different shape.
+ * `state.starRowEls` (rebuilt every renderBrowser(), ghosts included --
+ * unlike `browserRowEls`, which skips ghosts) is what makes the icon patch
+ * possible for every view a star can be toggled from, Recent's ghost rows
+ * included; when a row genuinely isn't part of the current paint (should
+ * not happen given the tracking above, kept as a safety net) this falls
+ * back to a full renderBrowser() rather than leaving a stale icon on screen.
+ */
+function patchFavoriteChange(state, file, on) {
+  if (state.view === 'favorites' && !on) {
+    removeFavoritesRow(state, file)
+    patchCountBadges(state)
+    return
+  }
+  const patched = patchStarIcon(state, file, on)
+  patchCountBadges(state)
+  if (!patched) renderBrowser(state)
+}
+
+/** Toggles one row's star button in place -- the star icon, its `eps-lp-
+ * star-on` class, and its title -- without touching anything else in the
+ * row (the already-loaded thumbnail `<img>` included). Returns false when
+ * *file* isn't part of the current paint (state.starRowEls), so the caller
+ * can fall back to a full repaint instead of leaving a stale icon. */
+function patchStarIcon(state, file, on) {
+  const starBtn = state.starRowEls.get(file)
+  if (!starBtn) return false
+  starBtn.className = on ? 'eps-lp-star eps-lp-star-on' : 'eps-lp-star'
+  starBtn.textContent = on ? '★' : '☆'
+  starBtn.title = on ? 'Unstar' : 'Star as a favorite'
+  return true
+}
+
+/** Removes exactly one row from the CURRENTLY RENDERED Favorites view --
+ * unstarring while browsing that view is the one star-toggle case that
+ * really does change the current view's row set. Falls to the view's own
+ * empty state when that was the last favorite, mirroring renderBrowser's
+ * own empty-favorites message exactly. */
+function removeFavoritesRow(state, file) {
+  const idx = state.favRowEls.findIndex((entry) => entry.file === file)
+  if (idx !== -1) {
+    state.favRowEls[idx].el.remove()
+    state.favRowEls.splice(idx, 1)
+  }
+  state.starRowEls.delete(file)
+  state.browserRowEls.delete(file)
+  if (state.favRowEls.length === 0) {
+    state.listEl.replaceChildren(
+      el('div', { className: 'eps-lp-empty', text: 'No favorites yet — star a lora to keep it here.' })
+    )
+  }
+}
+
+/** Updates the root browse view's "★ Favorites (n)" / "🕘 Recent (n)"
+ * pseudo-folder badges in place -- text only, no rebuild. A no-op when
+ * they aren't currently on screen (any view but the folder root, or an
+ * active search) -- renderBrowser nulls both refs whenever they're absent. */
+function patchCountBadges(state) {
+  if (state.favBadgeEl) state.favBadgeEl.textContent = `★ Favorites (${state.favorites.length})`
+  if (state.recentBadgeEl) state.recentBadgeEl.textContent = `🕘 Recent (${state.recents.length})`
 }
 
 // --- Rendering ---
@@ -1719,14 +1882,19 @@ function currentFolder(state) {
 function renderBrowser(state) {
   renderCrumbs(state)
   // The search corpus is the current browse folder, so the placeholder
-  // names it -- at the library root it stays the generic M3 wording.
+  // names it -- at the library root it stays the generic M3 wording. Also
+  // the folder-row-cap key below (2026-08-26): a fresh folder resets its
+  // own "Show more" cap back to FOLDER_RESULT_CAP.
+  const folder = currentFolder(state)
   if (state.searchInputEl) {
-    const folder = currentFolder(state)
     state.searchInputEl.placeholder = folder ? `Search ${basename(folder)}…` : 'Search loras…'
   }
   state.listEl.replaceChildren()
   state.favRowEls = []
   state.browserRowEls = new Map()
+  state.starRowEls = new Map() // 2026-08-26: file -> star button for THIS paint (ghosts included)
+  state.favBadgeEl = null // 2026-08-26: re-captured below only when the root pseudo-folders are on screen
+  state.recentBadgeEl = null
 
   if (state.error) {
     // §7.2 amendment: the error itself lives in the status line (with
@@ -1780,17 +1948,31 @@ function renderBrowser(state) {
   }
 
   if (state.path.length === 0) {
-    state.listEl.append(buildPseudoFolderRowEl(state, `★ Favorites (${state.favorites.length})`, 'favorites'))
-    state.listEl.append(buildPseudoFolderRowEl(state, `🕘 Recent (${state.recents.length})`, 'recent'))
+    const favRow = buildPseudoFolderRowEl(state, `★ Favorites (${state.favorites.length})`, 'favorites')
+    const recentRow = buildPseudoFolderRowEl(state, `🕘 Recent (${state.recents.length})`, 'recent')
+    // 2026-08-26: keep the label refs so a later star/recent-count change
+    // can patch this text in place (patchCountBadges) instead of a rebuild.
+    state.favBadgeEl = favRow.querySelector('.eps-lp-row-label')
+    state.recentBadgeEl = recentRow.querySelector('.eps-lp-row-label')
+    state.listEl.append(favRow)
+    state.listEl.append(recentRow)
   }
 
-  const listing = listFolder(state.loras, currentFolder(state))
+  const listing = listFolder(state.loras, folder)
   if (listing.folders.length === 0 && listing.loras.length === 0) {
     state.listEl.append(el('div', { className: 'eps-lp-empty', text: 'No loras in this folder.' }))
     return
   }
-  for (const folder of listing.folders) state.listEl.append(buildFolderRowEl(state, folder))
-  for (const lora of listing.loras) state.listEl.append(buildLoraRowEl(state, lora.file, lora.label))
+  for (const folderEntry of listing.folders) state.listEl.append(buildFolderRowEl(state, folderEntry))
+  // 2026-08-26: SEARCH_RESULT_CAP's sibling for plain folder browsing --
+  // see FOLDER_RESULT_CAP's own header. The cap is keyed to *folder* so
+  // navigating away and back starts fresh; "Show more" raises it in place.
+  if (state.folderCap.folder !== folder) state.folderCap = { folder, limit: FOLDER_RESULT_CAP }
+  const cap = state.folderCap.limit
+  const shown = listing.loras.slice(0, cap)
+  for (const lora of shown) state.listEl.append(buildLoraRowEl(state, lora.file, lora.label))
+  const remaining = listing.loras.length - shown.length
+  if (remaining > 0) state.listEl.append(buildShowMoreFolderRowEl(state, folder, remaining))
 }
 
 /**
@@ -1865,6 +2047,27 @@ function buildFolderRowEl(state, folder) {
 }
 
 /**
+ * 2026-08-26 while-running round: FOLDER_RESULT_CAP's own affordance --
+ * styled like buildPseudoFolderRowEl (a plain clickable row, no button
+ * chrome). A click raises the cap for *folder* by another FOLDER_RESULT_CAP
+ * and repaints; navigating to a different folder resets it back down
+ * (renderBrowser's own `state.folderCap.folder !== folder` check).
+ */
+function buildShowMoreFolderRowEl(state, folder, remaining) {
+  const label = el('span', {
+    className: 'eps-lp-row-label',
+    text: `…${remaining} more — Show more`,
+    attrs: { title: 'Show more loras in this folder' }
+  })
+  const rowEl = el('div', { className: 'eps-lp-row eps-lp-folder-row' }, [label])
+  rowEl.addEventListener('click', () => {
+    state.folderCap = { folder, limit: state.folderCap.limit + FOLDER_RESULT_CAP }
+    renderBrowser(state)
+  })
+  return rowEl
+}
+
+/**
  * One browser lora row: [≡ handle (M3, favorites view only)] + star toggle
  * + preview thumbnail (M3) + display name (relative to the current folder,
  * or scope-relative in search results) + `📋` trigger-word copy (M3) +
@@ -1892,6 +2095,11 @@ function buildLoraRowEl(state, file, displayLabel) {
   starBtn.addEventListener('click', () => {
     toggleFavorite(state, file, !favorite).catch((error) => api.warn('favorite toggle rejected', error))
   })
+  // 2026-08-26: tracked for EVERY row this paint builds, ghosts included --
+  // patchStarIcon's own lookup, so a star toggle from any view (including a
+  // ghost row in Recent, which browserRowEls below skips) can patch the
+  // icon in place instead of falling back to a full renderBrowser().
+  state.starRowEls.set(file, starBtn)
 
   // §6.13 M3 thumbnail: the sidecar preview image, served by ROUTE_PREVIEW
   // -- built ONLY for loras the feed's `previews` list names (owner report
@@ -1939,7 +2147,23 @@ function buildLoraRowEl(state, file, displayLabel) {
       attrs: { title: 'Copy this lora’s trigger words (from its .txt sidecar)' }
     })
     copyBtn.addEventListener('click', () => {
-      copyTriggerWords(state, file).catch((error) => api.warn('trigger-word copy rejected', error))
+      // 2026-08-26 while-running round: a GIL-busy server + a slow gvfs NAS
+      // sidecar read could take seconds with zero on-screen feedback and no
+      // guard against a second click firing a second request for the same
+      // file -- the button itself is now the guard, buildClearRecentsRowEl's
+      // own `_armed` idiom (a flag living directly on the element).
+      if (copyBtn._copyPending) return
+      copyBtn._copyPending = true
+      const restoreText = copyBtn.textContent
+      copyBtn.disabled = true
+      copyBtn.textContent = '…'
+      copyTriggerWords(state, file)
+        .catch((error) => api.warn('trigger-word copy rejected', error))
+        .finally(() => {
+          copyBtn._copyPending = false
+          copyBtn.disabled = false
+          copyBtn.textContent = restoreText
+        })
     })
     const addBtn = el('button', { className: 'eps-lp-btn', text: '＋ Add', attrs: { title: 'Add to the selection' } })
     addBtn.addEventListener('click', () => addLora(state, file))

@@ -89,6 +89,19 @@ VALID_UUID = "a1b2c3d4-e5f6-47a8-9b0c-d1e2f3a4b5c6"
 OTHER_VALID_UUID = "11111111-2222-3333-4444-555555555555"
 
 
+@pytest.fixture(autouse=True)
+def _reset_mtime_cache():
+    """``with_frame_mtimes``'s decorated-ref cache is process-lifetime and
+    keyed on ``grid_uuid`` (2026-08-26 while-running round) -- reset it
+    around every test in this file so two tests reusing ``VALID_UUID``/
+    ``OTHER_VALID_UUID`` against DIFFERENT throwaway ``fake_folder_paths``
+    buffers can never share a stale entry (see ``_mtime_cache_clear``'s
+    docstring)."""
+    store._mtime_cache_clear()
+    yield
+    store._mtime_cache_clear()
+
+
 # --------------------------------------------------------------- uuid regex
 
 
@@ -836,6 +849,165 @@ class TestWithFrameMtimes:
         foreign = store.with_frame_mtimes("nope", refs)
         assert foreign[0]["mtime"] == 0
         assert foreign[0]["filename"] == "0001.png"  # the rest of the ref is preserved
+
+
+def _count_frame_mtime_calls(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """Patches ``_frame_mtime_ms`` (the per-frame ``stat()`` helper
+    ``with_frame_mtimes``'s loop calls once per ref) to record every path
+    it's asked to stat, still delegating to the real implementation -- the
+    exact O(N) work the cache below is meant to skip entirely on a hit."""
+    calls: list[str] = []
+    original = store._frame_mtime_ms
+
+    def counting(path):
+        calls.append(str(path))
+        return original(path)
+
+    monkeypatch.setattr(store, "_frame_mtime_ms", counting)
+    return calls
+
+
+class TestWithFrameMtimesCache:
+    """2026-08-26 while-running round: ``with_frame_mtimes`` itself stat'd
+    EVERY frame on EVERY call -- an O(N) filesystem pass that fires once per
+    FINISHED RUN during a sweep (every ref-returning route calls it). Now
+    cached per ``grid_uuid``, keyed on :func:`store.buffer_generation`: an
+    unchanged buffer skips the stat loop entirely, and every write op drops
+    that uuid's cached entry so a stale decoration can never be served."""
+
+    # --------------------------------------------------------- hit skips stats
+
+    def test_a_second_call_on_an_unchanged_buffer_makes_no_new_stat_calls(
+        self, fake_folder_paths: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        store.append_batch(VALID_UUID, _make_batch(3))
+        refs = store.list_refs(VALID_UUID)
+        first = store.with_frame_mtimes(VALID_UUID, refs)  # primes the cache
+
+        calls = _count_frame_mtime_calls(monkeypatch)
+        second = store.with_frame_mtimes(VALID_UUID, refs)
+
+        assert second == first
+        assert calls == []  # cache hit -- the stat loop never ran
+
+    def test_the_cache_hit_returns_the_same_list_object(self, fake_folder_paths: Path) -> None:
+        store.append_batch(VALID_UUID, _make_batch(1))
+        refs = store.list_refs(VALID_UUID)
+        first = store.with_frame_mtimes(VALID_UUID, refs)
+        second = store.with_frame_mtimes(VALID_UUID, refs)
+        assert first is second  # the SAME cached list, not merely an equal one
+
+    def test_a_fresh_uuid_with_no_prior_call_is_a_real_miss(
+        self, fake_folder_paths: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        store.append_batch(VALID_UUID, _make_batch(2))
+        refs = store.list_refs(VALID_UUID)
+        calls = _count_frame_mtime_calls(monkeypatch)
+        store.with_frame_mtimes(VALID_UUID, refs)
+        assert len(calls) == 2  # one stat per frame, nothing cached yet
+
+    # ------------------------------------------------------- write ops invalidate
+
+    def test_append_invalidates_so_the_next_call_re_stats(
+        self, fake_folder_paths: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        store.append_batch(VALID_UUID, _make_batch(1))
+        store.with_frame_mtimes(VALID_UUID, store.list_refs(VALID_UUID))  # primes the cache
+        assert VALID_UUID in store._mtime_cache
+
+        store.append_batch(VALID_UUID, _make_batch(1))  # a write op
+        assert VALID_UUID not in store._mtime_cache  # dropped immediately, not just on next read
+
+        calls = _count_frame_mtime_calls(monkeypatch)
+        decorated = store.with_frame_mtimes(VALID_UUID, store.list_refs(VALID_UUID))
+        assert len(decorated) == 2
+        assert len(calls) == 2  # a genuine miss -- it re-stat'd both frames
+
+    def test_append_uploaded_image_invalidates(
+        self, fake_folder_paths: Path, fake_input_dir: Path
+    ) -> None:
+        _write_fake_upload(fake_input_dir, "pasted.png")
+        store.append_uploaded_image(VALID_UUID, "pasted.png")
+        store.with_frame_mtimes(VALID_UUID, store.list_refs(VALID_UUID))
+        assert VALID_UUID in store._mtime_cache
+
+        _write_fake_upload(fake_input_dir, "pasted2.png")
+        store.append_uploaded_image(VALID_UUID, "pasted2.png")
+        assert VALID_UUID not in store._mtime_cache
+
+    def test_remove_frame_invalidates(self, fake_folder_paths: Path) -> None:
+        store.append_batch(VALID_UUID, _make_batch(2))
+        refs = store.list_refs(VALID_UUID)
+        store.with_frame_mtimes(VALID_UUID, refs)
+        assert VALID_UUID in store._mtime_cache
+
+        store.remove_frame(VALID_UUID, refs[0]["filename"])
+        assert VALID_UUID not in store._mtime_cache
+
+    def test_clear_invalidates(self, fake_folder_paths: Path) -> None:
+        store.append_batch(VALID_UUID, _make_batch(1))
+        store.with_frame_mtimes(VALID_UUID, store.list_refs(VALID_UUID))
+        assert VALID_UUID in store._mtime_cache
+
+        store.clear(VALID_UUID)
+        assert VALID_UUID not in store._mtime_cache
+
+    def test_clone_invalidates_only_the_destination_uuid(self, fake_folder_paths: Path) -> None:
+        store.append_batch(VALID_UUID, _make_batch(1))  # source buffer
+        store.with_frame_mtimes(VALID_UUID, store.list_refs(VALID_UUID))
+        assert VALID_UUID in store._mtime_cache
+
+        # A stale entry for the destination uuid too, from before the clone
+        # (e.g. it was queried as an empty buffer earlier).
+        store.with_frame_mtimes(OTHER_VALID_UUID, [])
+        assert OTHER_VALID_UUID in store._mtime_cache
+
+        store.clone_buffer(VALID_UUID, OTHER_VALID_UUID)
+
+        assert OTHER_VALID_UUID not in store._mtime_cache  # invalidated
+        assert VALID_UUID in store._mtime_cache  # untouched -- clone never writes the source
+
+    def test_a_noop_remove_does_not_spuriously_invalidate(self, fake_folder_paths: Path) -> None:
+        """`remove_frame` on a filename not in the manifest is a documented
+        soft-fail no-op (no manifest rewrite) -- it must not touch the
+        cache at all, unlike a real removal."""
+        store.append_batch(VALID_UUID, _make_batch(1))
+        store.with_frame_mtimes(VALID_UUID, store.list_refs(VALID_UUID))
+        assert VALID_UUID in store._mtime_cache
+
+        store.remove_frame(VALID_UUID, "9999.png")  # not in the manifest -- soft no-op
+        assert VALID_UUID in store._mtime_cache  # still cached, nothing changed
+
+    def test_clearing_one_uuid_leaves_a_different_uuids_cache_entry_alone(
+        self, fake_folder_paths: Path
+    ) -> None:
+        store.append_batch(VALID_UUID, _make_batch(1))
+        store.with_frame_mtimes(VALID_UUID, store.list_refs(VALID_UUID))
+        store.append_batch(OTHER_VALID_UUID, _make_batch(1))
+        store.with_frame_mtimes(OTHER_VALID_UUID, store.list_refs(OTHER_VALID_UUID))
+        assert VALID_UUID in store._mtime_cache
+        assert OTHER_VALID_UUID in store._mtime_cache
+
+        store.clear(OTHER_VALID_UUID)
+
+        assert OTHER_VALID_UUID not in store._mtime_cache  # invalidated
+        assert VALID_UUID in store._mtime_cache  # a different uuid, untouched
+
+    # -------------------------------------------------------- small + evicted
+
+    def test_cache_never_grows_past_the_max_and_evicts_least_recently_used(
+        self, fake_folder_paths: Path
+    ) -> None:
+        assert store._MTIME_CACHE_MAX_UUIDS > 0
+        count = store._MTIME_CACHE_MAX_UUIDS + 1
+        uuids = [f"{i:08x}-0000-4000-8000-000000000000" for i in range(count)]
+        for grid_uuid in uuids:
+            store.append_batch(grid_uuid, _make_batch(1))
+            store.with_frame_mtimes(grid_uuid, store.list_refs(grid_uuid))
+
+        assert len(store._mtime_cache) == store._MTIME_CACHE_MAX_UUIDS
+        assert uuids[0] not in store._mtime_cache  # the least-recently-used entry was evicted
+        assert uuids[-1] in store._mtime_cache  # the most recent one survives
 
 
 class TestThumbnailPath:

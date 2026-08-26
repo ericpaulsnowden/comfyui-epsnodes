@@ -82,6 +82,17 @@ provenance-baked saves included, costs ~25–50 ms per run):
   Checkpoint Switcher parks all loaded weights on the CPU before the sweep
   starts, so idle models never squat on VRAM while another one samples.
 
+- **The panels stay instant while workflows run (v0.82.0).** Every panel
+  gesture was audited against a busy server: clicking a prompt in the
+  Notebook now uses the text it already has (zero network requests);
+  Save/Push/Delete on the State Controller, notebook drags, renames and
+  multi-deletes all paint immediately and do their (possibly slow) NAS round
+  trip in the background — failures come back loud, never silent; every
+  remaining backend route moved its file work off the server's event loop,
+  so one slow panel request can no longer stall ComfyUI itself. A write that
+  never answers times out after 30 s and reloads to show you what actually
+  landed, instead of wedging the panel.
+
 Two dials on *your* side that measurably matter at scale:
 
 - **Sampler live previews** re-render per step, per run — for a big

@@ -949,9 +949,35 @@ function applyPinView(state) {
   state.node.graph?.setDirtyCanvas(true, true)
 }
 
-/** ONE `GET /lora_library/set?slug=` per pin (token-guarded against a newer
- * pin / unpin landing first): 404 -> "state no longer exists", any other
- * failure -> "current state unavailable" (logged), success -> compare. */
+/**
+ * FORMAT.md §6.2 provenance M3 (2026-08-26 while-running round, finding 3):
+ * every pinned Apply-Set node used to run its OWN `GET /lora_library/set`
+ * drift check independently -- N nodes pinned to the SAME slug (the WAN
+ * hi+lo pattern: two Apply nodes sharing one captured state) fired N
+ * identical requests on every `configure()`, and mid-run the server is
+ * GIL-busy while the library may sit on a slow NAS mount, so that fanout
+ * piled directly onto the worst possible moment. A short-TTL + in-flight
+ * cache keyed by slug -- refreshSetsCache's `fetchInFlight` idiom above,
+ * cloned per-slug instead of global -- lets every node pinned to one slug
+ * share a single request. TTL is short (nowhere near list_sets' 30 s
+ * LISTING_RESCAN_S) so a badge still notices a genuine drift -- someone
+ * editing the state on another machine -- within one poll's reach rather
+ * than caching it away.
+ */
+const PIN_DRIFT_CACHE_TTL_MS = 5000
+/** slug -> {data, fetchedAt} -- a fresh successful GET /lora_library/set. */
+const pinDriftCache = new Map()
+/** slug -> in-flight GET promise (resolves/rejects exactly like
+ * `api.getJson`) -- joined by every caller sharing that slug, never
+ * duplicated. Kept inline in fetchPinDrift below (rather than split into
+ * its own helper) so the request itself stays a single, easy-to-audit
+ * `api.getJson('/lora_library/set', { slug })` call site. */
+const pinDriftInFlight = new Map()
+
+/** ONE (per-slug-shared, see the const block above) `GET
+ * /lora_library/set?slug=` per pin (token-guarded against a newer pin /
+ * unpin landing first): 404 -> "state no longer exists", any other failure
+ * -> "current state unavailable" (logged), success -> compare. */
 async function fetchPinDrift(state) {
   const token = state.driftToken
   const slug = state.pin?.slug
@@ -961,7 +987,22 @@ async function fetchPinDrift(state) {
     return
   }
   try {
-    const data = await api.getJson('/lora_library/set', { slug })
+    const cached = pinDriftCache.get(slug)
+    let pending = pinDriftInFlight.get(slug)
+    if (cached && Date.now() - cached.fetchedAt < PIN_DRIFT_CACHE_TTL_MS) {
+      pending = Promise.resolve(cached.data)
+    } else if (!pending) {
+      pending = api.getJson('/lora_library/set', { slug })
+        .then((result) => {
+          pinDriftCache.set(slug, { data: result, fetchedAt: Date.now() })
+          return result
+        })
+        .finally(() => {
+          pinDriftInFlight.delete(slug)
+        })
+      pinDriftInFlight.set(slug, pending)
+    }
+    const data = await pending
     if (token !== state.driftToken) return
     state.driftCurrent = data
     state.driftStatus = comparePinnedSet(state.pin.set, data)
@@ -1128,6 +1169,12 @@ export function initSetsFreshness() {
     // `refreshOptions` -> `resolveRawValues`), i.e. THIS module's function
     // and THIS cache. The forced cache refresh below is the whole job.
     await refreshSetsCache(true)
+    // 2026-08-26 while-running round (finding 3): a CRUD just changed a set
+    // on disk -- drop the per-slug pin-drift memo too, so the FIRST drift
+    // check after a save/delete is exact rather than serving a pre-CRUD
+    // answer for up to PIN_DRIFT_CACHE_TTL_MS.
+    pinDriftCache.clear()
+    pinDriftInFlight.clear()
   })
   // `app.graph` exists by `setup()`; arm the mirrors-tag watch on the root
   // (and any subgraphs already present) before any node can be removed.

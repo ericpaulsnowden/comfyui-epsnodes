@@ -10,6 +10,7 @@ own `fake_folder_paths` fixture does for its route.
 from __future__ import annotations
 
 import sys
+import threading
 import types
 
 import pytest
@@ -83,6 +84,52 @@ class TestCheckpointsRouteNoLoopbackGate:
             "/eps_ckpt/checkpoints", headers={"X-Forwarded-For": "192.168.1.50"}
         )
         assert response.status == 200
+
+
+class _ThreadRecorder:
+    """Wraps a function, recording which OS thread ran each call before
+    delegating to the original -- ``test_nas_io_round.py``'s identical
+    helper, duplicated here rather than imported since that module isn't
+    one of this pack's ``eps_image`` route tests and shouldn't gain a
+    cross-file dependency for one small helper."""
+
+    def __init__(self, original) -> None:
+        self.original = original
+        self.threads: list[int] = []
+
+    def __call__(self, *args, **kwargs):
+        self.threads.append(threading.get_ident())
+        return self.original(*args, **kwargs)
+
+
+class TestOffLoop:
+    """2026-08-26 while-running round: ``folder_paths.get_filename_list``
+    does a real scandir/stat pass, not a cached lookup -- synchronously on
+    the event loop it competes with every other coroutine while the server
+    is GIL-busy mid-run. Now wrapped in ``asyncio.to_thread`` (the pack's
+    established idiom, ``routes_image_grid.py``'s preview branch)."""
+
+    async def test_get_filename_list_runs_off_the_event_loop_thread(
+        self, monkeypatch: pytest.MonkeyPatch, aiohttp_client
+    ) -> None:
+        loop_thread = threading.get_ident()
+        checkpoints = ["a.safetensors", "styles/b.safetensors"]
+        recorder = _ThreadRecorder(
+            lambda folder: list(checkpoints) if folder == "checkpoints" else []
+        )
+        fake_module = types.ModuleType("folder_paths")
+        fake_module.get_filename_list = recorder
+        monkeypatch.setitem(sys.modules, "folder_paths", fake_module)
+        app = web.Application()
+        app.add_routes(routes_checkpoint_switcher.build_routes())
+        client = await aiohttp_client(app)
+
+        response = await client.get("/eps_ckpt/checkpoints")
+
+        assert response.status == 200
+        assert (await response.json()) == {"checkpoints": checkpoints}
+        # Byte-identical response, just not built on the loop thread.
+        assert recorder.threads and all(t != loop_thread for t in recorder.threads)
 
 
 class TestBuildRoutesAndRegister:

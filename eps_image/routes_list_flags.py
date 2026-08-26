@@ -27,10 +27,20 @@ Registered onto ``PromptServer.instance.routes`` through the same
 ``register``/``build_routes``/``register_routes`` split as
 ``routes_checkpoint_switcher.py`` (tests wrap ``build_routes()`` in a plain
 ``aiohttp`` app with a fake ``nodes`` module -- no ComfyUI needed).
+
+**2026-08-26 while-running round:** the answer is static for the process's
+whole life (see :data:`_cached_response`'s docstring for why), so a
+successful walk is memoized at module scope after the first request and
+every later request is answered from that cached dict with no walk at all;
+the one-time miss path still walks ``NODE_CLASS_MAPPINGS`` off the event
+loop via ``asyncio.to_thread`` (this pack's established idiom for a
+non-trivial synchronous pass inside an aiohttp handler --
+``routes_image_grid.py``'s preview branch).
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any
 
@@ -64,15 +74,56 @@ def collect_list_flags(mappings: Any) -> dict[str, dict[str, Any]]:
     return out
 
 
+#: Memoized ``{"classes": {...}}`` body (2026-08-26 while-running round):
+#: every request used to re-walk ALL of ``NODE_CLASS_MAPPINGS``
+#: synchronously, on the loop, for an answer that's static for the whole
+#: life of the process -- a loaded class's ``INPUT_IS_LIST``/
+#: ``OUTPUT_IS_LIST``/``RETURN_TYPES`` never change after import, and
+#: ``NODE_CLASS_MAPPINGS`` itself only grows new entries at custom-node
+#: LOAD time (server startup). This pack has no cheap in-process signal for
+#: "a custom node was hot-reloaded without a process restart" -- every
+#: reload path this repo has run against (ComfyUI-Manager's Restart,
+#: `--reload`, a plain process bounce) re-execs the server, which
+#: re-imports this module and drops the cache for free -- so rather than
+#: invent a polling/mtime scheme for a signal that doesn't exist, staleness
+#: is accepted up to the next restart (documented here rather than gated on
+#: anything). Only a SUCCESSFUL walk is cached: a transient failure (an
+#: empty/degenerate ``nodes`` module, or the walk raising) must not wedge
+#: every later request behind one bad answer.
+_cached_response: dict[str, Any] | None = None
+
+
+def _reset_cache() -> None:
+    """Test-only: drop the memoized response so the next request re-walks
+    ``NODE_CLASS_MAPPINGS``. Production code never calls this -- see
+    :data:`_cached_response`'s docstring for why the process-lifetime cache
+    is safe without one."""
+    global _cached_response
+    _cached_response = None
+
+
 def register_routes(routes: web.RouteTableDef) -> None:
     """Attach the list-flags route to *routes*."""
 
     @routes.get(ROUTE)
     async def get_list_flags(request: web.Request) -> web.Response:
-        import nodes  # ComfyUI's own module; only importable inside ComfyUI
+        global _cached_response
+        if _cached_response is None:
+            import nodes  # ComfyUI's own module; only importable inside ComfyUI
 
-        mappings = getattr(nodes, "NODE_CLASS_MAPPINGS", {})
-        return web.json_response({"classes": collect_list_flags(mappings)})
+            mappings = getattr(nodes, "NODE_CLASS_MAPPINGS", {})
+            # One getattr per loaded class, but a large custom-node install
+            # can mean hundreds of classes -- off the loop like every other
+            # non-trivial CPU pass in this pack's routes (paid at most once
+            # per process; see _cached_response above). A concurrent request
+            # arriving before this one lands can redundantly kick off its
+            # own to_thread walk too (no lock here) -- both compute the same
+            # answer, so the only cost is a rare duplicate walk right at
+            # warm-up, the same race this pack already accepts in
+            # image_grid_store.thumbnail_path's cache-miss path.
+            classes = await asyncio.to_thread(collect_list_flags, mappings)
+            _cached_response = {"classes": classes}
+        return web.json_response(_cached_response)
 
 
 def build_routes() -> web.RouteTableDef:

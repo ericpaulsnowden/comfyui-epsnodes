@@ -359,6 +359,102 @@ async def test_post_set_delete_missing_slug_is_400(
     assert resp.status == 400
 
 
+# ---------------------------- warm-cache response parity (2026-08-26 while-running round)
+
+
+async def test_post_set_response_matches_a_forced_fresh_listing(
+    context: LibraryContext, aiohttp_client
+) -> None:
+    """Finding 1: save_set now splices the just-saved summary into a warm
+    listing cache instead of forcing a full rescan to build this route's
+    response -- the hard requirement is that the response stays byte-for-
+    byte what a forced fresh scan would produce, order included (unit
+    coverage of the splice mechanism itself lives in test_sets_store.py;
+    this pins the same guarantee at the HTTP boundary)."""
+    client = await aiohttp_client(make_app(context))
+    await client.post("/lora_library/set", json={"set": {"name": "Zebra", "loras": []}})
+    await client.post("/lora_library/set", json={"set": {"name": "Apple", "loras": []}})
+    resp = await client.post("/lora_library/set", json={"set": {"name": "Mango", "loras": []}})
+    assert resp.status == 200
+    body = await resp.json()
+
+    sets_store.clear_caches()
+    forced = sets_store.list_sets(context)
+    assert body["sets"] == forced
+    assert [s["name"] for s in body["sets"]] == ["Apple", "Mango", "Zebra"]
+
+
+async def test_post_set_delete_response_matches_a_forced_fresh_listing(
+    context: LibraryContext, aiohttp_client
+) -> None:
+    """Same guarantee as above, for POST /set/delete (finding 1's other
+    half)."""
+    client = await aiohttp_client(make_app(context))
+    await client.post("/lora_library/set", json={"set": {"name": "Alpha", "loras": []}})
+    created = await client.post("/lora_library/set", json={"set": {"name": "Bravo", "loras": []}})
+    await client.post("/lora_library/set", json={"set": {"name": "Charlie", "loras": []}})
+    slug = (await created.json())["slug"]
+
+    resp = await client.post("/lora_library/set/delete", json={"slug": slug})
+    assert resp.status == 200
+    body = await resp.json()
+
+    sets_store.clear_caches()
+    forced = sets_store.list_sets(context)
+    assert body["sets"] == forced
+    assert [s["name"] for s in body["sets"]] == ["Alpha", "Charlie"]
+
+
+async def test_post_set_skips_the_full_rescan_when_the_listing_was_already_warm(
+    context: LibraryContext, aiohttp_client, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The core of finding 1 ("Save pays a guaranteed double NAS round
+    trip"): once a listing is warm -- the State Controller's own shared
+    poll makes this the common case mid-run -- a save must not force a
+    rescan of every set file just to build its response."""
+    client = await aiohttp_client(make_app(context))
+    await client.get("/lora_library/sets")  # warms the listing cache
+
+    calls: list[int] = []
+    original = sets_store._scan_sets
+
+    def counting(ctx: LibraryContext, sets_dir):
+        calls.append(1)
+        return original(ctx, sets_dir)
+
+    monkeypatch.setattr(sets_store, "_scan_sets", counting)
+
+    resp = await client.post("/lora_library/set", json={"set": {"name": "Fresh", "loras": []}})
+    assert resp.status == 200
+    assert calls == []  # the splice served the response -- no rescan
+
+
+async def test_get_set_repeated_reads_do_not_reparse_an_unchanged_file(
+    context: LibraryContext, aiohttp_client, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Finding 2: GET /lora_library/set (load_set) used to open+parse the
+    file on EVERY call, including the pin-drift check every pinned Apply-Set
+    node fires against this exact route."""
+    client = await aiohttp_client(make_app(context))
+    await client.post("/lora_library/set", json={"set": {"name": "Foo", "loras": []}})
+    warm = await client.get("/lora_library/set", params={"slug": "foo"})
+    assert warm.status == 200  # warms load_set's per-file cache
+
+    calls: list[int] = []
+    original = sets_store.normalize_set
+
+    def counting(raw: object):
+        calls.append(1)
+        return original(raw)
+
+    monkeypatch.setattr(sets_store, "normalize_set", counting)
+
+    second = await client.get("/lora_library/set", params={"slug": "foo"})
+    third = await client.get("/lora_library/set", params={"slug": "foo"})
+    assert second.status == third.status == 200
+    assert calls == []
+
+
 # -------------------------------------------------- unreachable library dir
 
 

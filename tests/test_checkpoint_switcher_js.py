@@ -348,7 +348,7 @@ def test_fetch_and_configure_both_reconcile_through_the_same_resync(source: str)
     `state.selection` from the widget's CURRENT value via the same
     function, rather than each trusting its own private snapshot."""
     configure_body = _function_body(source, "wireConfigureReload(state)")
-    load_body = _function_body(source, "loadCheckpoints(state)")
+    load_body = _function_body(source, "loadCheckpoints(state, force = false)")
     assert "reloadFromWidget(state)" in configure_body
     assert "reloadFromWidget(state)" in load_body
     reload_body = _function_body(source, "reloadFromWidget(state)")
@@ -432,9 +432,11 @@ def test_fetch_failure_has_an_inline_error_and_a_retry_control(source: str) -> N
     render_body = _function_body(source, "renderList(state)")
     assert "state.error" in render_body
     assert "'Retry'" in render_body
-    assert "loadCheckpoints(state)" in render_body.split("'Retry'", 1)[1][:300]
+    # `true` -- Retry forces a fresh fetch rather than re-awaiting the shared
+    # promise (see test_retry_forces_a_fresh_shared_fetch below).
+    assert "loadCheckpoints(state, true)" in render_body.split("'Retry'", 1)[1][:300]
 
-    load_body = _function_body(source, "loadCheckpoints(state)")
+    load_body = _function_body(source, "loadCheckpoints(state, force = false)")
     assert "} catch (error) {" in load_body
     assert "state.error = (error && error.message) || 'Failed to load checkpoints'" in load_body
 
@@ -446,6 +448,50 @@ def test_attach_never_throws_out_of_the_initial_load_either(source: str) -> None
     an unhandled promise rejection."""
     body = _function_body(source, "attach(node)")
     assert "loadCheckpoints(state).catch((error) => console.warn(PREFIX," in body
+
+
+# ------------------------------------------------- shared cross-node fetch
+# (2026-08-26 while-running round: N attached panels used to fire N GETs to
+# /eps_ckpt/checkpoints on attach -- see routes_checkpoint_switcher.py's
+# to_thread finding for the matching backend-side round.)
+
+
+def test_checkpoint_fetch_is_shared_across_panels_via_a_module_promise(source: str) -> None:
+    """Every panel now awaits ONE module-scope in-flight/cached promise
+    instead of firing its own request -- same shape as `cross_sweep.js`'s
+    `listFlagsPromise` (module-scope, created lazily, reused)."""
+    assert "let checkpointsPromise = null" in source
+    fetch_body = _function_body(source, "fetchCheckpointsShared(force)")
+    assert "if (force || !checkpointsPromise) {" in fetch_body
+    assert "checkpointsPromise = (async () => {" in fetch_body
+    assert "return checkpointsPromise" in fetch_body
+    assert "api.fetchApi(ROUTE)" in fetch_body
+
+    load_body = _function_body(source, "loadCheckpoints(state, force = false)")
+    assert "await fetchCheckpointsShared(force)" in load_body
+    # the direct fetch moved into the shared function -- loadCheckpoints no
+    # longer calls the network itself.
+    assert "api.fetchApi(ROUTE)" not in load_body
+
+
+def test_a_failed_shared_fetch_clears_the_slot_so_the_next_caller_retries(source: str) -> None:
+    """A rejected fetch must not wedge every future attach (a fresh node
+    dropped in later, or Retry) behind one stale error forever -- the shared
+    promise is cleared before rethrowing, unlike `cross_sweep.js`'s
+    `listFlagsPromise` (which never rejects at all, so this case can't arise
+    there)."""
+    fetch_body = _function_body(source, "fetchCheckpointsShared(force)")
+    assert "} catch (error) {" in fetch_body
+    assert "checkpointsPromise = null" in fetch_body
+    assert "throw error" in fetch_body
+
+
+def test_retry_forces_a_fresh_shared_fetch(source: str) -> None:
+    """Retry must bypass whatever the shared promise currently holds --
+    `force=true` -- not just re-await a possibly-stale-failed promise every
+    other panel is also sharing."""
+    render_body = _function_body(source, "renderList(state)")
+    assert "loadCheckpoints(state, true)" in render_body.split("'Retry'", 1)[1][:300]
 
 
 # ---------------------------------------------------- window-listener safety

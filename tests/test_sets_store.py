@@ -17,6 +17,54 @@ from lora_library import sets_store
 from lora_library.context import LibraryContext
 from lora_library.routes import SLUG_RE
 
+# 2026-08-26 while-running round test helpers: monkeypatch-based call
+# counters shared by TestSaveDeleteWarmCacheSplice (finding 1) and
+# TestLoadSetCache (finding 2), each scoped to exactly the seam the
+# corresponding cache is meant to bypass on a warm hit.
+
+
+def _scan_counter(monkeypatch: pytest.MonkeyPatch) -> list[int]:
+    """Counts real `_scan_sets` calls -- the full directory rescan
+    finding 1's listing splice is meant to make unnecessary on a warm hit."""
+    calls: list[int] = []
+    original = sets_store._scan_sets
+
+    def counting(context: LibraryContext, sets_dir: Path) -> list[dict]:
+        calls.append(1)
+        return original(context, sets_dir)
+
+    monkeypatch.setattr(sets_store, "_scan_sets", counting)
+    return calls
+
+
+def _parse_counter(monkeypatch: pytest.MonkeyPatch) -> list[int]:
+    """Counts real `normalize_set` calls -- the read+parse+validate work
+    finding 2's load cache is meant to skip on a warm (mtime_ns, size) hit.
+    """
+    calls: list[int] = []
+    original = sets_store.normalize_set
+
+    def counting(raw: object) -> dict:
+        calls.append(1)
+        return original(raw)
+
+    monkeypatch.setattr(sets_store, "normalize_set", counting)
+    return calls
+
+
+def _stat_counter(monkeypatch: pytest.MonkeyPatch) -> list[int]:
+    """Counts real `Path.stat` calls -- finding 2's freshness check must
+    NEVER be skipped, only the parse behind it."""
+    calls: list[int] = []
+    original = Path.stat
+
+    def counting(self: Path, *args: object, **kwargs: object) -> object:
+        calls.append(1)
+        return original(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "stat", counting)
+    return calls
+
 # ------------------------------------------------------------------- slugify
 
 
@@ -753,3 +801,209 @@ class TestSetsLayoutV0650:
         """list_sets globs sets_dir/*.json and warns on non-slug stems --
         the layout must never be inside it."""
         assert sets_store.layout_path(context).parent != context.sets_dir()
+
+
+# ------------------------------------ warm-cache splice (2026-08-26 while-running round)
+
+
+class TestSaveDeleteWarmCacheSplice:
+    """Finding 1: `save_set`/`delete_set` used to force the very next
+    `list_sets()` call (routes_sets.py's save/delete handlers both tail one
+    onto their response, per FORMAT.md §5) into a full disk rescan, by
+    evicting the whole listing cache unconditionally on every write. They
+    now splice the one changed slug into an already-cached listing instead,
+    verified two ways below: (1) the spliced result is byte-for-byte what a
+    FORCED fresh scan (`clear_caches()` then `list_sets()`) produces -- the
+    finding's hard "response shape identical" requirement, order included
+    -- and (2) no `_scan_sets` call happens at all when the listing was
+    already warm.
+    """
+
+    def test_save_after_a_warm_listing_matches_a_forced_fresh_scan(
+        self, context: LibraryContext, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        sets_store.save_set(context, {"name": "Alpha", "loras": []})
+        sets_store.save_set(context, {"name": "Zebra", "loras": []})
+        sets_store.list_sets(context)  # warms the listing cache
+        calls = _scan_counter(monkeypatch)
+
+        sets_store.save_set(context, {"name": "Mango", "loras": [{"file": "a.safetensors"}]})
+        spliced = sets_store.list_sets(context)
+
+        assert calls == []  # the splice served it -- no rescan
+        sets_store.clear_caches()
+        forced = sets_store.list_sets(context)
+        assert spliced == forced
+        assert [e["name"] for e in spliced] == ["Alpha", "Mango", "Zebra"]
+
+    def test_rename_via_explicit_slug_matches_a_forced_fresh_scan(
+        self, context: LibraryContext, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        slug, _ = sets_store.save_set(context, {"name": "Foo", "loras": []})
+        sets_store.save_set(context, {"name": "Bravo", "loras": []})
+        sets_store.list_sets(context)
+        calls = _scan_counter(monkeypatch)
+
+        sets_store.save_set(context, {"name": "Zzz Renamed", "loras": []}, slug=slug)
+        spliced = sets_store.list_sets(context)
+
+        assert calls == []
+        sets_store.clear_caches()
+        forced = sets_store.list_sets(context)
+        assert spliced == forced
+        assert [e["name"] for e in spliced] == ["Bravo", "Zzz Renamed"]
+
+    def test_delete_after_a_warm_listing_matches_a_forced_fresh_scan(
+        self, context: LibraryContext, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        slug_a, _ = sets_store.save_set(context, {"name": "Alpha", "loras": []})
+        sets_store.save_set(context, {"name": "Bravo", "loras": []})
+        sets_store.save_set(context, {"name": "Charlie", "loras": []})
+        sets_store.list_sets(context)
+        calls = _scan_counter(monkeypatch)
+
+        assert sets_store.delete_set(context, slug_a) is True
+        spliced = sets_store.list_sets(context)
+
+        assert calls == []
+        sets_store.clear_caches()
+        forced = sets_store.list_sets(context)
+        assert spliced == forced
+        assert [e["name"] for e in spliced] == ["Bravo", "Charlie"]
+
+    def test_no_warm_listing_yet_falls_back_to_one_normal_scan(
+        self, context: LibraryContext, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """No regression for the cold-start case (nothing cached yet, e.g.
+        right after the process starts): the splice is a documented no-op,
+        so the very next `list_sets()` just scans once, exactly as it
+        always did -- not zero (nothing to splice into), not more than one.
+        """
+        calls = _scan_counter(monkeypatch)
+        sets_store.save_set(context, {"name": "Solo", "loras": []})
+        listed = sets_store.list_sets(context)
+        assert [e["name"] for e in listed] == ["Solo"]
+        assert len(calls) == 1
+
+    def test_delete_of_unknown_slug_leaves_a_warm_listing_untouched(
+        self, context: LibraryContext, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """delete_set's FileNotFoundError branch (nothing to splice -- see
+        its own comment) still forgets the listing outright rather than
+        guessing; the following list_sets() call must still land on the
+        correct, complete set -- just via one real rescan, not a splice."""
+        sets_store.save_set(context, {"name": "Alpha", "loras": []})
+        sets_store.list_sets(context)
+        calls = _scan_counter(monkeypatch)
+
+        assert sets_store.delete_set(context, "ghost-slug") is False
+        listed = sets_store.list_sets(context)
+        assert [e["name"] for e in listed] == ["Alpha"]
+        assert len(calls) == 1  # forgotten, not spliced -- one real rescan
+
+
+class TestLoadSetCache:
+    """Finding 2: `load_set` (``GET /lora_library/set``) used to open+parse
+    the file on EVERY call -- including the pin-drift check every pinned
+    Apply-Set node fires. Backed now by a per-file (mtime_ns, size) cache,
+    the same idiom `_entry_cache` already used for listings, applied to the
+    FULL normalized dict this time."""
+
+    def test_unchanged_file_parses_once_across_repeated_loads(
+        self, context: LibraryContext, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        slug, _ = sets_store.save_set(
+            context, {"name": "Foo", "loras": [{"file": "a.safetensors"}]}
+        )
+        sets_store.load_set(context, slug)  # warms the load cache
+        parses = _parse_counter(monkeypatch)
+
+        first = sets_store.load_set(context, slug)
+        second = sets_store.load_set(context, slug)
+        third = sets_store.load_set(context, slug)
+
+        assert parses == []  # every call was a warm (mtime_ns, size) hit
+        assert first == second == third
+        assert first["loras"][0]["file"] == "a.safetensors"
+
+    def test_stat_still_runs_on_every_call_even_when_warm(
+        self, context: LibraryContext, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The freshness check itself (the stat) is never skipped -- only
+        the parse behind a cache hit is."""
+        slug, _ = sets_store.save_set(context, {"name": "Foo", "loras": []})
+        sets_store.load_set(context, slug)
+        stats = _stat_counter(monkeypatch)
+
+        sets_store.load_set(context, slug)
+        sets_store.load_set(context, slug)
+
+        assert len(stats) >= 2
+
+    def test_save_set_warms_the_load_cache_so_the_next_load_is_free(
+        self, context: LibraryContext, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """save_set warms `_load_cache` directly with what it just wrote
+        (see its own 2026-08-26 comment) -- so a save followed by a load
+        (the common "save, then re-fetch to confirm" shape) costs zero
+        extra parses, not merely one instead of a full rescan."""
+        slug, _ = sets_store.save_set(context, {"name": "Foo", "loras": []})
+        sets_store.load_set(context, slug)
+        parses = _parse_counter(monkeypatch)
+
+        sets_store.save_set(
+            context, {"name": "Foo", "loras": [{"file": "a.safetensors"}]}, slug=slug
+        )
+        # save_set's own `normalize_set(set_data)` call (unavoidable -- every
+        # save validates its payload) is the only entry so far.
+        assert len(parses) == 1
+        reloaded = sets_store.load_set(context, slug)
+
+        assert reloaded["loras"][0]["file"] == "a.safetensors"
+        assert len(parses) == 1  # the follow-up load_set() added none
+
+    def test_out_of_process_edit_is_detected_via_stat_and_reparsed(
+        self, context: LibraryContext, library_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An edit that does NOT go through this process's own save_set
+        (another machine sharing the NAS library, or a hand edit) can only
+        be noticed via the file's own (mtime_ns, size) -- exercised here by
+        writing straight to the file, bypassing save_set's cache-warming
+        entirely. The new content differs in byte SIZE from what was
+        cached, which alone forces a cache miss regardless of any
+        filesystem's mtime resolution."""
+        slug, _ = sets_store.save_set(context, {"name": "Foo", "loras": []})
+        sets_store.load_set(context, slug)  # warms the load cache
+        parses = _parse_counter(monkeypatch)
+
+        path = library_dir / "sets" / f"{slug}.json"
+        path.write_text(
+            json.dumps({"format": 1, "name": "Foo", "loras": [{"file": "a.safetensors"}]}),
+            encoding="utf-8",
+        )
+
+        reloaded = sets_store.load_set(context, slug)
+        assert reloaded["loras"][0]["file"] == "a.safetensors"
+        assert len(parses) == 1
+
+    def test_returned_dict_is_independent_across_calls(self, context: LibraryContext) -> None:
+        """Same "safe to mutate freely" contract list_sets() already
+        documents for its summaries -- a cache hit must never hand back an
+        aliased object."""
+        slug, _ = sets_store.save_set(
+            context, {"name": "Foo", "loras": [{"file": "a.safetensors"}]}
+        )
+        first = sets_store.load_set(context, slug)
+        first["loras"][0]["strength"] = 999.0
+        first["name"] = "MUTATED"
+
+        second = sets_store.load_set(context, slug)
+        assert second["name"] == "Foo"
+        assert second["loras"][0]["strength"] == 1.0
+
+    def test_missing_slug_is_still_none_with_the_cache_in_play(
+        self, context: LibraryContext, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        parses = _parse_counter(monkeypatch)
+        assert sets_store.load_set(context, "does-not-exist") is None
+        assert parses == []
