@@ -560,6 +560,70 @@ def register(context: LibraryContext, routes: web.RouteTableDef) -> None:
             }
         )
 
+    @routes.post("/lora_library/notebook/delete_category")
+    async def post_notebook_delete_category(request: web.Request) -> web.Response:
+        """FORMAT.md §5's delete_category row / §3.4 Delete category: remove
+        one category's heading line, MERGING its §3.1 description and every
+        entry it held into the block above it (the implicit head region when
+        it was the first category, which just uncategorizes them). Nothing is
+        deleted but the heading — the entry-deleting route is
+        ``post_notebook_delete`` above, and this one can never reach an
+        entry. Same guard/conflict shape as ``post_notebook_move_category``
+        above; an unknown ``name`` — including the header-less uncategorized
+        head region — is 404 via ``markdown_store.CategoryNotFoundError``.
+
+        Returns the usual ``entries``/``categories`` refresh plus
+        ``merged_into`` (the name the contents joined, ``""`` for the head
+        region) and ``entries_moved``, which §7.2's panel reports so the
+        merge is visible rather than inferred."""
+        try:
+            body = await request.json()
+        except Exception:  # broad: malformed body is a client error
+            return error_response(400, "body must be JSON")
+        if not isinstance(body, dict):
+            return error_response(400, "body must be a JSON object")
+
+        path, err = await _resolve_and_guard(context, request, body.get("file"), writing=True)
+        if err is not None:
+            return err
+
+        name = body.get("name")
+        if not isinstance(name, str) or not name.strip():
+            return error_response(400, "'name' is required")
+        base_mtime = body.get("base_mtime")
+        if base_mtime is not None and not isinstance(base_mtime, (int, float)):
+            return error_response(400, "'base_mtime' must be a number")
+
+        try:
+            parsed, current_mtime, line_ending = await asyncio.to_thread(
+                markdown_store.load_notebook, path
+            )
+        except markdown_store.MarkdownStoreError as exc:
+            return error_response(400, str(exc))
+        try:
+            markdown_store.check_conflict(base_mtime, current_mtime)
+        except markdown_store.ConflictError as exc:
+            return web.json_response({"error": str(exc), "mtime": exc.current_mtime}, status=409)
+
+        try:
+            result = markdown_store.delete_category(parsed, name)
+        except markdown_store.CategoryNotFoundError as exc:
+            return error_response(404, str(exc))
+
+        new_mtime = await asyncio.to_thread(
+            markdown_store.save_notebook, path, parsed, line_ending
+        )
+        return web.json_response(
+            {
+                "ok": True,
+                "mtime": new_mtime,
+                "entries": markdown_store.list_entries(parsed),
+                "categories": markdown_store.list_categories(parsed),
+                "merged_into": result["merged_into"],
+                "entries_moved": result["entries"],
+            }
+        )
+
     @routes.post("/lora_library/notebook/open_folder")
     async def post_notebook_open_folder(request: web.Request) -> web.Response:
         """FORMAT.md §5's ``open_folder`` row: reveal the resolved file's

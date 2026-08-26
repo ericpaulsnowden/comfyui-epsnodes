@@ -1006,6 +1006,97 @@ class TestMoveCategory:
             ms.move_category(parsed, "Cat A", before="")
 
 
+class TestDeleteCategory:
+    """FORMAT.md §3.4 Delete category — the heading goes, its contents merge
+    into the block above (owner report 2026-08-25)."""
+
+    def test_heading_goes_and_entries_merge_into_the_category_above(self) -> None:
+        parsed = ms.parse("# Cat A\n## E1\nB1\n# Cat B\n## E2\nB2\n## E3\nB3\n")
+        result = ms.delete_category(parsed, "Cat B")
+        assert result == {"name": "Cat B", "merged_into": "Cat A", "entries": 2}
+        assert ms.list_categories(parsed) == ["Cat A"]
+        assert ms.list_entries(parsed) == [
+            {"name": "E1", "category": "Cat A"},
+            {"name": "E2", "category": "Cat A"},
+            {"name": "E3", "category": "Cat A"},
+        ]
+        assert ms.serialize(parsed) == [
+            "# Cat A", "## E1", "B1", "## E2", "B2", "## E3", "B3",
+        ]
+
+    def test_deleting_the_first_category_uncategorizes_its_entries(self) -> None:
+        parsed = ms.parse("# Cat A\n## E1\nB1\n# Cat B\n## E2\nB2\n")
+        result = ms.delete_category(parsed, "Cat A")
+        assert result == {"name": "Cat A", "merged_into": "", "entries": 1}
+        assert ms.list_entries(parsed) == [
+            {"name": "E1", "category": ""},
+            {"name": "E2", "category": "Cat B"},
+        ]
+        assert ms.serialize(parsed) == ["## E1", "B1", "# Cat B", "## E2", "B2"]
+
+    def test_emptied_heading_can_finally_be_removed(self) -> None:
+        # The reported case: remove_entry leaves the heading behind (§3.4),
+        # and this is the only write that can then retire it.
+        parsed = ms.parse("# Cat A\n## E1\nB1\n# Leftover\n")
+        assert ms.remove_entry(parsed, "E1") is True
+        assert ms.list_categories(parsed) == ["Cat A", "Leftover"]
+        assert ms.delete_category(parsed, "Leftover") == {
+            "name": "Leftover", "merged_into": "Cat A", "entries": 0,
+        }
+        assert ms.list_categories(parsed) == ["Cat A"]
+        assert ms.serialize(parsed) == ["# Cat A"]
+
+    def test_descriptions_concatenate_with_one_blank_line(self) -> None:
+        parsed = ms.parse("# Cat A\nabove prose\n# Cat B\nbelow prose\n## E1\nB1\n")
+        ms.delete_category(parsed, "Cat B")
+        assert ms.get_category_description(parsed, "Cat A") == "above prose\n\nbelow prose"
+        assert ms.serialize(parsed) == [
+            "# Cat A", "above prose", "", "below prose", "## E1", "B1",
+        ]
+
+    def test_description_survives_alone_when_the_block_above_has_none(self) -> None:
+        parsed = ms.parse("# Cat A\n## E1\nB1\n# Cat B\nonly prose\n")
+        ms.delete_category(parsed, "Cat B")
+        assert ms.get_category_description(parsed, "Cat A") == "only prose"
+
+    def test_entry_bodies_travel_byte_identically(self) -> None:
+        text = "# Cat A\n## E1\nB1\n# Cat B\n## E2\n  indented\n\n```\n# fenced\n```\n"
+        parsed = ms.parse(text)
+        ms.delete_category(parsed, "Cat B")
+        assert ms.get_entry(parsed, "E2")["text"] == "  indented\n\n```\n# fenced\n```"
+
+    def test_result_round_trips_through_a_reparse(self) -> None:
+        parsed = ms.parse("# Cat A\n## E1\nB1\n# Cat B\ndesc\n## E2\nB2\n")
+        ms.delete_category(parsed, "Cat B")
+        once = ms.serialize(parsed)
+        assert ms.serialize(ms.parse("\n".join(once))) == once
+
+    def test_repeated_name_targets_the_last_block_by_identity(self) -> None:
+        # Both "# Foo" blocks are EQUAL dataclasses (same name, no entries,
+        # no preamble), so a list.index()/remove() implementation would
+        # silently operate on the first one instead of the last.
+        parsed = ms.parse("# Foo\n# Bar\n## E1\nB1\n# Foo\n")
+        assert ms.delete_category(parsed, "Foo") == {
+            "name": "Foo", "merged_into": "Bar", "entries": 0,
+        }
+        assert ms.serialize(parsed) == ["# Foo", "# Bar", "## E1", "B1"]
+
+    def test_unknown_category_raises(self) -> None:
+        parsed = ms.parse("# Cat A\n## E1\nB1\n")
+        with pytest.raises(ms.CategoryNotFoundError):
+            ms.delete_category(parsed, "Nope")
+
+    @pytest.mark.parametrize("name", ["", "   "])
+    def test_head_region_has_no_heading_to_delete(self, name: str) -> None:
+        parsed = ms.parse("## E1\nB1\n# Cat A\n## E2\nB2\n")
+        with pytest.raises(ms.CategoryNotFoundError):
+            ms.delete_category(parsed, name)
+
+    def test_name_is_trimmed_like_every_other_category_write(self) -> None:
+        parsed = ms.parse("# Cat A\n## E1\nB1\n# Cat B\n## E2\nB2\n")
+        assert ms.delete_category(parsed, "  Cat B  ")["name"] == "Cat B"
+        assert ms.list_categories(parsed) == ["Cat A"]
+
 # -------------------------------------------------------------- round trips
 
 

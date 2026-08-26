@@ -443,6 +443,24 @@ execution — **the file is the truth; the UI is a view.**
 
 ### §6.1 `LoraLibraryNotebook` (display: "EPS Prompt Notebook")
 
+**Header parity with §6.2's controller (v0.81.0, owner: "this should be
+consistent in the prompt library as well").** `buildCategoryHeaderRow` is
+now label + delete button (`.llnb-category-label`/`.llnb-category-delete`,
+the controller's `.llsc-category-*` trio llnb-prefixed): collapsed headers
+show `▸ name (N)` (client-side count over loaded entries, no fetch), and
+every header carries an armed two-click ✕ (per-button `_armed`/timer,
+`DELETE_CONFIRM_MS` 4 s) that routes through the EXISTING
+`performDeleteCategory` → §5 `/delete_category` (non-destructive §3.4
+merge-upward; conflict/mtime handling and the `Collapsed sections`
+property cleanup ride along for free). The ✕ is isolated from the header's
+tap/rename machinery (stopPropagation + target guards); pinned mode never
+renders headers, so never the new UI. NOTE (shared-tree archaeology,
+2026-08-25): the §3.4 `delete_category` primitive + §5 route + the
+contextual Delete button shipped from a CONCURRENT session's working-tree
+round adopted into v0.81.0 — its FORMAT rows landed a commit early, inside
+v0.80.1's docs stage.
+
+
 **Content-derived `IS_CHANGED` (v0.80.0 sweep-performance round).** Through
 v0.79.0 the token was the whole file's mtime+size — so editing ANY entry in
 a big library file, even one the node never selected, cascaded through
@@ -587,6 +605,22 @@ collapse, and the rename then landed on a collapsed header).
   returns True (entry names are dynamic).
 
 ### §6.2 `LoraLibraryApplySet` (display: "EPS Apply LoRA Set")
+
+**v0.81.0 consistency round (owner reports 2026-08-25).** (1) `# name`
+creation: `_doNewCategory` paints the fresh group BEFORE `_saveLayout`'s
+POST (the sibling rename/drag flows already did; on a NAS the un-painted
+second read as "didn't create") and `_saveLayout`'s shared catch now toasts
+— a failed layout write was previously status-line-only, which is hidden by
+default. (2) Collapsed groups persist per workflow:
+`properties['Collapsed groups']` mirrors §6.1's `Collapsed sections` idiom
+(pure `parseCollapsedGroups`, read/write halves, 5 write-through sites,
+apply at construct + configure). (3) Delete State is optimistic:
+`_doDelete(entry)` removes the row from `_setsCache` and toasts
+`Deleting "X"…` before the POST; failure restores from a pre-mutation
+snapshot + loud toast; `_deleteInFlightSlugs` (a Set — concurrent deletes)
+filters every `_applySetsResponse` so a stale poller snapshot can never
+resurrect the row mid-flight.
+
 
 **`pinned_state` (STRING, optional, TAIL-appended after `set`/`strength_scale`/
 `loader_slot` and the model/clip sockets, default `""`, `multiline: false`,

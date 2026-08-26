@@ -246,10 +246,42 @@
  * reloads the entry pane even if the clicked entry was already the
  * "active" one underneath category mode) and clicking a header always
  * enters it, but neither path ever calls setSelection()/syncEntryWidget().
- * Delete is entry-only and disabled outright in category mode
- * (updateDeleteButtonEnabled()); double-clicking a header opens the inline
- * rename editor on the header itself, exactly like double-clicking an entry
- * row does (see "Renaming — TWO paths" above).
+ * Delete is CONTEXTUAL, the one exception to category mode's "UI-only"
+ * rule and the only §3.4 write that can remove a category heading (owner
+ * report 2026-08-25, "you can't delete section headers"): with a header
+ * active, Delete deletes THAT HEADER over §5's `delete_category` route
+ * (performDeleteCategory()) instead of the entry selection, which it never
+ * reads. It is deliberately non-destructive — the heading line goes and its
+ * §3.1 description plus every entry it held merge into the block above it
+ * (the uncategorized head region when it was the first category), so the
+ * gesture is "merge this section upward", never "delete these entries".
+ * That is what makes it safe to give a two-click confirm and no more; the
+ * armed status line names the destination and the count first
+ * (describePendingCategoryDelete()), and the result line repeats them from
+ * the server's own answer (deletedCategoryStatus()). It exists because
+ * nothing else could remove a heading: deleting a category's last ENTRY
+ * deliberately leaves the emptied heading in place (FORMAT.md §3.4,
+ * "categories are the user's prose, not derived state"), which left a
+ * header the panel could never get rid of afterwards. Double-clicking a
+ * header still opens the inline rename editor on the header itself, exactly
+ * like double-clicking an entry row does (see "Renaming — TWO paths"
+ * above).
+ *
+ * A SECOND entry point onto that same performDeleteCategory() sits on the
+ * header itself (owner report 2026-08-25, UI parity with the Lora State
+ * Controller's group headers: "When a group is closed in the state
+ * controller it has an x to delete and shows a number of items in the
+ * group. This should be consistent in the prompt library as well."):
+ * buildCategoryHeaderRow() shows `(N)` — categoryEntryCount() — next to a
+ * collapsed header's name, and buildCategoryDeleteButton() adds an inline ✕
+ * with its own local two-click arm/confirm (independent of the bottom
+ * Delete button's `state.deleteConfirmActive`), matching
+ * controller.js's `_buildCategoryHeader()` down to the class names
+ * (`llnb-category-label`/`-delete`/`-delete-armed`, that file's
+ * `llsc-` twins) and the CATEGORY_DELETE_CONFIRM_MS/DELETE_CONFIRM_MS
+ * timeout (both 4000ms). Confirming it sets `state.activeCategory` to that
+ * header's category and calls performDeleteCategory() directly — no second
+ * request path, no divergent wording.
  *
  * Single-tap collapse (owner ask 2026-07-19 "single tap category name to
  * collapse category"): a plain tap on a header now does TWO things at once
@@ -688,6 +720,9 @@ const CSS_TEXT = `
   cursor: pointer;
   border-radius: 3px;
   outline: none;
+  display: flex;
+  align-items: center;
+  gap: 4px;
 }
 .llnb-category:hover { background: var(--content-hover-bg, #2a2a2a); }
 .llnb-category:focus-visible { box-shadow: inset 0 0 0 1px var(--border-color, #444); }
@@ -696,6 +731,17 @@ const CSS_TEXT = `
   background: rgba(66, 133, 244, 0.22);
   color: var(--input-text, #ccc);
 }
+/* Owner report 2026-08-25 ("consistent with the state controller"): the
+   count-when-collapsed + armed X mirror controller.js's .llsc-category-*
+   trio exactly, llnb- prefixed. */
+.llnb-category-label { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.llnb-category-delete {
+  flex: 0 0 auto; background: none; border: none; cursor: pointer; padding: 0 2px;
+  color: var(--descrip-text, #999); font-size: 10px; line-height: 1; font-family: inherit;
+  visibility: hidden;
+}
+.llnb-category:hover .llnb-category-delete { visibility: visible; }
+.llnb-category-delete-armed { color: #ff6b6b; visibility: visible; }
 .llnb-entry {
   padding: 3px 7px;
   margin: 1px 0;
@@ -3400,6 +3446,74 @@ function buildEntryRow(state, entry) {
   return row
 }
 
+/** Number of entries currently under `category` (§3.4) — the source for the
+ * collapsed header's `(N)` badge below and for
+ * describePendingCategoryDelete()'s own count further down. Client-side
+ * only, off the already-loaded `state.entries` — no fetch (owner report
+ * 2026-08-25: "consistent with the state controller", which counts its own
+ * collapsed groups the same way, off its already-loaded layout). */
+function categoryEntryCount(state, category) {
+  return state.entries.filter((entry) => entry.category === category).length
+}
+
+/**
+ * The header's inline ✕ (owner report 2026-08-25, UI parity with the Lora
+ * State Controller's group headers — see controller.js's
+ * `_buildCategoryHeader()`: "▸ name (N)" collapsed, plus an armed two-click
+ * ✕ that removes the GROUP only). An armed two-click confirm LOCAL to this
+ * one button (`deleteBtn._armed`/`_armTimer`), entirely independent of the
+ * bottom Delete button's `state.deleteConfirmActive` — same as the
+ * controller's per-button arm state, so arming one header's ✕ never disarms
+ * another header's, or the bottom button's. Same DELETE_CONFIRM_MS window
+ * the bottom button already uses (also the controller's own
+ * `CATEGORY_DELETE_CONFIRM_MS` — both 4000ms).
+ *
+ * Confirming does not open a second request path: it enters category mode
+ * on `category` (the same `state.activeCategory` assignment selectCategory()
+ * makes, minus its async description fetch — nothing here needs the editor
+ * pane painted first) and calls the EXISTING performDeleteCategory(), which
+ * already posts §5's `/delete_category` route, drives the standard 409
+ * conflict UI, drops the name from `state.collapsedCategories` +
+ * `Collapsed sections`, and reports the merge from the server's own answer
+ * (deletedCategoryStatus()) — see the file header's "Delete is CONTEXTUAL"
+ * paragraph and performDeleteCategory()'s own doc.
+ */
+function buildCategoryDeleteButton(state, category) {
+  const deleteBtn = el('button', {
+    className: 'llnb-category-delete',
+    text: '✕',
+    attrs: {
+      type: 'button',
+      title: 'Remove this heading — its entries move to the block above. Click twice.'
+    }
+  })
+  deleteBtn.addEventListener('click', (event) => {
+    event.stopPropagation()
+    if (isPinned(state) || state.busy) return // M3 / mid-request guard
+    if (!deleteBtn._armed) {
+      deleteBtn._armed = true
+      deleteBtn.classList.add('llnb-category-delete-armed')
+      deleteBtn.textContent = 'sure?'
+      clearTimeout(deleteBtn._armTimer)
+      deleteBtn._armTimer = setTimeout(() => {
+        deleteBtn._armed = false
+        deleteBtn.classList.remove('llnb-category-delete-armed')
+        deleteBtn.textContent = '✕'
+      }, DELETE_CONFIRM_MS)
+      // Same reasoning as the bottom Delete button's own arm step (see
+      // onDeleteClick): the button is too narrow to say what a header
+      // delete does to the entries under it, so the status line spells the
+      // merge out here, before the second click.
+      setStatus(state, describePendingCategoryDelete(state, category))
+      return
+    }
+    clearTimeout(deleteBtn._armTimer)
+    state.activeCategory = category
+    performDeleteCategory(state).catch((error) => api.warn('category delete failed', error))
+  })
+  return deleteBtn
+}
+
 /**
  * A category header row (FORMAT.md §7.2 amendment): a tap toggles collapse
  * AND enters category mode (see the file header's "Single-tap collapse"
@@ -3415,14 +3529,34 @@ function buildCategoryHeaderRow(state, category) {
   if (state.activeCategory === category) classes.push('llnb-category-active')
   const collapsed = state.collapsedCategories.has(category)
 
-  const headerEl = el('div', {
-    className: classes.join(' '),
-    text: `${collapsed ? '▸' : '▾'} ${category}`,
-    attrs: { tabindex: '0', title: category }
+  // Count-when-collapsed + armed ✕ (owner report 2026-08-25: "consistent
+  // with the state controller") — see buildCategoryDeleteButton()'s doc.
+  const labelEl = el('span', {
+    className: 'llnb-category-label',
+    text: collapsed
+      ? `▸ ${category} (${categoryEntryCount(state, category)})`
+      : `▾ ${category}`
   })
+  const deleteBtn = buildCategoryDeleteButton(state, category)
+
+  const headerEl = el(
+    'div',
+    { className: classes.join(' '), attrs: { tabindex: '0', title: category } },
+    [labelEl, deleteBtn]
+  )
   headerEl.__llnbName = category
-  headerEl.addEventListener('pointerdown', (event) => onCategoryPointerDown(state, event, category))
+  headerEl.addEventListener('pointerdown', (event) => {
+    // The ✕ has its own click handler (buildCategoryDeleteButton) — it must
+    // never also arm the header's drag/collapse-toggle gesture below,
+    // exactly like controller.js's _buildCategoryHeader() target check.
+    if (event.target === deleteBtn) return
+    onCategoryPointerDown(state, event, category)
+  })
   headerEl.addEventListener('dblclick', (event) => {
+    // Same reasoning as the pointerdown guard above: a fast double-click
+    // that lands on the ✕ must arm/confirm the delete, never open the
+    // rename editor underneath it.
+    if (event.target === deleteBtn) return
     event.preventDefault()
     event.stopPropagation()
     state.drag?.cleanup?.()
@@ -4830,24 +4964,34 @@ async function confirmNewCategory(state, name) {
 // ---------------------------------------------------------------------------
 
 function onDeleteClick(state) {
-  // Delete is entry-only — disabled outright in category mode
-  // (updateDeleteButtonEnabled()); this is belt-and-suspenders against any
-  // path that could invoke the handler despite that (FORMAT.md §7.2
-  // amendment).
+  // Delete is contextual (see updateDeleteButtonEnabled()): category mode
+  // owns it whenever it is active — deleting the HEADER, never an entry —
+  // the same single branch point performSave() has for performSaveCategory().
   if (pinnedRefuse(state)) return // M3
-  if (!state.selection.length || state.busy || state.activeCategory != null) return
+  if (state.busy) return
+  const category = state.activeCategory
+  if (category == null && !state.selection.length) return
 
   if (!state.deleteConfirmActive) {
     state.deleteConfirmActive = true
     if (state.deleteBtn) {
-      state.deleteBtn.textContent = deleteConfirmLabel(state.selection.length)
+      state.deleteBtn.textContent =
+        category != null ? 'Are you sure?' : deleteConfirmLabel(state.selection.length)
       state.deleteBtn.classList.add('llnb-btn-danger')
     }
+    // The button is far too narrow to say what a header delete does to the
+    // entries under it, so the status line spells the merge out here —
+    // BEFORE the second click, not after it.
+    if (category != null) setStatus(state, describePendingCategoryDelete(state, category))
     state.deleteConfirmTimer = setTimeout(() => cancelDeleteConfirm(state), DELETE_CONFIRM_MS)
     return
   }
 
   cancelDeleteConfirm(state)
+  if (category != null) {
+    performDeleteCategory(state).catch((error) => api.warn('category delete failed', error))
+    return
+  }
   performDeleteRun(state, [...state.selection], 0).catch((error) => api.warn('delete failed', error))
 }
 
@@ -4855,6 +4999,37 @@ function onDeleteClick(state) {
  * 2026-07-18c) — the plain, not-yet-armed button label never changes. */
 function deleteConfirmLabel(count) {
   return count > 1 ? `Are you sure? (${count})` : 'Are you sure?'
+}
+
+/**
+ * What the armed second click is about to do, for the status line in
+ * category mode (owner report 2026-08-25). The section ABOVE is predicted
+ * from `state.categories` file order — index 0 meaning the implicit
+ * uncategorized head region (FORMAT.md §3.1) — purely to word this one
+ * sentence; the SERVER's own `merged_into` is what the after-the-fact
+ * message reports, so a hand-edited file repeating a heading can never make
+ * the promise and the outcome disagree. Exported (with
+ * deletedCategoryStatus() below) for
+ * tests/test_notebook_delete_category_js.py, same as the collapse helpers.
+ */
+export function describePendingCategoryDelete(state, category) {
+  const held = state.entries.filter((entry) => entry.category === category).length
+  if (!held) return `Delete the "${category}" heading? It holds no entries.`
+  const index = state.categories.indexOf(category)
+  const above = index > 0 ? `"${state.categories[index - 1]}"` : 'the top of the notebook'
+  const what = held === 1 ? 'its 1 entry' : `its ${held} entries`
+  return `Delete the "${category}" heading? Nothing is deleted with it — ${what} move into ${above}.`
+}
+
+/** The after-the-fact half of describePendingCategoryDelete(), worded from
+ * the server's `merged_into`/`entries_moved` instead of a prediction. */
+export function deletedCategoryStatus(data, category) {
+  const moved = typeof data?.entries_moved === 'number' ? data.entries_moved : 0
+  const into = typeof data?.merged_into === 'string' ? data.merged_into : ''
+  if (!moved) return `Deleted the "${category}" heading.`
+  const what = moved === 1 ? 'Its entry' : `Its ${moved} entries`
+  const where = into ? `"${into}"` : 'the top of the notebook'
+  return `Deleted the "${category}" heading. ${what} moved into ${where}.`
 }
 
 function cancelDeleteConfirm(state) {
@@ -4942,6 +5117,72 @@ async function performDeleteRun(state, names, startIndex, { force = false } = {}
   state.busy = false
   updateDeleteButtonEnabled(state)
   setStatus(state, names.length > 1 ? `Deleted ${names.length} entries.` : 'Deleted.')
+}
+
+/**
+ * Deletes the ACTIVE CATEGORY's heading over §5's ``delete_category`` route
+ * (owner report 2026-08-25, "you can't delete section headers"): the one
+ * heading line goes and its contents merge into the block above — no entry
+ * is ever removed by this path, which is why it needs none of
+ * performDeleteRun()'s per-name sequencing and takes the shape of a single
+ * write like performSaveCategory() instead.
+ *
+ * A 409 shows the same Reload/Overwrite UI every other write here uses;
+ * Overwrite re-enters with `force: true` (that request skips `base_mtime`).
+ * On success the panel LEAVES category mode: the deleted header cannot stay
+ * selected, so the editor falls back to whatever entry was selected
+ * underneath all along (category mode never touched `state.selection` —
+ * file header) via loadActiveEditor(), or clears when there is none. The
+ * collapse key goes with the header, persisted property included, or a
+ * later category reusing that name would come back mysteriously collapsed.
+ */
+async function performDeleteCategory(state, { force = false } = {}) {
+  const category = state.activeCategory
+  if (!category || state.busy) return
+
+  state.busy = true
+  updateSaveButtonEnabled(state)
+  updateDeleteButtonEnabled(state)
+  setStatus(state, 'Deleting…')
+
+  let data
+  try {
+    const body = { file: state.file, name: category }
+    if (!force && typeof state.baseMtime === 'number') body.base_mtime = state.baseMtime
+    data = await api.postJson('/lora_library/notebook/delete_category', body)
+  } catch (error) {
+    state.busy = false
+    updateSaveButtonEnabled(state)
+    updateDeleteButtonEnabled(state)
+    if (error?.status === 409) {
+      showConflict(state, 'File changed on disk', {
+        onReload: () => reloadNow(state),
+        onOverwrite: () => performDeleteCategory(state, { force: true })
+      })
+    } else {
+      api.warn('failed to delete notebook category', error)
+      setStatus(state, `Delete failed: ${error.message}`)
+    }
+    return
+  }
+
+  state.busy = false
+  // Disk truth first, unconditionally -- performSave()'s 2026-07-30 rule.
+  state.baseMtime = typeof data.mtime === 'number' ? data.mtime : state.baseMtime
+  state.entries = Array.isArray(data.entries) ? data.entries : state.entries
+  state.categories = Array.isArray(data.categories) ? data.categories : state.categories
+  syncNotebookCache(state, data) // session cache (file header)
+
+  if (state.collapsedCategories.delete(category)) syncCollapsedSectionsProperty(state)
+
+  state.activeCategory = null
+  renderList(state)
+  updateSaveButtonEnabled(state)
+  updateDeleteButtonEnabled(state)
+  updateSelectionHint(state)
+  updateModeHint(state)
+  await loadActiveEditor(state)
+  setStatus(state, deletedCategoryStatus(data, category))
 }
 
 // ---------------------------------------------------------------------------
@@ -5234,10 +5475,20 @@ function updateSaveButtonEnabled(state) {
 
 function updateDeleteButtonEnabled(state) {
   if (!state.deleteBtn) return
-  // Delete stays entry-only — disabled outright in category mode (FORMAT.md
-  // §7.2 amendment), and outright while pinned (M3).
+  // Delete is CONTEXTUAL, exactly like Save (owner report 2026-08-25, "you
+  // can't delete section headers"): in category mode it deletes the active
+  // HEADER, so it enables on that alone and ignores the entry selection
+  // underneath — which category mode never touches — while outside it the
+  // entry rule is the one this button always had. Disabled outright while
+  // pinned (M3) or busy either way.
+  const categoryMode = state.activeCategory != null
   state.deleteBtn.disabled =
-    state.busy || state.selection.length === 0 || state.activeCategory != null || isPinned(state)
+    state.busy || isPinned(state) || (!categoryMode && state.selection.length === 0)
+  if (isPinned(state)) return // the pinned title (set in buildUi) says why
+  state.deleteBtn.title = categoryMode
+    ? `Delete the "${state.activeCategory}" heading. Its entries move into the section `
+      + 'above — nothing is deleted with it. Click twice to confirm.'
+    : 'Delete the selected entry from the file. Click twice to confirm.'
 }
 
 // ---------------------------------------------------------------------------

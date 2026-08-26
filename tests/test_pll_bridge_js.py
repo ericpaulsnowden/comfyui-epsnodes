@@ -791,7 +791,10 @@ def test_group_headers_rename_in_place_on_double_click(controller_source: str) -
     assert "layout.categories = layout.categories.map((c) => (c === from ? to : c))" in commit
     assert "layout.order[to] = layout.order[from] || []" in commit
     assert "delete layout.order[from]" in commit
-    assert "if (this._collapsedCategories.delete(from)) this._collapsedCategories.add(to)" in commit
+    # Task 3 (2026-08-25): the migration now ALSO writes through to the
+    # persisted `Collapsed groups` property -- see TestCollapsedGroupsV0800.
+    assert "if (this._collapsedCategories.delete(from)) {" in commit
+    assert "this._collapsedCategories.add(to)" in commit
     assert commit.count("this._saveLayout()") == 1
     # the editor survives the poll: no rebuild under an open rename
     render = _method_body(controller_source, "_renderStateList()")
@@ -888,8 +891,24 @@ import * as c from './extensions/comfyui-epsnodes/lora_library/controller.js'
 const out = {
   exports: {
     statesLocationLine: typeof c.statesLocationLine === 'function',
-    setsDirOf: typeof c.setsDirOf === 'function'
+    setsDirOf: typeof c.setsDirOf === 'function',
+    parseCollapsedGroups: typeof c.parseCollapsedGroups === 'function'
   },
+  // Task 3 (2026-08-25): notebook.js's parseCollapsedSections() tolerance
+  // pins, by hand, against controller.js's own duplicate.
+  collapsedGroupsParse: [
+    c.parseCollapsedGroups(['A', 'B']),
+    c.parseCollapsedGroups(['A', 1, null, 'B', {}]), // non-strings dropped
+    c.parseCollapsedGroups('["A","B"]'), // a hand-edited JSON string round-trips
+    c.parseCollapsedGroups('not json'), // malformed JSON folds to []
+    c.parseCollapsedGroups('[1,2]'), // a JSON array of non-strings folds to []
+    c.parseCollapsedGroups(''), // blank string
+    c.parseCollapsedGroups('   '), // whitespace-only string
+    c.parseCollapsedGroups(null),
+    c.parseCollapsedGroups(undefined),
+    c.parseCollapsedGroups(42),
+    c.parseCollapsedGroups({ A: true }) // a plain object, not an array
+  ],
   defaultSameDir: c.statesLocationLine({ library_dir: '/home/u/lib', default_library_dir: '/home/u/lib/' }),
   defaultWinSeparators: c.statesLocationLine({ library_dir: 'C:\\\\Users\\\\e\\\\lib', default_library_dir: 'C:/Users/e/lib' }),
   configuredUnc: c.statesLocationLine({ library_dir: '\\\\\\\\nas\\\\share\\\\comfy', default_library_dir: 'C:\\\\Users\\\\e\\\\lib' }),
@@ -1307,3 +1326,247 @@ def test_states_location_is_dom_only_and_torn_down(controller_source: str) -> No
     fit = _method_body(controller_source, "_fitStatesLocationText()")
     assert "textEl.scrollWidth <= textEl.clientWidth + 1" in fit  # front-truncate only on real overflow
     assert "frontTruncateText(full, budget)" in fit
+
+
+# ---------------------------------------------------------------------------
+# 2026-08-25 round: three owner reports in one file --
+#  (1) `# name` group creation "doesn't consistently create a new group"
+#  (2) collapsed groups must persist per workflow (notebook.js's v0.79.0
+#      `Collapsed sections` idiom, mirrored here as `Collapsed groups`)
+#  (3) Delete state "can take upwards of 10 seconds ... feels
+#      non-responsive" while a workflow is running
+# ---------------------------------------------------------------------------
+
+
+class TestFlakyGroupCreationFixV20260825:
+    """Root cause 1: `_doNewCategory()` mutated `_layoutCache` synchronously
+    but never repainted until `_saveLayout()`'s POST resolved -- on the
+    owner's NAS-backed library (500-1000 ms round trips, slower still while
+    a workflow runs) the toast said "created" while the pane looked
+    unchanged for up to a second, reading as "nothing happened" and inviting
+    a confused repeat click. Root cause 2: `_saveLayout()`'s catch block
+    (shared by new-group/rename/delete-group/drag-reorder) never toasted a
+    failed save -- only a `status` line hidden by default -- so a group that
+    failed to persist on a flaky NAS write silently evaporated on the next
+    refresh with zero explanation."""
+
+    def test_new_category_paints_optimistically_before_the_save_resolves(
+        self, controller_source: str
+    ) -> None:
+        new_cat = _method_body(controller_source, "async _doNewCategory()")
+        assert "this._layoutCache.categories.push(name)" in new_cat
+        render_at = new_cat.index("this._renderStateList()")
+        save_at = new_cat.index("await this._saveLayout()")
+        push_at = new_cat.index("this._layoutCache.categories.push(name)")
+        # paint BEFORE the network round trip, not after
+        assert push_at < render_at < save_at
+
+    def test_save_layout_toasts_loudly_on_failure(self, controller_source: str) -> None:
+        save = _method_body(controller_source, "async _saveLayout()")
+        catch_block = save.split("} catch (error) {", 1)[1].split(
+            "this._layoutSaveQueued = false", 1
+        )[0]
+        assert "this._setStatusText(failMessage)" in catch_block
+        assert "this._toast('error', NODE_TITLE, failMessage)" in catch_block
+        assert "Could not save the group layout:" in catch_block
+        # still refetches so the pane snaps back to stored truth (unchanged)
+        assert "this._refreshSetsCache().catch(() => {})" in save
+
+    def test_duplicate_and_missing_name_are_still_loud(self, controller_source: str) -> None:
+        """The two other no-op outcomes (v0.72.1) are untouched by this round."""
+        new_cat = _method_body(controller_source, "async _doNewCategory()")
+        assert (
+            "this._toast('warn', NODE_TITLE, 'Enter a group name after the # "
+            "(e.g. \"# Portraits\").')" in new_cat
+        )
+        assert 'this._toast(\'warn\', NODE_TITLE, `A group named "${name}" already exists.`)' in (
+            new_cat
+        )
+
+
+class TestCollapsedGroupsPersistPerWorkflowV20260825:
+    """Owner ask 2026-08-25: "They should both remember their closed
+    states." `_collapsedCategories` was an in-memory-only Set, lost on every
+    reload. Mirrors notebook.js's v0.79.0 `Collapsed sections` property
+    idiom exactly, renamed for this file's own vocabulary (`Collapsed
+    groups`, duplicated by hand per the isCategoryNameInput/
+    categoryNameFromInput no-cross-import convention)."""
+
+    def test_pure_parser_is_exported_and_tolerant(self, controller_api: dict) -> None:
+        assert controller_api["exports"]["parseCollapsedGroups"] is True
+        parsed = controller_api["collapsedGroupsParse"]
+        assert parsed == [
+            ["A", "B"],
+            ["A", "B"],
+            ["A", "B"],
+            [],
+            [],
+            [],
+            [],
+            [],
+            [],
+            [],
+            [],
+        ]
+
+    def test_property_declared_right_after_debug_capture_and_applied_explicitly(
+        self, controller_source: str
+    ) -> None:
+        ctor = _method_body(controller_source, "constructor(title = NODE_TITLE)")
+        assert "const PROP_COLLAPSED_GROUPS = 'Collapsed groups'" in controller_source
+        assert "this.addProperty(PROP_DEBUG_CAPTURE, false, 'boolean')" in ctor
+        assert "this.addProperty(PROP_COLLAPSED_GROUPS, [], 'array')" in ctor
+        # addProperty() never fires onPropertyChanged -- a fresh node needs
+        # the explicit apply, BEFORE _buildWidgets()'s first render.
+        assert ctor.index("this.addProperty(PROP_COLLAPSED_GROUPS, [], 'array')") < ctor.index(
+            "this._guarded('build widgets', () => this._buildWidgets())"
+        )
+        assert "this._applyCollapsedGroupsFromProperty()" in ctor
+        assert ctor.index("this.addProperty(PROP_COLLAPSED_GROUPS, [], 'array')") < ctor.index(
+            "this._applyCollapsedGroupsFromProperty()"
+        )
+
+    def test_on_property_changed_reapplies_and_repaints(self, controller_source: str) -> None:
+        changed = _method_body(controller_source, "onPropertyChanged(name, value)")
+        assert "if (name === PROP_SHOW_STATUS) {" in changed  # existing branch preserved
+        assert "if (name === PROP_COLLAPSED_GROUPS) {" in changed
+        collapsed_branch = changed.split("if (name === PROP_COLLAPSED_GROUPS) {", 1)[1]
+        assert "this._applyCollapsedGroupsFromProperty()" in collapsed_branch
+        assert "this._renderStateList()" in collapsed_branch
+
+    def test_read_and_write_halves(self, controller_source: str) -> None:
+        read = _method_body(controller_source, "_applyCollapsedGroupsFromProperty()")
+        assert "parseCollapsedGroups(this.properties?.[PROP_COLLAPSED_GROUPS])" in read
+        assert "this._collapsedCategories = new Set(names)" in read
+        write = _method_body(controller_source, "_syncCollapsedGroupsProperty()")
+        assert (
+            "this.properties[PROP_COLLAPSED_GROUPS] = Array.from(this._collapsedCategories)"
+            in write
+        )
+        # this.setDirtyCanvas(...), matching every other call site in this
+        # class -- not node.graph?.setDirtyCanvas(...), notebook.js's form
+        # for a `state.node` reference obtained from outside the class.
+        assert "this.setDirtyCanvas(true, true)" in write
+
+    def test_every_mutation_site_writes_through_the_property(self, controller_source: str) -> None:
+        """The 5 sites named in the owner's ask: the toggle, the rename
+        migration, the group delete, the drag-landing reveal, and the
+        fresh-category open."""
+        toggle = _method_body(controller_source, "_toggleCategoryCollapsed(category)")
+        assert "this._syncCollapsedGroupsProperty()" in toggle
+        assert toggle.index("this._syncCollapsedGroupsProperty()") < toggle.index(
+            "this._renderStateList()"
+        )
+
+        rename = _method_body(controller_source, "_commitCategoryRename()")
+        assert "if (this._collapsedCategories.delete(from)) {" in rename
+        rename_migration = rename.split("if (this._collapsedCategories.delete(from)) {", 1)[1]
+        rename_migration = rename_migration.split("}", 1)[0]
+        assert "this._collapsedCategories.add(to)" in rename_migration
+        assert "this._syncCollapsedGroupsProperty()" in rename_migration
+
+        delete_cat = _method_body(controller_source, "_deleteCategory(category)")
+        assert (
+            "if (this._collapsedCategories.delete(category)) this._syncCollapsedGroupsProperty()"
+            in delete_cat
+        )
+
+        finish_drag = _method_body(controller_source, "_finishStateDrag(drag)")
+        assert (
+            "if (this._collapsedCategories.delete(target.category)) "
+            "this._syncCollapsedGroupsProperty()" in finish_drag
+        )
+
+        new_cat = _method_body(controller_source, "async _doNewCategory()")
+        assert (
+            "if (this._collapsedCategories.delete(name)) this._syncCollapsedGroupsProperty()"
+            in new_cat
+        )
+
+    def test_never_reaches_for_localstorage(self, controller_source: str) -> None:
+        """Persist WITH THE WORKFLOW (a node property) -- not a browser-local
+        stash that would desync between machines or a re-imported workflow."""
+        assert "localStorage" not in controller_source
+
+
+class TestOptimisticDeleteV20260825:
+    """Owner report 2026-08-25: "Delete state for the Lora Loader can take
+    upwards of 10 seconds if a workflow is running. The app feels
+    non-responsive." The server work was already off-loop, but the FRONTEND
+    awaited the whole round trip before touching the pane at all -- the row
+    stayed put, nothing moved, no toast, for as long as the NAS write (or a
+    busy queue) took. Optimistic UI: remove the row THE INSTANT the confirm
+    click lands; roll back and toast loudly on failure."""
+
+    def test_confirm_click_resolves_the_entry_and_hands_it_to_do_delete(
+        self, controller_source: str
+    ) -> None:
+        click = _method_body(controller_source, "_onDeleteClick()")
+        confirm_branch = click.split("this._disarmDeleteButton()", 1)[1]
+        assert "const entry = this._selectedSetEntry()" in confirm_branch
+        assert "if (!entry) {" in confirm_branch
+        assert "this._toast('warn', NODE_TITLE, 'Pick a saved state first.')" in confirm_branch
+        assert "this._runAction(LABEL_DELETE, () => this._doDelete(entry))" in confirm_branch
+        # _doDelete() itself no longer re-resolves the selection -- it takes
+        # the entry as a parameter now.
+        assert "async _doDelete(entry) {" in controller_source
+
+    def test_delete_removes_the_row_before_the_post_and_guards_the_slug(
+        self, controller_source: str
+    ) -> None:
+        do_delete = _method_body(controller_source, "async _doDelete(entry)")
+        assert "const previousCache = this._setsCache" in do_delete
+        assert "const previousSignature = this._setsSignature" in do_delete
+        assert "this._deleteInFlightSlugs.add(entry.slug)" in do_delete
+        assert "this._setsCache = this._setsCache.filter((s) => s.slug !== entry.slug)" in do_delete
+        assert "this._setsSignature = JSON.stringify(this._setsCache)" in do_delete
+        # every optimistic step happens BEFORE the POST fires
+        filter_at = do_delete.index(
+            "this._setsCache = this._setsCache.filter((s) => s.slug !== entry.slug)"
+        )
+        render_at = do_delete.index("this._renderStateList()")
+        toast_at = do_delete.index('this._toast(\'info\', NODE_TITLE, `Deleting "${entry.name}"…`)')
+        post_at = do_delete.index(
+            "await api.postJson('/lora_library/set/delete', { slug: entry.slug })"
+        )
+        assert filter_at < render_at < post_at
+        assert toast_at < post_at
+        # the guard is always released, success or failure
+        assert do_delete.count("this._deleteInFlightSlugs.delete(entry.slug)") == 1
+        assert "} finally {" in do_delete
+
+    def test_applied_sets_response_filters_the_in_flight_slug(self, controller_source: str) -> None:
+        """The shared poller (or any other response) must never resurrect a
+        row `_doDelete()` already removed optimistically."""
+        apply = _method_body(controller_source, "_applySetsResponse(data)")
+        assert ".filter((s) => !this._deleteInFlightSlugs.has(s.slug))" in apply
+        filter_at = apply.index(".filter((s) => !this._deleteInFlightSlugs.has(s.slug))")
+        signature_at = apply.index("const signature = JSON.stringify(this._setsCache)")
+        assert filter_at < signature_at
+
+    def test_success_settles_quietly_with_the_same_feed_refresh_as_before(
+        self, controller_source: str
+    ) -> None:
+        do_delete = _method_body(controller_source, "async _doDelete(entry)")
+        try_block = do_delete.split("try {", 1)[1].split("} catch (error) {", 1)[0]
+        assert "this._applySetsResponse(response)" in try_block
+        assert "announceSetsChanged()" in try_block
+        assert "const nextEntry = this._setsCache[0] || null" in try_block
+        assert "this._selectEntry(nextEntry)" in try_block
+        # no second "deleted" toast -- the "Deleting…" toast already covered it
+        assert "_toast(" not in try_block
+
+    def test_failure_rolls_back_the_row_and_toasts_loudly(self, controller_source: str) -> None:
+        do_delete = _method_body(controller_source, "async _doDelete(entry)")
+        catch_block = do_delete.split("} catch (error) {", 1)[1].split("} finally {", 1)[0]
+        assert "this._setsCache = previousCache" in catch_block
+        assert "this._setsSignature = previousSignature" in catch_block
+        assert "this._renderStateList()" in catch_block
+        assert (
+            "this._toast('error', NODE_TITLE, `Could not delete \"${entry.name}\": "
+            "${error?.message || error}`)" in catch_block
+        )
+
+    def test_deleting_toast_names_the_state(self, controller_source: str) -> None:
+        do_delete = _method_body(controller_source, "async _doDelete(entry)")
+        assert 'this._toast(\'info\', NODE_TITLE, `Deleting "${entry.name}"…`)' in do_delete

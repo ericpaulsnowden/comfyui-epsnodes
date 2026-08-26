@@ -181,6 +181,12 @@ captions).
 - The workflow stores only the file path + selected entry name — never the
   text. The file is the truth; the node is a view.
 
+- **Section headers now match the State Controller (v0.81.0).** A collapsed
+  section shows its prompt count — `▸ Styles (4)` — and every header carries
+  the controller's armed two-click ✕: first click asks `sure?`, second
+  removes the heading. **Removing a heading never deletes prompts** — its
+  entries (and description) merge into the section above, exactly as if the
+  heading line were erased by hand.
 - **Closed sections stay closed — per workflow (v0.79.0).** Collapse a
   category (`#` heading) and that workflow remembers it: the state saves
   with the workflow and the sections render collapsed from the first paint
@@ -222,6 +228,15 @@ happen there — and the Builder assembles prompts *out of* it:
   Run Multiplier demo uses).
 
 ## EPS Lora Loader State Controller (shipped; requires rgthree-comfy)
+
+**v0.81.0 consistency round (your reports):** creating a group with `# name`
+now paints the new group instantly (it used to wait out the NAS save — up to
+a second of "nothing happened") and any failed save toasts loudly instead of
+vanishing silently; **closed groups are remembered per workflow** (they
+reload collapsed, same as the Notebook's sections); **Delete State is
+instant** — the row disappears the moment you confirm with a "Deleting…"
+notice, and only reappears (with a loud error) if the NAS write actually
+fails. No more ten-second frozen panel mid-run.
 
 `EPSNodes → LoRA → EPS Lora Loader State Controller`: a small panel node that
 drives a genuine, untouched

@@ -772,6 +772,78 @@ def move_category(
     return {"name": name}
 
 
+def delete_category(parsed: ParsedNotebook, name: str) -> dict:
+    """Delete category *name*'s ``#`` heading, MERGING what it held into the
+    block above it — FORMAT.md §3.4 Delete category, the primitive behind
+    §5's ``POST /lora_library/notebook/delete_category`` and §7.2's Delete
+    button in category mode. Mutates *parsed* in place; returns
+    ``{"name","merged_into","entries"}`` — the deleted name, the name of the
+    block its contents joined (``""`` for the implicit head region), and how
+    many entries moved.
+
+    Deleting a header is deliberately NON-DESTRUCTIVE (owner ask
+    2026-08-25): the one heading line goes and nothing else does. The
+    block's entries AND its §3.1 description both survive by joining the
+    preceding block, exactly as they would if that heading line were erased
+    by hand — entries append after the previous block's own, and the two
+    descriptions concatenate (one blank line between) when both are
+    non-empty. That is the same rule said twice: deleting a header MERGES
+    its section into the section above. Entry objects travel by reference,
+    so bodies stay byte-identical, and no entry can collide on the way up
+    because entry names are already unique file-wide (:func:`parse`'s
+    ``seen_names``).
+
+    This is the ONE §3.4 write that removes a category heading, and it
+    exists because nothing else could: ``remove_entry`` deliberately leaves
+    an emptied category in place ("categories are the user's prose, not
+    derived state"), which left a header the UI could never get rid of once
+    its last entry was gone (owner report 2026-08-25).
+
+    A named block always HAS a block above it — :func:`parse` seeds
+    ``blocks[0]`` as the implicit head region (FORMAT.md §3.1) even for an
+    empty file — so deleting the first category simply uncategorizes its
+    entries rather than needing a special case.
+
+    A repeated category name targets the LAST block with that name, same
+    convention as :func:`set_category_description`/:func:`move_category`.
+    Both the "above" lookup and the removal address that block BY IDENTITY
+    (``is``), never by ``list.index``/``list.remove``: :class:`CategoryBlock`
+    is a dataclass, so a file hand-edited to hold two indistinguishable
+    headings (``# Foo`` twice, both empty) makes those blocks compare EQUAL
+    and the list methods would silently operate on the first one.
+
+    The uncategorized head region is not a category and has no heading to
+    delete: a blank/whitespace-only *name* always raises, the same blanket
+    rule :func:`move_category` uses for the same reason.
+
+    Raises :class:`CategoryNotFoundError` if *name* is blank or names no
+    existing category.
+    """
+    name = (name or "").strip()
+    if not name:
+        raise CategoryNotFoundError(
+            "the uncategorized head region has no heading to delete — FORMAT.md §3.4"
+        )
+    block = _find_last_block(parsed, name)
+    if block is None:
+        raise CategoryNotFoundError(f"no such category {name!r} — FORMAT.md §3.2")
+
+    index = next(i for i, candidate in enumerate(parsed.blocks) if candidate is block)
+    above = parsed.blocks[index - 1]
+    moved = len(block.entries)
+
+    description = _trimmed_text(block.preamble)
+    if description:
+        existing = _trimmed_text(above.preamble)
+        above.preamble = (
+            [*existing.split("\n"), "", *description.split("\n")]
+            if existing
+            else description.split("\n")
+        )
+    above.entries.extend(block.entries)
+    parsed.blocks.pop(index)
+    return {"name": name, "merged_into": above.name, "entries": moved}
+
 # --------------------------------------------------------------------- I/O
 
 def detect_line_ending(text: str) -> str:

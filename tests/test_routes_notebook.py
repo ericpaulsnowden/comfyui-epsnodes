@@ -1286,6 +1286,129 @@ async def test_post_move_matching_base_mtime_succeeds(
     assert resp.status == 200
 
 
+# ------------------------------------------- POST /notebook/delete_category
+
+
+async def test_post_delete_category_merges_entries_into_the_category_above(
+    context: LibraryContext, library_dir: Path, aiohttp_client
+) -> None:
+    client = await aiohttp_client(make_app(context))
+    await client.post(
+        "/lora_library/notebook/entry",
+        json={"file": "loras.md", "name": "E1", "text": "b1", "category": "Cat A"},
+    )
+    await client.post(
+        "/lora_library/notebook/entry",
+        json={"file": "loras.md", "name": "E2", "text": "b2", "category": "Cat B"},
+    )
+    resp = await client.post(
+        "/lora_library/notebook/delete_category",
+        json={"file": "loras.md", "name": "Cat B"},
+    )
+    assert resp.status == 200
+    body = await resp.json()
+    assert body["ok"] is True
+    assert body["merged_into"] == "Cat A"
+    assert body["entries_moved"] == 1
+    assert body["categories"] == ["Cat A"]
+    assert body["entries"] == [
+        {"name": "E1", "category": "Cat A"},
+        {"name": "E2", "category": "Cat A"},
+    ]
+    raw = (library_dir / "loras.md").read_text(encoding="utf-8")
+    assert raw == "# Cat A\n## E1\nb1\n## E2\nb2\n"
+
+
+async def test_post_delete_category_removes_an_emptied_heading(
+    context: LibraryContext, library_dir: Path, aiohttp_client
+) -> None:
+    # The owner's report end to end: delete a category's last entry (which
+    # deliberately leaves the heading, §3.4), then retire the heading.
+    client = await aiohttp_client(make_app(context))
+    await client.post(
+        "/lora_library/notebook/entry",
+        json={"file": "loras.md", "name": "E1", "text": "b1", "category": "Cat A"},
+    )
+    await client.post("/lora_library/notebook/delete", json={"file": "loras.md", "name": "E1"})
+    resp = await client.post(
+        "/lora_library/notebook/delete_category",
+        json={"file": "loras.md", "name": "Cat A"},
+    )
+    assert resp.status == 200
+    body = await resp.json()
+    assert body["categories"] == []
+    assert body["entries_moved"] == 0
+    assert (library_dir / "loras.md").read_text(encoding="utf-8") == ""
+
+
+async def test_post_delete_category_first_category_uncategorizes_entries(
+    context: LibraryContext, aiohttp_client
+) -> None:
+    client = await aiohttp_client(make_app(context))
+    await client.post(
+        "/lora_library/notebook/entry",
+        json={"file": "loras.md", "name": "E1", "text": "b1", "category": "Cat A"},
+    )
+    resp = await client.post(
+        "/lora_library/notebook/delete_category",
+        json={"file": "loras.md", "name": "Cat A"},
+    )
+    assert resp.status == 200
+    body = await resp.json()
+    assert body["merged_into"] == ""
+    assert body["entries"] == [{"name": "E1", "category": ""}]
+
+
+async def test_post_delete_category_stale_base_mtime_is_409_and_file_untouched(
+    context: LibraryContext, library_dir: Path, aiohttp_client
+) -> None:
+    client = await aiohttp_client(make_app(context))
+    created = await client.post(
+        "/lora_library/notebook/category",
+        json={"file": "loras.md", "name": "Styles", "description": "orig"},
+    )
+    real_mtime = (await created.json())["mtime"]
+    before = (library_dir / "loras.md").read_text(encoding="utf-8")
+
+    resp = await client.post(
+        "/lora_library/notebook/delete_category",
+        json={"file": "loras.md", "name": "Styles", "base_mtime": real_mtime - 100.0},
+    )
+    assert resp.status == 409
+    assert (library_dir / "loras.md").read_text(encoding="utf-8") == before
+
+
+async def test_post_delete_category_unknown_name_is_404(
+    context: LibraryContext, aiohttp_client
+) -> None:
+    client = await aiohttp_client(make_app(context))
+    await client.post("/lora_library/notebook/category", json={"file": "loras.md", "name": "Cat A"})
+    resp = await client.post(
+        "/lora_library/notebook/delete_category",
+        json={"file": "loras.md", "name": "does-not-exist"},
+    )
+    assert resp.status == 404
+
+
+async def test_post_delete_category_missing_name_is_400(
+    context: LibraryContext, aiohttp_client
+) -> None:
+    client = await aiohttp_client(make_app(context))
+    resp = await client.post("/lora_library/notebook/delete_category", json={"file": "loras.md"})
+    assert resp.status == 400
+
+
+async def test_post_delete_category_missing_file_is_404(
+    context: LibraryContext, aiohttp_client
+) -> None:
+    client = await aiohttp_client(make_app(context))
+    resp = await client.post(
+        "/lora_library/notebook/delete_category",
+        json={"file": "loras.md", "name": "Cat A"},
+    )
+    assert resp.status == 404
+
+
 # --------------------------------------------- POST /notebook/move_category
 
 

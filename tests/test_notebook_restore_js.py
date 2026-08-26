@@ -1002,7 +1002,9 @@ def test_collapsed_sections_export_list_is_additive(source: str) -> None:
     """Every export this file shipped before this round must still be
     there -- prompt_builder.js and controller.js import a subset of these
     by name (tests/test_prompt_builder_js.py, tests/test_pll_bridge_js.py)
-    -- and the three new pure helpers are exported alongside them."""
+    -- and the three collapse helpers are exported alongside them, plus the
+    two delete-a-section-header wording helpers added 2026-08-25
+    (tests/test_notebook_delete_category_js.py drives those under Node)."""
     pre_existing = (
         "export function attachNotebookWidget(node)",
         "export function pickServerFolder(options = {})",
@@ -1015,10 +1017,13 @@ def test_collapsed_sections_export_list_is_additive(source: str) -> None:
     )
     for signature in pre_existing:
         assert signature in source, signature
-    for signature in (
+    added_this_round = (
         "export function parseCollapsedSections(raw)",
         "export function toggleCollapsedSection(list, name)",
         "export function isSectionCollapsed(list, name)",
-    ):
+        "export function describePendingCategoryDelete(state, category)",
+        "export function deletedCategoryStatus(data, category)",
+    )
+    for signature in added_this_round:
         assert signature in source, signature
-    assert source.count("\nexport function ") == len(pre_existing) + 3
+    assert source.count("\nexport function ") == len(pre_existing) + len(added_this_round)

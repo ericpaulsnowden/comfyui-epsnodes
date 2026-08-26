@@ -848,6 +848,20 @@ const PROP_SHOW_STATUS = 'Show status'
  * resolve on its own.
  */
 const PROP_DEBUG_CAPTURE = 'Debug capture'
+/**
+ * Owner ask 2026-08-25 ("They should both remember their closed states"):
+ * collapsed groups now persist WITH THE WORKFLOW, mirroring notebook.js's
+ * v0.79.0 `Collapsed sections` property idiom exactly (same
+ * `addProperty()` + wrapped `onPropertyChanged` idiom this file's own
+ * `Show status`/`Debug capture` already use) -- see
+ * `_syncCollapsedGroupsProperty()`/`_applyCollapsedGroupsFromProperty()`
+ * and every write-through site (`_toggleCategoryCollapsed()`, the rename
+ * migration in `_commitCategoryRename()`, `_deleteCategory()`,
+ * `_finishStateDrag()`'s landing reveal, `_doNewCategory()`'s fresh-group
+ * open). Value: an array of collapsed group NAMES, same shape as
+ * notebook.js's property.
+ */
+const PROP_COLLAPSED_GROUPS = 'Collapsed groups'
 
 /**
  * FORMAT.md §6.3 target FAMILIES (v0.64.0, owner ask 2026-08-14: "eps lora
@@ -998,6 +1012,35 @@ function isCategoryNameInput(rawName) {
 }
 function categoryNameFromInput(rawName) {
   return (rawName || '').trim().replace(/^#+\s*/, '').trim()
+}
+
+/**
+ * Tolerant parse of the `Collapsed groups` node property into an array of
+ * group-name strings -- notebook.js's `parseCollapsedSections()` by hand
+ * (this file's no-cross-import #-helper convention, same as
+ * isCategoryNameInput/categoryNameFromInput above). Accepts the canonical
+ * shape (an array, non-string entries dropped), a JSON-encoded string of
+ * the same (what a hand-edit through the node's Properties panel
+ * round-trips as), or anything else -- `undefined`/`null`/malformed
+ * JSON/a non-array all fold to `[]`. Never throws. Exported for
+ * tests/test_pll_bridge_js.py.
+ * @param {unknown} raw
+ * @returns {string[]}
+ */
+export function parseCollapsedGroups(raw) {
+  if (Array.isArray(raw)) return raw.filter((name) => typeof name === 'string')
+  if (typeof raw === 'string') {
+    const trimmed = raw.trim()
+    if (!trimmed) return []
+    let parsed
+    try {
+      parsed = JSON.parse(trimmed)
+    } catch {
+      return []
+    }
+    return Array.isArray(parsed) ? parsed.filter((name) => typeof name === 'string') : []
+  }
+  return []
 }
 
 /** A structurally-sound client copy of the §4.2 layout -- categories
@@ -2641,6 +2684,16 @@ export function registerControllerNode() {
         // different dedup-suffixed label for the same underlying entry. See
         // _selectedSetEntry() for the full root-cause writeup.
         this._selectedSlug = null
+        // Task 4 (owner report 2026-08-25, "delete can take upwards of 10
+        // seconds ... feels non-responsive"): slugs `_doDelete()` has
+        // optimistically removed from the pane but whose POST hasn't
+        // settled yet -- `_applySetsResponse()` filters these out of every
+        // response it is fed (the shared poller included) so a stale
+        // snapshot taken before the server actually processed the delete
+        // can never resurrect the row. A Set, not a scalar: two deletes in
+        // flight at once (a second confirm during the first's slow NAS
+        // write) must each keep their own guard.
+        this._deleteInFlightSlugs = new Set()
 
         // FORMAT.md §6.3: "Show status" — boolean, default false, revealed
         // via the node's right-click Properties Panel. Must exist before
@@ -2652,6 +2705,18 @@ export function registerControllerNode() {
         // show/hide; onPropertyChanged() has nothing to do for it, it's read
         // fresh from `this.properties` at the top of every capture instead.
         this.addProperty(PROP_DEBUG_CAPTURE, false, 'boolean')
+        // Task 3 (owner ask 2026-08-25): "Collapsed groups" -- same
+        // Properties-Panel pattern, but this one DOES have live state to
+        // sync (`_collapsedCategories`, read by `_buildWidgets()` below via
+        // `_buildStatePane()`'s first `_renderStateList()`). `addProperty()`
+        // alone never fires `onPropertyChanged` (see it below), so a FRESH
+        // node needs this explicit apply; a RESTORED node's `configure()`
+        // (below) re-fires `onPropertyChanged` with the SAVED array before
+        // this panel's first entries-populated render ever runs (that
+        // render is always async, off the sets/layout fetch `onAdded()`
+        // kicks off), so the saved value always wins last -- no flash.
+        this.addProperty(PROP_COLLAPSED_GROUPS, [], 'array')
+        this._applyCollapsedGroupsFromProperty()
 
         this._guarded('build widgets', () => this._buildWidgets())
       }
@@ -2676,15 +2741,63 @@ export function registerControllerNode() {
        * — both are desired here, unlike the `set`-combo case.
        */
       onPropertyChanged(name, value) {
-        if (name !== PROP_SHOW_STATUS) return
-        this._guarded('Show status property changed', () => {
-          if (this._w.status) {
-            // Track BOTH renderers' flags (see the `set` widget below).
-            this._w.status.hidden = !value
-            this._w.status.options = { ...(this._w.status.options || {}), hidden: !value }
-          }
-          this.setDirtyCanvas(true, true)
-        })
+        if (name === PROP_SHOW_STATUS) {
+          this._guarded('Show status property changed', () => {
+            if (this._w.status) {
+              // Track BOTH renderers' flags (see the `set` widget below).
+              this._w.status.hidden = !value
+              this._w.status.options = { ...(this._w.status.options || {}), hidden: !value }
+            }
+            this.setDirtyCanvas(true, true)
+          })
+          return
+        }
+        if (name === PROP_COLLAPSED_GROUPS) {
+          // Task 3 (owner ask 2026-08-25): covers BOTH configure()'s
+          // restore (the saved array lands here, per litegraph's
+          // properties-merge loop -- same citation as the PROP_SHOW_STATUS
+          // branch above) and a live hand-edit through the node's
+          // right-click Properties panel -- notebook.js's
+          // registerCollapsedSectionsProperty() wiring, by hand.
+          this._guarded('Collapsed groups property changed', () => {
+            this._applyCollapsedGroupsFromProperty()
+            this._renderStateList()
+          })
+        }
+      }
+
+      /**
+       * READ half (Task 3): replaces `_collapsedCategories` (the render-time
+       * cache -- unchanged `.has()` calls throughout `_groupedRows()`/
+       * `_buildCategoryHeader()`) with whatever the `Collapsed groups` node
+       * property currently says. Never writes the property or dirties the
+       * canvas -- see `_syncCollapsedGroupsProperty()` for the write half.
+       * notebook.js's `applyCollapsedSectionsFromProperty()` by hand.
+       */
+      _applyCollapsedGroupsFromProperty() {
+        const names = parseCollapsedGroups(this.properties?.[PROP_COLLAPSED_GROUPS])
+        this._collapsedCategories = new Set(names)
+      }
+
+      /**
+       * WRITE half (Task 3): folds the CURRENT `_collapsedCategories` Set
+       * back into the `Collapsed groups` node property and dirties the
+       * canvas so the workflow's next save captures it -- called from every
+       * place that mutates the Set (`_toggleCategoryCollapsed()`, the
+       * rename migration in `_commitCategoryRename()`, `_deleteCategory()`,
+       * `_finishStateDrag()`'s landing reveal, `_doNewCategory()`'s
+       * fresh-group open). notebook.js's `syncCollapsedSectionsProperty()`
+       * by hand.
+       */
+      _syncCollapsedGroupsProperty() {
+        this.properties = this.properties || {}
+        this.properties[PROP_COLLAPSED_GROUPS] = Array.from(this._collapsedCategories)
+        // this.setDirtyCanvas(...), not node.graph?.setDirtyCanvas(...) --
+        // notebook.js's syncCollapsedSectionsProperty() calls the latter
+        // because its `state.node` is a plain LGraphNode reference obtained
+        // from outside; every other call site IN THIS CLASS (`this` is
+        // already the node) uses the plain form, so this one matches them.
+        this.setDirtyCanvas(true, true)
       }
 
       // ---------------------------------------------------------- lifecycle
@@ -3368,8 +3481,13 @@ export function registerControllerNode() {
           layout.categories = layout.categories.map((c) => (c === from ? to : c))
           layout.order[to] = layout.order[from] || []
           delete layout.order[from]
-          // Collapse is tracked by NAME, so the key moves with the rename.
-          if (this._collapsedCategories.delete(from)) this._collapsedCategories.add(to)
+          // Collapse is tracked by NAME, so the key moves with the rename --
+          // and the persisted property (Task 3) has to move with it too, or
+          // the workflow's next save loses the migration.
+          if (this._collapsedCategories.delete(from)) {
+            this._collapsedCategories.add(to)
+            this._syncCollapsedGroupsProperty()
+          }
           this._setStatusText(`Group "${from}" renamed to "${to}".`)
           this._renderStateList()
           this._saveLayout().catch((error) => api.warn(`${NODE_TITLE}: group rename save failed`, error))
@@ -3379,6 +3497,7 @@ export function registerControllerNode() {
       _toggleCategoryCollapsed(category) {
         if (this._collapsedCategories.has(category)) this._collapsedCategories.delete(category)
         else this._collapsedCategories.add(category)
+        this._syncCollapsedGroupsProperty()
         this._renderStateList()
       }
 
@@ -3391,7 +3510,7 @@ export function registerControllerNode() {
           layout.order[UNCATEGORIZED] = [...(layout.order[UNCATEGORIZED] || []), ...orphans]
           delete layout.order[category]
           layout.categories = layout.categories.filter((c) => c !== category)
-          this._collapsedCategories.delete(category)
+          if (this._collapsedCategories.delete(category)) this._syncCollapsedGroupsProperty()
           this._setStatusText(`Group "${category}" removed — its states are ungrouped.`)
           this._saveLayout().catch((error) => api.warn(`${NODE_TITLE}: group delete failed`, error))
         })
@@ -3627,7 +3746,8 @@ export function registerControllerNode() {
             pullSlugFromLayout(layout, drag.slug)
             const list = layout.order[target.category] || (layout.order[target.category] = [])
             if (!list.includes(drag.slug)) list.push(drag.slug)
-            this._collapsedCategories.delete(target.category) // show where it landed
+            // show where it landed
+            if (this._collapsedCategories.delete(target.category)) this._syncCollapsedGroupsProperty()
           }
           this._renderStateList()
           this._saveLayout().catch((error) => api.warn(`${NODE_TITLE}: reorder save failed`, error))
@@ -3880,7 +4000,18 @@ export function registerControllerNode() {
               }
             } catch (error) {
               api.warn(`${NODE_TITLE}: saving the sets layout failed`, error)
-              this._setStatusText(`Could not save the group layout: ${error?.message || error}`)
+              const failMessage = `Could not save the group layout: ${error?.message || error}`
+              this._setStatusText(failMessage)
+              // Owner report 2026-08-25 ("# name doesn't consistently
+              // create a new group"): this catch used to be silent besides
+              // the hidden `status` line -- a failed save (a slow/flaky
+              // NAS write, or a timeout while a workflow is running) left
+              // no trace, so a new group/rename/delete/reorder that never
+              // actually persisted just vanished on the next refresh below
+              // with zero explanation. Every layout-mutating flow shares
+              // this one save path, so one toast here covers all of them --
+              // silent refusal is a bug.
+              this._toast('error', NODE_TITLE, failMessage)
               this._layoutSaveQueued = false // never loop against a failing server
               this._layoutSaveInFlight = false
               this._refreshSetsCache().catch(() => {})
@@ -3909,12 +4040,20 @@ export function registerControllerNode() {
         }
         const list = Array.isArray(data?.sets) ? data.sets : []
         const seenLabels = new Set()
-        this._setsCache = list.map((s) => {
-          let label = s.name || s.slug
-          if (seenLabels.has(label)) label = `${label} (${s.slug})`
-          seenLabels.add(label)
-          return { slug: s.slug, name: s.name, count: s.count, label }
-        })
+        // Task 4 (owner report 2026-08-25): never let a response that
+        // predates the server actually processing an in-flight delete
+        // resurrect the row `_doDelete()` already removed optimistically --
+        // covers the shared poller, another controller's fan-out, and this
+        // node's own explicit refetches alike (`_deleteInFlightSlugs`, the
+        // drag machinery's in-flight-token guard, applied here).
+        this._setsCache = list
+          .filter((s) => !this._deleteInFlightSlugs.has(s.slug))
+          .map((s) => {
+            let label = s.name || s.slug
+            if (seenLabels.has(label)) label = `${label} (${s.slug})`
+            seenLabels.add(label)
+            return { slug: s.slug, name: s.name, count: s.count, label }
+          })
         // FORMAT.md §6.3 (2026-07-21): keep the two-pane list in sync with
         // the cache on every rebuild — a capture/update/delete response, the
         // sets-changed event, or the shared poll (`runSharedSetsFetch()`,
@@ -4309,7 +4448,21 @@ export function registerControllerNode() {
         }
         this._layoutCache.categories.push(name)
         this._layoutCache.order[name] = []
-        this._collapsedCategories.delete(name) // open, like the Notebook's fresh category
+        // open, like the Notebook's fresh category (Task 3: sync only when
+        // this actually changes something -- a genuinely fresh name is
+        // never in the collapsed set, so this is usually a no-op)
+        if (this._collapsedCategories.delete(name)) this._syncCollapsedGroupsProperty()
+        // Owner report 2026-08-25 ("doesn't consistently create a new
+        // group"): on the NAS-backed library (500-1000 ms round trips,
+        // slower still while a workflow is running) the new group used to
+        // sit invisible until `_saveLayout()`'s POST resolved below -- the
+        // toast already said "created" but the pane looked unchanged for up
+        // to a second, which read as "nothing happened" and invited a
+        // confused repeat click. Paint it NOW, optimistically, the same
+        // instant `_commitCategoryRename()`/`_finishStateDrag()` already
+        // do; `_saveLayout()` repaints again once the server's healed
+        // response lands (a no-op if nothing else changed meanwhile).
+        this._renderStateList()
         // v0.67.2 (owner report 2026-08-20: "a section gets added but the
         // '# name' element also still shows"): clearing the litegraph text
         // widget's value only repaints on the next canvas draw, and the Vue
@@ -4323,6 +4476,12 @@ export function registerControllerNode() {
         // silent -- and on pre-v0.67.2 builds a 4 s poll landing right after
         // could momentarily paint the group away. Say it out loud.
         this._toast('info', NODE_TITLE, `Group "${name}" created — drag states onto it.`)
+        // Owner report 2026-08-25: a slow/failed save used to be SILENT --
+        // only the hidden `status` line noted it -- so a group that failed
+        // to persist just quietly evaporated on the next refresh with no
+        // explanation. `_saveLayout()` now toasts loudly on failure too
+        // (see its own catch block), covering this and every other
+        // layout-mutating flow that shares this one save path.
         await this._saveLayout()
       }
 
@@ -4382,7 +4541,19 @@ export function registerControllerNode() {
           return
         }
         this._disarmDeleteButton()
-        this._runAction(LABEL_DELETE, () => this._doDelete())
+        // Owner report 2026-08-25 ("Delete state ... can take upwards of 10
+        // seconds if a workflow is running ... feels non-responsive"):
+        // resolve the entry HERE, at confirm time, and hand it to
+        // `_doDelete()` directly -- it removes the row from the pane
+        // BEFORE the POST even starts (see `_doDelete()`'s own doc
+        // comment), so there is no window where the confirm click looks
+        // like it did nothing.
+        const entry = this._selectedSetEntry()
+        if (!entry) {
+          this._toast('warn', NODE_TITLE, 'Pick a saved state first.')
+          return
+        }
+        this._runAction(LABEL_DELETE, () => this._doDelete(entry))
       }
 
       /** Cancel a pending delete-confirmation and restore the button's normal look. Idempotent. */
@@ -4824,28 +4995,73 @@ export function registerControllerNode() {
         await this._toastCompositeRowsSaved(newName ? 'Saved + renamed to' : 'Updated', savedSlug)
       }
 
-      async _doDelete() {
-        const entry = this._selectedSetEntry()
-        if (!entry) {
-          this._toast('warn', NODE_TITLE, 'Pick a saved state first.')
-          return
+      /**
+       * Owner report 2026-08-25: a delete could take upwards of 10 seconds
+       * while a workflow was running, and the pane sat frozen-looking the
+       * whole time -- the row stayed in the list, nothing moved, until the
+       * POST finally resolved. Optimistic UI: the row is removed from
+       * `_setsCache` (and the pane repainted, scroll position kept --
+       * `_renderStateList()`'s own v0.72.1 guarantee) THE INSTANT the
+       * confirm click lands, a "Deleting…" toast says what is happening,
+       * and the POST fires in the background. `entry` is resolved by the
+       * caller (`_onDeleteClick()`) at confirm time, before any of this
+       * runs, so a poller repaint that lands mid-flight can never retarget
+       * which row this call is about.
+       *
+       * `this._deleteInFlightSlugs` (guard the in-flight name, the drag
+       * machinery's token twin): while a slug sits in this set,
+       * `_applySetsResponse()` filters it out of whatever it is fed -- so a
+       * stale poll response snapshotted before the server actually
+       * processed the delete (entirely possible: the shared poll runs
+       * every `SETS_POLL_MS` and any CRUD event forces an extra one) can
+       * never resurrect the row just removed. Cleared in `finally`,
+       * whether the delete succeeded or not.
+       *
+       * On success: settle quietly -- `_applySetsResponse()`/
+       * `announceSetsChanged()`/the selection fallback are exactly what ran
+       * here before this round ("feed refresh as today"); the "Deleting…"
+       * toast already told the user what happened, so there is no second
+       * success toast.
+       *
+       * On failure: put the row back EXACTLY where it was (`_setsCache`/
+       * `_setsSignature` restored from the snapshot taken before the
+       * optimistic removal, so `_applySetsResponse()`'s change-gate does
+       * not skip the next real repaint) and toast the error loudly --
+       * silent refusal is a bug.
+       */
+      async _doDelete(entry) {
+        const previousCache = this._setsCache
+        const previousSignature = this._setsSignature
+        this._deleteInFlightSlugs.add(entry.slug)
+        this._setsCache = this._setsCache.filter((s) => s.slug !== entry.slug)
+        this._setsSignature = JSON.stringify(this._setsCache)
+        this._renderStateList()
+        this._toast('info', NODE_TITLE, `Deleting "${entry.name}"…`)
+        try {
+          const response = await api.postJson('/lora_library/set/delete', { slug: entry.slug })
+          this._applySetsResponse(response)
+          announceSetsChanged()
+          // Selection falls back to the first remaining state — through
+          // `_selectEntry()` (2026-07-21b), so the `name` field follows the
+          // selection like every other selection movement; an emptied
+          // library clears all three (slug anchor, hidden widget, name
+          // field).
+          const nextEntry = this._setsCache[0] || null
+          if (nextEntry) {
+            this._selectEntry(nextEntry)
+          } else {
+            this._selectedSlug = null
+            this._setSetValueSilently('')
+            this._clearNameField()
+          }
+        } catch (error) {
+          this._setsCache = previousCache
+          this._setsSignature = previousSignature
+          this._renderStateList()
+          this._toast('error', NODE_TITLE, `Could not delete "${entry.name}": ${error?.message || error}`)
+        } finally {
+          this._deleteInFlightSlugs.delete(entry.slug)
         }
-        const response = await api.postJson('/lora_library/set/delete', { slug: entry.slug })
-        this._applySetsResponse(response)
-        announceSetsChanged()
-        // Selection falls back to the first remaining state — through
-        // `_selectEntry()` (2026-07-21b), so the `name` field follows the
-        // selection like every other selection movement; an emptied library
-        // clears all three (slug anchor, hidden widget, name field).
-        const nextEntry = this._setsCache[0] || null
-        if (nextEntry) {
-          this._selectEntry(nextEntry)
-        } else {
-          this._selectedSlug = null
-          this._setSetValueSilently('')
-          this._clearNameField()
-        }
-        this._toast('success', NODE_TITLE, `Deleted "${entry.name}".`)
       }
 
       /**
