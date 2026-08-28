@@ -30,7 +30,7 @@ from __future__ import annotations
 import json
 import logging
 import re
-from typing import Any
+from typing import Any, ClassVar
 
 from . import resolution_presets_store as presets_store
 
@@ -520,6 +520,24 @@ class EPSResolution:
         "button fills width/height with the wired image's own size in one "
         "click."
     )
+
+    #: §6.16 state registry (v0.83.0): the widgets a Universal State
+    #: Controller may capture/apply, declared next to the parser that owns
+    #: their shape. ``presets`` carries only the ticked preset NAMES (see
+    #: ``_parse_preset_names`` above / FORMAT.md §6.5 M3) -- a plain string
+    #: array, nothing richer. The ``image``/``image_2``..``image_8`` sockets
+    #: are IMAGE-typed, not widgets, and never appear here.
+    EPS_STATE_WIDGETS: ClassVar[dict[str, Any]] = {
+        "format": 1,
+        "widgets": {
+            "height": {"kind": "int", "min": HEIGHT_MIN, "max": HEIGHT_MAX},
+            "width": {"kind": "int", "min": WIDTH_MIN, "max": WIDTH_MAX},
+            "resize_method": {"kind": "choice"},
+            "interpolation": {"kind": "choice"},
+            "multiple_of": {"kind": "int", "min": MULTIPLE_OF_MIN, "max": MULTIPLE_OF_MAX},
+            "presets": {"kind": "json_array", "items": "string"},
+        },
+    }
 
     @classmethod
     def INPUT_TYPES(cls) -> dict[str, Any]:

@@ -24,7 +24,7 @@ from __future__ import annotations
 import copy
 import json
 import logging
-from typing import Any
+from typing import Any, ClassVar
 
 from . import sets_store
 from .context import LibraryContext
@@ -228,6 +228,22 @@ class LoraLibraryApplySet:
         "Apply Set at once) at a state; the node's 'mirrors loader' tag "
         "scopes which pushes it follows."
     )
+
+    #: §6.16 state registry (v0.83.0): the widgets a Universal State
+    #: Controller may capture/apply, declared next to the parser that owns
+    #: their shape. ``pinned_state`` is excluded -- baked provenance from
+    #: EPS Save Image (§6.14), not user-picked state.
+    EPS_STATE_WIDGETS: ClassVar[dict[str, Any]] = {
+        "format": 1,
+        "widgets": {
+            "set": {"kind": "choice"},
+            "strength_scale": {"kind": "float", "min": 0.0, "max": 2.0},
+            "loader_slot": {"kind": "int", "min": 0, "max": 63},
+        },
+        "excluded": {
+            PIN_WIDGET: "provenance from a baked image, not user intent",
+        },
+    }
 
     @classmethod
     def INPUT_TYPES(cls) -> dict[str, Any]:

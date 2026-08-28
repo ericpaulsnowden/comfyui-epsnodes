@@ -45,7 +45,7 @@ planned stack through the proven ``_apply_stack`` staticmethod.
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import Any, ClassVar
 
 from . import nodes_sets
 from .context import LibraryContext
@@ -332,6 +332,20 @@ class LoraLibrarySweep:
         "output into Save Image's filename_prefix so each saved file says "
         "which lora and strength produced it."
     )
+
+    #: §6.16 state registry (v0.83.0): the widgets a Universal State
+    #: Controller may capture/apply, declared next to the parser that owns
+    #: their shape. ``model``/``lora_stack``/``clip`` are sockets, not
+    #: widgets, and never appear here.
+    EPS_STATE_WIDGETS: ClassVar[dict[str, Any]] = {
+        "format": 1,
+        "widgets": {
+            "min": {"kind": "float", "min": -10.0, "max": 10.0},
+            "max": {"kind": "float", "min": -10.0, "max": 10.0},
+            "increment": {"kind": "float", "min": 0.01, "max": 10.0},
+            "mode": {"kind": "choice"},
+        },
+    }
 
     @classmethod
     def INPUT_TYPES(cls) -> dict[str, Any]:

@@ -5,7 +5,7 @@ live in **plain files you own**. Everything appears under **EPSNodes** in
 the node browser and Settings. It started as a LoRA family and has grown
 beyond it — image-flow utilities now live here too.
 
-## The seventeen nodes
+## The eighteen nodes
 
 No third-party packs required — every node here runs on ComfyUI alone;
 the Lora Loader State Controller is built to extend rgthree-comfy, but only
@@ -21,6 +21,7 @@ section further down; this is the map.
 | [**EPS Prompt Builder**](#eps-prompt-builder-shipped) | Composes prompts *from* your Prompt Notebook: its entries listed on the left, a reorderable list of building blocks on the right, all combined — after any piped-in text — into one output. The notebook stays the single place you edit. | An EPS Prompt Notebook on the canvas (it defines the file). |
 | [**EPS LoRA Picker**](#eps-lora-picker-shipped) | Browse your loras by folder instead of one flat list — drill down, star favorites, see recents, pin a per-workflow folder scope — and build a selection with per-lora strengths. Outputs a `LORA_STACK`, patched model/clip, trigger words, and a filename token. | Your LoRA files; nothing else — favorites/recents live in the shared library folder. |
 | [**EPS Apply LoRA Set**](#eps-apply-lora-set-shipped) | Pick a saved lora configuration ("state") from a dropdown and apply it — which loras, order, on/off, strengths. Standalone: MODEL/CLIP in → out, plus a `LORA_STACK` and trigger words. | Your LoRA files + a saved set (via the Controller, the API, or by hand). |
+| [**EPS Universal State Controller**](#eps-universal-state-controller-shipped) | Save and re-apply the *whole workflow's* EPS-node settings as named states — prompts selected, switcher ticks, picker stacks, resolution, distributor toggles, all of it — with a per-workflow checklist of which nodes to include. | Nothing — frontend-only, drives the other EPS nodes. |
 | [**EPS Lora Loader State Controller**](#eps-lora-loader-state-controller-shipped-requires-rgthree-comfy) | Captures and applies those states directly on an [rgthree Power Lora Loader](https://github.com/rgthree/rgthree-comfy) or an EPS LoRA Picker — the loader stays the loader, this moves whole configurations in and out of it. | **rgthree-comfy**'s Power Lora Loader (third-party; only those targets need it) and/or the EPS LoRA Picker (no dependency). |
 | [**EPS LoRA Iterator**](#eps-lora-iterator-shipped) | Auditions any `LORA_STACK` by strength: set min/max/increment and one queue runs your workflow once per step (per lora, or all together). | A `LORA_STACK` source (usually Apply LoRA Set) + a model. |
 | [**EPS Image Switcher**](#eps-image-switcher-shipped) | Any number of image inputs, each independently on/off; the enabled ones fan out (N enabled → N runs). Disabled branches never execute. | Nothing — drag-and-drop with core nodes. |
@@ -237,6 +238,37 @@ happen there — and the Builder assembles prompts *out of* it:
 - Try `examples/eps-test-prompt-builder.json` (copy
   `examples/eps-cross-test-prompts.md` into your library first, same file the
   Run Multiplier demo uses).
+
+## EPS Universal State Controller (shipped)
+
+`EPSNodes → EPS Universal State Controller`: the Lora State Controller's
+big sibling. One node that captures a named snapshot of **every EPS node's
+settings** in the workflow — which prompts are selected, which models are
+ticked, the picker's stack, resolution, distributor toggles, multiplier
+modes, save prefixes — and applies it back later, or in another session.
+
+- **Looks and works like the Lora State Controller**: grouped states
+  (`# name` makes a group), search, Save/Apply/Delete, instant-feel saves
+  with loud failures. States live in your library folder
+  (`library/states/`), so they share across machines the same way your
+  lora sets do.
+- **The Included-nodes page**: a second tab lists every state-bearing node
+  on the canvas, grouped by type, each with a checkbox (and per-type master
+  checkboxes). Untick what a state shouldn't touch — the choice saves with
+  the workflow. Everything is included by default; new nodes join
+  automatically.
+- **Applying is honest**: values are validated before they're written
+  (a state can never corrupt a node), and every apply ends with a report —
+  "Applied 7 of 9 · 1 not found · 1 skipped". Nothing partial ever happens
+  silently.
+- Fourteen node types are covered; the grid's server buffer, provenance
+  pins and the solo token are deliberately excluded (each would corrupt or
+  surprise). The Lora State Controller keeps its specialized job — your
+  existing lora states are untouched.
+- Under the hood every EPS node now **declares its own state** in a small
+  registry (`GET /eps/state_registry`) — the piece that lets this node (and
+  future tools) read and write any node's settings without guessing at
+  formats.
 
 ## EPS Lora Loader State Controller (shipped; requires rgthree-comfy)
 

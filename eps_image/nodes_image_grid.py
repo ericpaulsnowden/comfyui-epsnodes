@@ -93,7 +93,7 @@ list to break.
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import Any, ClassVar
 
 from . import image_grid_store as store
 
@@ -209,6 +209,20 @@ class EPSImageGrid:
         "one frame; unfocus (double-click again) to go back to the whole "
         "buffer."
     )
+
+    #: §6.16 state registry (v0.83.0): the widgets a Universal State
+    #: Controller may capture/apply, declared next to the parser that owns
+    #: their shape. Out of the universal-state scope by owner decision
+    #: 2026-08-26 -- every widget here is excluded, none captured/applied.
+    EPS_STATE_WIDGETS: ClassVar[dict[str, Any]] = {
+        "format": 1,
+        "widgets": {},
+        "excluded": {
+            "mode": "out of the universal-state scope by owner decision 2026-08-26",
+            "focus": "out of the universal-state scope by owner decision 2026-08-26",
+            "grid_uuid": "server-side buffer identity -- sharing it corrupts buffers",
+        },
+    }
 
     @classmethod
     def INPUT_TYPES(cls) -> dict[str, Any]:

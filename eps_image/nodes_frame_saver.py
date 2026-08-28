@@ -32,7 +32,7 @@ import contextlib
 import logging
 import os
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 
 # Plain module name, not the old `as video` alias: run()'s new `video`
 # PARAMETER (the §6.7 v0.60.0 wired input) would shadow it.
@@ -89,6 +89,19 @@ class EPSFrameSaver:
         "and the wire wins over the browsed path -- a wired Load Video "
         "even scrubs from another machine's browser."
     )
+
+    #: §6.16 state registry (v0.83.0): the widgets a Universal State
+    #: Controller may capture/apply, declared next to the parser that owns
+    #: their shape. Out of the universal-state scope by owner decision
+    #: 2026-08-26 -- every widget here is excluded, none captured/applied.
+    EPS_STATE_WIDGETS: ClassVar[dict[str, Any]] = {
+        "format": 1,
+        "widgets": {},
+        "excluded": {
+            "video_path": "out of the universal-state scope by owner decision 2026-08-26",
+            "frame": "out of the universal-state scope by owner decision 2026-08-26",
+        },
+    }
 
     # `video_path` and `frame` below have no `tooltip`: both widgets are
     # hidden serialized bridges (`web/eps_image/frame_saver.js`'s "Two

@@ -25,7 +25,7 @@ import hashlib
 import json
 import logging
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 
 from . import markdown_store
 from .context import DEFAULT_NOTEBOOK_FILENAME, LibraryContext
@@ -372,6 +372,21 @@ class LoraLibraryNotebook:
         "re-read on every run, so edits made outside ComfyUI are picked up "
         "automatically."
     )
+
+    #: §6.16 state registry (v0.83.0): the widgets a Universal State
+    #: Controller may capture/apply, declared next to the parser that owns
+    #: their shape. ``pinned`` is excluded -- it is baked provenance from
+    #: EPS Save Image (§6.14), not something a user picks in the panel.
+    EPS_STATE_WIDGETS: ClassVar[dict[str, Any]] = {
+        "format": 1,
+        "widgets": {
+            "file": {"kind": "string", "max_len": 10000},
+            "entry": {"kind": "lines"},
+        },
+        "excluded": {
+            PIN_WIDGET: "provenance from a baked image, not user intent",
+        },
+    }
 
     @classmethod
     def INPUT_TYPES(cls) -> dict[str, Any]:

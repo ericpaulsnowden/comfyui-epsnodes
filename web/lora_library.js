@@ -16,6 +16,7 @@ import * as notebook from './lora_library/notebook.js'
 import * as promptBuilder from './lora_library/prompt_builder.js'
 import * as sets from './lora_library/sets.js'
 import * as controller from './lora_library/controller.js'
+import * as universalController from './lora_library/universal_controller.js'
 import * as picker from './lora_library/picker.js'
 import * as pathHeal from './lora_library/path_heal.js'
 import { SETTINGS, initSettings } from './lora_library/settings.js'
@@ -56,6 +57,7 @@ app.registerExtension({
    */
   init() {
     safely('controller.registerControllerNode', () => controller.registerControllerNode())
+    safely('universalController.registerControllerNode', () => universalController.registerControllerNode())
   },
 
   /**
@@ -83,6 +85,7 @@ app.registerExtension({
    */
   beforeRegisterVueAppNodeDefs(defs) {
     safely('controller.nameNodeDef', () => controller.nameNodeDef(defs))
+    safely('universalController.nameNodeDef', () => universalController.nameNodeDef(defs))
   },
 
   /**

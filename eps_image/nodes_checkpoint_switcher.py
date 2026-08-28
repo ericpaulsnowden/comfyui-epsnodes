@@ -107,7 +107,7 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import Any
+from typing import Any, ClassVar
 
 logger = logging.getLogger("eps_image")
 
@@ -426,6 +426,16 @@ class EPSCheckpointSwitcher:
         "operating system (Windows \\ vs Linux/macOS / in subfolder names) "
         "still load the right file here."
     )
+
+    #: §6.16 state registry (v0.83.0): the widgets a Universal State
+    #: Controller may capture/apply, declared next to the parser that owns
+    #: their shape.
+    EPS_STATE_WIDGETS: ClassVar[dict[str, Any]] = {
+        "format": 1,
+        "widgets": {
+            "selection": {"kind": "json_array", "items": "string"},
+        },
+    }
 
     @classmethod
     def INPUT_TYPES(cls) -> dict[str, Any]:

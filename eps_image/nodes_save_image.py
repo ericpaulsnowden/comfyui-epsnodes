@@ -54,7 +54,7 @@ import logging
 import os
 from collections.abc import Iterator
 from datetime import datetime, timezone
-from typing import Any, NamedTuple
+from typing import Any, ClassVar, NamedTuple
 
 from .nodes_cross_sweep import EPSCrossSweep
 
@@ -567,6 +567,17 @@ class EPSSaveImage:
         "recreate just that one image, exactly, even after the library was "
         "edited. With run_info unwired it behaves exactly like Save Image."
     )
+
+    #: §6.16 state registry (v0.83.0): the widgets a Universal State
+    #: Controller may capture/apply, declared next to the parser that owns
+    #: their shape. ``images`` is a socket and ``run_info`` is wire-only
+    #: (forceInput); neither appears here.
+    EPS_STATE_WIDGETS: ClassVar[dict[str, Any]] = {
+        "format": 1,
+        "widgets": {
+            "filename_prefix": {"kind": "string", "max_len": 10000},
+        },
+    }
 
     @classmethod
     def INPUT_TYPES(cls) -> dict[str, Any]:

@@ -85,7 +85,7 @@ import hashlib
 import json
 import logging
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 
 from . import markdown_store
 from .context import DEFAULT_NOTEBOOK_FILENAME, LibraryContext
@@ -405,6 +405,19 @@ class EPSPromptBuilder:
         "still referenced here fails the queue loudly, naming every "
         "missing block, rather than silently building a wrong prompt."
     )
+
+    #: §6.16 state registry (v0.83.0): the widgets a Universal State
+    #: Controller may capture/apply, declared next to the parser that owns
+    #: their shape. ``text``/``name`` are wire-only (forceInput, no widget)
+    #: and never appear here.
+    EPS_STATE_WIDGETS: ClassVar[dict[str, Any]] = {
+        "format": 1,
+        "widgets": {
+            "file": {"kind": "string", "max_len": 10000},
+            "blocks": {"kind": "json_array", "items": "string"},
+            "separator": {"kind": "string", "max_len": 10000},
+        },
+    }
 
     @classmethod
     def INPUT_TYPES(cls) -> dict[str, Any]:

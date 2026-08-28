@@ -20,7 +20,7 @@ from __future__ import annotations
 import json
 import logging
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 
 from . import nodes_sets, sets_store
 from .context import LibraryContext
@@ -265,6 +265,21 @@ class EPSLoraPicker:
         "node's selection as a named state and apply states back into it "
         "-- including when either node sits inside a subgraph."
     )
+
+    #: §6.16 state registry (v0.83.0): the widgets a Universal State
+    #: Controller may capture/apply, declared next to the parser that owns
+    #: their shape. ``selection``'s shape (see :func:`_parse_selection`
+    #: above, module docstring §6.13): a JSON OBJECT ``{"scope": <per-
+    #: workflow view state, ignored here>, "loras": [{"file", "on",
+    #: "strength", "strength_clip"?}, ...]}`` -- a fixed-key object, not a
+    #: pattern-keyed map, hence plain ``json_object`` with no
+    #: ``key_pattern``.
+    EPS_STATE_WIDGETS: ClassVar[dict[str, Any]] = {
+        "format": 1,
+        "widgets": {
+            "selection": {"kind": "json_object"},
+        },
+    }
 
     @classmethod
     def INPUT_TYPES(cls) -> dict[str, Any]:

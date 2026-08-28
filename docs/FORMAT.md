@@ -372,6 +372,41 @@ every listing):
 - Collapse state is per-browser view state — never in this file, never in
   the workflow.
 
+## §4.3 Universal states on disk (v0.83.0)
+
+`library/states/<slug>.json` — snapshots of many nodes' widget values,
+captured by §6.16's Universal State Controller. Shape:
+
+```json
+{"format": 1, "name": "Portrait pass", "notes": "",
+ "captured": "2026-08-26T12:00:00Z",
+ "nodes": [
+   {"class": "EPSResolution", "id": "12", "title": "Hero size",
+    "widgets": {"width": 1024, "height": 1024, "resize_method": "stretch"}}
+ ]}
+```
+
+- `name` required non-empty; `notes`/`captured` optional strings
+  (`captured` defaults to UTC now, `Z`-suffixed); `nodes` a list. Node
+  entry: `class`/`id` required non-empty strings (`id` = the frontend's
+  opaque subgraph path id, e.g. `"3:2"`); `title` optional; `widgets` a
+  required object. Filename = `slugify(name)`, byte-identical rules to
+  §4's set slugs. Sidecar `universal_states_layout.json` (groups) uses
+  §4.2's exact self-healing layout mechanics. JSON-kind widget values are
+  stored STRUCTURALLY (parsed objects/arrays), not as the widget's own
+  JSON string — the frontend parses at capture and re-serializes at apply
+  (the v0.83.0 rig-caught seam).
+- **Registry validation on save** (`EPS_STATE_WIDGETS`, §6.16): a KNOWN
+  class rejects undeclared/excluded widget keys loudly
+  (`StateValidationError` naming `<class>.<widget>`) and type-checks every
+  value per kind. A class with NO registry entry (future pack, third-party,
+  not loaded here) is kept as-is and echoed in the save response's
+  `foreign` list — save is tolerant-but-loud, load silently tolerant, so a
+  state from a newer build survives a round trip through an older one.
+- Store = `sets_store.py`'s blueprint verbatim (atomic gvfs-safe writes,
+  three-layer caches, v0.82.0 splice-on-save), own module
+  `universal_states_store.py`.
+
 ## §5 HTTP routes
 
 Mostly under `/lora_library/`; the `eps_image/` node families register their
@@ -397,6 +432,12 @@ documented in full in its §6.x section). JSON in/out; errors are `{"error":
 | `POST /lora_library/notebook/move_category` `{"file","name","before"?,"base_mtime"?}` | §3.4 Move category: relocate the whole block before the named category, or to end-of-file when `before` omitted; unknown `name`/`before` ⇒ 404; §3.5 ⇒ 409; `{"ok","mtime","entries","categories"}` |
 | `POST /lora_library/notebook/delete` `{"file","name","base_mtime"?}` | `{"ok","mtime","entries"}` |
 | `POST /lora_library/notebook/delete_category` `{"file","name","base_mtime"?}` | §3.4 Delete category: remove that one `# heading` line, MERGING its §3.1 description and every entry it held into the block above it (the implicit head region when it was the first category, which uncategorizes them). Deletes no entry — unknown `name`, including the header-less head region, ⇒ 404; §3.5 ⇒ 409. → `{"ok","mtime","entries","categories","merged_into","entries_moved"}` |
+| `GET /lora_library/universal_states` | §4.3 listing + `layout` + `states_dir`/`is_default_library`/`mtime` in ONE round trip (v0.82.0 lesson) |
+| `GET /lora_library/universal_state?slug=` | one full normalized §4.3 state (per-file cached) |
+| `POST /lora_library/universal_state` `{state[,slug]}` | normalize+registry-validate, splice-warm caches → `{"ok","slug","states","foreign"}` |
+| `POST /lora_library/universal_state/delete` `{slug}` | splice discipline → `{"ok","states"}` |
+| `POST /lora_library/universal_states/layout` `{layout}` | §4.2-mechanics sidecar save, full-replace + self-heal |
+| `GET /eps/state_registry` | every node class's `EPS_STATE_WIDGETS` (§6.16) — process-lifetime memo, the `/eps/list_flags` shape |
 | `POST /lora_library/notebook/move` `{"file","name","before"?,"category"?,"base_mtime"?}` | §3.4 Move: exactly one of `before` (entry name to insert before) or `category` (append to that category's end; `""` = uncategorized/file-end rule) — both/neither ⇒ 400; unknown `name`/`before` ⇒ 404; §3.5 conflicts ⇒ 409; `{"ok","mtime","entries"}` |
 | `GET /lora_library/sets` | `{"sets": [{"slug","name","count"}]}` sorted by name |
 | `GET /lora_library/set?slug=` | the full §4 JSON + `"slug"` |
@@ -3439,6 +3480,55 @@ category "EPSNodes"; class id frozen once shipped (§8).
   selecting writes this node's `file` widget. `file`/`blocks` are hidden
   BOTH ways (§7.5: options.hidden for Vue + widget.hidden for canvas).
   All state lives in the two widgets — nothing in localStorage.
+
+## §6.16 `EPSUniversalStateController` (display: "EPS Universal State Controller") — states for every EPS node
+
+New in v0.83.0 (owner spec 2026-08-26; four choices confirmed same day: the
+14 core node classes; cross-workflow apply with a diff [M3]; side-by-side
+with §6.2's lora controller, untouched; scope checkboxes per controller
+node, per workflow). `web/lora_library/universal_controller.js` — a
+FRONTEND-ONLY node on §6.2's architecture (`lusc-*` twin of `llsc-*`),
+backend §4.3 + `routes_universal_states.py`. Roadmap:
+`docs/ROADMAP-universal-state.md` (M3 cross-workflow diff, M4 risky
+opt-ins, on the owner's word).
+
+- **The state registry (M0, the architecture decision).** Every
+  state-bearing node class declares `EPS_STATE_WIDGETS` next to its own
+  parser — a PURE declarative dict `{format, widgets: {name: {kind,
+  ...}}, excluded: {name: reason}}` with a CLOSED kind set (string / int /
+  float / choice / lines / json_array / json_object+key_pattern).
+  `GET /eps/state_registry` collects them (routes_list_flags' memo shape).
+  Consumers validate through the registry instead of hand-parsing hidden
+  JSON bridges; `tests/test_state_registry.py`'s completeness check forces
+  every widget-bearing input to be declared or excluded-with-reason.
+  EPSImageGrid/EPSFrameSaver declare empty widgets + all-excluded (owner
+  scope decision); `grid_uuid`'s reason is the §6.6 buffer-corruption
+  hazard. Existing ad-hoc consumers (§6.10 estimator's six parsers, §6.14
+  `_pinnable_class`) migrate opportunistically, not big-bang.
+- **Two pages.** States = §6.2's list twin (groups via the §4.2-style
+  sidecar; `# name` creates optimistically+loud per v0.81.0; collapse
+  counts + armed two-click ✕; search; per-workflow `Collapsed groups`
+  property; v0.82.0 optimistic save/delete with an in-flight-slug poller
+  guard). Group ASSIGNMENT is a dropdown, not §6.2's pointer drag (scope
+  trim, documented in the file header). Included nodes = every
+  registry-listed node on canvas (api.js walkers, subgraphs included)
+  grouped by class with tri-state class masters; the `'Included nodes'`
+  property stores ONLY exclusions (`{"nodes": {id: false}, "classes":
+  {class: false}}`, `normalizeExclusions` drops anything else) so new
+  nodes default to included.
+- **Capture** walks included nodes, reads declared widgets, PARSES
+  JSON-kind strings (`captureWidgetValue` — the v0.83.0 rig catch: the
+  raw string fed to the dict-shaped validator silently dropped every
+  toggles/selection/blocks/presets widget), validates per kind, stores
+  structurally; the toast names per-class counts.
+- **Apply (M1 = exact id+class match)** validates every value again —
+  `choice` against the LIVE widget's own options — writes via
+  `widget.value` then `widget.callback?.()`, ONE `setDirtyCanvas` at the
+  end (`widgetWriteValue` re-serializes JSON kinds), and ALWAYS ends with
+  the diff toast: "Applied N of M · X not found · Y skipped (excluded
+  here)". A 0-of-M apply is a warn toast, never silence. A save/delete
+  response carries no `layout` key and must never touch the panel's layout
+  (the agent-caught clobber guard, test-pinned).
 
 ## §7 Frontend surfaces
 

@@ -598,7 +598,7 @@ def test_list_sets_parses_once_then_answers_from_the_cache(
     assert sets_store.list_sets(context)[0]["name"] == "Apple"
 
 
-def test_save_and_delete_in_this_process_invalidate_and_reparse_only_the_changed_file(
+def test_save_and_delete_in_this_process_keep_every_cache_warm(
     context: LibraryContext, monkeypatch
 ) -> None:
     _three_sets(context)

@@ -92,7 +92,7 @@ from __future__ import annotations
 import json
 import logging
 import re
-from typing import Any
+from typing import Any, ClassVar
 
 logger = logging.getLogger("eps_image")
 
@@ -304,6 +304,24 @@ class EPSCrossSweep:
         "every saved file carries its own pre-soloed workflow: drop the "
         "image onto the canvas to recreate just that one."
     )
+
+    #: §6.16 state registry (v0.83.0): the widgets a Universal State
+    #: Controller may capture/apply, declared next to the parser that owns
+    #: their shape. ``solo_run`` is excluded -- a transient re-run token,
+    #: not durable configuration. Every other input here is a socket
+    #: (MODEL/CLIP/IMAGE/VAE) or wire-only (forceInput STRING) and never
+    #: appears here.
+    EPS_STATE_WIDGETS: ClassVar[dict[str, Any]] = {
+        "format": 1,
+        "widgets": {
+            "base_folder": {"kind": "string", "max_len": 10000},
+            "pair_mode": {"kind": "choice"},
+            "sweep_mode": {"kind": "choice"},
+        },
+        "excluded": {
+            "solo_run": "transient one-of-N re-run token",
+        },
+    }
 
     @classmethod
     def INPUT_TYPES(cls) -> dict[str, Any]:

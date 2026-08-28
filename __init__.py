@@ -195,6 +195,20 @@ try:
 except Exception:
     logger.exception("EPSNodes: eps_image.routes_list_flags failed to register")
 
+# §6.16 state registry's own route (`GET /eps/state_registry`, v0.83.0):
+# every loaded class's own EPS_STATE_WIDGETS descriptor, for the run-count
+# estimator, EPS Save Image pinning, and the Universal State Controller
+# alike. No LibraryContext needed (it reads `nodes.NODE_CLASS_MAPPINGS`,
+# same as list_flags just above), registered just as defensively.
+try:
+    _state_registry_routes_path = "eps_image.routes_state_registry"
+    if _TOP_PREFIX:
+        _state_registry_routes_path = f"{_TOP_PREFIX}.{_state_registry_routes_path}"
+    _state_registry_routes = importlib.import_module(_state_registry_routes_path)
+    _state_registry_routes.register()
+except Exception:
+    logger.exception("EPSNodes: eps_image.routes_state_registry failed to register")
+
 # EPSResolution's server-side size-presets route module (`GET/POST
 # /eps_resolution/presets*`) -- UNLIKE the three context-free eps_image
 # route blocks above, this one needs the shared LibraryContext (FORMAT.md
@@ -213,6 +227,22 @@ try:
     _resolution_presets_routes.register_live(_context)
 except Exception:
     logger.exception("EPSNodes: eps_image.routes_resolution_presets failed to register")
+
+# Universal State Controller's state routes (`/lora_library/universal_state*`,
+# FORMAT.md §4.3/§6.16 M1) -- needs the shared LibraryContext (states live
+# inside the same library folder the Notebook/sets already share), so it is
+# registered defensively here exactly like eps_image.routes_resolution_presets
+# just above (register_live(_context), not folded into lora_library.routes'
+# own _register_all -- that file is shared with concurrent work and this
+# pack's __init__.py already wires several feature routes this same way).
+try:
+    _universal_states_routes_path = "lora_library.routes_universal_states"
+    if _TOP_PREFIX:
+        _universal_states_routes_path = f"{_TOP_PREFIX}.{_universal_states_routes_path}"
+    _universal_states_routes = importlib.import_module(_universal_states_routes_path)
+    _universal_states_routes.register_live(_context)
+except Exception:
+    logger.exception("EPSNodes: lora_library.routes_universal_states failed to register")
 
 WEB_DIRECTORY = "./web"
 

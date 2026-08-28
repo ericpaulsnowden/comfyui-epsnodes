@@ -745,10 +745,24 @@ def _make_switcher_ns(
         return (enabled_values,)
 
     paired = low_pattern is not None
+    #: §6.16 state registry (v0.83.0): the widgets a Universal State
+    #: Controller may capture/apply, declared next to the parser that owns
+    #: their shape -- stamped per generated class since ``toggles``'s own
+    #: key_pattern is this class's slot prefix (``image_N``/``model_N``/
+    #: ``clip_N``/``vae_N``). The unbounded ``<prefix>_N`` sockets
+    #: themselves are IMAGE/MODEL/CLIP/VAE-typed, not widgets, and never
+    #: appear here.
+    state_widgets = {
+        "format": 1,
+        "widgets": {
+            "toggles": {"kind": "json_object", "key_pattern": f"^{prefix}_\\d+$"},
+        },
+    }
     namespace: dict[str, Any] = {
         "__module__": __name__,
         "__doc__": class_doc,
         "CATEGORY": "EPSNodes/Switchers",
+        "EPS_STATE_WIDGETS": state_widgets,
         # §8: the low output is a TAIL append -- existing wires never move.
         "RETURN_TYPES": (io_type, io_type) if paired else (io_type,),
         "RETURN_NAMES": (output_name, low_output_name) if paired else (output_name,),
