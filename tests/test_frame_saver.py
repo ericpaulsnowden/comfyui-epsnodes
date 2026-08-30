@@ -374,6 +374,60 @@ class TestValidateVideoPath:
         assert resolved is None
         assert error is not None
 
+    # ----------------------------------- 2026-08-28 cross-OS foreign-absolute
+    #
+    # Same bug class as `lora_library/context.py`'s `is_foreign_absolute`
+    # fix, ported locally here per this module's own self-containment rule
+    # (module docstring: `eps_image/` must not reach into `lora_library/`'s
+    # internals). No healing here (FORMAT.md §6.7: a video path is
+    # arbitrary filesystem, never confined to one shared folder) -- just
+    # detection and a clean, specific error instead of the generic one.
+
+    def test_windows_drive_letter_path_is_rejected_with_a_specific_message(self) -> None:
+        resolved, error = routes_frame_saver._validate_video_path(r"Z:\clips\video.mp4")
+        assert resolved is None
+        assert "Windows" in error
+        assert "absolute path (got" not in error
+
+    def test_windows_forward_slash_drive_path_is_rejected(self) -> None:
+        resolved, error = routes_frame_saver._validate_video_path("Z:/clips/video.mp4")
+        assert resolved is None
+        assert "Windows" in error
+
+    def test_unc_path_is_rejected_with_a_specific_message(self) -> None:
+        resolved, error = routes_frame_saver._validate_video_path(r"\\server\share\video.mp4")
+        assert resolved is None
+        assert "Windows" in error
+
+    def test_posix_path_is_rejected_on_simulated_windows(self, monkeypatch) -> None:
+        monkeypatch.setattr(routes_frame_saver, "_IS_WINDOWS", True)
+        resolved, error = routes_frame_saver._validate_video_path("/mnt/nas/video.mp4")
+        assert resolved is None
+        assert "POSIX" in error
+
+    def test_windows_path_is_not_flagged_foreign_on_simulated_windows(
+        self, monkeypatch, tmp_path: Path
+    ) -> None:
+        # Confirms the seam actually flips the branch rather than always
+        # reporting foreign: a locally-absolute-shaped value on the
+        # simulated platform reaches the ordinary (non-foreign) checks
+        # instead, exactly as it does for real on real Windows.
+        monkeypatch.setattr(routes_frame_saver, "_IS_WINDOWS", True)
+        assert routes_frame_saver._is_foreign_absolute(r"C:\clips\video.mp4") is False
+
+    def test_ordinary_relative_path_keeps_the_generic_message(self) -> None:
+        # Regression: a plain (non-foreign) relative value must keep the
+        # pre-existing generic wording.
+        resolved, error = routes_frame_saver._validate_video_path("clips/video.mp4")
+        assert resolved is None
+        assert "absolute path (got" in error
+
+    def test_locally_absolute_path_is_unaffected(self, tmp_path: Path) -> None:
+        target = tmp_path / "clip.mp4"
+        resolved, error = routes_frame_saver._validate_video_path(str(target))
+        assert error is None
+        assert resolved == target.resolve()
+
 
 @pytest.fixture
 async def client(aiohttp_client):
@@ -504,6 +558,24 @@ class TestProbeRoute:
         )
         assert response.status == 403
         assert "error" in await response.json()
+
+    async def test_foreign_absolute_path_is_a_clean_400(self, client) -> None:
+        response = await client.get(
+            "/eps_frame_saver/probe", params={"path": r"Z:\clips\video.mp4"}
+        )
+        assert response.status == 400
+        data = await response.json()
+        assert "Windows" in data["error"]
+
+    async def test_foreign_absolute_path_still_gates_on_loopback_first(self, client) -> None:
+        # Gate-first order preserved: a remote caller gets the loopback 403,
+        # never the path-shape 400, even for a foreign-absolute value.
+        response = await client.get(
+            "/eps_frame_saver/probe",
+            params={"path": r"Z:\clips\video.mp4"},
+            headers=REMOTE_HEADERS,
+        )
+        assert response.status == 403
 
 
 class TestStreamRoute:

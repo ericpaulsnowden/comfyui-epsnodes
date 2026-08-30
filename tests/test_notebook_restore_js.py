@@ -85,11 +85,56 @@ def test_post_configure_reload_resyncs_the_remote_guard_baseline(source: str) ->
     assert "state.lastKnownFileValue = restored" in block
 
 
+# --------------- 2026-08-29 bugfix round: Universal State Controller Apply
+
+
+def test_external_write_resync_branches_on_whether_file_changed(source: str) -> None:
+    """Owner report: "applying any of the sets won't change anything" --
+    an Apply writing this node's `entry` widget directly (`widget.value =
+    x; widget.callback?.()`) updates the node but never touches this
+    panel's own rendered DOM. `resyncAfterExternalWrite` is the fix: a
+    changed `file` needs the SAME real reload `onFileWidgetChanged()`/
+    `wireConfigureReload()` already use (a different file's entries were
+    never fetched); an unchanged `file` is a cache-only resync reusing
+    `restoreSelectionFromWidget()` plus the exact render calls
+    `applyNotebookPayload()` runs after every load -- never a parallel
+    render path."""
+    block = source.split("function resyncAfterExternalWrite(state)", 1)[1]
+    block = block.split("\nfunction ", 1)[0]
+    assert "restored !== state.file || state.loadError" in block
+    assert "reloadNow(state)" in block
+    assert "restoreSelectionFromWidget(state)" in block
+    assert "renderList(state)" in block
+    assert "updateDeleteButtonEnabled(state)" in block
+    assert "updateSelectionHint(state)" in block
+    assert "updateModeHint(state)" in block
+    assert "loadActiveEditor(state)" in block
+
+
+def test_attach_publishes_the_reload_seam_and_installs_the_subscription(source: str) -> None:
+    """Mirrors picker.js's pre-existing `__epsLpReload` seam (controller.js's
+    Push State already pokes it) -- api.js's shared
+    `announceWidgetsChangedExternally()`/`subscribeWidgetsChangedExternally()`
+    routes by NODE IDENTITY, so this file only needs to stamp its own
+    reload function onto the node and make sure the ONE shared subscription
+    (idempotent module flag, installed from the first attach) is live."""
+    attach = source.split("export function attachNotebookWidget(node)", 1)[1]
+    attach = attach.split("\n}\n", 1)[0]
+    assert "node.__epsNotebookReload = () => resyncAfterExternalWrite(state)" in attach
+    assert "installExternalWriteSubscription()" in attach
+    install = source.split("function installExternalWriteSubscription()", 1)[1]
+    install = install.split("\n}\n", 1)[0]
+    assert "if (externalWriteSubscribed) return" in install
+    assert "externalWriteSubscribed = true" in install
+    assert "api.subscribeWidgetsChangedExternally((entries) => {" in install
+    assert "entry?.node?.__epsNotebookReload?.()" in install
+
+
 def test_same_value_reselect_reloads_instead_of_no_oping(source: str) -> None:
     """Defect 2's pin: an equal-value pick must still reload when the panel
     is displaying a DIFFERENT file. Without this, Browse…-picking the path
     already in the widget is a dead click — the loop the owner hit."""
-    block = source.split("function setFileWidgetValue(state, value)", 1)[1]
+    block = source.split("function setFileWidgetValue(state, rawValue)", 1)[1]
     block = block.split("\n// ---", 1)[0]
     assert "if (widget.value === value)" in block
     assert "state.file !== value" in block
@@ -99,7 +144,7 @@ def test_same_value_reselect_reloads_instead_of_no_oping(source: str) -> None:
 def test_same_value_reselect_still_avoids_pointless_refetches(source: str) -> None:
     # When the panel already shows that file, the equal-value path must stay
     # a no-op — otherwise every redundant pick hits the network.
-    block = source.split("function setFileWidgetValue(state, value)", 1)[1]
+    block = source.split("function setFileWidgetValue(state, rawValue)", 1)[1]
     block = block.split("\n// ---", 1)[0]
     # the early return survives; it's now guarded, not removed
     assert "return" in block.split("state.file !== value", 1)[1][:400]
@@ -503,6 +548,18 @@ out.collapsedIsSection = [
   nb.isSectionCollapsed(null, 'A'),
   nb.isSectionCollapsed(undefined, 'A')
 ]
+out.relativize = {
+  inside: nb.relativizeToLibrary('/lib/docs/x.md', '/lib/docs'),
+  nested: nb.relativizeToLibrary('/lib/docs/sub/x.md', '/lib/docs'),
+  siblingPrefix: nb.relativizeToLibrary('/lib2/x.md', '/lib'),
+  outside: nb.relativizeToLibrary('/elsewhere/x.md', '/lib/docs'),
+  windows: nb.relativizeToLibrary('Z:\\\\docs\\\\x.md', 'Z:\\\\docs'),
+  trailingSlashBase: nb.relativizeToLibrary('/lib/docs/x.md', '/lib/docs/'),
+  dirItself: nb.relativizeToLibrary('/lib/docs', '/lib/docs'),
+  alreadyRelative: nb.relativizeToLibrary('x.md', '/lib/docs'),
+  noBase: nb.relativizeToLibrary('/lib/docs/x.md', null),
+  empty: nb.relativizeToLibrary('', '/lib')
+}
 process.stdout.write(JSON.stringify(out))
 """
 
@@ -578,7 +635,7 @@ def test_unchanged_is_exactly_unchanged_true(cache_api: dict) -> None:
 
 def _picker_section(source: str) -> str:
     return source.split("const PICKER_OVERLAY_ID = 'llnb-picker-overlay'", 1)[1].split(
-        "function setFileWidgetValue(state, value)", 1
+        "function setFileWidgetValue(state, rawValue)", 1
     )[0]
 
 
@@ -1027,6 +1084,7 @@ def test_collapsed_sections_export_list_is_additive(source: str) -> None:
         "export function isSectionCollapsed(list, name)",
         "export function describePendingCategoryDelete(state, category)",
         "export function deletedCategoryStatus(data, category)",
+        "export function relativizeToLibrary(value, libraryDir)",
     )
     for signature in added_this_round:
         assert signature in source, signature
@@ -1413,3 +1471,36 @@ def test_api_source_states_the_no_default_change_guarantee(api_timeout_probe: di
     assert "if (typeof timeoutMs !== 'number') return api.fetchApi(path, fetchOptions)" in (
         API_SOURCE
     )
+
+
+# ---------------- v0.84.0: picks inside the library are stored RELATIVE
+
+
+class TestRelativizeToLibrary:
+    """The forward half of the cross-OS path fix (FORMAT.md §2): a file
+    picked inside the library folder is stored relative, so the workflow
+    opens on the other machine with no healing needed at all."""
+
+    def test_paths_inside_the_library_become_relative(self, cache_api: dict) -> None:
+        r = cache_api["relativize"]
+        assert r["inside"] == "x.md"
+        assert r["nested"] == "sub/x.md"
+        assert r["windows"] == "x.md"
+        assert r["trailingSlashBase"] == "x.md"
+
+    def test_paths_outside_the_library_are_untouched(self, cache_api: dict) -> None:
+        r = cache_api["relativize"]
+        assert r["outside"] == "/elsewhere/x.md"
+        # boundary safety: /lib2 is NOT inside /lib
+        assert r["siblingPrefix"] == "/lib2/x.md"
+        assert r["dirItself"] == "/lib/docs"
+
+    def test_degenerate_inputs_pass_through(self, cache_api: dict) -> None:
+        r = cache_api["relativize"]
+        assert r["alreadyRelative"] == "x.md"
+        assert r["noBase"] == "/lib/docs/x.md"
+        assert r["empty"] == ""
+
+    def test_the_pick_path_relativizes_before_storing(self, source: str) -> None:
+        assert "function setFileWidgetValue(state, rawValue)" in source
+        assert "relativizeToLibrary(rawValue, state.libraryDir)" in source

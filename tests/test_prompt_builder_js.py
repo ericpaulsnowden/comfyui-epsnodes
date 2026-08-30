@@ -525,6 +525,40 @@ def test_restore_race_is_guarded_like_notebooks_own_fix(source: str) -> None:
     assert "if (state.configureReloaded) return" in deferred
 
 
+def test_external_write_resync_never_forces_a_network_call_for_blocks_only(source: str) -> None:
+    """2026-08-29 bugfix round (owner: "applying any of the sets won't
+    change anything") -- deliberately NOT `wireConfigureReload()`'s full
+    body: that one ALWAYS calls `reloadEntries()`, which issues a real GET
+    even when the cache already has the answer. An Apply writing only
+    `blocks` (never touching `file`) must repaint the right pane alone,
+    purely from `state.entries` already cached -- no network. Only a
+    changed `file` falls through to the real reload."""
+    resync = _body(source, "resyncAfterExternalWrite(state)")
+    assert "state.blocks = parseBlocks(state.blocksWidget.value)" in resync
+    assert "const fileChanged = (state.fileWidget.value ?? '') !== state.file" in resync
+    assert "if (fileChanged) {" in resync
+    assert "reloadEntries(state)" in resync
+    assert "renderRightPane(state)" in resync
+
+
+def test_attach_publishes_the_reload_seam_and_installs_the_subscription(source: str) -> None:
+    """Same `__eps<Panel>Reload` seam convention picker.js already
+    publishes for controller.js's Push State -- api.js's shared
+    `announceWidgetsChangedExternally()`/`subscribeWidgetsChangedExternally()`
+    routes by NODE IDENTITY, so this file only needs to stamp its own
+    reload function onto the node and install the ONE shared subscription
+    once (idempotent module flag)."""
+    entry = source.split("export function attachPromptBuilderPanel(node) {", 1)[1]
+    entry = entry.split("\n}\n", 1)[0]
+    assert "node.__epsPromptBuilderReload = () => resyncAfterExternalWrite(state)" in entry
+    assert "installExternalWriteSubscription()" in entry
+    install = _body(source, "installExternalWriteSubscription()")
+    assert "if (externalWriteSubscribed) return" in install
+    assert "externalWriteSubscribed = true" in install
+    assert "api.subscribeWidgetsChangedExternally((entries) => {" in install
+    assert "entry?.node?.__epsPromptBuilderReload?.()" in install
+
+
 def test_teardown_clears_poll_and_attach_timers(source: str) -> None:
     teardown = _body(source, "teardown(state)")
     assert "if (state.pollTimer) clearInterval(state.pollTimer)" in teardown

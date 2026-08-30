@@ -31,7 +31,8 @@ from pathlib import Path, PureWindowsPath
 
 from aiohttp import web
 
-from .context import LibraryContext
+from .context import LibraryContext, is_foreign_absolute
+from .context import is_windows as _context_is_windows
 from .version import __version__
 
 logger = logging.getLogger("lora_library")
@@ -789,6 +790,40 @@ def _uri_style_path_error(raw: str) -> str:
     )
 
 
+def _foreign_absolute_path_error(raw: str) -> str:
+    """FORMAT.md §2/§7.6 400 message for a ``dir``/path value that
+    :func:`is_foreign_absolute` (``context.py``, 2026-08-28 cross-OS path
+    fix) flags -- absolute for the OTHER platform's syntax but not this
+    one, e.g. a Windows drive-letter or UNC path pasted into this server's
+    picker while it runs on macOS/Linux, or a POSIX mount path pasted in on
+    Windows.
+
+    Same spirit as :func:`_uri_style_path_error` for a typed ``scheme://``
+    address: names the mismatch directly instead of the generic "must be
+    an absolute path" 400, which reads like a typo rather than a path
+    copied from the OTHER machine that saved this workflow. Checked
+    BEFORE, not instead of, that generic check at every call site — this
+    is only ever reached for a value the generic check would also reject,
+    just with a less useful message.
+
+    Uses :func:`_context_is_windows` (``context.py``'s own accessor) rather
+    than this module's :func:`_is_windows`, deliberately: this message must
+    describe the SAME platform verdict that already decided *raw* was
+    foreign-absolute, not a second, independent seam that could disagree
+    with it under test.
+    """
+    other, this = (
+        ("POSIX (macOS/Linux)", "Windows")
+        if _context_is_windows()
+        else ("Windows", "POSIX (macOS/Linux)")
+    )
+    return (
+        f"{raw!r} looks like an absolute {other} path, but this server runs on "
+        f"{this} and can't reach it directly here -- enter a path absolute on "
+        "THIS machine (its own mount point for a shared folder)."
+    )
+
+
 # --------------------------------------------------- library_dir diagnosis
 #
 # 2026-07-19 fix (owner report: a NAS-backed library_dir the server machine
@@ -1053,6 +1088,17 @@ def register_core(context: LibraryContext, routes: web.RouteTableDef) -> None:
         # plain language (:func:`_uri_style_path_error`).
         if "://" in raw:
             return error_response(400, _uri_style_path_error(raw))
+        # 2026-08-28 fix: a foreign-absolute `dir` (a Windows drive-letter/
+        # UNC path browsed to on macOS/Linux, or vice-versa) is NEVER
+        # `is_absolute()` for this platform's own Path flavor either -- so
+        # without this it fell into the generic 400 below, which is correct
+        # but doesn't say why a value that looks like a real path fails.
+        # Never silently browses the wrong place: `is_foreign_absolute` is
+        # only ever true for a value that can't resolve as a directory on
+        # THIS machine, so this can only add a clearer error, never change
+        # what a valid `dir` resolves to.
+        if raw and is_foreign_absolute(raw):
+            return error_response(400, _foreign_absolute_path_error(raw))
         directory = Path(raw) if raw else await asyncio.to_thread(context.library_dir)
         if not directory.is_absolute():
             return error_response(400, f"dir must be an absolute path (got {raw!r})")
@@ -1098,6 +1144,12 @@ def register_core(context: LibraryContext, routes: web.RouteTableDef) -> None:
             context.save_config(config)
             library_dir = await asyncio.to_thread(context.library_dir)
             return web.json_response({"ok": True, "library_dir": str(library_dir)})
+        # 2026-08-28 fix: same foreign-absolute detection as `fs/list` above
+        # -- a Windows path typed in while running on macOS/Linux (or the
+        # reverse) is never locally `is_absolute()` either, so this gives
+        # the specific reason instead of the generic 400 below.
+        if is_foreign_absolute(raw):
+            return error_response(400, _foreign_absolute_path_error(raw))
         path = Path(raw)
         if not path.is_absolute():
             return error_response(400, f"library folder must be an absolute path (got {raw!r})")
@@ -1138,6 +1190,10 @@ def register_core(context: LibraryContext, routes: web.RouteTableDef) -> None:
             return error_response(
                 400, f"{raw.split('://', 1)[0]}:// is a network address, not a file path"
             )
+        # 2026-08-28 fix: same foreign-absolute detection as `fs/list`/
+        # `POST /config` above.
+        if is_foreign_absolute(raw):
+            return error_response(400, _foreign_absolute_path_error(raw))
         path = Path(raw)
         if not path.is_absolute():
             return error_response(400, f"shared folder must be an absolute path (got {raw!r})")

@@ -25,13 +25,29 @@
  *     POST underneath, just a cheaper interaction than a drag gesture. Groups
  *     therefore stay fully functional (create/rename/delete/collapse/assign)
  *     without the drag port.
- *  2. Save State is CAPTURE-ONLY (creates a new state every time — there is
- *     no in-place "overwrite the selected state" second button, unlike
- *     controller.js's separate New State / Save State pair). The task's own
- *     spec lists exactly three buttons — "Save State (capture), Apply
- *     State, Delete State" — so update-in-place is left for a future round
- *     if the owner wants it; renaming/overwriting today means Delete + a
- *     fresh Save.
+ *  2. (2026-08-29 bugfix round, REVERSED — see below) New State / Save
+ *     State are now a controller.js-identical PAIR, not one capture-only
+ *     button. Owner report: "anytime I change a value of a set and try to
+ *     save over it, it creates a new set" — the original three-button
+ *     shape (Save/Apply/Delete, "Save" = capture) had no update-in-place
+ *     path at all, so saving over an existing name minted `<slug>-2` every
+ *     time. Mirrors controller.js's `_onCaptureClick()`/`_doCapture()`
+ *     (`New State`, unchanged create path) vs `_onUpdateClick()`/
+ *     `_doUpdate()` (`Save State`, overwrites the SELECTED state's file in
+ *     place — same slug, fresh widgets + `captured` timestamp) exactly,
+ *     including the rename-in-place rule (`_saveAsNewName()`: an edited
+ *     name field renames the selected state rather than forking a
+ *     duplicate — controller.js's 2026-07-22 "Save renames in place"
+ *     reversal, not the create-a-new-entry behavior an earlier
+ *     controller.js history entry describes) and the disable rule (New
+ *     State always enabled — it is also the `#`-group-creation entry
+ *     point and must work with nothing selected; Save/Apply/Delete
+ *     disabled with no state selected). `POST /lora_library/universal_state`
+ *     already accepted an optional `slug` for this (verified against
+ *     `lora_library/routes_universal_states.py` and
+ *     `universal_states_store.save_state()`: a caller-supplied slug is
+ *     used AS-IS, never re-derived/de-duplicated) — only the frontend UI
+ *     was missing the second button.
  *  3. No NAS "states location" footer / Browse…/Open-folder UI. That whole
  *     subsystem in controller.js is about surfacing a SHARED library folder
  *     across machines and isn't part of this node's spec.
@@ -68,9 +84,28 @@
  * Pure, exported, unit-tested helpers (no DOM/network touched):
  * `validateStateValue`, `buildStatePayload`, `applyPlan`,
  * `exclusionsAfterToggle`, `classToggleState`, `summarizeCapture`,
- * `summarizeApply`, `compareStateEntries`, `parseCollapsedGroups`,
- * `isGroupNameInput`, `groupNameFromInput`, `normalizeExclusions`,
- * `normalizeRegistry`.
+ * `summarizeUpdate`, `summarizeApply`, `compareStateEntries`,
+ * `parseCollapsedGroups`, `isGroupNameInput`, `groupNameFromInput`,
+ * `normalizeExclusions`, `normalizeRegistry`.
+ *
+ * 2026-08-29 bugfix round, second half (owner: "applying any of the sets
+ * won't change anything") — `_doApply()`'s write loop (`_writeApplyPlan()`)
+ * correctly updates every matched node's widgets, but a DOM-panel node
+ * (the Notebook, the LoRA Picker, the Prompt Builder, the Checkpoint
+ * Switcher, Resolution's own presets `<select>`) holds its own rendered
+ * state that a bare `widget.value = x; widget.callback?.()` never touches
+ * — that panel's DOM only repaints from its own gestures/reload cycles.
+ * `_writeApplyPlan()` now calls `api.announceWidgetsChangedExternally()`
+ * ONCE, after its existing single `setDirtyCanvas`, naming only the nodes
+ * it actually wrote; each affected panel module subscribes
+ * (`api.subscribeWidgetsChangedExternally()`) and re-syncs from that
+ * node's OWN existing reload entry point — see api.js's own doc comment on
+ * both functions for the full mechanism (coalescing, the
+ * `app.configuringGraph` graph-load guard, the per-subscriber try/catch).
+ * Canvas-drawn nodes (Switchers, Distributor) need no such subscription —
+ * they redraw every frame straight from the widget, so the existing
+ * `setDirtyCanvas` alone already covers them (verified by reading both
+ * files: neither owns a DOM widget at all).
  */
 
 import { app } from '../../../scripts/app.js'
@@ -96,7 +131,8 @@ const PROP_COLLAPSED_GROUPS = 'Collapsed groups'
  * only value ever written; there is no `true` entry, ever. */
 const PROP_INCLUDED_NODES = 'Included nodes'
 
-const LABEL_SAVE = 'Save State'
+const LABEL_CAPTURE = 'New State'
+const LABEL_UPDATE = 'Save State'
 const LABEL_APPLY = 'Apply State'
 const LABEL_DELETE = 'Delete State'
 const LABEL_DELETE_CONFIRM = 'Are you sure?'
@@ -488,13 +524,16 @@ function pluralizeLabel(label, count) {
 }
 
 /**
- * The Save State success toast: `Saved "<name>" — 9 nodes: 2 switchers, 1
- * notebook, …`. Classes are counted from the CAPTURED nodes (post-exclusion,
- * post-validation -- i.e. `buildStatePayload(...).nodes`), sorted by count
- * descending then display-name ascending, capped at `maxClasses` with a
- * trailing "…" when more were captured than shown.
+ * The per-class node-count tail BOTH `summarizeCapture` (New State) and
+ * `summarizeUpdate` (Save State) build their toast around -- "9 nodes: 2
+ * switchers, 1 notebook, …". Classes are counted from the CAPTURED nodes
+ * (post-exclusion, post-validation -- i.e. `buildStatePayload(...).nodes`),
+ * sorted by count descending then display-name ascending, capped at
+ * `maxClasses` with a trailing "…" when more were captured than shown.
+ * Factored out so the two toasts can never drift on how they count/format
+ * -- only the leading verb + quoted name differ between them.
  */
-export function summarizeCapture(name, nodesEntries, registry, { maxClasses = 4 } = {}) {
+function describeCapturedCounts(nodesEntries, registry, maxClasses) {
   const counts = new Map()
   for (const entry of nodesEntries || []) {
     counts.set(entry.class, (counts.get(entry.class) || 0) + 1)
@@ -509,7 +548,29 @@ export function summarizeCapture(name, nodesEntries, registry, { maxClasses = 4 
   const shown = parts.slice(0, maxClasses)
   const pieces = shown.map((p) => `${p.count} ${pluralizeLabel(p.label, p.count)}`)
   const suffix = parts.length > shown.length ? ', …' : ''
-  return `Saved "${name}" — ${total} node${total === 1 ? '' : 's'}: ${pieces.join(', ')}${suffix}`
+  return `${total} node${total === 1 ? '' : 's'}: ${pieces.join(', ')}${suffix}`
+}
+
+/**
+ * The New State success toast: `Saved "<name>" — 9 nodes: 2 switchers, 1
+ * notebook, …`. See `describeCapturedCounts` for the shared tail.
+ */
+export function summarizeCapture(name, nodesEntries, registry, { maxClasses = 4 } = {}) {
+  return `Saved "${name}" — ${describeCapturedCounts(nodesEntries, registry, maxClasses)}`
+}
+
+/**
+ * The Save State (update-in-place) success toast -- controller.js's
+ * `_doUpdate()` verb rule, ported verbatim: `renamed` (the name field
+ * carried a rename, `_saveAsNewName()` returned non-null) reads "Saved +
+ * renamed to "<name>" — …"; a plain overwrite reads "Updated "<name>" —
+ * …". Same shared node-count tail as `summarizeCapture` -- the two toasts
+ * must never disagree on how a capture is counted, only on what verb
+ * introduces it.
+ */
+export function summarizeUpdate(name, nodesEntries, registry, { renamed = false, maxClasses = 4 } = {}) {
+  const verb = renamed ? 'Saved + renamed to' : 'Updated'
+  return `${verb} "${name}" — ${describeCapturedCounts(nodesEntries, registry, maxClasses)}`
 }
 
 /** Up to `max` "<display> '<title>' #<id>" descriptions, "+N more" beyond that. */
@@ -1306,12 +1367,21 @@ export function registerControllerNode() {
           this._pane.listEl
         ])
 
-        this._w.saveBtn = this._createActionButton(
+        this._w.captureBtn = this._createActionButton(
           'lusc-btn',
-          LABEL_SAVE,
-          () => this._onSaveClick(),
+          LABEL_CAPTURE,
+          () => this._onCaptureClick(),
           'Capture every included node’s current widget values as a NEW ' +
-            'named state. A name starting with "#" creates a group instead.'
+            'named state. A name starting with "#" creates a group instead. ' +
+            'Never overwrites an existing state.'
+        )
+        this._w.updateBtn = this._createActionButton(
+          'lusc-btn',
+          LABEL_UPDATE,
+          () => this._onUpdateClick(),
+          'Overwrite the selected state with every included node’s ' +
+            'current widget values. Edit the name field first to rename ' +
+            'it too.'
         )
         this._w.applyBtn = this._createActionButton(
           'lusc-btn',
@@ -1328,7 +1398,8 @@ export function registerControllerNode() {
             'Click twice to confirm.'
         )
         const rightPane = el('div', { className: 'lusc-pane-right' }, [
-          this._w.saveBtn,
+          this._w.captureBtn,
+          this._w.updateBtn,
           this._w.applyBtn,
           this._w.deleteBtn
         ])
@@ -1503,8 +1574,15 @@ export function registerControllerNode() {
         this._renderMoveGroupControl()
       }
 
+      // `captureBtn` (New State) is deliberately NEVER touched here --
+      // controller.js's own captureBtn precedent (file header trim #2): a
+      // `#`-named group creation must work with no state selected at all,
+      // and New State's own click handler already probes/toasts for
+      // anything else it needs. Save/Apply/Delete all require a SELECTED
+      // state and are disabled without one.
       _refreshActionButtonsEnabled() {
         const hasSelection = !!this._selectedStateEntry()
+        if (this._w.updateBtn) this._w.updateBtn.disabled = !hasSelection
         if (this._w.applyBtn) this._w.applyBtn.disabled = !hasSelection
         if (this._w.deleteBtn && !this._w.deleteBtn._armed) this._w.deleteBtn.disabled = !hasSelection
       }
@@ -1772,13 +1850,13 @@ export function registerControllerNode() {
 
       // ------------------------------------------------------ button actions
 
-      _onSaveClick() {
+      _onCaptureClick() {
         this._disarmDeleteButton()
         if (isGroupNameInput(this._w.name?.value)) {
           this._runAction('New Group', () => this._doNewCategory())
           return
         }
-        this._runAction(LABEL_SAVE, () => this._doCapture())
+        this._runAction(LABEL_CAPTURE, () => this._doCapture())
       }
 
       async _doNewCategory() {
@@ -1815,6 +1893,29 @@ export function registerControllerNode() {
           api.warn(`${NODE_TITLE}: name widget callback threw`, error)
         }
         this.setDirtyCanvas(true, true)
+      }
+
+      _onUpdateClick() {
+        this._disarmDeleteButton()
+        this._runAction(LABEL_UPDATE, () => this._doUpdate())
+      }
+
+      /**
+       * Save State's rename decision -- controller.js's `_saveAsNewName()`
+       * ported verbatim (2026-07-22 "Save renames in place", cited in the
+       * file header trim #2 note): a non-empty `name` field that DIFFERS
+       * from the selected entry's own current name renames the state IN
+       * PLACE (same slug, new `name` inside the file); an empty or
+       * unedited field means a plain overwrite that leaves the name
+       * untouched. There is no "spin off a copy" path here at all -- New
+       * State (`_doCapture()`) is the only way a new file is ever created,
+       * so an edited name field can only ever mean "rename this one."
+       */
+      _saveAsNewName(entry) {
+        const typed = (this._w.name?.value || '').trim()
+        const current = entry?.name || entry?.slug || ''
+        if (!typed || typed === current) return null
+        return typed
       }
 
       _onApplyClick() {
@@ -1855,20 +1956,44 @@ export function registerControllerNode() {
         this._toast(severity, NODE_TITLE, `Applied "${full?.name ?? entry.name}" -> ${text}.`)
       }
 
+      /**
+       * 2026-08-29 bugfix round (owner: "applying any of the sets won't
+       * change anything") -- after the SAME write loop + single
+       * `setDirtyCanvas` this method always had, announce which nodes were
+       * actually written so their own DOM panel (if any) can re-sync --
+       * see the file header's own section on this and api.js's
+       * `announceWidgetsChangedExternally()` doc comment for the full
+       * mechanism. Built from `writtenNames`, NOT `matchedNode.writes`
+       * itself: a matched-but-all-invalid node (every write dropped by
+       * `applyPlan`'s own validation) wrote nothing and must not appear --
+       * "listing only the nodes it actually wrote."
+       */
       _writeApplyPlan(plan, discovered) {
         const byPathId = new Map(discovered.map((d) => [d.pathId, d.node]))
+        const changedEntries = []
         for (const matchedNode of plan.matched) {
           const liveNode = byPathId.get(matchedNode.id)
           if (!liveNode) continue
           const widgetsByName = new Map((liveNode.widgets || []).map((w) => [w.name, w]))
+          const writtenNames = []
           for (const write of matchedNode.writes) {
             const widget = widgetsByName.get(write.name)
             if (!widget) continue
             widget.value = write.value
             widget.callback?.(write.value, app.canvas, liveNode)
+            writtenNames.push(write.name)
+          }
+          if (writtenNames.length) {
+            changedEntries.push({
+              node: liveNode,
+              pathId: matchedNode.id,
+              class: matchedNode.class,
+              widgets: writtenNames
+            })
           }
         }
         this.setDirtyCanvas(true, true)
+        api.announceWidgetsChangedExternally(changedEntries)
       }
 
       _onDeleteClick() {
@@ -1974,6 +2099,56 @@ export function registerControllerNode() {
       }
 
       /**
+       * Save State's optimistic half (controller.js's `_beginOptimisticUpdate()`
+       * shape): unlike a create, an update's slug never changes, so there is
+       * no provisional slug to invent -- `entry.slug` ITSELF is marked
+       * in-flight, in the SAME `_saveInFlightSlugs` set New State's
+       * provisional row uses. That is what stops a stale poll snapshot
+       * (captured before this update's write lands) from regressing the
+       * name/count painted here back to what the file still says on disk --
+       * `_applyStatesResponse()`'s `localBySlug` guard already covers any
+       * slug in this set, create or update alike. `_statesCache` entries
+       * are always REPLACED, never mutated in place, matching every other
+       * write in this file. Re-sorts (a rename can move the row), repaints,
+       * keeps the SAME row selected with `loadName: false` -- the name
+       * field already holds whatever the user is mid-typing (a rename, or
+       * nothing), and overwriting it here would fight that -- and toasts
+       * "Saving…". Returns the OLD entry for
+       * `_rollbackOptimisticUpdate()`'s failure path.
+       */
+      _beginOptimisticUpdate(entry, newName, count) {
+        this._saveInFlightSlugs.add(entry.slug)
+        const name = newName ?? entry.name
+        const updated = {
+          slug: entry.slug,
+          name,
+          count,
+          captured: entry.captured,
+          label: name || entry.slug
+        }
+        this._statesCache = this._statesCache
+          .map((s) => (s.slug === entry.slug ? updated : s))
+          .sort(compareStateEntries)
+        this._renderStateList()
+        this._selectEntry(updated, { loadName: false })
+        this._toast('info', NODE_TITLE, `Saving "${name}"…`)
+        return entry
+      }
+
+      /** `_beginOptimisticUpdate()`'s failure half: puts the row back
+       * EXACTLY as it read before -- the same "restore exactly" rule
+       * `_rollbackOptimisticCreate()`/`_doDelete()`'s own rollback use --
+       * and toasts loudly. */
+      _rollbackOptimisticUpdate(previous, error) {
+        this._statesCache = this._statesCache
+          .map((s) => (s.slug === previous.slug ? previous : s))
+          .sort(compareStateEntries)
+        this._selectEntry(previous, { loadName: false })
+        this._renderStateList()
+        this._toast('error', NODE_TITLE, `Could not save "${previous.name}": ${error?.message || error}`)
+      }
+
+      /**
        * Capture: registry -> live discovery -> read every declared
        * widget's `.value` -> `buildStatePayload()` (pure: filters
        * excluded/non-state-bearing, validates per kind) -> optimistic
@@ -2013,6 +2188,97 @@ export function registerControllerNode() {
           this._rollbackOptimisticCreate(provisionalSlug, previousSelectedSlug, name, error)
         } finally {
           this._saveInFlightSlugs.delete(provisionalSlug)
+        }
+      }
+
+      /**
+       * Save State: overwrite the SELECTED state in place -- same slug, a
+       * FRESH capture of every included node's current widget values, a
+       * new `captured` timestamp, and (only when `_saveAsNewName()` says
+       * the name field was edited) a renamed `name`. Same discovery/
+       * exclusion/validation pipeline `_doCapture()` uses just above --
+       * Save IS a re-capture, aimed at an existing file instead of a new
+       * one -- and controller.js's `_doUpdate()` optimistic-then-POST
+       * posture: `_beginOptimisticUpdate()` paints before the network
+       * call, `_rollbackOptimisticUpdate()` restores the row exactly on
+       * failure, `_saveInFlightSlugs` guards the slug the same way New
+       * State's provisional slug guards a create.
+       *
+       * The backend already supports this: `POST
+       * /lora_library/universal_state` accepts an optional `slug`, and
+       * `universal_states_store.save_state()` uses a caller-supplied slug
+       * AS-IS (no `_unique_slug` de-duplication -- that call only runs
+       * when `slug is None`) -- passing the SELECTED state's own slug back
+       * is what turns this POST from "mint `<slug>-2`" into "overwrite
+       * this file," with no backend change needed (verified by reading
+       * `lora_library/routes_universal_states.py` and
+       * `universal_states_store.save_state()` directly).
+       */
+      async _doUpdate() {
+        const entry = this._selectedStateEntry()
+        if (!entry) {
+          this._toast('warn', NODE_TITLE, 'Pick a saved state first.')
+          return
+        }
+        const newName = this._saveAsNewName(entry)
+        const registry = await fetchStateRegistry()
+        if (this._removed) return
+        this._registry = registry
+        const exclusions = this._exclusions()
+        const discovered = discoverStateNodes(registry)
+        const nodesInfo = discovered.map((d) => ({
+          pathId: d.pathId,
+          class: d.class,
+          title: d.title,
+          widgetValues: readWidgetValues(d.node, Object.keys(registry.classes[d.class]?.widgets || {}))
+        }))
+        const { nodes, warnings } = buildStatePayload(nodesInfo, registry, exclusions)
+        for (const warning of warnings) api.warn(`${NODE_TITLE}: save: ${warning}`)
+
+        const savedSlug = entry.slug
+        const previous = this._beginOptimisticUpdate(entry, newName, nodes.length)
+        try {
+          // Preserve the existing notes; only the widgets (and, optionally,
+          // the name) change on Save -- best-effort GET, falls back to a
+          // bare rewrite (notes reset) if the existing file can't be read
+          // for some reason -- controller.js's `_doUpdate()` identical
+          // trigger_words/notes fallback.
+          let name = entry.name
+          let notes = ''
+          try {
+            const existing = await api.getJson(STATE_ROUTE, { slug: savedSlug })
+            name = existing.name ?? name
+            notes = existing.notes ?? ''
+          } catch (error) {
+            api.warn(
+              `${NODE_TITLE}: could not read the existing state before saving; overwriting anyway`,
+              error
+            )
+          }
+          const state = {
+            format: 1,
+            name: newName ?? name,
+            notes,
+            captured: new Date().toISOString(),
+            nodes
+          }
+          const response = await api.postJson(STATE_ROUTE, { slug: savedSlug, state })
+          this._applyStatesResponse(response)
+          announceStatesChanged()
+          this._selectStateBySlug(savedSlug)
+          const saved = this._statesCache.find((s) => s.slug === savedSlug)
+          this._toast(
+            'success',
+            NODE_TITLE,
+            summarizeUpdate(saved?.name ?? (newName ?? name), nodes, registry, { renamed: !!newName })
+          )
+          if (Array.isArray(response.foreign) && response.foreign.length) {
+            this._toast('warn', NODE_TITLE, `Saved with warnings: ${response.foreign.join('; ')}`)
+          }
+        } catch (error) {
+          this._rollbackOptimisticUpdate(previous, error)
+        } finally {
+          this._saveInFlightSlugs.delete(savedSlug)
         }
       }
 

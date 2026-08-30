@@ -212,6 +212,50 @@ class TestMissingFileErrorNamesResolvedPath:
         assert absolute_file in str(exc_info.value)
 
 
+# --------------------------------------------------- cross-OS foreign-absolute
+#
+# 2026-08-28 owner report: Linux box, library on a gvfs SMB mount, workflow
+# saved on the Windows PC. The `file` widget held `Z:\docs\short_prompts.md`;
+# on POSIX that used to join WHOLE under `library_dir`
+# (`context.is_foreign_absolute`/`heal_foreign_absolute` fix that instead).
+
+
+class TestForeignAbsoluteFileHealing:
+    def test_reads_the_entry_after_healing_to_an_existing_tail(
+        self, library_dir: Path
+    ) -> None:
+        _write_notebook(library_dir, "short_prompts.md", "## Portrait\nSome prompt text.\n")
+        node = nodes_notebook.LoraLibraryNotebook()
+        result = node.read_entry(file=r"Z:\docs\short_prompts.md", entry="Portrait")
+        assert result == (["Some prompt text."], ["Portrait"])
+
+    def test_missing_file_error_names_what_was_tried_not_a_bogus_join(
+        self, library_dir: Path
+    ) -> None:
+        node = nodes_notebook.LoraLibraryNotebook()
+        with pytest.raises(ValueError) as exc_info:
+            node.read_entry(file=r"Z:\docs\short_prompts.md", entry="Anything")
+        message = str(exc_info.value)
+        assert "tried as a Windows path from another machine:" in message
+        tried = message.split("tried as a Windows path from another machine: ", 1)[1]
+        # The candidate NAMED in the hint is a clean local path -- no
+        # leftover backslash/drive-colon from the original foreign value.
+        assert "\\" not in tried.split(")", 1)[0]
+        assert str(library_dir / "docs" / "short_prompts.md") in message
+
+    def test_ordinary_missing_file_still_uses_the_plain_resolved_wording(
+        self, library_dir: Path
+    ) -> None:
+        # Regression guard: a normal (non-foreign) missing file must keep
+        # the pre-existing "(resolved: ...)" wording, not the new hint.
+        node = nodes_notebook.LoraLibraryNotebook()
+        with pytest.raises(ValueError) as exc_info:
+            node.read_entry(file="loras.md", entry="Anything")
+        message = str(exc_info.value)
+        assert "resolved:" in message
+        assert "tried as a" not in message
+
+
 # --------------------------------------------------------------- multi-select
 
 

@@ -54,6 +54,11 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 RESOLUTION_JS = REPO_ROOT / "web" / "eps_image" / "resolution.js"
+# 2026-08-29 (Universal State Controller Apply fix): resolution.js now also
+# imports `../lora_library/api.js` (subscribeWidgetsChangedExternally) --
+# the real siblings, checkpoint_switcher_api's identical convention.
+API_JS = REPO_ROOT / "web" / "lora_library" / "api.js"
+VERSION_JS = REPO_ROOT / "web" / "lora_library" / "version.js"
 
 NODE = shutil.which("node")
 
@@ -210,8 +215,17 @@ def presets_api(tmp_path_factory: pytest.TempPathFactory) -> dict:
     module_dir.mkdir(parents=True)
     shutil.copyfile(RESOLUTION_JS, module_dir / "resolution.js")
 
-    # resolution.js's two imports -- `../../../scripts/app.js` (pre-existing,
-    # M1/M2) and `../../../scripts/api.js` (new, this round). Only the pure
+    # 2026-08-29: resolution.js's THIRD import, `../lora_library/api.js`
+    # (subscribeWidgetsChangedExternally) -- the real sibling module, not a
+    # stub (it has its own further import of scripts/app.js + scripts/api.js
+    # below, exactly checkpoint_switcher_api's identical convention).
+    lora_dir = layout / "extensions" / "comfyui-epsnodes" / "lora_library"
+    lora_dir.mkdir(parents=True)
+    shutil.copyfile(API_JS, lora_dir / "api.js")
+    shutil.copyfile(VERSION_JS, lora_dir / "version.js")
+
+    # resolution.js's two DIRECT scripts imports -- `../../../scripts/app.js`
+    # (pre-existing, M1/M2) and `../../../scripts/api.js` (M3). Only the pure
     # helpers are exercised here, so bare stubs suffice; the relative DEPTH
     # is what's actually load-bearing (get it wrong and Node fails to
     # resolve the module at all) -- test_resolution_grid_js.py's identical
@@ -748,6 +762,32 @@ def test_fetch_and_configure_both_reconcile_through_the_same_function(source: st
     assert "reconcilePresetsUi(node)" in load_body
     reconcile_body = _function_body(source, "reconcilePresetsUi(node)")
     assert "selectionFromWidgetValue(state.widget.value)" in reconcile_body
+
+
+# --------------- 2026-08-29 bugfix round: Universal State Controller Apply
+
+
+def test_attach_installs_the_shared_external_write_subscription(source: str) -> None:
+    """Owner report: "applying any of the sets won't change anything" --
+    Apply writing the `presets` widget directly has no comparable callback
+    wired to repaint the combo (unlike the five plain fields, which already
+    self-heal via `wireManualEditClearsSelection`'s wrapped `.callback`),
+    so the SAME cache-only `reconcilePresetsUi()` `onConfigure` already uses
+    for the restore race is subscribed to api.js's shared
+    `announceWidgetsChangedExternally()` event too."""
+    attach = _function_body(source, "attachPresetsUi(node)")
+    assert "installExternalWriteSubscription()" in attach
+    install = _function_body(source, "installExternalWriteSubscription()")
+    assert "if (resolutionExternalWriteSubscribed) return" in install
+    assert "resolutionExternalWriteSubscribed = true" in install
+    assert "subscribeWidgetsChangedExternally((entries) => {" in install
+    # routes by NODE IDENTITY via the `_epsPresets` stash `attachPresetsUi`
+    # sets, not by class string -- any entry naming this node reconciles,
+    # regardless of which widget(s) it wrote (cheap + idempotent either way).
+    assert "if (entry?.node?._epsPresets) reconcilePresetsUi(entry.node)" in install
+    assert (
+        "import { subscribeWidgetsChangedExternally } from '../lora_library/api.js'" in source
+    )
 
 
 def test_missing_preset_name_stays_selected_with_a_missing_label(source: str) -> None:

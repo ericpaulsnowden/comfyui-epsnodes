@@ -28,6 +28,11 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 RESOLUTION_JS = REPO_ROOT / "web" / "eps_image" / "resolution.js"
+# 2026-08-29 (Universal State Controller Apply fix): resolution.js now also
+# imports `../lora_library/api.js` (subscribeWidgetsChangedExternally) --
+# the real siblings, test_resolution_presets_js.py's identical convention.
+API_JS = REPO_ROOT / "web" / "lora_library" / "api.js"
+VERSION_JS = REPO_ROOT / "web" / "lora_library" / "version.js"
 
 NODE = shutil.which("node")
 
@@ -160,6 +165,15 @@ def grid_api(tmp_path_factory: pytest.TempPathFactory) -> dict:
     module_dir = layout / "extensions" / "comfyui-epsnodes" / "eps_image"
     module_dir.mkdir(parents=True)
     shutil.copyfile(RESOLUTION_JS, module_dir / "resolution.js")
+
+    # 2026-08-29: resolution.js's THIRD static import, `../lora_library/
+    # api.js` (subscribeWidgetsChangedExternally) -- ES modules resolve
+    # every static import eagerly, so the real sibling must exist here too,
+    # exactly like the M3 `scripts/api.js` stub above.
+    lora_dir = layout / "extensions" / "comfyui-epsnodes" / "lora_library"
+    lora_dir.mkdir(parents=True)
+    shutil.copyfile(API_JS, lora_dir / "api.js")
+    shutil.copyfile(VERSION_JS, lora_dir / "version.js")
 
     probe = layout / "probe.mjs"
     probe.write_text(

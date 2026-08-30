@@ -62,13 +62,20 @@
  * strings alone. The backend resolves the same way at queue time, so an
  * un-healed value still loads the right file.
  *
- * No window-level listeners: every interaction here is a plain element-level
- * click/change/input, so the FORMAT.md §7.5 capture-phase requirement for
- * window-level gesture listeners does not come up -- there are none.
+ * No window-level GESTURE listeners: every interaction here is a plain
+ * element-level click/change/input, so the FORMAT.md §7.5 capture-phase
+ * requirement for pointer-drag-style window listeners does not come up --
+ * there are none (see the window-listener-safety test below). The ONE
+ * exception (2026-08-29, Universal State Controller Apply fix) is
+ * `api.js`'s shared `subscribeWidgetsChangedExternally()` -- installed
+ * once via `../lora_library/api.js`, not a bare `window.addEventListener`
+ * this file calls itself, and not a pointer/gesture listener at all: see
+ * `installExternalWriteSubscription()`/`reloadFromWidget()` below.
  */
 
 import { api } from '../../../scripts/api.js'
 import { healComboValue, isHealEnabled } from '../lora_library/path_heal.js'
+import { subscribeWidgetsChangedExternally } from '../lora_library/api.js'
 
 /** Frozen once shipped -- mirrors the Python node's class id. */
 export const CLASS_ID = 'EPSCheckpointSwitcher'
@@ -544,6 +551,26 @@ function reloadFromWidget(state) {
   renderList(state)
 }
 
+// Universal State Controller Apply fix (2026-08-29, owner report:
+// "applying any of the sets won't change anything"). One shared
+// subscription to api.js's `announceWidgetsChangedExternally()` serves
+// every attached checkpoint switcher -- installed once, idempotently, from
+// the first `attach()` call. Routes by NODE IDENTITY (the announce entry's
+// own `.node` reference against the `__epsCkptReload` seam stamped on each
+// attached node below -- picker.js's `__epsLpReload` precedent), which is
+// exactly `reloadFromWidget` above: no network, re-derives `state.selection`
+// from the widget's CURRENT value and repaints the checkbox list from the
+// checkpoints already fetched.
+let externalWriteSubscribed = false
+
+function installExternalWriteSubscription() {
+  if (externalWriteSubscribed) return
+  externalWriteSubscribed = true
+  subscribeWidgetsChangedExternally((entries) => {
+    for (const entry of entries || []) entry?.node?.__epsCkptReload?.()
+  })
+}
+
 /**
  * Writes *nextSelection* to the `selection` widget, but NOT as-is: it is
  * first re-sorted to the fetched list's own order (known names filtered
@@ -716,6 +743,11 @@ export function attach(node) {
     hideSelectionWidget(state)
     buildUi(state)
     wireConfigureReload(state)
+    // Universal State Controller Apply fix (see reloadFromWidget's own
+    // subscription comment above): publish this node's reload seam and
+    // make sure the one shared subscription is installed.
+    node.__epsCkptReload = () => reloadFromWidget(state)
+    installExternalWriteSubscription()
 
     loadCheckpoints(state).catch((error) => console.warn(PREFIX, 'initial checkpoint load failed', error))
   } catch (error) {

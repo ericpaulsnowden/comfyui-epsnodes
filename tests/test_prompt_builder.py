@@ -353,6 +353,48 @@ class TestMissingBlocks:
         assert result == ([""], [""])
 
 
+# --------------------------------------------------- cross-OS foreign-absolute
+#
+# 2026-08-28 owner report (mirrors nodes_notebook.py's identical fix): a
+# `file` value that's absolute for the OTHER platform (e.g.
+# `Z:\docs\short_prompts.md` read on POSIX) used to join WHOLE under
+# `library_dir` instead of resolving relative to it.
+
+
+class TestForeignAbsoluteFileHealing:
+    def test_resolves_blocks_after_healing_to_an_existing_tail(
+        self, library_dir: Path
+    ) -> None:
+        _write_notebook(library_dir, "short_prompts.md", "## A\nbodyA\n")
+        node = EPSPromptBuilder()
+        result = node.build(
+            file=r"Z:\docs\short_prompts.md", blocks=_blocks("A"), separator=", "
+        )
+        assert result == (["bodyA"], ["A"])
+
+    def test_missing_block_error_names_what_was_tried_not_a_bogus_join(
+        self, library_dir: Path
+    ) -> None:
+        node = EPSPromptBuilder()
+        with pytest.raises(ValueError) as exc_info:
+            node.build(file=r"Z:\docs\short_prompts.md", blocks=_blocks("Ghost"), separator=", ")
+        message = str(exc_info.value)
+        assert "tried as a Windows path from another machine:" in message
+        tried = message.split("tried as a Windows path from another machine: ", 1)[1]
+        assert "\\" not in tried.split(")", 1)[0]
+        assert str(library_dir / "docs" / "short_prompts.md") in message
+
+    def test_ordinary_missing_block_still_uses_the_plain_resolved_wording(
+        self, library_dir: Path
+    ) -> None:
+        node = EPSPromptBuilder()
+        with pytest.raises(ValueError) as exc_info:
+            node.build(file="loras.md", blocks=_blocks("Ghost"), separator=", ")
+        message = str(exc_info.value)
+        assert "resolved:" in message
+        assert "tried as a" not in message
+
+
 # ------------------------------------------------------------------ IS_CHANGED
 
 

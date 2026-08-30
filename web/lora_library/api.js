@@ -4,6 +4,7 @@
  * log prefix stay uniform.
  */
 
+import { app } from '../../../scripts/app.js'
 import { api } from '../../../scripts/api.js'
 
 export { FRONTEND_VERSION } from './version.js'
@@ -211,4 +212,125 @@ export function findByPathId(rootGraph, pathId) {
     graph = node.subgraph || null
   }
   return node
+}
+
+// ---------------------------------------------------------------------------
+// Cross-panel "a widget was written EXTERNALLY" notification (Universal
+// State Controller Apply fix, 2026-08-29 round -- owner report: "applying
+// any of the sets won't change anything"). Mirrors controller.js's
+// `announceSetsChanged()`/`lora_library:sets-changed` idiom (a bare
+// `window.dispatchEvent(new CustomEvent(...))`, subscribed with
+// `window.addEventListener` -- see sets.js's `initSetsFreshness()`), but
+// this one carries a PAYLOAD (which nodes/widgets were written) so a
+// subscriber can re-sync ONLY the node(s) an announcement actually names
+// instead of doing a blind full reload on every unrelated write.
+//
+// WHY this exists: a plain litegraph WIDGET redraws every canvas frame
+// straight from `widget.value`, so `widget.value = x; widget.callback?.()`
+// (Universal State Controller's `_writeApplyPlan()`) is enough on its own
+// for a node like EPS Resolution's plain int fields or a Switcher's combo.
+// A DOM-PANEL node (the Notebook, the LoRA Picker, the Prompt Builder, the
+// Checkpoint Switcher, Resolution's OWN presets `<select>`) holds its own
+// rendered state in real DOM elements that only ever repaint from that
+// panel's own gestures or reload cycles -- a programmatic widget write
+// changes the node's data but never touches that DOM, which is exactly
+// what left the Notebook showing "Film Grain" after an Apply had already
+// written "Detailer" onto the live `entry` widget (data verified, toast
+// said "Applied 3 of 3"). Put here, in api.js, rather than in
+// universal_controller.js: every one of the affected panel modules already
+// imports this file, so this is the one module every side of the fix can
+// share without any of them importing one another.
+// ---------------------------------------------------------------------------
+
+export const WIDGETS_CHANGED_EXTERNALLY_EVENT = 'lora_library:widgets-changed-externally'
+
+let pendingExternalWidgetChanges = null
+let externalWidgetChangeFlushQueued = false
+
+/**
+ * Tell every subscriber that *entries* worth of nodes just had one or more
+ * widgets written PROGRAMMATICALLY -- i.e. NOT through that node's own
+ * panel gesture. `entries`: `[{node, pathId, class, widgets}]` -- `node` is
+ * the LIVE node reference (so a subscriber never needs its own lookup by
+ * id), `pathId`/`class` are carried for logging, `widgets` is the array of
+ * widget NAMES that changed on that node. A falsy/empty *entries* is a
+ * silent no-op (an Apply that wrote nothing has nothing to announce).
+ *
+ * Calls COALESCE to at most one dispatched event per tick -- this pack's
+ * `setTimeout(fn, 0)` one-tick-coalescer idiom (`sets.js`'s
+ * `scheduleMirrorsHeal()`, `path_heal.js`'s load coalescer,
+ * `universal_controller.js`'s own `scheduleUniversalKick()`): several
+ * calls landing in the same synchronous pass (or the same macrotask queue
+ * turn) merge their entries into ONE flushed event instead of firing once
+ * per call, so a subscriber's re-sync work is naturally batched too. The
+ * flush additionally SKIPS while a whole-graph rebuild is in progress
+ * (`app.configuringGraph` -- a private counter core increments for the
+ * exact duration of `LGraph.prototype.configure()`; see
+ * `eps_image/image_grid.js`'s `isGraphConfiguring()` for the full citation
+ * and the live-verification story, duplicated here rather than imported
+ * per this pack's no-cross-import-for-one-line-helpers convention): a
+ * load/undo/redo/tab-switch is synchronous and always finishes -- flag
+ * back to `false` -- before this `setTimeout(fn, 0)` macrotask gets a
+ * turn, so this check reliably catches a call that landed mid-rebuild.
+ * Every panel is about to repaint itself from its OWN restore path in that
+ * case (`onConfigure`/`configure()`), so a stale external announce landing
+ * in that same window would be redundant at best, and unsafe at worst for
+ * a panel not yet fully constructed.
+ *
+ * Never throws -- this is a nicety, never load-bearing for the write that
+ * triggered it.
+ * @param {Array<{node: object, pathId: string, class: string, widgets: string[]}>} entries
+ */
+export function announceWidgetsChangedExternally(entries) {
+  try {
+    if (!Array.isArray(entries) || !entries.length) return
+    pendingExternalWidgetChanges = [...(pendingExternalWidgetChanges || []), ...entries]
+    if (externalWidgetChangeFlushQueued) return
+    externalWidgetChangeFlushQueued = true
+    setTimeout(() => {
+      externalWidgetChangeFlushQueued = false
+      const flushed = pendingExternalWidgetChanges || []
+      pendingExternalWidgetChanges = null
+      if (!flushed.length) return
+      if (app.configuringGraph) return // graph load/undo/tab-switch storm -- panels reload themselves
+      try {
+        window.dispatchEvent(
+          new CustomEvent(WIDGETS_CHANGED_EXTERNALLY_EVENT, { detail: { entries: flushed } })
+        )
+      } catch {
+        // Announcement is a nicety; the write that triggered it must not depend on it.
+      }
+    }, 0)
+  } catch {
+    // Announcement is a nicety; the write that triggered it must not depend on it.
+  }
+}
+
+/**
+ * Subscribe to `announceWidgetsChangedExternally()`. *handler* is called
+ * with the flushed `entries` array for every announcement. Returns an
+ * unsubscribe function (mirrors the pack's `window.addEventListener`/
+ * `removeEventListener` pairing convention, e.g.
+ * `universal_controller.js`'s own `_subscribeStatesChanged`/
+ * `_unsubscribeStatesChanged`), though every current caller subscribes
+ * once for the page's lifetime and never calls it, the same as
+ * `sets.js`'s `initSetsFreshness()` listener.
+ *
+ * *handler* is wrapped in its own try/catch here -- NOT the caller's job --
+ * so one panel module's subscriber throwing can never suppress delivery to
+ * every OTHER panel subscribed to the same event (requirement: "guarded
+ * per panel so one panel's failure can't break the others").
+ * @param {(entries: Array<{node: object, pathId: string, class: string, widgets: string[]}>) => void} handler
+ * @returns {() => void} unsubscribe
+ */
+export function subscribeWidgetsChangedExternally(handler) {
+  const listener = (event) => {
+    try {
+      handler(event?.detail?.entries || [])
+    } catch (error) {
+      warn('a widgets-changed-externally subscriber threw', error)
+    }
+  }
+  window.addEventListener(WIDGETS_CHANGED_EXTERNALLY_EVENT, listener, { capture: true })
+  return () => window.removeEventListener(WIDGETS_CHANGED_EXTERNALLY_EVENT, listener, { capture: true })
 }

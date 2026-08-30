@@ -53,6 +53,27 @@ One directory holds everything a user shares between machines:
   the target file's dominant line-ending style (§3.6). Never call
   `os.path.relpath` against ComfyUI dirs (cross-drive crash on Windows).
 
+**Cross-OS foreign-absolute paths (v0.84.0, owner report 2026-08-28).** A
+value absolute in the OTHER platform's syntax — a Windows drive-letter/UNC
+path read on macOS/Linux, or a POSIX path read on Windows — is NOT
+`is_absolute()` under this platform's own `Path` flavor, so it used to join
+WHOLE under `library_dir`: `Z:\docs\short_prompts.md` became
+`…/personal_folder/docs/Z:\docs\short_prompts.md`, which a real gvfs mount
+rejects with `[Errno 22]` (`:` and `\` are legal POSIX filename chars, so
+nothing objects earlier). `context.is_foreign_absolute` (explicit
+`PureWindowsPath`/`PurePosixPath`, never a bare `Path`) now catches it at
+every `is_absolute()` decision point. The Notebook/Prompt Builder resolvers
+HEAL it — `heal_foreign_absolute` tries tails of the foreign path's own
+segments under `library_dir`, longest first, taking the first that EXISTS and
+otherwise the longest candidate so error text names something sane. Healing
+is UNCONDITIONAL and read-only: it fires only on a value that cannot resolve
+locally and never rewrites the stored widget (contrast §7.6's model healing,
+which rewrites values that might legitimately differ, hence its setting).
+fs-browse and the Frame Saver have no library folder to heal against, so
+they 400 cleanly instead of browsing the wrong place.
+`LibraryContext.relativize_library_path` is the forward fix: a path inside
+`library_dir` is stored RELATIVE, portable by construction.
+
 **gvfs/FUSE mounts can't rename-over-existing (v0.80.1, owner traceback
 2026-08-25).** On the owner's Linux box the share is mounted via gvfs
 (`/run/user/1000/gvfs/smb-share:…`), where `os.replace` onto an EXISTING
@@ -3530,6 +3551,31 @@ opt-ins, on the owner's word).
   response carries no `layout` key and must never touch the panel's layout
   (the agent-caught clobber guard, test-pinned).
 
+**v0.84.0 fixes (owner report 2026-08-28).** (1) *"Applying any of the sets
+won't change anything"* — apply DID write correctly (verified: notebook
+`entry` "Film Grain"→"Detailer", resolution width 222→111) but the DOM-panel
+nodes hold their own render state and never re-read a programmatically
+written widget, so the visible UI stayed stale. New shared notification in
+`api.js`: `announceWidgetsChangedExternally(entries)` /
+`subscribeWidgetsChangedExternally(handler)` — coalesced to one dispatch per
+tick and suppressed while `app.configuringGraph` is set (no stray resync
+during a graph load), each subscriber try/caught so one panel can't block
+another. Every DOM panel re-syncs through its OWN existing entry point
+(Notebook `resyncAfterExternalWrite`→`restoreSelectionFromWidget`/cache-first
+`loadActiveEditor`, Picker `reloadFromWidget`, Builder `renderRightPane`,
+Checkpoint Switcher `reloadFromWidget`, Resolution `reconcilePresetsUi`);
+canvas-drawn nodes (Switchers/Distributor) redraw from the widget every frame
+and keep the existing `setDirtyCanvas` alone. The controller fires it ONCE
+after the apply loop, naming only nodes it actually wrote.
+(2) *"Saving over a set creates a new set"* — the panel shipped with a single
+Save button and no update path (proved on disk: `aaa.json` + `aaa-2.json`,
+both `"name": "AAA"`). Now §6.2's exact split: **New State · Save State ·
+Apply State · Delete State**, where Save State re-captures and POSTs the
+SELECTED state's own slug (the backend already overwrote when handed one —
+`_unique_slug` only runs for `slug is None`), optimistic with rollback, and
+an edited name field renames in place rather than forking (§6.2's 2026-07-22
+rule).
+
 ## §7 Frontend surfaces
 
 **§7.2 amendment — load-failure is an explicit, value-preserving ERROR
@@ -3936,6 +3982,14 @@ from a draw.
   `/upload/image` route, verified working for a genuine non-loopback caller
   on the rig).
 
+**Free-form `file` values are NOT covered by §7.6 (v0.84.0).**
+`path_heal.js` matches COMBO values against
+`folder_paths.get_filename_list`; a Notebook / Prompt Builder `file` (or a
+Frame Saver `video_path`) is free-form with no options list to match
+against. Their cross-OS fix is server-side in `context.py` (§2's
+foreign-absolute healing) — unconditional and non-rewriting, a different
+mechanism for a different shape of value.
+
 **§7.6 Cross-OS model-path healing on load (`web/lora_library/path_heal.js`,
 v0.71.0, owner report 2026-08-22: workflows shared between the Windows PC
 and the Linux box break because model paths carry the other OS's slash
@@ -4024,3 +4078,72 @@ dated 2026-08-26 comments at each site:
 - FROZEN once shipped: node class ids, route paths, the §3 grammar's
   meaning of existing files, and §4 `format: 1` field semantics. New
   capabilities add fields/routes; they do not repurpose old ones.
+
+## §9 `EPSNodeAudit` (display: "EPS Node Audit") — what the other packs can reach
+
+A third family (`eps_audit/`) alongside `lora_library/` and `eps_image/`,
+and the only one that looks OUTWARD at the rest of the install.
+
+**Why it exists.** Four third-party packs were audited by hand between
+2026-08-15 and 08-28, and they did not contain four unrelated bugs — they
+contained the SAME two mistakes repeated: a path resolver that falls back to
+joining a caller-supplied string onto a base directory (an absolute string
+then replaces that directory outright, and `..` escapes it), and an
+unauthenticated route that forwards a caller-supplied URL — one of them
+carrying an API key from the environment to whatever host the caller named.
+One pack had inherited the first by being a fork of another. Idioms recur
+because packs are forked, copy-pasted and written from the same examples, so
+scanning for the idiom finds the next occurrence before anyone reads that
+pack. Per-pack patches scale with the number of packs installed and must be
+re-applied after every update; a control at the shared chokepoint does not.
+
+**Observe only, and deliberately so.** Nothing in this family blocks,
+patches, or rewrites another pack's behaviour. An inventory you can trust is
+the prerequisite for any policy, and a guardrail that silently changed
+another pack's behaviour would be harder to reason about than the packs
+themselves. Note also what this is NOT: it runs in the same process at the
+same privilege as the code it reports on, so it is a guardrail against
+sloppy code, never a boundary against code written to defeat it. Real
+isolation is an OS-level concern (separate user, container, namespace).
+
+### Three lenses
+
+- **Routes** — reads the live aiohttp table (`PromptServer.instance.app
+  .router`) and attributes each handler to the pack that owns its source
+  file. It READS the finished table rather than wrapping registration,
+  because packs register at import time in directory order: a wrapper this
+  pack installed would only ever see packs sorting after it.
+- **Egress** — wraps `aiohttp.ClientSession._request`,
+  `urllib.request.urlopen` and `requests.Session.request` to tally
+  `(pack, scheme, host, method, count)`. Never payloads, never URL paths:
+  the question is who a pack talks to, and the host answers it without the
+  inventory becoming its own privacy problem. Load order does not matter
+  here — the wrap is on the client library, not the caller — but it can only
+  see calls made after it attached, so hooks install at pack load, never
+  from a node run (an audit must not change the process it reports on).
+- **Source scan** — regex over installed `.py` for the recurring idioms
+  (`scanner.RULES`). Test trees and hidden directories are skipped: ComfyUI
+  does not import them, so they are not attack surface.
+
+### Findings are leads, not verdicts
+
+The rules are heuristics with no dataflow behind them, tuned to over-report
+rather than miss — correct code that validates its inputs still matches
+(`EPS Frame Saver` in this pack does, and is fine). Every report carries
+that caveat in its own footer rather than in documentation nobody re-reads.
+Tuning that survived the first live run against the owner's real install:
+`model.eval()` is not dynamic execution, joining names from `os.listdir`
+back onto their own directory is not a traversal, and `startswith(os.pardir)`
+is a string check rather than a containment check.
+
+### Surfaces
+
+| Surface | Shape |
+| --- | --- |
+| Node `EPSNodeAudit` | widgets `scope` (everything / routes only / egress only / source scan only) + `include_this_pack` (default TRUE — a self-audit that skipped itself would be worth less); one STRING output `report`; `OUTPUT_NODE` so the text shows on the node. `IS_CHANGED` is content-derived (route count + outbound-call counter), never a timestamp. |
+| `GET /eps/audit?scope=&include_this_pack=` | The same report as JSON. **Local-only** via `request_is_loopback` — unlike this pack's other read routes, this one hands out an inventory of the server's own attack surface, which is exactly what an attacker on the LAN would want. Scan runs off the event loop. |
+
+The pack logs which egress hooks attached at startup and **warns loudly for
+any that did not**: an interposition that quietly stops matching its target
+is worse than none, because you keep believing you are covered. The report
+repeats that as a `NOT WATCHING:` line.

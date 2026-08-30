@@ -1218,6 +1218,11 @@ export function attachNotebookWidget(node) {
     wirePinnedWidget(state)
     wireConfigureReload(state)
     wireNodeCleanup(state)
+    // Universal State Controller Apply fix (see resyncAfterExternalWrite's
+    // own doc comment): publish this node's reload seam and make sure the
+    // one shared subscription to the announce event is installed.
+    node.__epsNotebookReload = () => resyncAfterExternalWrite(state)
+    installExternalWriteSubscription()
 
     // FORMAT.md §7.2 amendment: one `/config` check per attach (cached at
     // module scope — see "Remote gating" below) to gate the file panel's
@@ -2519,14 +2524,46 @@ function commitPickedFolder(session, path) {
   onPick?.(path)
 }
 
+/**
+ * The library-relative form of *value* when it sits INSIDE *libraryDir*,
+ * else *value* untouched (v0.84.0, the forward half of the cross-OS path
+ * fix — FORMAT.md §2). A path stored relative resolves against whatever
+ * `library_dir` the READING machine has, so a workflow picked on the PC
+ * opens on the Linux box without any healing at all; an absolute path only
+ * survives the trip because `context.heal_foreign_absolute` rescues it.
+ * Storing relative is therefore prevention, the healing is the cure.
+ *
+ * Boundary-safe: the match must land on a separator, so `/lib2/x.md` is
+ * NOT inside `/lib`. Separator-insensitive on the comparison (a Windows
+ * `Z:\docs` library dir vs a `Z:/docs/x.md` pick), and the result is
+ * always POSIX-style — `Path("sub/x.md")` joins correctly on both
+ * platforms, while a backslash would not survive a POSIX join.
+ */
+export function relativizeToLibrary(value, libraryDir) {
+  if (typeof value !== 'string' || !value) return value
+  if (typeof libraryDir !== 'string' || !libraryDir) return value
+  const norm = (s) => s.replace(/\\/g, '/').replace(/\/+$/, '')
+  const target = norm(value)
+  const base = norm(libraryDir)
+  if (!base || target === base) return value
+  if (!target.startsWith(base + '/')) return value
+  const rel = target.slice(base.length + 1)
+  return rel || value
+}
+
 /** Writes `value` through the `file` widget's real setter+callback — the
  * exact same pattern syncEntryWidget() uses for `entry` — so picking a file
  * here behaves exactly like typing it in, including the debounced reload
  * (onFileWidgetChanged, via wireFileWidget) and that same wrapper's §7.2
  * read-only guard (moot in practice, since Browse… is itself hidden for a
  * remote caller — belt-and-suspenders all the same). */
-function setFileWidgetValue(state, value) {
+function setFileWidgetValue(state, rawValue) {
   const widget = state.fileWidget
+  // v0.84.0: a pick inside the library folder is stored RELATIVE, so the
+  // workflow stays portable across machines (FORMAT.md §2). Outside the
+  // library folder the absolute path is kept as-is -- there is nothing to
+  // be relative TO.
+  const value = relativizeToLibrary(rawValue, state.libraryDir)
   if (widget.value === value) {
     // Same value already in the widget -- but that does NOT mean the panel
     // is showing it (owner report 2026-07-27: "I have to re-select the
@@ -2956,6 +2993,78 @@ function restoreSelectionFromWidget(state) {
     survivors.push(name)
   }
   return survivors
+}
+
+/**
+ * Universal State Controller Apply fix (2026-08-29, owner report:
+ * "applying any of the sets won't change anything") -- api.js's
+ * `announceWidgetsChangedExternally()` calls this (via
+ * `node.__epsNotebookReload`, below) after a programmatic
+ * `widget.value = x; widget.callback?.()` write to this node's `file` or
+ * `entry` widget (`nodes_notebook.py`'s `EPS_STATE_WIDGETS` declares
+ * both). That write updates the NODE correctly, but this panel's own
+ * rendered DOM (the entry list, the editor pane) only ever repaints from
+ * its own gestures or reload cycles -- exactly the bug reproduced on the
+ * rig (a Notebook whose `entry` widget flipped from "Film Grain" to
+ * "Detailer" kept showing "Film Grain" selected).
+ *
+ * `file` changed -> the entries for a DIFFERENT file were never fetched by
+ * this panel; fall through to `reloadNow()`, the SAME real reload
+ * `onFileWidgetChanged()`/`wireConfigureReload()` already use for exactly
+ * this case (one GET). `file` unchanged, only `entry` changed -> a pure
+ * re-derivation of the selection against what is ALREADY loaded --
+ * `restoreSelectionFromWidget()` plus the identical render calls
+ * `applyNotebookPayload()` runs after every load (`renderList`,
+ * `updateDeleteButtonEnabled`, `updateSelectionHint`, `updateModeHint`,
+ * `loadActiveEditor`). `loadActiveEditor()` -> `loadEntryText()`'s own
+ * cache-first path (`hasCachedEntryText`) means this branch never issues a
+ * network request for an entry the CURRENT file already loaded, which is
+ * the only case an Apply from the SAME workflow can produce -- satisfying
+ * "never fires a network request when the panel can repaint from cached
+ * data." Idempotent either way: `populateEditor()`'s own mid-edit guard
+ * (`document.activeElement` check) already refuses to clobber unsaved
+ * typing, and `renderList()` already preserves scroll/focus/collapse
+ * state on every one of its many other call sites, so calling it again
+ * here needs no special-casing.
+ */
+function resyncAfterExternalWrite(state) {
+  const restored = state.fileWidget?.value ?? ''
+  if (restored !== state.file || state.loadError) {
+    reloadNow(state).catch((error) =>
+      api.warn('notebook reload after external widget change failed', error)
+    )
+    return
+  }
+  const survivors = restoreSelectionFromWidget(state)
+  state.selection = survivors
+  state.activeName = survivors.length ? survivors[0] : null
+  renderList(state)
+  updateDeleteButtonEnabled(state)
+  updateSelectionHint(state)
+  updateModeHint(state)
+  loadActiveEditor(state).catch((error) =>
+    api.warn('notebook external resync editor load failed', error)
+  )
+}
+
+// One shared subscription to api.js's `announceWidgetsChangedExternally()`
+// serves every attached Notebook node -- installed once, idempotently,
+// from the first `attachNotebookWidget()` call (this file's
+// `comboRefreshWrapped`-style module-flag idiom, see sets.js). Routes by
+// NODE IDENTITY (the announce entry's own `.node` reference against the
+// `__epsNotebookReload` seam stamped on each attached node -- picker.js's
+// `__epsLpReload` precedent, already used by controller.js's Push State),
+// never by a class-name string, so this file never needs to know what
+// Universal State Controller (or any future caller of the same shared
+// event) calls this node's class.
+let externalWriteSubscribed = false
+
+function installExternalWriteSubscription() {
+  if (externalWriteSubscribed) return
+  externalWriteSubscribed = true
+  api.subscribeWidgetsChangedExternally((entries) => {
+    for (const entry of entries || []) entry?.node?.__epsNotebookReload?.()
+  })
 }
 
 function baselineStatus(state, problems) {

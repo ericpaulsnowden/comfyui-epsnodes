@@ -47,10 +47,15 @@ def walk_api(tmp_path_factory: pytest.TempPathFactory) -> dict:
     module_dir.mkdir(parents=True)
     shutil.copyfile(API_JS, module_dir / "api.js")
     # api.js imports ComfyUI's scripts/api.js -- stub it (same served-layout
-    # technique as test_pll_bridge_js.py's app.js stub).
+    # technique as test_pll_bridge_js.py's app.js stub). 2026-08-29: api.js
+    # also gained a static `scripts/app.js` import (the cross-panel
+    # announce/subscribe pair's `app.configuringGraph` guard) -- ES modules
+    # resolve every static import eagerly regardless of whether this
+    # probe's own calls ever reach it, so it must be stubbed too.
     scripts = layout / "scripts"
     scripts.mkdir(parents=True, exist_ok=True)
     (scripts / "api.js").write_text("export const api = {}\n", encoding="utf-8")
+    (scripts / "app.js").write_text("export const app = {}\n", encoding="utf-8")
     (module_dir / "version.js").write_text("export const FRONTEND_VERSION = 'test'\n", encoding="utf-8")
     probe = layout / "probe.mjs"
     probe.write_text(PROBE_JS, encoding="utf-8")

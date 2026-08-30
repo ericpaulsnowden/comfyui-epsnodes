@@ -18,7 +18,7 @@ import tempfile
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 
 logger = logging.getLogger("lora_library")
 
@@ -38,6 +38,158 @@ SETS_DIRNAME = "sets"
 #: and the stores' directory-level ``FileNotFoundError`` paths forget the
 #: cache outright (:meth:`LibraryContext.forget_ensured_dirs`).
 ENSURED_DIR_TTL_S = 30.0
+
+#: True on a real Windows host. A module-level CONSTANT, not a bare
+#: ``os.name`` check inlined at each call site, so tests can monkeypatch it
+#: (``monkeypatch.setattr(context, "_IS_WINDOWS", True)``) to exercise the
+#: opposite platform's branch of :func:`is_foreign_absolute` (and everything
+#: built on it) without a real Windows/POSIX host. Same seam shape as
+#: ``lora_library/routes.py``'s ``_is_windows()`` function seam, but a
+#: constant here since every reader just needs the current verdict, never a
+#: callable.
+_IS_WINDOWS: bool = os.name == "nt"
+
+
+def is_windows() -> bool:
+    """Public read of :data:`_IS_WINDOWS`, for a caller OUTSIDE this module
+    that needs to build its own message off the SAME platform verdict
+    :func:`is_foreign_absolute` used -- e.g. ``lora_library/routes.py``'s
+    ``_foreign_absolute_path_error``, which names "the other platform" for
+    a value THIS module already flagged. Deliberately not routes.py's own,
+    separate ``_is_windows()`` function seam: the two happen to always
+    agree in a real run (both read the real ``os.name`` once, at import
+    time here vs. per-call there), but a caller that needs to describe
+    ``is_foreign_absolute``'s OWN verdict should read the SAME flag it
+    used, not a second independent seam that a test could in principle
+    monkeypatch out of sync with this one.
+    """
+    return _IS_WINDOWS
+
+
+def is_foreign_absolute(value: str) -> bool:
+    """True when *value* is an absolute path for the OTHER platform's path
+    syntax but not this one -- a Windows drive-letter (``X:\\...``,
+    ``X:/...``) or UNC (``\\\\server\\share\\...``) path seen on a POSIX
+    server, or a POSIX-root (``/...``) path seen on a Windows server.
+
+    The bug this exists to catch (owner report 2026-08-28: Linux box, library
+    on a gvfs SMB mount, workflow saved on the Windows PC). Every
+    ``is_absolute()`` call in this pack was answered by the LOCAL platform's
+    own concrete :class:`Path` flavor, so
+    ``Path("Z:\\docs\\short_prompts.md").is_absolute()`` is ``False`` on
+    POSIX -- backslash and colon are ordinary filename characters there --
+    which is indistinguishable, to the code that asked, from an ACTUAL
+    relative name like ``"loras.md"``. Both used to fall into the same
+    "join it under ``library_dir``" branch, producing an unopenable path
+    like ``<library_dir>/docs/Z:\\docs\\short_prompts.md`` and a cryptic
+    ``[Errno 22] Invalid argument`` once the mount rejected it. Symmetric in
+    reverse: ``PureWindowsPath("/mnt/nas/x.md").is_absolute()`` is also
+    ``False``, so a Linux-saved absolute path joins under ``library_dir`` on
+    Windows the same way.
+
+    This function is the one place that tells "foreign-absolute" apart from
+    "genuinely relative", by asking BOTH :class:`PureWindowsPath` and
+    :class:`PurePosixPath` explicitly -- never a bare :class:`Path`, which
+    only ever answers for the platform actually running -- and checking for
+    exactly the disagreement that means "foreign, not relative": absolute
+    under the OTHER flavor, not absolute under this one.
+
+    Does NOT flag:
+
+    - a relative name (``"loras.md"``, ``"sub/loras.md"``) -- neither
+      flavor considers it absolute, so the "absolute under the other
+      flavor" half is already false;
+    - a path already absolute on THIS platform -- the "not absolute under
+      this flavor" half is false;
+    - a ``scheme://...`` value -- guarded out explicitly. ``resolve_
+      notebook_file`` raises its own :class:`ValueError` for that shape
+      BEFORE this check ever runs (a network address is neither a
+      foreign-absolute path nor a local one), and this guard keeps every
+      OTHER caller's answer consistent with that even if one calls this
+      function directly without checking ``"://"`` first.
+
+    Exported for :mod:`lora_library.nodes_notebook` and
+    :mod:`lora_library.nodes_prompt_builder` (their ``_peek_resolved_path``
+    twins) and :mod:`lora_library.routes` (the fs-browse ``is_absolute()``
+    sites) to import and call directly -- genuinely SHARED, unlike this
+    pack's usual own-your-helpers convention (see ``nodes_prompt_builder.
+    _peek_resolved_path``'s docstring), because a disagreement between call
+    sites about what counts as foreign-absolute would BE the bug all over
+    again. ``eps_image/routes_frame_saver.py`` keeps its own verbatim copy
+    instead of importing this one, per that module's own established
+    self-containment rule for anything reaching into ``lora_library/``
+    (its module docstring's ``request_is_loopback``/``_machine_owns_
+    address`` precedent) -- kept in sync by hand, flagged in its copy's
+    docstring.
+    """
+    if not value or "://" in value:
+        return False
+    if _IS_WINDOWS:
+        return PurePosixPath(value).is_absolute() and not PureWindowsPath(value).is_absolute()
+    return PureWindowsPath(value).is_absolute() and not PurePosixPath(value).is_absolute()
+
+
+def foreign_absolute_note(candidate: Path) -> str:
+    """``"tried as a Windows path from another machine: <candidate>"`` (or
+    its POSIX counterpart) -- the phrase every heal-on-read call site
+    splices into its own "does not exist" / 400 message once :func:`is_
+    foreign_absolute` has flagged the ORIGINAL value, so every site names
+    the same thing the same way instead of re-deriving which platform is
+    "foreign" at each call site. The flavor named is always the complement
+    of :data:`_IS_WINDOWS` -- the only platform :func:`is_foreign_absolute`
+    could have flagged *candidate*'s source value against.
+    """
+    flavor = "POSIX" if _IS_WINDOWS else "Windows"
+    return f"tried as a {flavor} path from another machine: {candidate}"
+
+
+def _foreign_path_segments(value: str) -> list[str]:
+    """*value*'s path components after its foreign root/drive, e.g.
+    ``["docs", "short_prompts.md"]`` for ``"Z:\\docs\\short_prompts.md"``
+    seen from POSIX, or ``["mnt", "nas", "x.md"]`` for ``"/mnt/nas/x.md"``
+    seen from Windows. Only ever called after :func:`is_foreign_absolute`
+    has confirmed *value* is absolute for the OTHER platform, so its
+    ``.parts`` always starts with a root/drive component to drop; the
+    ``or`` fallback only matters for the degenerate case of a bare
+    root/drive with nothing after it.
+    """
+    flavor = PurePosixPath if _IS_WINDOWS else PureWindowsPath
+    parsed = flavor(value)
+    segments = list(parsed.parts[1:])
+    return segments or [parsed.name or DEFAULT_NOTEBOOK_FILENAME]
+
+
+def heal_foreign_absolute(value: str, base: Path) -> Path:
+    """Resolve a foreign-absolute *value* (:func:`is_foreign_absolute`
+    already ``True``) to a path under *base* by trying progressively
+    shorter TAILS of its segments, longest first: for
+    ``"Z:\\docs\\short_prompts.md"`` that's ``<base>/docs/short_prompts.md``,
+    then ``<base>/short_prompts.md``. Returns the first candidate that
+    EXISTS; if none does, returns the longest-tail candidate, so a "missing
+    file" error still names something sane and a first save lands
+    somewhere sensible under the library folder instead of under a literal
+    drive-letter/backslash tree that can never exist on this OS.
+
+    UNCONDITIONAL and NO rewriting: nothing on disk changes here, and this
+    runs every time :func:`is_foreign_absolute` says yes -- safe to do
+    unconditionally (unlike the gated ``web/lora_library/path_heal.js``
+    COMBO-value healing, FORMAT.md §7.6, which rewrites values that might
+    legitimately differ) because it only ever activates on a value that
+    CANNOT resolve locally as given; healing is strictly better than
+    failing, and no stored data is touched.
+
+    Every candidate is built by joining plain segment STRINGS onto *base*
+    with :meth:`Path.joinpath` -- the foreign path's own separators are
+    discarded the moment *value* is split into segments
+    (:func:`_foreign_path_segments`), so no candidate this function returns
+    can ever contain a ``\\`` or a drive colon.
+    """
+    segments = _foreign_path_segments(value)
+    candidates = [base.joinpath(*segments[i:]) for i in range(len(segments))]
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    return candidates[0]
 
 
 @dataclass
@@ -257,6 +409,25 @@ class LibraryContext:
         Raising here is caught by ``routes_notebook._resolve_path`` (→ a 400
         naming the problem) and surfaces loudly at queue time from the node,
         which is where FORMAT.md §6.1 wants bad ``file`` values to land.
+
+        A FOREIGN-ABSOLUTE value (:func:`is_foreign_absolute`; 2026-08-28
+        owner report: ``Z:\\docs\\short_prompts.md`` from a Windows-saved
+        workflow, read on a Linux box) is checked BEFORE the plain
+        ``is_absolute()`` branch below, which would otherwise answer
+        ``False`` for it — indistinguishable from a genuinely relative name
+        — and join the WHOLE foreign path under ``library_dir``, producing
+        an unopenable path and a bare ``[Errno 22]``. Instead it's healed
+        (:func:`heal_foreign_absolute`) against tails of its own segments
+        under :meth:`library_dir`: never rewritten on disk, always applied,
+        because it only ever fires on a value that cannot resolve locally
+        as given. Checking it first rather than nested inside ``not path.
+        is_absolute()`` changes nothing about real behavior — by
+        :func:`is_foreign_absolute`'s own definition, a value it flags is
+        NEVER locally absolute on a host where :data:`_IS_WINDOWS` matches
+        the real platform — but it keeps this method fully exercisable
+        under the injectable ``_IS_WINDOWS`` seam in tests, where the real
+        concrete :class:`Path` class stays bound to the actual test
+        machine's OS regardless of what the seam claims.
         """
         value = (file_value or "").strip() or DEFAULT_NOTEBOOK_FILENAME
         if "://" in value:
@@ -267,10 +438,39 @@ class LibraryContext:
                 "/mnt/nas/loras.md, or /run/user/1000/gvfs/smb-share:server=… "
                 "for a share mounted from your file manager)."
             )
+        if is_foreign_absolute(value):
+            return heal_foreign_absolute(value, self.library_dir())
         path = Path(value)
         if not path.is_absolute():
             path = self.library_dir() / path
         return path
+
+    def relativize_library_path(self, path: Path | str) -> str:
+        """*path* as a POSIX-style string relative to the library folder
+        when it's inside it (``"short_prompts.md"``, ``"sub/x.md"``); the
+        absolute string UNCHANGED otherwise.
+
+        FORMAT.md §2/§7.6: the fix that stops NEW workflows acquiring an
+        unportable absolute ``file`` value in the first place (2026-08-28
+        cross-OS path fix) — a resolved-path-to-client seam should
+        relativize here before that path round-trips into a ``file`` widget
+        and gets saved absolute into a workflow that may next open on a
+        different OS or mount point.
+
+        Compared against :meth:`configured_library_dir` — the same path
+        :meth:`library_dir` returns, without paying its ``mkdir`` — via
+        :meth:`Path.relative_to`, never a raw string prefix check: a
+        sibling folder that merely shares ``library_dir``'s string prefix
+        (``/lib2`` vs ``/lib``) must NOT be misread as "inside" it, and
+        ``relative_to`` compares path SEGMENTS so it can't make that
+        mistake the way ``str.startswith`` would.
+        """
+        candidate = Path(path)
+        try:
+            rel = candidate.relative_to(self.configured_library_dir())
+        except ValueError:
+            return str(candidate)
+        return rel.as_posix()
 
 
 def _atomic_write_text(path: Path, text: str) -> None:

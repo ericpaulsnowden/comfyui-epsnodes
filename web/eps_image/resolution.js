@@ -216,6 +216,7 @@
 
 import { app } from '../../../scripts/app.js'
 import { api } from '../../../scripts/api.js'
+import { subscribeWidgetsChangedExternally } from '../lora_library/api.js'
 
 const NODE_TYPE = 'EPSResolution'
 const NODE_TITLE = 'EPS Resolution'
@@ -1947,6 +1948,37 @@ function reconcilePresetsUi(node) {
   renderPresetCombo(node)
 }
 
+/**
+ * Universal State Controller Apply fix (2026-08-29, owner report:
+ * "applying any of the sets won't change anything"). `EPS_STATE_WIDGETS`
+ * declares `width`/`height`/`resize_method`/`interpolation`/`multiple_of`
+ * (the five `PRESET_FIELD_NAMES`) AND `presets` itself as capturable/
+ * applicable widgets. A programmatic Apply write to the five plain fields
+ * already self-heals the presets combo for free: `_writeApplyPlan()` calls
+ * the widget's REAL `.callback`, which `wireManualEditClearsSelection()`
+ * wraps to call `commitSelection()` -> `renderPresetCombo()` whenever a
+ * preset was active (`clearsPresetOnManualEdit()`) -- an Apply counts as a
+ * manual edit by that rule, same as a grid drag or "copy from image." What
+ * is NOT already covered: an Apply writing the `presets` widget ITSELF
+ * directly (a state that captured a specific preset selection) has no
+ * comparable callback wired to repaint the combo, so `reconcilePresetsUi`
+ * -- the SAME cache-only, no-network reconciliation `onConfigure` already
+ * runs for the restore race -- is called here too, for every entry naming
+ * this node regardless of which widget(s) it wrote (cheap and idempotent
+ * either way, so no need to inspect the entry's `widgets` list).
+ */
+let resolutionExternalWriteSubscribed = false
+
+function installExternalWriteSubscription() {
+  if (resolutionExternalWriteSubscribed) return
+  resolutionExternalWriteSubscribed = true
+  subscribeWidgetsChangedExternally((entries) => {
+    for (const entry of entries || []) {
+      if (entry?.node?._epsPresets) reconcilePresetsUi(entry.node)
+    }
+  })
+}
+
 // ------------------------------------------------------------- M3: fetch (GET)
 
 function applyPresetsPayload(node, data) {
@@ -2517,6 +2549,11 @@ function attachPresetsUi(node) {
       }
       return result
     }
+
+    // Universal State Controller Apply fix (see installExternalWriteSubscription's
+    // own doc comment): the one shared subscription routes by
+    // `node._epsPresets`, which `attachPresetsUi` just stamped above.
+    installExternalWriteSubscription()
 
     loadPresets(node).catch((error) => console.warn(PREFIX, 'initial preset load failed', error))
   } catch (error) {

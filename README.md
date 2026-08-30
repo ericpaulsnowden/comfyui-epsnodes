@@ -72,6 +72,13 @@ provenance-baked saves included, costs ~25–50 ms per run):
 - **Run order already minimizes model churn.** Model-major nesting (models
   outermost, texts innermost) keeps each model resident on the GPU for its
   whole stretch — see the Run Multiplier section.
+- **Workflows move between Windows and Linux/macOS (v0.84.0).** A notebook
+  file saved as `Z:\docs\prompts.md` on the PC used to fail on the Linux box
+  with a confusing `Invalid argument` error — a Windows path isn't "absolute"
+  to Linux, so it got pasted onto your library folder instead. Those paths now
+  resolve automatically by finding the file inside your library folder, in
+  either direction, and newly picked files are stored relative to the library
+  folder so they're portable from the start.
 - **Editing your library no longer nukes the cache.** The Notebook and the
   Prompt Builder now key their cache tokens on the *selected/blocked
   entries' content*, not the whole file — polish an unrelated prompt in a
@@ -257,6 +264,10 @@ modes, save prefixes — and applies it back later, or in another session.
   checkboxes). Untick what a state shouldn't touch — the choice saves with
   the workflow. Everything is included by default; new nodes join
   automatically.
+- **New State vs Save State** work like the Lora State Controller's: *New
+  State* captures a new one, *Save State* overwrites the selected state in
+  place (renaming it if you edited the name), so re-saving never forks a
+  duplicate.
 - **Applying is honest**: values are validated before they're written
   (a state can never corrupt a node), and every apply ends with a report —
   "Applied 7 of 9 · 1 not found · 1 skipped". Nothing partial ever happens

@@ -866,6 +866,26 @@ function reloadFromWidget(state) {
   render(state)
 }
 
+// Universal State Controller Apply fix (2026-08-29, owner report:
+// "applying any of the sets won't change anything"). One shared
+// subscription to api.js's `announceWidgetsChangedExternally()` serves
+// every attached picker -- installed once, idempotently, from the first
+// `attachPickerPanel()` call. Routes by NODE IDENTITY: the `__epsLpReload`
+// seam this file already publishes on every attached node (see
+// attachPickerPanel() -- controller.js's Push State already pokes it
+// directly for its own reason) is exactly `reloadFromWidget` above, which
+// is ALREADY safe for an external write per its own doc comment ("the
+// controller's apply") -- no new render path needed, just this subscribe.
+let externalWriteSubscribed = false
+
+function installExternalWriteSubscription() {
+  if (externalWriteSubscribed) return
+  externalWriteSubscribed = true
+  api.subscribeWidgetsChangedExternally((entries) => {
+    for (const entry of entries || []) entry?.node?.__epsLpReload?.()
+  })
+}
+
 /** Serializes `state.selection` back into the hidden widget -- every
  * mutation (toggle, strength, remove, Add, scope pin/clear) funnels
  * through here so the widget and the panel can never drift apart. */
@@ -2873,6 +2893,7 @@ export function attachPickerPanel(node) {
     // widget from outside, so publish the panel-reload seam it pokes.
     for (const graph of walkGraphs(app.graph)) installGraphNodeWatch(graph)
     node.__epsLpReload = () => reloadFromWidget(state)
+    installExternalWriteSubscription()
     state.selection = selectionFromWidgetValue(widget.value)
     // Read-only info surfaced in right-click -> Properties (owner ask
     // 2026-08-14, replacing the status bar's standing count); refreshed

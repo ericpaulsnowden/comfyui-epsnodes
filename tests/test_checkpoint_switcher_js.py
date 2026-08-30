@@ -342,6 +342,30 @@ def test_on_configure_is_chained_never_replaced(source: str) -> None:
     assert "reloadFromWidget(state)" in body
 
 
+# --------------- 2026-08-29 bugfix round: Universal State Controller Apply
+
+
+def test_attach_publishes_the_reload_seam_and_installs_the_subscription(source: str) -> None:
+    """Owner report: "applying any of the sets won't change anything" --
+    an Apply writing this node's `selection` widget directly needs the same
+    cache-only `reloadFromWidget()` reconciliation `wireConfigureReload()`
+    already uses. Picker.js's `__epsLpReload` seam convention, ported here:
+    stamp a reload function onto the node so api.js's shared
+    `announceWidgetsChangedExternally()` event can reach it without either
+    file importing the other."""
+    body = _function_body(source, "attach(node)")
+    assert "node.__epsCkptReload = () => reloadFromWidget(state)" in body
+    assert "installExternalWriteSubscription()" in body
+    install = _function_body(source, "installExternalWriteSubscription()")
+    assert "if (externalWriteSubscribed) return" in install
+    assert "externalWriteSubscribed = true" in install
+    assert "subscribeWidgetsChangedExternally((entries) => {" in install
+    assert "entry?.node?.__epsCkptReload?.()" in install
+    assert (
+        "import { subscribeWidgetsChangedExternally } from '../lora_library/api.js'" in source
+    )
+
+
 def test_fetch_and_configure_both_reconcile_through_the_same_resync(source: str) -> None:
     """Whichever of {the initial fetch, onConfigure} finishes LAST must be
     the one that produces the final render -- both call sites re-derive

@@ -579,6 +579,11 @@ export function attachPromptBuilderPanel(node) {
     hideWidgetBothWays(blocksWidget, node)
     wireNodeCleanup(state)
     wireConfigureReload(state)
+    // Universal State Controller Apply fix (see resyncAfterExternalWrite's
+    // own doc comment): publish this node's reload seam and make sure the
+    // one shared subscription is installed.
+    node.__epsPromptBuilderReload = () => resyncAfterExternalWrite(state)
+    installExternalWriteSubscription()
     installPoll(state)
 
     // Restore-race guard (see file header): deferred one tick, skipped when
@@ -809,6 +814,60 @@ function wireConfigureReload(state) {
     }
     return result
   }
+}
+
+/**
+ * Universal State Controller Apply fix (2026-08-29, owner report:
+ * "applying any of the sets won't change anything") -- api.js's
+ * `announceWidgetsChangedExternally()` calls this (via
+ * `node.__epsPromptBuilderReload`, below) after a programmatic
+ * `widget.value = x; widget.callback?.()` write to this node's `file` or
+ * `blocks` widget (`nodes_prompt_builder.py`'s `EPS_STATE_WIDGETS` declares
+ * both, plus `separator` — a plain VISIBLE text widget this panel never
+ * reads, so it needs no resync here: it repaints itself every canvas
+ * frame like any other litegraph widget).
+ *
+ * Deliberately NOT `wireConfigureReload()`'s full body: that function
+ * ALWAYS calls `reloadEntries()`, which issues a real GET even when the
+ * cache already has the answer (its own `known_mtime` short-circuit only
+ * makes that GET cheap, never absent) — fine for an actual configure-time
+ * restore, but a violation of "never fires a network request when the
+ * panel can repaint from cached data" for a `blocks`-only Apply that never
+ * touched `file` at all. So: `file` changed -> a DIFFERENT file's entries
+ * were never fetched, fall through to the real reload; `file` unchanged,
+ * only `blocks` (block membership/order) changed -> re-parse `blocks` off
+ * the widget and repaint the right pane alone, purely from `state.entries`
+ * already cached by the last load -- no network. `renderRightPane()`
+ * already guards against clobbering a native HTML5 drag in progress
+ * (deferring the repaint until it ends), so this needs no extra
+ * idempotency handling of its own.
+ */
+function resyncAfterExternalWrite(state) {
+  state.blocks = parseBlocks(state.blocksWidget.value)
+  const fileChanged = (state.fileWidget.value ?? '') !== state.file
+  if (fileChanged) {
+    reloadEntries(state).catch((error) =>
+      api.warn('prompt builder reload after external widget change failed', error)
+    )
+    return
+  }
+  renderRightPane(state)
+}
+
+// One shared subscription to api.js's `announceWidgetsChangedExternally()`
+// serves every attached Prompt Builder node -- installed once,
+// idempotently, from the first `attachPromptBuilderPanel()` call. Routes
+// by NODE IDENTITY (the announce entry's own `.node` reference against the
+// `__epsPromptBuilderReload` seam stamped on each attached node -- picker.js's
+// `__epsLpReload` precedent).
+let externalWriteSubscribed = false
+
+function installExternalWriteSubscription() {
+  if (externalWriteSubscribed) return
+  externalWriteSubscribed = true
+  api.subscribeWidgetsChangedExternally((entries) => {
+    for (const entry of entries || []) entry?.node?.__epsPromptBuilderReload?.()
+  })
 }
 
 // ---------------------------------------------------------------------------

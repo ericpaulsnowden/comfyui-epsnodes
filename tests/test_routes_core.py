@@ -34,6 +34,7 @@ from aiohttp import web
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from lora_library import context as context_module
 from lora_library import routes as lora_routes
 from lora_library.context import LibraryContext
 from lora_library.routes import build_routes
@@ -424,6 +425,85 @@ async def test_fs_list_uri_style_error_names_the_actual_scheme(client) -> None:
     assert response.status == 400
     data = await response.json()
     assert data["error"].startswith("nfs://")
+
+
+# ------------------------------------------- fs/list: foreign-absolute `dir` 400
+#
+# 2026-08-28 owner report (Linux box, gvfs SMB mount, workflow saved on the
+# Windows PC): a `dir` value absolute for the OTHER platform's syntax (a
+# Windows drive-letter/UNC path browsed to on macOS/Linux, or a POSIX path
+# browsed to on Windows) is never `is_absolute()` for THIS platform's own
+# `Path` flavor either -- it used to fall into the generic "must be an
+# absolute path" 400 below, true but unhelpful. Detection is
+# `lora_library.context.is_foreign_absolute`, gated by THAT module's own
+# `_IS_WINDOWS` seam -- a separate constant from this module's `_is_windows()`
+# function seam the ROOTS tests above monkeypatch, since the two seams serve
+# unrelated checks.
+
+
+async def test_fs_list_rejects_a_windows_shaped_dir_with_a_helpful_message(client) -> None:
+    response = await client.get(
+        "/lora_library/fs/list", params={"dir": r"Z:\docs\short_prompts"}
+    )
+    assert response.status == 400
+    data = await response.json()
+    assert "absolute Windows path" in data["error"]
+    assert "runs on POSIX" in data["error"]
+    assert "must be an absolute path" not in data["error"]
+
+
+async def test_fs_list_rejects_a_unc_shaped_dir_with_a_helpful_message(client) -> None:
+    response = await client.get(
+        "/lora_library/fs/list", params={"dir": r"\\server\share\docs"}
+    )
+    assert response.status == 400
+    data = await response.json()
+    assert "Windows" in data["error"]
+
+
+async def test_fs_list_rejects_a_posix_shaped_dir_on_simulated_windows(
+    client, monkeypatch
+) -> None:
+    # Patching ONLY `context._IS_WINDOWS` (not this module's own, separate
+    # `_is_windows()` seam) must flip BOTH the detection (`is_foreign_
+    # absolute`) and the message wording (`_foreign_absolute_path_error`,
+    # via `_context_is_windows`) together -- confirming they read the same
+    # flag rather than two independent ones that could disagree.
+    monkeypatch.setattr(context_module, "_IS_WINDOWS", True)
+    response = await client.get("/lora_library/fs/list", params={"dir": "/mnt/nas/docs"})
+    assert response.status == 400
+    data = await response.json()
+    assert "absolute POSIX (macOS/Linux) path" in data["error"]
+    assert "runs on Windows" in data["error"]
+
+
+async def test_fs_list_foreign_absolute_dir_is_still_loopback_only(client) -> None:
+    response = await client.get(
+        "/lora_library/fs/list",
+        params={"dir": r"Z:\docs\short_prompts"},
+        headers=REMOTE_HEADERS,
+    )
+    assert response.status == 403
+
+
+async def test_fs_list_ordinary_relative_dir_keeps_the_generic_message(client) -> None:
+    # Regression: a plain (non-foreign) relative value must keep the
+    # pre-existing generic wording -- this fix only sharpens the message
+    # for a value it specifically detects as foreign-absolute.
+    response = await client.get("/lora_library/fs/list", params={"dir": "not/absolute"})
+    assert response.status == 400
+    data = await response.json()
+    assert "must be an absolute path" in data["error"]
+
+
+async def test_fs_list_locally_absolute_dir_is_unaffected(client, tmp_path: Path) -> None:
+    # Regression: a genuinely local absolute dir must not be misdetected as
+    # foreign and must still navigate normally.
+    (tmp_path / "elsewhere").mkdir()
+    response = await client.get(
+        "/lora_library/fs/list", params={"dir": str(tmp_path / "elsewhere")}
+    )
+    assert response.status == 200
 
 
 async def test_fs_list_drive_root_parent_climbs_to_roots_under_monkeypatched_windows(

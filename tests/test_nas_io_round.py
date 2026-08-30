@@ -901,3 +901,243 @@ class TestGvfsReplaceFallback:
         monkeypatch.setattr(ctx.os, "replace", always_eexist)
         ctx._atomic_write_text(target, "new")
         assert target.read_text(encoding="utf-8") == "new"
+
+
+# ============================== 6. cross-OS foreign-absolute paths (2026-08-28)
+#
+# Owner report: Linux box, library on a gvfs SMB mount, workflow saved on the
+# Windows PC. The Notebook's `file` widget held `Z:\docs\short_prompts.md`.
+# `Path("Z:\\docs\\short_prompts.md").is_absolute()` is False on POSIX (`:`
+# and `\` are ordinary POSIX filename characters), so the WHOLE Windows path
+# joined UNDER `library_dir`, producing an unopenable
+# `<library_dir>/docs/Z:\docs\short_prompts.md` and a cryptic `[Errno 22]
+# Invalid argument` once the mount rejected it. `is_foreign_absolute` tells a
+# foreign-absolute path apart from a genuinely relative one; `resolve_
+# notebook_file` heals it (unconditionally, never rewriting anything on
+# disk) against tails of its own segments under `library_dir` instead.
+
+
+class TestIsForeignAbsolute:
+    """Truth table for the module-level `context.is_foreign_absolute` --
+    exercised for real on this POSIX dev/CI machine, plus the reverse
+    direction via the injectable `_IS_WINDOWS` seam (same shape as
+    `lora_library/routes.py`'s `_is_windows()` function seam, but a plain
+    constant here -- see the seam's own docstring)."""
+
+    @pytest.mark.parametrize(
+        "value",
+        [
+            r"Z:\docs\short_prompts.md",
+            "Z:/docs/short_prompts.md",
+            r"\\server\share\docs\x.md",
+        ],
+        ids=["backslash", "forward-slash", "unc"],
+    )
+    def test_windows_shaped_values_are_foreign_on_posix(self, value: str) -> None:
+        assert context_module.is_foreign_absolute(value) is True
+
+    @pytest.mark.parametrize("value", ["loras.md", "sub/loras.md", "nested/sub/loras.md"])
+    def test_relative_names_are_never_foreign(self, value: str) -> None:
+        assert context_module.is_foreign_absolute(value) is False
+
+    def test_locally_absolute_posix_path_is_not_foreign_on_posix(self) -> None:
+        assert context_module.is_foreign_absolute("/mnt/nas/loras.md") is False
+
+    def test_a_posix_style_unc_double_slash_with_no_scheme_is_not_foreign(self) -> None:
+        # This shape is absolute on BOTH flavors (Windows reads a leading
+        # `//` as UNC too) -- `test_markdown_store.py`'s
+        # `test_ordinary_and_unc_paths_still_resolve` already pins that it
+        # passes through untouched; this pins the detector agrees.
+        assert context_module.is_foreign_absolute("//server/share/loras.md") is False
+
+    def test_scheme_value_is_never_foreign(self) -> None:
+        assert context_module.is_foreign_absolute("smb://host/share/loras.md") is False
+
+    def test_empty_value_is_never_foreign(self) -> None:
+        assert context_module.is_foreign_absolute("") is False
+
+    def test_posix_root_is_foreign_on_simulated_windows(self, monkeypatch) -> None:
+        monkeypatch.setattr(context_module, "_IS_WINDOWS", True)
+        assert context_module.is_foreign_absolute("/mnt/nas/loras.md") is True
+
+    def test_windows_shaped_value_is_not_foreign_on_simulated_windows(self, monkeypatch) -> None:
+        monkeypatch.setattr(context_module, "_IS_WINDOWS", True)
+        assert context_module.is_foreign_absolute(r"C:\Users\eric\loras.md") is False
+
+    def test_relative_name_is_not_foreign_on_simulated_windows(self, monkeypatch) -> None:
+        monkeypatch.setattr(context_module, "_IS_WINDOWS", True)
+        assert context_module.is_foreign_absolute("loras.md") is False
+
+    def test_scheme_value_is_not_foreign_on_simulated_windows_either(self, monkeypatch) -> None:
+        monkeypatch.setattr(context_module, "_IS_WINDOWS", True)
+        assert context_module.is_foreign_absolute("smb://host/share/loras.md") is False
+
+
+class TestHealForeignAbsoluteHelper:
+    """Direct unit coverage of `context.heal_foreign_absolute` /
+    `_foreign_path_segments`, below the `resolve_notebook_file` level."""
+
+    def test_no_tail_exists_returns_the_longest_one(self, tmp_path: Path) -> None:
+        result = context_module.heal_foreign_absolute(r"Z:\docs\short_prompts.md", tmp_path)
+        assert result == tmp_path / "docs" / "short_prompts.md"
+
+    def test_shortest_tail_wins_when_only_it_exists(self, tmp_path: Path) -> None:
+        (tmp_path / "short_prompts.md").write_text("x", encoding="utf-8")
+        result = context_module.heal_foreign_absolute(r"Z:\docs\short_prompts.md", tmp_path)
+        assert result == tmp_path / "short_prompts.md"
+
+    def test_longer_tail_wins_over_shorter_when_both_exist(self, tmp_path: Path) -> None:
+        (tmp_path / "docs").mkdir()
+        (tmp_path / "docs" / "short_prompts.md").write_text("long", encoding="utf-8")
+        (tmp_path / "short_prompts.md").write_text("short", encoding="utf-8")
+        result = context_module.heal_foreign_absolute(r"Z:\docs\short_prompts.md", tmp_path)
+        assert result == tmp_path / "docs" / "short_prompts.md"
+
+    def test_reverse_direction_segments_drop_the_posix_root(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        monkeypatch.setattr(context_module, "_IS_WINDOWS", True)
+        result = context_module.heal_foreign_absolute("/mnt/nas/x.md", tmp_path)
+        assert result == tmp_path / "mnt" / "nas" / "x.md"
+
+    def test_never_produces_a_backslash_or_drive_colon_on_posix(self, tmp_path: Path) -> None:
+        result = context_module.heal_foreign_absolute(r"Z:\docs\short_prompts.md", tmp_path)
+        assert "\\" not in str(result)
+        assert all(":" not in part for part in result.parts)
+
+    def test_a_bare_drive_root_with_no_segments_does_not_crash(self, tmp_path: Path) -> None:
+        # Degenerate input (no real `file` widget would hold just "Z:\\"),
+        # but the helper must still return something sane rather than
+        # raising on an empty candidate list.
+        result = context_module.heal_foreign_absolute("Z:\\", tmp_path)
+        assert result.parent == tmp_path
+
+
+class TestForeignAbsoluteNote:
+    def test_names_windows_flavor_on_posix(self) -> None:
+        note = context_module.foreign_absolute_note(Path("/lib/short_prompts.md"))
+        assert note == "tried as a Windows path from another machine: /lib/short_prompts.md"
+
+    def test_names_posix_flavor_on_simulated_windows(self, monkeypatch) -> None:
+        monkeypatch.setattr(context_module, "_IS_WINDOWS", True)
+        note = context_module.foreign_absolute_note(Path("C:/lib/x.md"))
+        assert note.startswith("tried as a POSIX path from another machine:")
+
+
+class TestResolveNotebookFileHealsForeignAbsolutePaths:
+    """`LibraryContext.resolve_notebook_file`'s heal-on-read, end to end."""
+
+    def test_owner_exact_path_heals_to_the_existing_short_tail(
+        self, context: LibraryContext, library_dir: Path
+    ) -> None:
+        # Only the SHORT tail exists (not `<library_dir>/docs/...`) -- this
+        # is what actually exercises "longest tail first, first EXISTING
+        # tail wins": if the long tail existed too this wouldn't prove the
+        # fallback-through behavior.
+        target = library_dir / "short_prompts.md"
+        target.write_text("## A\nbody\n", encoding="utf-8")
+        resolved = context.resolve_notebook_file(r"Z:\docs\short_prompts.md")
+        assert resolved == target
+
+    def test_owner_exact_path_falls_back_to_the_longest_tail_when_nothing_exists(
+        self, context: LibraryContext, library_dir: Path
+    ) -> None:
+        resolved = context.resolve_notebook_file(r"Z:\docs\short_prompts.md")
+        assert resolved == library_dir / "docs" / "short_prompts.md"
+
+    def test_forward_slash_windows_path_heals_the_same_way(
+        self, context: LibraryContext, library_dir: Path
+    ) -> None:
+        target = library_dir / "short_prompts.md"
+        target.write_text("## A\nbody\n", encoding="utf-8")
+        resolved = context.resolve_notebook_file("Z:/docs/short_prompts.md")
+        assert resolved == target
+
+    def test_reverse_direction_posix_path_on_simulated_windows(
+        self, context: LibraryContext, library_dir: Path, monkeypatch
+    ) -> None:
+        # `resolve_notebook_file` checks `is_foreign_absolute` BEFORE the
+        # local `Path.is_absolute()` gate specifically so this is possible:
+        # on the REAL host OS (POSIX, here) a bare concrete `Path` would
+        # call "/mnt/nas/docs/loras.md" locally absolute regardless of what
+        # `_IS_WINDOWS` claims, which would short-circuit past the foreign
+        # check entirely if it were checked second (see the method's own
+        # docstring for why checking it first changes nothing about real
+        # behavior on a host where the flag matches the real platform).
+        monkeypatch.setattr(context_module, "_IS_WINDOWS", True)
+        target = library_dir / "loras.md"
+        target.write_text("## A\nbody\n", encoding="utf-8")
+        resolved = context.resolve_notebook_file("/mnt/nas/docs/loras.md")
+        assert resolved == target
+
+    def test_never_produces_a_backslash_or_drive_colon_on_posix(
+        self, context: LibraryContext
+    ) -> None:
+        resolved = context.resolve_notebook_file(r"Z:\docs\short_prompts.md")
+        assert "\\" not in str(resolved)
+        assert all(":" not in part for part in resolved.parts)
+
+    def test_scheme_value_still_raises_before_any_foreign_absolute_handling(
+        self, context: LibraryContext
+    ) -> None:
+        with pytest.raises(ValueError, match="network address"):
+            context.resolve_notebook_file("smb://host/share/loras.md")
+
+    def test_regression_owner_reports_errno22_join_shape_no_longer_happens(
+        self, context: LibraryContext, library_dir: Path
+    ) -> None:
+        # Before the fix, this value joined WHOLE under `library_dir`, e.g.
+        # `<library_dir>/Z:\docs\short_prompts.md` -- a path containing a
+        # literal backslash and drive colon, which is exactly what made a
+        # real gvfs SMB mount reject the open with `[Errno 22] Invalid
+        # argument`. Pin that shape can no longer come out of this method.
+        buggy_join = library_dir / "Z:\\docs\\short_prompts.md"
+        resolved = context.resolve_notebook_file(r"Z:\docs\short_prompts.md")
+        assert resolved != buggy_join
+        assert "\\" not in str(resolved)
+        assert all(":" not in part for part in resolved.parts)
+
+
+class TestRelativizeLibraryPath:
+    """`LibraryContext.relativize_library_path` -- the fix that stops NEW
+    workflows acquiring an unportable absolute `file` value in the first
+    place."""
+
+    def test_path_inside_library_dir_becomes_a_relative_posix_string(
+        self, context: LibraryContext, library_dir: Path
+    ) -> None:
+        target = library_dir / "short_prompts.md"
+        assert context.relativize_library_path(target) == "short_prompts.md"
+
+    def test_nested_path_inside_library_dir_uses_forward_slashes(
+        self, context: LibraryContext, library_dir: Path
+    ) -> None:
+        target = library_dir / "sub" / "x.md"
+        assert context.relativize_library_path(target) == "sub/x.md"
+
+    def test_path_outside_library_dir_is_returned_absolute_and_unchanged(
+        self, context: LibraryContext, library_dir: Path, tmp_path: Path
+    ) -> None:
+        outside = tmp_path / "elsewhere" / "x.md"
+        assert context.relativize_library_path(outside) == str(outside)
+
+    def test_the_library_dir_itself_relativizes_to_a_dot(
+        self, context: LibraryContext, library_dir: Path
+    ) -> None:
+        assert context.relativize_library_path(library_dir) == "."
+
+    def test_sibling_dir_sharing_a_string_prefix_is_not_mistaken_for_inside(
+        self, context: LibraryContext, library_dir: Path
+    ) -> None:
+        # `library_dir` ends in ".../library" -- a sibling ".../library2"
+        # shares that whole string as a PREFIX but is a different
+        # directory. A naive `str.startswith` would wrongly call this
+        # "inside"; `Path.relative_to` compares path SEGMENTS and correctly
+        # refuses.
+        sibling = library_dir.parent / (library_dir.name + "2") / "x.md"
+        assert context.relativize_library_path(sibling) == str(sibling)
+
+    def test_accepts_a_plain_string_path_too(
+        self, context: LibraryContext, library_dir: Path
+    ) -> None:
+        assert context.relativize_library_path(str(library_dir / "x.md")) == "x.md"

@@ -28,7 +28,13 @@ from pathlib import Path
 from typing import Any, ClassVar
 
 from . import markdown_store
-from .context import DEFAULT_NOTEBOOK_FILENAME, LibraryContext
+from .context import (
+    DEFAULT_NOTEBOOK_FILENAME,
+    LibraryContext,
+    foreign_absolute_note,
+    heal_foreign_absolute,
+    is_foreign_absolute,
+)
 
 logger = logging.getLogger("lora_library")
 
@@ -228,13 +234,26 @@ def _peek_resolved_path(context: LibraryContext, file_value: str) -> Path:
     read, no filesystem write) instead of calling ``library_dir()``.
     Absolute ``file`` values need no such peek — they already pass through
     untouched, so this is only ever consulted for the relative branch.
+
+    Mirrors :meth:`LibraryContext.resolve_notebook_file`'s 2026-08-28
+    foreign-absolute healing too: a value that's absolute for the OTHER
+    platform (``is_foreign_absolute``) is neither genuinely relative nor
+    locally absolute, so without this it would fall straight into the
+    plain ``base / path`` join below and reproduce this bug's own
+    ``[Errno 22]`` shape even while merely PEEKING a path for an error
+    message. Checked before the local ``is_absolute()`` branch, same
+    reasoning as the real method's own docstring: identical real-world
+    result, but keeps this peek exercisable under the injectable
+    ``_IS_WINDOWS`` seam in tests.
     """
     value = (file_value or "").strip() or DEFAULT_NOTEBOOK_FILENAME
+    configured = context.load_config().get("library_dir")
+    base = Path(configured) if configured else context.default_library_dir
+    if is_foreign_absolute(value):
+        return heal_foreign_absolute(value, base)
     path = Path(value)
     if path.is_absolute():
         return path
-    configured = context.load_config().get("library_dir")
-    base = Path(configured) if configured else context.default_library_dir
     return base / path
 
 
@@ -281,9 +300,14 @@ def resolve_selection(
     parsed, mtime, _line_ending = _load_notebook_cached(path)
     if mtime is None:
         hint = _unreachable_library_dir_hint(path)
-        raise ValueError(
-            f"EPS Prompt Notebook: file {file!r} does not exist (resolved: {path}){hint}"
+        # 2026-08-28: a foreign-absolute `file` that healed to no existing
+        # tail names WHAT WAS TRIED instead of the generic "resolved: ..."
+        # -- `path` here IS the longest-tail candidate `heal_foreign_
+        # absolute` fell back to, so this costs nothing extra to compute.
+        detail = (
+            foreign_absolute_note(path) if is_foreign_absolute(file) else f"resolved: {path}"
         )
+        raise ValueError(f"EPS Prompt Notebook: file {file!r} does not exist ({detail}){hint}")
 
     names = _selected_names(entry)
     if not names:

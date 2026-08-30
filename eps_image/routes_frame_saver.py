@@ -39,7 +39,7 @@ import logging
 import os
 import socket
 from collections import OrderedDict
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
 
 from aiohttp import web
@@ -135,6 +135,31 @@ def error_response(status: int, message: str) -> web.Response:
     return web.json_response({"error": message}, status=status)
 
 
+#: Ported verbatim from ``lora_library/context.py``'s ``_IS_WINDOWS`` --
+#: kept as a separate module-level constant (not imported) for the same
+#: self-containment reason as this module's ``request_is_loopback``/
+#: ``_machine_owns_address`` copies above: ``eps_image/`` must not reach
+#: into ``lora_library/``'s internals. A seam tests can monkeypatch to
+#: exercise the opposite platform's branch of :func:`_is_foreign_absolute`.
+_IS_WINDOWS: bool = os.name == "nt"
+
+
+def _is_foreign_absolute(value: str) -> bool:
+    """Ported verbatim from ``lora_library/context.py``'s
+    ``is_foreign_absolute`` (2026-08-28 cross-OS path fix): true when
+    *value* is absolute for the OTHER platform's path syntax but not this
+    one -- a Windows drive-letter/UNC path seen on POSIX, or a POSIX-root
+    path seen on Windows. See that function's docstring for the full
+    owner-report rationale; kept in sync by hand when the canonical copy
+    changes, same as this module's ``request_is_loopback`` pair.
+    """
+    if not value or "://" in value:
+        return False
+    if _IS_WINDOWS:
+        return PurePosixPath(value).is_absolute() and not PureWindowsPath(value).is_absolute()
+    return PureWindowsPath(value).is_absolute() and not PurePosixPath(value).is_absolute()
+
+
 def _validate_video_path(raw: str) -> tuple[Path | None, str | None]:
     """FORMAT.md §6.7's shared path validation for both routes below.
 
@@ -160,10 +185,30 @@ def _validate_video_path(raw: str) -> tuple[Path | None, str | None]:
     it can never name a real file) -- caught here and turned into the same
     400-worthy message shape as every other rejection, rather than
     propagating into a 500.
+
+    2026-08-28 fix: a FOREIGN-ABSOLUTE *raw* (:func:`_is_foreign_absolute`
+    -- a Windows drive-letter/UNC video path handed to a POSIX ComfyUI
+    host, or the reverse) is never ``is_absolute()`` for THIS platform's
+    own :class:`Path` flavor either, so without this check it degraded to
+    the exact same "path must be an absolute path" 400 as any other
+    malformed value below -- correct, but silent about the real cause.
+    Unlike the notebook resolver, there is no library folder to heal a
+    video path against here (FORMAT.md §6.7: a video path is arbitrary
+    filesystem, never confined to one shared folder), so this is
+    detection-and-a-clean-error only, checked BEFORE the generic
+    ``is_absolute()`` gate below rather than instead of it -- gate-first
+    order is otherwise unchanged.
     """
     trimmed = (raw or "").strip()
     if not trimmed:
         return None, "missing 'path' query parameter"
+    if _is_foreign_absolute(trimmed):
+        other = "POSIX (macOS/Linux)" if _IS_WINDOWS else "Windows"
+        return None, (
+            f"{trimmed!r} looks like an absolute {other} path from another machine "
+            "-- this server can't reach it directly; point at its local mount "
+            "path instead"
+        )
     try:
         path = Path(trimmed)
         if not path.is_absolute():

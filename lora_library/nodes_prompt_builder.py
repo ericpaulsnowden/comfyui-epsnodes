@@ -88,7 +88,13 @@ from pathlib import Path
 from typing import Any, ClassVar
 
 from . import markdown_store
-from .context import DEFAULT_NOTEBOOK_FILENAME, LibraryContext
+from .context import (
+    DEFAULT_NOTEBOOK_FILENAME,
+    LibraryContext,
+    foreign_absolute_note,
+    heal_foreign_absolute,
+    is_foreign_absolute,
+)
 
 logger = logging.getLogger("lora_library")
 
@@ -222,13 +228,26 @@ def _peek_resolved_path(context: LibraryContext, file_value: str) -> Path:
     missing-block error below name a path, instead of leaking a raw
     traceback. See that function's docstring for the full owner-report
     rationale (2026-07-19); only the relative-``file`` branch ever consults
-    this -- absolute values pass through untouched either way."""
+    this -- absolute values pass through untouched either way.
+
+    Also mirrors ``resolve_notebook_file``'s 2026-08-28 foreign-absolute
+    healing (``nodes_notebook._peek_resolved_path``'s identical addition --
+    see that docstring): a value absolute for the OTHER platform is
+    neither genuinely relative nor locally absolute, so without this it
+    would fall into the plain ``base / path`` join below and reproduce
+    this bug's own broken-path shape even while just peeking for an error
+    message. Checked before the local ``is_absolute()`` branch -- same
+    real-world result, but keeps this peek exercisable under the
+    injectable ``_IS_WINDOWS`` seam in tests.
+    """
     value = (file_value or "").strip() or DEFAULT_NOTEBOOK_FILENAME
+    configured = context.load_config().get("library_dir")
+    base = Path(configured) if configured else context.default_library_dir
+    if is_foreign_absolute(value):
+        return heal_foreign_absolute(value, base)
     path = Path(value)
     if path.is_absolute():
         return path
-    configured = context.load_config().get("library_dir")
-    base = Path(configured) if configured else context.default_library_dir
     return base / path
 
 
@@ -281,9 +300,15 @@ def _resolve_blocks(
             resolved.append((found["name"], found["text"]))
 
     if missing:
+        # 2026-08-28: name what was TRIED for a foreign-absolute `file` that
+        # healed to no existing tail (mirrors nodes_notebook.resolve_
+        # selection's identical change) -- `path` here IS the longest-tail
+        # candidate `heal_foreign_absolute` fell back to.
+        detail = (
+            foreign_absolute_note(path) if is_foreign_absolute(file) else f"resolved: {path}"
+        )
         raise ValueError(
-            f"EPS Prompt Builder: no block(s) named {missing!r} in {file!r} "
-            f"(resolved: {path})"
+            f"EPS Prompt Builder: no block(s) named {missing!r} in {file!r} ({detail})"
         )
     return resolved
 

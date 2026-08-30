@@ -122,6 +122,7 @@ _NODE_SPECS = [
     ("eps_image.nodes_save_image", "EPSSaveImage", "EPS Save Image"),
     ("eps_image.nodes_distributor", "EPSDistributor", "EPS Distributor"),
     ("eps_image.nodes_checkpoint_switcher", "EPSCheckpointSwitcher", "EPS Checkpoint Switcher"),
+    ("eps_audit.nodes_audit", "EPSNodeAudit", "EPS Node Audit"),
 ]
 
 NODE_CLASS_MAPPINGS = {}
@@ -243,6 +244,41 @@ try:
     _universal_states_routes.register_live(_context)
 except Exception:
     logger.exception("EPSNodes: lora_library.routes_universal_states failed to register")
+
+# EPS Node Audit (FORMAT.md §9, v0.84.0): the audit family's own local-only
+# report route (`GET /eps/audit`), plus the one thing in this pack that must
+# happen at LOAD time rather than on demand -- installing the observe-only
+# egress hooks. They wrap the HTTP client libraries (not their callers), so
+# load order does not matter for correctness, but they can only tally calls
+# made AFTER they attach, and installing them from the node instead would
+# mean an audit run silently changed the process it reports on. Registered
+# as defensively as every block above: the audit family failing to load must
+# never cost the pack its actual nodes.
+try:
+    _audit_routes_path = "eps_audit.routes_audit"
+    if _TOP_PREFIX:
+        _audit_routes_path = f"{_TOP_PREFIX}.{_audit_routes_path}"
+    _audit_routes = importlib.import_module(_audit_routes_path)
+    _audit_routes.register()
+
+    _audit_path = "eps_audit.audit"
+    if _TOP_PREFIX:
+        _audit_path = f"{_TOP_PREFIX}.{_audit_path}"
+    _audit = importlib.import_module(_audit_path)
+    _audit_hooks = _audit.install_hooks_at_startup()
+    # Fail LOUD, both ways: an interposition that quietly stops matching its
+    # target is worse than none, because you keep believing you are covered.
+    _attached = sorted(name for name, ok in _audit_hooks.items() if ok)
+    _detached = sorted(name for name, ok in _audit_hooks.items() if not ok)
+    logger.info("EPSNodes: audit egress hooks attached: %s", ", ".join(_attached) or "none")
+    if _detached:
+        logger.warning(
+            "EPSNodes: audit is NOT watching %s -- outbound calls made through "
+            "those libraries will not appear in the audit report.",
+            ", ".join(_detached),
+        )
+except Exception:
+    logger.exception("EPSNodes: eps_audit failed to register (the audit node may be inert)")
 
 WEB_DIRECTORY = "./web"
 

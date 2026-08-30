@@ -662,6 +662,30 @@ def test_attach_never_throws(source: str) -> None:
     assert "loadPicker(state).catch((error) => api.warn('initial picker load failed'," in body
 
 
+# --------------- 2026-08-29 bugfix round: Universal State Controller Apply
+
+
+def test_attach_installs_the_shared_external_write_subscription(source: str) -> None:
+    """Owner report: "applying any of the sets won't change anything" --
+    this file ALREADY publishes `__epsLpReload` on every attached node for
+    controller.js's Push State to poke directly (see the file's own comment
+    at the attach call site); the fix wires the SAME seam to api.js's
+    shared `announceWidgetsChangedExternally()` event too, so the Universal
+    State Controller's Apply reaches it without either file importing the
+    other."""
+    body = _function_body(source, "attachPickerPanel(node)")
+    assert "node.__epsLpReload = () => reloadFromWidget(state)" in body
+    assert "installExternalWriteSubscription()" in body
+
+
+def test_external_write_subscription_is_installed_once_and_routes_by_node(source: str) -> None:
+    install = _function_body(source, "installExternalWriteSubscription()")
+    assert "if (externalWriteSubscribed) return" in install
+    assert "externalWriteSubscribed = true" in install
+    assert "api.subscribeWidgetsChangedExternally((entries) => {" in install
+    assert "entry?.node?.__epsLpReload?.()" in install
+
+
 # ---------------------------------------------------- Vue-nodes hide flags
 
 

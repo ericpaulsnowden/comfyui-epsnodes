@@ -62,6 +62,20 @@ pytestmark = pytest.mark.skipif(NODE is None, reason="node (JS runtime) not inst
 
 PROBE_JS = r"""
 import * as m from './extensions/comfyui-epsnodes/lora_library/universal_controller.js'
+import * as sharedApi from './extensions/comfyui-epsnodes/lora_library/api.js'
+import { app as stubApp } from './scripts/app.js'
+
+// Plain Node has no `window` global -- api.js's announce/subscribe pair
+// (this file's own new cross-panel notification) only ever runs inside a
+// real ComfyUI frontend where `window` always exists, exactly like every
+// other `window.dispatchEvent`/`addEventListener` call this pack's other
+// announcers make (controller.js's announceSetsChanged(), sets.js's
+// initSetsFreshness()) -- none of THOSE are driven under Node either. A
+// bare `EventTarget` supplies enough of the interface
+// (addEventListener/removeEventListener/dispatchEvent) to drive the real
+// coalescing/guard/per-handler-try-catch logic behaviorally here, without
+// touching the DOM tree this repo genuinely has no harness for.
+globalThis.window = new EventTarget()
 
 const out = {}
 
@@ -72,6 +86,7 @@ out.exports = {
   exclusionsAfterToggle: typeof m.exclusionsAfterToggle,
   classToggleState: typeof m.classToggleState,
   summarizeCapture: typeof m.summarizeCapture,
+  summarizeUpdate: typeof m.summarizeUpdate,
   summarizeApply: typeof m.summarizeApply,
   compareStateEntries: typeof m.compareStateEntries,
   parseCollapsedGroups: typeof m.parseCollapsedGroups,
@@ -229,6 +244,13 @@ out.summarizeCaptureSingular = m.summarizeCapture(
   registry
 )
 
+// --------------------------------------------------------- summarizeUpdate
+
+out.summarizeUpdatePlain = m.summarizeUpdate('My State', out.buildPayloadBasic.nodes, registry)
+out.summarizeUpdateRenamed = m.summarizeUpdate('New Name', out.buildPayloadBasic.nodes, registry, {
+  renamed: true
+})
+
 // ------------------------------------------------------------- misc helpers
 
 out.compareStateEntries = [
@@ -358,6 +380,66 @@ out.writeSeam = {
   const liveIndex = { '2': { class: 'EPSDistributor', widgets: { toggles: { options: {} } } } }
   const plan = m.applyPlan(payload.nodes, liveIndex, registry, {})
   out.seamRoundTrip = { stored, written: plan.matched[0]?.writes?.[0]?.value }
+}
+
+// ------------ api.js's cross-panel announce/subscribe mechanism (Bug 1) ------------
+// 2026-08-29 bugfix round (owner: "applying any of the sets won't change
+// anything") -- behavioral coverage of the SHARED mechanism, not just a
+// source pin: real coalescing, real per-handler isolation, real
+// app.configuringGraph guard.
+
+{
+  const received = []
+  const unsubscribe = sharedApi.subscribeWidgetsChangedExternally(
+    (entries) => received.push(entries)
+  )
+  // Two calls in the same synchronous pass coalesce into ONE flushed
+  // event carrying BOTH sets of entries merged, not two separate events.
+  const entryA = { node: { id: 1 }, pathId: '1', class: 'A', widgets: ['x'] }
+  const entryB = { node: { id: 2 }, pathId: '2', class: 'B', widgets: ['y'] }
+  sharedApi.announceWidgetsChangedExternally([entryA])
+  sharedApi.announceWidgetsChangedExternally([entryB])
+  sharedApi.announceWidgetsChangedExternally([]) // no-op: nothing to announce
+  sharedApi.announceWidgetsChangedExternally(null) // malformed input -- must not throw
+  await new Promise((resolve) => setTimeout(resolve, 20))
+  unsubscribe()
+  out.announceCoalescesToOneFlush = received
+}
+
+{
+  // A throwing subscriber must never suppress delivery to ANOTHER one
+  // subscribed to the same event ("guarded per panel so one panel's
+  // failure can't break the others").
+  const receivedGood = []
+  const unsubBad = sharedApi.subscribeWidgetsChangedExternally(() => {
+    throw new Error('a broken panel subscriber')
+  })
+  const unsubGood = sharedApi.subscribeWidgetsChangedExternally(
+    (entries) => receivedGood.push(entries)
+  )
+  const entryC = { node: {}, pathId: '9', class: 'C', widgets: ['z'] }
+  sharedApi.announceWidgetsChangedExternally([entryC])
+  await new Promise((resolve) => setTimeout(resolve, 20))
+  unsubBad()
+  unsubGood()
+  out.announceSurvivesAThrowingSubscriber = receivedGood
+}
+
+{
+  // A whole-graph rebuild in progress must suppress the flush entirely --
+  // `app.configuringGraph` is a private core counter read via plain
+  // property access (api.js's own doc comment cites the full mechanism).
+  const receivedDuringConfigure = []
+  const unsubscribe = sharedApi.subscribeWidgetsChangedExternally((entries) =>
+    receivedDuringConfigure.push(entries)
+  )
+  stubApp.configuringGraph = true
+  const entryD = { node: {}, pathId: '5', class: 'D', widgets: ['w'] }
+  sharedApi.announceWidgetsChangedExternally([entryD])
+  await new Promise((resolve) => setTimeout(resolve, 20))
+  stubApp.configuringGraph = false
+  unsubscribe()
+  out.announceSkippedDuringGraphConfigure = receivedDuringConfigure
 }
 
 process.stdout.write(JSON.stringify(out))
@@ -585,6 +667,29 @@ class TestSummarizeCapture:
         text = controller_api["summarizeCaptureSingular"]
         assert "1 eps switcher" in text
         assert "eps switchers" not in text
+
+
+class TestSummarizeUpdate:
+    """Save State's toast -- shares `summarizeCapture`'s node-count tail
+    exactly (both built from the same private `describeCapturedCounts`),
+    differing only in the leading verb: 'Updated' for a plain overwrite,
+    'Saved + renamed to' when the name field carried a rename."""
+
+    def test_plain_overwrite_reads_updated(self, controller_api: dict) -> None:
+        text = controller_api["summarizeUpdatePlain"]
+        assert text.startswith('Updated "My State" — ')
+        assert "eps switcher" in text
+
+    def test_renamed_overwrite_reads_saved_plus_renamed_to(self, controller_api: dict) -> None:
+        text = controller_api["summarizeUpdateRenamed"]
+        assert text.startswith('Saved + renamed to "New Name" — ')
+
+    def test_shares_the_exact_same_node_count_tail_as_summarize_capture(
+        self, controller_api: dict
+    ) -> None:
+        capture_tail = controller_api["summarizeCaptureBasic"].split(' — ', 1)[1]
+        update_tail = controller_api["summarizeUpdatePlain"].split(' — ', 1)[1]
+        assert capture_tail == update_tail
 
 
 def test_compare_state_entries_sorts_by_name_then_slug(controller_api: dict) -> None:
@@ -821,7 +926,7 @@ def test_two_page_toggle_is_a_property_free_instance_field(source: str) -> None:
 
 
 def test_group_creation_via_hash_prefix_in_the_name_field(source: str) -> None:
-    on_save = _method_body(source, "_onSaveClick()")
+    on_save = _method_body(source, "_onCaptureClick()")
     assert "isGroupNameInput(this._w.name?.value)" in on_save
     assert "this._doNewCategory()" in on_save
     new_cat = _method_body(source, "async _doNewCategory()")
@@ -910,14 +1015,114 @@ def test_move_to_group_replaces_drag_reorder(source: str) -> None:
     assert "await this._saveLayout()" in move
 
 
-def test_save_state_is_capture_only_no_update_in_place(source: str) -> None:
-    """Scope trim #2 (file header): this node has exactly three buttons per
-    spec, so there is no separate overwrite-in-place path."""
-    assert "LABEL_SAVE = 'Save State'" in source
+def test_four_button_row_new_save_apply_delete(source: str) -> None:
+    """2026-08-29 bugfix round (owner: "anytime I change a value of a set
+    and try to save over it, it creates a new set") -- the original
+    three-button shape (Save/Apply/Delete, "Save" = capture-only) had no
+    update-in-place path, so saving over an existing name always minted
+    `<slug>-2`. This mirrors controller.js's New State / Save State pair
+    exactly: New State is untouched creation, Save State now overwrites
+    the selected state in place."""
+    assert "LABEL_CAPTURE = 'New State'" in source
+    assert "LABEL_UPDATE = 'Save State'" in source
     assert "LABEL_APPLY = 'Apply State'" in source
     assert "LABEL_DELETE = 'Delete State'" in source
-    assert "_doUpdate" not in source
-    assert "_saveAsNewName" not in source
+    assert "async _doUpdate()" in source
+    assert "_saveAsNewName(entry)" in source
+    right_pane = source.split("const rightPane = el('div', { className: 'lusc-pane-right' }, [", 1)[
+        1
+    ].split("])", 1)[0]
+    # button row order per the task spec: New State, Save State, Apply
+    # State, Delete State
+    assert right_pane.index("this._w.captureBtn") < right_pane.index("this._w.updateBtn")
+    assert right_pane.index("this._w.updateBtn") < right_pane.index("this._w.applyBtn")
+    assert right_pane.index("this._w.applyBtn") < right_pane.index("this._w.deleteBtn")
+
+
+def test_save_state_overwrites_the_selected_slug_in_place(source: str) -> None:
+    """CONFIRMED bug: saving "AAA" twice used to produce both aaa.json and
+    aaa-2.json. `_doUpdate()` must post the SAME slug it read off the
+    selected entry, using the exact `buildStatePayload`/discovery pipeline
+    `_doCapture()` uses (Save IS a re-capture, just aimed at an existing
+    file) -- never the no-slug create form."""
+    do_update = _method_body(source, "async _doUpdate()")
+    assert "const entry = this._selectedStateEntry()" in do_update
+    assert "this._toast('warn', NODE_TITLE, 'Pick a saved state first.')" in do_update
+    assert "const savedSlug = entry.slug" in do_update
+    assert "discoverStateNodes(registry)" in do_update
+    assert "buildStatePayload(nodesInfo, registry, exclusions)" in do_update
+    assert "api.postJson(STATE_ROUTE, { slug: savedSlug, state })" in do_update
+    # never the bare no-slug create form this same route also accepts
+    assert "api.postJson(STATE_ROUTE, { state })" not in do_update
+
+
+def test_save_state_rename_decision_renames_in_place_never_forks(source: str) -> None:
+    """controller.js's 2026-07-22 "Save renames in place" rule, ported
+    verbatim: an edited name field renames the SAME slug rather than
+    spinning off a duplicate -- there is no create path inside `_doUpdate`
+    at all, so an edited name can only ever mean "rename this one." An
+    empty or unedited field means a plain overwrite with the name
+    untouched."""
+    save_as_new_name = _method_body(source, "_saveAsNewName(entry)")
+    assert "const typed = (this._w.name?.value || '').trim()" in save_as_new_name
+    assert "if (!typed || typed === current) return null" in save_as_new_name
+    do_update = _method_body(source, "async _doUpdate()")
+    assert "const newName = this._saveAsNewName(entry)" in do_update
+    assert "name: newName ?? name," in do_update
+    # the resulting POST always carries the SAME slug regardless of newName
+    assert "api.postJson(STATE_ROUTE, { slug: savedSlug, state })" in do_update
+
+
+def test_optimistic_update_paints_before_the_network_call_and_rolls_back(source: str) -> None:
+    """Same optimistic-then-POST posture as `_beginOptimisticCreate()`/
+    `_rollbackOptimisticCreate()` (v0.82 pattern), adapted for an update:
+    no provisional slug is invented (the slug never changes), but the
+    SAME `_saveInFlightSlugs` guard protects the row from a stale poll
+    response the same way a create's provisional slug does."""
+    begin = _method_body(source, "_beginOptimisticUpdate(entry, newName, count)")
+    assert "this._saveInFlightSlugs.add(entry.slug)" in begin
+    assert "this._renderStateList()" in begin
+    assert "this._selectEntry(updated, { loadName: false })" in begin
+    do_update = _method_body(source, "async _doUpdate()")
+    begin_idx = do_update.index("_beginOptimisticUpdate(entry, newName, nodes.length)")
+    post_idx = do_update.index("await api.postJson(STATE_ROUTE")
+    assert begin_idx < post_idx
+    assert "this._rollbackOptimisticUpdate(" in do_update
+    assert do_update.index("try {") < do_update.index("this._rollbackOptimisticUpdate(")
+    assert "this._saveInFlightSlugs.delete(savedSlug)" in do_update
+    rollback = _method_body(source, "_rollbackOptimisticUpdate(previous, error)")
+    assert "s.slug === previous.slug ? previous : s" in rollback
+    assert "this._toast('error', NODE_TITLE," in rollback
+
+
+def test_new_state_always_enabled_others_disabled_without_selection(source: str) -> None:
+    """New State (`captureBtn`) must work with nothing selected -- it is
+    also the `#`-group-creation entry point, controller.js's own
+    captureBtn precedent. Save/Apply/Delete all require a selection."""
+    refresh = _method_body(source, "_refreshActionButtonsEnabled()")
+    assert "this._w.captureBtn" not in refresh
+    assert "this._w.updateBtn.disabled = !hasSelection" in refresh
+    assert "this._w.applyBtn.disabled = !hasSelection" in refresh
+    assert "this._w.deleteBtn.disabled = !hasSelection" in refresh
+
+
+def test_apply_announces_only_the_written_nodes_once_after_dirty(source: str) -> None:
+    """2026-08-29 bugfix round, second half (owner: "applying any of the
+    sets won't change anything") -- after the SAME write loop + single
+    `setDirtyCanvas` this method always had, `_writeApplyPlan` announces
+    which nodes were actually written so their own DOM panel can re-sync.
+    A matched-but-nothing-written node must be excluded (`writtenNames`
+    gate), and the announce call must fire AFTER `setDirtyCanvas`, not
+    before or interleaved with the per-write loop."""
+    write_plan = _method_body(source, "_writeApplyPlan(plan, discovered)")
+    assert write_plan.count("setDirtyCanvas") == 1
+    assert write_plan.count("announceWidgetsChangedExternally") == 1
+    dirty_idx = write_plan.index("setDirtyCanvas")
+    announce_idx = write_plan.index("api.announceWidgetsChangedExternally(changedEntries)")
+    assert dirty_idx < announce_idx
+    assert "if (writtenNames.length) {" in write_plan
+    assert "node: liveNode," in write_plan
+    assert "widgets: writtenNames" in write_plan
 
 
 def test_configure_repairs_a_stale_class_id_title(source: str) -> None:
@@ -1013,3 +1218,40 @@ class TestJsonWidgetSeam:
         assert out["stored"] == {"out_2": False}
         # ...and the apply plan's write carries the STRING form back
         assert out["written"] == '{"out_2":false}'
+
+
+# --------------- 2026-08-29 bugfix round: api.js's announce/subscribe (Bug 1)
+
+
+class TestWidgetsChangedExternallyAnnounce:
+    """Behavioral coverage of api.js's shared cross-panel notification --
+    driven for real (a bare `EventTarget` standing in for `window`, see the
+    probe's own comment), not just pinned via source text: the fix for
+    "applying any of the sets won't change anything" depends on this
+    mechanism actually coalescing/guarding/isolating correctly, not merely
+    on the right words appearing in the source."""
+
+    def test_multiple_calls_in_one_tick_coalesce_to_a_single_flush(
+        self, controller_api: dict
+    ) -> None:
+        received = controller_api["announceCoalescesToOneFlush"]
+        assert len(received) == 1, "two announce() calls in one tick must merge into ONE dispatch"
+        merged = received[0]
+        assert [e["pathId"] for e in merged] == ["1", "2"]
+
+    def test_empty_and_malformed_entries_are_silent_no_ops(self, controller_api: dict) -> None:
+        # The empty-array and null announce() calls in the probe must not
+        # have produced any EXTRA flush beyond the one real one above.
+        assert len(controller_api["announceCoalescesToOneFlush"]) == 1
+
+    def test_a_throwing_subscriber_never_suppresses_another_ones_delivery(
+        self, controller_api: dict
+    ) -> None:
+        received = controller_api["announceSurvivesAThrowingSubscriber"]
+        assert len(received) == 1
+        assert received[0][0]["pathId"] == "9"
+
+    def test_flush_is_skipped_while_a_whole_graph_rebuild_is_in_progress(
+        self, controller_api: dict
+    ) -> None:
+        assert controller_api["announceSkippedDuringGraphConfigure"] == []
