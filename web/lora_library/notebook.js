@@ -3157,11 +3157,43 @@ function syncEntryWidget(state) {
   state.node.graph?.setDirtyCanvas(true, true)
 }
 
+/**
+ * *names* reordered to match the entry LIST (v0.85.0, owner report
+ * 2026-08-28: "sometimes the order of images doesn't match the order of
+ * list"). The panel's own gestures disagreed about what "selection order"
+ * meant — ctrl+click APPENDS, shift+click takes a list-ordered slice, and
+ * toggling an entry off then on moved it to the end — so the `entry`
+ * widget (and every §6.10 run token `t{N}` derived from it) depended on
+ * click history rather than on anything visible. Canonical order is what
+ * the list shows.
+ *
+ * Stable: names absent from *entries* (a stale selection mid-reload) keep
+ * their relative order at the END rather than being dropped — this is a
+ * display-order helper, never a filter. `read_entry` sorts the same way
+ * server-side, which is what fixes workflows saved before v0.85.0.
+ */
+export function orderNamesByList(names, entries) {
+  if (!Array.isArray(names) || names.length < 2) return Array.isArray(names) ? names : []
+  const rank = new Map()
+  if (Array.isArray(entries)) {
+    entries.forEach((entry, index) => {
+      const name = entry && entry.name
+      if (typeof name === 'string' && !rank.has(name)) rank.set(name, index)
+    })
+  }
+  const fallback = rank.size
+  return names
+    .map((name, index) => ({ name, index, rank: rank.has(name) ? rank.get(name) : fallback }))
+    .sort((a, b) => a.rank - b.rank || a.index - b.index)
+    .map((item) => item.name)
+}
+
 /** Dumb setter: replace the selection + active entry, sync the `entry`
  * widget, and re-render. Does not touch the editor pane — callers that
  * change the ACTIVE entry are responsible for loading (or clearing) it. */
 function setSelection(state, names, active) {
-  state.selection = names
+  // v0.85.0: store in LIST order, never click order (orderNamesByList).
+  state.selection = orderNamesByList(names, state.entries)
   state.activeName = active
   syncEntryWidget(state)
   renderList(state)

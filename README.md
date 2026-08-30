@@ -200,6 +200,13 @@ captions).
 - The workflow stores only the file path + selected entry name — never the
   text. The file is the truth; the node is a view.
 
+- **Selected prompts run in list order (v0.85.0).** The order prompts run
+  in — and the `t1`, `t2`, `t3` parts of your filenames — follows the order
+  they appear in the notebook, not the order you happened to click them.
+  Drag entries to change the run order; ctrl-clicking them in a different
+  sequence no longer matters. (This renumbers `t{N}` for workflows where
+  those two used to differ, so a solo token you wrote down before now
+  points at a different run.)
 - **Section headers now match the State Controller (v0.81.0).** A collapsed
   section shows its prompt count — `▸ Styles (4)` — and every header carries
   the controller's armed two-click ✕: first click asks `sure?`, second

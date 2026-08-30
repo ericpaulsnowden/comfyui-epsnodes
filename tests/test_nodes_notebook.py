@@ -260,12 +260,38 @@ class TestForeignAbsoluteFileHealing:
 
 
 class TestMultiSelect:
-    def test_selection_order_is_preserved_not_file_order(self, library_dir: Path) -> None:
+    def test_output_is_file_order_not_click_order(self, library_dir: Path) -> None:
+        # v0.85.0 (owner report 2026-08-28: "sometimes the order of images
+        # doesn't match the order of list"): `entry` records the order the
+        # user CLICKED, which the panel's own gestures disagree about
+        # (ctrl+click appends, shift+click slices in list order). The node
+        # now emits FILE order regardless, so a §6.10 run token's `t{N}`
+        # follows what the list shows. This inverts the pre-v0.85.0
+        # contract deliberately.
         _write_notebook(library_dir, "loras.md", "## A\nbodyA\n## B\nbodyB\n## C\nbodyC\n")
         node = nodes_notebook.LoraLibraryNotebook()
         texts, names = node.read_entry(file="loras.md", entry="B\nA\nC")
-        assert names == ["B", "A", "C"]
-        assert texts == ["bodyB", "bodyA", "bodyC"]
+        assert names == ["A", "B", "C"]
+        assert texts == ["bodyA", "bodyB", "bodyC"]
+
+    def test_file_order_survives_an_already_saved_click_ordered_widget(
+        self, library_dir: Path
+    ) -> None:
+        # The whole reason the sort lives in the NODE and not only in the
+        # panel: a workflow saved before v0.85.0 still holds click order.
+        _write_notebook(library_dir, "loras.md", "## A\nbodyA\n## B\nbodyB\n## C\nbodyC\n")
+        node = nodes_notebook.LoraLibraryNotebook()
+        _texts, names = node.read_entry(file="loras.md", entry="C\nB")
+        assert names == ["B", "C"]
+
+    def test_file_order_follows_a_reordered_file(self, library_dir: Path) -> None:
+        # Drag an entry in the notebook (which rewrites the file) and the
+        # emitted order follows the NEW file order, same selection.
+        _write_notebook(library_dir, "loras.md", "## A\nbodyA\n## B\nbodyB\n")
+        node = nodes_notebook.LoraLibraryNotebook()
+        assert node.read_entry(file="loras.md", entry="A\nB")[1] == ["A", "B"]
+        _write_notebook(library_dir, "loras.md", "## B\nbodyB\n## A\nbodyA\n")
+        assert node.read_entry(file="loras.md", entry="A\nB")[1] == ["B", "A"]
 
     def test_texts_and_names_stay_paired_across_categories(self, library_dir: Path) -> None:
         _write_notebook(
@@ -273,7 +299,9 @@ class TestMultiSelect:
         )
         node = nodes_notebook.LoraLibraryNotebook()
         texts, names = node.read_entry(file="loras.md", entry="B\nA")
-        assert list(zip(names, texts, strict=True)) == [("B", "bodyB"), ("A", "bodyA")]
+        # v0.85.0: file order across categories too (Cat A's A precedes
+        # Cat B's B), pairing intact.
+        assert list(zip(names, texts, strict=True)) == [("A", "bodyA"), ("B", "bodyB")]
 
     def test_blank_and_whitespace_only_lines_are_skipped(self, library_dir: Path) -> None:
         _write_notebook(library_dir, "loras.md", "## A\nbodyA\n## B\nbodyB\n")
@@ -568,9 +596,11 @@ class TestPinnedM3:
         self, library_dir: Path, context: LibraryContext
     ) -> None:
         _write_notebook(library_dir, "loras.md", "## A\nbodyA\n## B\nbodyB\n")
+        # v0.85.0: file order (the pin capture shares this path, so a pin
+        # records exactly what the run used).
         assert nodes_notebook.resolve_selection(context, "loras.md", "B\nA") == (
-            ["bodyB", "bodyA"],
-            ["B", "A"],
+            ["bodyA", "bodyB"],
+            ["A", "B"],
         )
         with pytest.raises(ValueError, match="Ghost"):
             nodes_notebook.resolve_selection(context, "loras.md", "Ghost")

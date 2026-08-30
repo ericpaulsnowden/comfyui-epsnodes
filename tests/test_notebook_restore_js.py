@@ -548,6 +548,18 @@ out.collapsedIsSection = [
   nb.isSectionCollapsed(null, 'A'),
   nb.isSectionCollapsed(undefined, 'A')
 ]
+out.orderByList = {
+  reordered: nb.orderNamesByList(['B', 'A', 'C'], [{ name: 'A' }, { name: 'B' }, { name: 'C' }]),
+  subset: nb.orderNamesByList(['C', 'A'], [{ name: 'A' }, { name: 'B' }, { name: 'C' }]),
+  single: nb.orderNamesByList(['B'], [{ name: 'A' }, { name: 'B' }]),
+  empty: nb.orderNamesByList([], [{ name: 'A' }]),
+  unknownGoesLast: nb.orderNamesByList(
+    ['B', 'Ghost', 'A'],
+    [{ name: 'A' }, { name: 'B' }]
+  ),
+  noEntries: nb.orderNamesByList(['B', 'A'], null),
+  nonArray: nb.orderNamesByList(null, [{ name: 'A' }])
+}
 out.relativize = {
   inside: nb.relativizeToLibrary('/lib/docs/x.md', '/lib/docs'),
   nested: nb.relativizeToLibrary('/lib/docs/sub/x.md', '/lib/docs'),
@@ -1085,6 +1097,7 @@ def test_collapsed_sections_export_list_is_additive(source: str) -> None:
         "export function describePendingCategoryDelete(state, category)",
         "export function deletedCategoryStatus(data, category)",
         "export function relativizeToLibrary(value, libraryDir)",
+        "export function orderNamesByList(names, entries)",
     )
     for signature in added_this_round:
         assert signature in source, signature
@@ -1504,3 +1517,32 @@ class TestRelativizeToLibrary:
     def test_the_pick_path_relativizes_before_storing(self, source: str) -> None:
         assert "function setFileWidgetValue(state, rawValue)" in source
         assert "relativizeToLibrary(rawValue, state.libraryDir)" in source
+
+
+# ---------------- v0.85.0: selection is stored in LIST order
+
+
+class TestOrderNamesByList:
+    """Owner report 2026-08-28: run tokens followed click order, so the
+    image order didn't match the list. The panel now stores the selection
+    in list order (and `read_entry` sorts server-side for already-saved
+    workflows)."""
+
+    def test_click_order_becomes_list_order(self, cache_api: dict) -> None:
+        o = cache_api["orderByList"]
+        assert o["reordered"] == ["A", "B", "C"]
+        assert o["subset"] == ["A", "C"]
+
+    def test_degenerate_inputs_are_safe(self, cache_api: dict) -> None:
+        o = cache_api["orderByList"]
+        assert o["single"] == ["B"]
+        assert o["empty"] == []
+        assert o["nonArray"] == []
+        assert o["noEntries"] == ["B", "A"]  # nothing to rank against
+
+    def test_unknown_names_are_kept_last_never_dropped(self, cache_api: dict) -> None:
+        # A stale selection mid-reload must not silently lose entries.
+        assert cache_api["orderByList"]["unknownGoesLast"] == ["A", "B", "Ghost"]
+
+    def test_set_selection_orders_before_storing(self, source: str) -> None:
+        assert "state.selection = orderNamesByList(names, state.entries)" in source

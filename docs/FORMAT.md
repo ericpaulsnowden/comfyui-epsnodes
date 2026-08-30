@@ -505,6 +505,26 @@ execution — **the file is the truth; the UI is a view.**
 
 ### §6.1 `LoraLibraryNotebook` (display: "EPS Prompt Notebook")
 
+**Selection emits in FILE order, not click order (v0.85.0, owner report
+2026-08-28: "sometimes the order of images doesn't match the order of
+list").** `entry` records the order the user CLICKED, and the panel's own
+gestures never agreed on what that meant — ctrl+click APPENDS, shift+click
+takes a list-ordered `entries.slice()`, and toggling an entry off then on
+moved it to the end — so §6.10's run token `t{N}`, the save-path
+components and the image order all followed click history rather than
+anything visible in the list. Fixed at BOTH ends: the panel stores the
+selection through `orderNamesByList(names, state.entries)` (so the widget
+itself is honest), and `resolve_selection` sorts by the parsed file order
+before returning (so ALREADY-SAVED workflows and hand-built `/prompt`
+callers are canonical too — the widget keeps whatever it holds, the OUTPUT
+is what's sorted). Both are stable, and unknown names are kept LAST rather
+than dropped (a stale selection mid-reload must never lose entries).
+`resolve_selection` is also §6.14's pin-capture path, so a pin records
+exactly the order its run used. CONSEQUENCE: for a workflow whose click
+order differed from list order, `t{N}` renumbers — a solo token written
+down from an earlier run points at a different combination now.
+
+
 **Header parity with §6.2's controller (v0.81.0, owner: "this should be
 consistent in the prompt library as well").** `buildCategoryHeaderRow` is
 now label + delete button (`.llnb-category-label`/`.llnb-category-delete`,

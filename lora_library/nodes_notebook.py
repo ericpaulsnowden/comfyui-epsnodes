@@ -331,6 +331,29 @@ def resolve_selection(
             f"EPS Prompt Notebook: no entry named {missing!r} in {file!r} (resolved: {path})"
         )
 
+    # v0.85.0 (owner report 2026-08-28: "sometimes the order of images
+    # doesn't match the order of list"): emit in FILE order, not the order
+    # the user happened to click. `entry` records selection order -- and
+    # the panel's own gestures disagree with each other about what that
+    # means (ctrl+click APPENDS, shift+click takes a list-ordered slice,
+    # toggling an entry off and back on moves it to the end), so a §6.10
+    # run token's `t{N}` used to depend on click history rather than on
+    # anything visible in the list. Sorting here (not only in the panel)
+    # is what fixes ALREADY-SAVED workflows and hand-built /prompt callers
+    # too: the widget keeps whatever it holds, the OUTPUT is canonical.
+    # Stable sort, so a duplicated name keeps its relative order, and
+    # unknown names cannot reach here (the missing check above raises).
+    order = {
+        item["name"]: index
+        for index, item in enumerate(markdown_store.list_entries(parsed))
+    }
+    ranked = sorted(
+        zip(result_names, texts),
+        key=lambda pair: order.get(pair[0], len(order)),
+    )
+    result_names = [name for name, _text in ranked]
+    texts = [text for _name, text in ranked]
+
     return (texts, result_names)
 
 
