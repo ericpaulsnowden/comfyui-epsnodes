@@ -548,6 +548,23 @@ out.collapsedIsSection = [
   nb.isSectionCollapsed(null, 'A'),
   nb.isSectionCollapsed(undefined, 'A')
 ]
+out.emptyCategoryInsert = (() => {
+  const E = (...xs) => xs.map(([n, c]) => ({ name: n, category: c }))
+  const cats = ['Empty Top', 'Group Two', 'Group Three']
+  const list = E(['A', 'Group Two'], ['B', 'Group Two'], ['C', 'Group Three'])
+  return {
+    emptyTop: nb.emptyCategoryInsertIndex(list, 'Empty Top', cats),
+    emptyMiddle: nb.emptyCategoryInsertIndex(
+      E(['A', 'Empty Top'], ['C', 'Group Three']), 'Group Two', cats
+    ),
+    emptyLast: nb.emptyCategoryInsertIndex(
+      E(['A', 'Empty Top'], ['B', 'Group Two']), 'Group Three', cats
+    ),
+    headRegion: nb.emptyCategoryInsertIndex(list, '', cats),
+    unknown: nb.emptyCategoryInsertIndex(list, 'Ghost', cats),
+    noCategoryList: nb.emptyCategoryInsertIndex(list, 'Empty Top', null)
+  }
+})()
 out.orderByList = {
   reordered: nb.orderNamesByList(['B', 'A', 'C'], [{ name: 'A' }, { name: 'B' }, { name: 'C' }]),
   subset: nb.orderNamesByList(['C', 'A'], [{ name: 'A' }, { name: 'B' }, { name: 'C' }]),
@@ -1098,6 +1115,7 @@ def test_collapsed_sections_export_list_is_additive(source: str) -> None:
         "export function deletedCategoryStatus(data, category)",
         "export function relativizeToLibrary(value, libraryDir)",
         "export function orderNamesByList(names, entries)",
+        "export function emptyCategoryInsertIndex(entries, category, categories)",
     )
     for signature in added_this_round:
         assert signature in source, signature
@@ -1197,11 +1215,11 @@ def test_finding3_move_is_optimistic_before_the_request(source: str) -> None:
     cases = (
         (
             "performMove(state, name, target, { force = false } = {})",
-            "state.entries = reorderEntriesLocally(state.entries, name, target)",
+            "state.entries = reorderEntriesLocally(state.entries, name, target, state.categories)",
         ),
         (
             "performMoveRun(state, names, target, { force = false } = {})",
-            "state.entries = reorderEntriesLocallyMany(state.entries, names, target)",
+            "state.entries = reorderEntriesLocallyMany(state.entries, names, target, state.categories)",
         ),
         (
             "performMoveCategory(state, category, target, { force = false } = {})",
@@ -1546,3 +1564,52 @@ class TestOrderNamesByList:
 
     def test_set_selection_orders_before_storing(self, source: str) -> None:
         assert "state.selection = orderNamesByList(names, state.entries)" in source
+
+
+# ---------------- v0.85.1: dropping into an EMPTY group
+
+
+class TestEmptyCategoryDropPlacement:
+    """Owner report 2026-08-28: "if the top group has nothing in it you
+    can't drag new items into it -- they always end up in the last group."
+    The optimistic paint fell back to the end of the whole list whenever
+    the target category had no entries to append after; the server always
+    placed it correctly, which is why the workaround (move the group down,
+    drag, move it back) appeared to help."""
+
+    def test_empty_group_gets_its_own_slot_not_the_end(self, cache_api: dict) -> None:
+        i = cache_api["emptyCategoryInsert"]
+        assert i["emptyTop"] == 0  # the bug: this used to be 3 (end of list)
+        assert i["emptyMiddle"] == 1
+        assert i["emptyLast"] == 2
+
+    def test_head_region_sorts_first_and_unknowns_last(self, cache_api: dict) -> None:
+        i = cache_api["emptyCategoryInsert"]
+        assert i["headRegion"] == 0
+        assert i["unknown"] == 3
+        assert i["noCategoryList"] == 3  # no order to reason about -> old fallback
+
+    def test_move_paths_pass_the_category_order(self, source: str) -> None:
+        assert (
+            "reorderEntriesLocally(state.entries, name, target, state.categories)" in source
+        )
+        assert (
+            "reorderEntriesLocallyMany(state.entries, names, target, state.categories)"
+            in source
+        )
+
+    def test_a_refused_move_rolls_the_optimistic_reorder_back(self, source: str) -> None:
+        # A 409 used to leave the row sitting at its new slot while the
+        # banner said the file changed -- the panel showing a move the
+        # server had refused.
+        assert source.count("const entriesBeforeMove = state.entries") == 2
+        assert source.count("state.entries = entriesBeforeMove") == 2
+
+    def test_every_write_response_refreshes_both_mtimes(self, source: str) -> None:
+        # baseMtime (what writes send) and paintedMtime (what the cached
+        # paint reads) drifting apart is what produced spurious
+        # "file changed on disk" refusals.
+        assert "function noteFileMtime(state, mtime)" in source
+        assert "state.baseMtime = mtime" in source
+        assert "state.paintedMtime = mtime" in source
+        assert "state.baseMtime = typeof data.mtime" not in source

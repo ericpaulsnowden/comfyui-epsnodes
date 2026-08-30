@@ -505,6 +505,31 @@ execution — **the file is the truth; the UI is a view.**
 
 ### §6.1 `LoraLibraryNotebook` (display: "EPS Prompt Notebook")
 
+**Three drag/write defects (v0.85.1, owner report 2026-08-28).**
+1. *"If the top group has nothing in it you can't drag new items into it —
+   they always end up in the last group."* `reorderEntriesLocally`'s
+   `category` branch appended after the target category's LAST existing
+   entry and fell back to `entries.length` when it had none — i.e. the end
+   of the whole list, which renders inside whatever group is last. Purely
+   an OPTIMISTIC-paint bug: `markdown_store.move_entry` finds the block by
+   name and appends correctly, which is why it looked position-dependent
+   and why "move the group down, drag, move it back" appeared to work. The
+   empty case now derives its slot from the CATEGORY ORDER
+   (`emptyCategoryInsertIndex`: first entry whose category ranks after the
+   target; head region `''` ranks first; unknown names rank last).
+2. **A refused move stayed on screen.** Both move paths painted
+   optimistically and, on a 409, showed the conflict banner while LEAVING
+   the row at its new slot — the panel displaying a move the server had
+   just refused. Both now restore the pre-drag order before showing the
+   banner (`entriesBeforeMove`).
+3. **Spurious "file changed on disk".** `baseMtime` (what writes send as
+   §3.5's `base_mtime`) and `paintedMtime` (what the cached paint and the
+   inline-rename path read) were refreshed by different code paths, so one
+   of the panel's OWN writes could leave the other stale and the next write
+   was then refused verbatim by `check_conflict` — reproduced end to end.
+   One helper (`noteFileMtime`) now sets both from every write response.
+
+
 **Selection emits in FILE order, not click order (v0.85.0, owner report
 2026-08-28: "sometimes the order of images doesn't match the order of
 list").** `entry` records the order the user CLICKED, and the panel's own

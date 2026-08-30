@@ -200,6 +200,11 @@ captions).
 - The workflow stores only the file path + selected entry name — never the
   text. The file is the truth; the node is a view.
 
+- **Dragging into an empty group works (v0.85.1).** Dropping prompts into a
+  group that has nothing in it — including the top one — now puts them
+  there instead of in the last group. And if a save is ever refused because
+  the file changed underneath, the list snaps back to the truth instead of
+  showing a move that didn't happen.
 - **Selected prompts run in list order (v0.85.0).** The order prompts run
   in — and the `t1`, `t2`, `t3` parts of your filenames — follows the order
   they appear in the notebook, not the order you happened to click them.

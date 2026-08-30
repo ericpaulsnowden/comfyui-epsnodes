@@ -2681,6 +2681,22 @@ function syncNotebookCache(state, data) {
   notebookCacheSet(file, payload, mtime)
 }
 
+/**
+ * Adopt *mtime* as the file's CURRENT state after a successful write
+ * (v0.85.1). `baseMtime` (what writes send as §3.5's `base_mtime`) and
+ * `paintedMtime` (what the cached paint and the inline-rename path read)
+ * used to be refreshed by different code paths, so one of the panel's own
+ * writes could leave the other stale -- and the next write then 409'd with
+ * "file changed on disk" even though nothing but this panel had touched
+ * it (owner report 2026-08-28, reproduced: a stale base_mtime is refused
+ * verbatim by check_conflict). One helper, both fields, every write.
+ */
+function noteFileMtime(state, mtime) {
+  if (typeof mtime !== 'number') return
+  state.baseMtime = mtime
+  state.paintedMtime = mtime
+}
+
 /** The panel now knows *name*'s body: keep the search corpus (and thereby
  * the next cached paint) current -- also makes "searchable after Save" true
  * without waiting for the next full load. */
@@ -4384,7 +4400,7 @@ function isNoopMove(state, draggedName, target) {
  * the drop target came from a rendered row — but the request/response
  * cycle still lands the true result either way).
  */
-function reorderEntriesLocally(entries, name, target) {
+function reorderEntriesLocally(entries, name, target, categories) {
   const index = entries.findIndex((entry) => entry.name === name)
   if (index === -1) return entries
   const next = entries.slice()
@@ -4396,17 +4412,59 @@ function reorderEntriesLocally(entries, name, target) {
     return next
   }
   // 'category': append to the END of that category's run of entries
-  // (mirrors markdown_store.move_entry's dst_block.entries.append), or the
-  // very end of the file when the category has no entries here yet.
-  let insertAt = next.length
+  // (mirrors markdown_store.move_entry's dst_block.entries.append).
+  //
+  // v0.85.1 (owner report 2026-08-28: "if the top group has nothing in it
+  // you can't drag new items into it -- they always end up in the last
+  // group"): when the target category is EMPTY here, there is no run to
+  // append after, and falling back to `next.length` put the entry at the
+  // end of the WHOLE list -- i.e. inside whatever group renders last.
+  // That is a pure optimistic-paint bug (the server's move_entry finds the
+  // block by name and appends correctly), which is why it looked
+  // position-dependent and why the "move the group, drag, move it back"
+  // dance appeared to work. The empty case now derives the insertion point
+  // from the CATEGORY ORDER: the first entry belonging to a category that
+  // sorts AFTER the target, else the end of the list when the target is
+  // genuinely last. `categories` is the panel's own ordered name list;
+  // without it (a caller that has none) the old end-of-list fallback
+  // stands, which is correct for a last-position target either way.
+  const targetCategory = target.category || ''
+  let insertAt = -1
   for (let i = next.length - 1; i >= 0; i--) {
-    if ((next[i].category || '') === (target.category || '')) {
+    if ((next[i].category || '') === targetCategory) {
       insertAt = i + 1
       break
     }
   }
-  next.splice(insertAt, 0, { ...moved, category: target.category || '' })
+  if (insertAt === -1) {
+    insertAt = emptyCategoryInsertIndex(next, targetCategory, categories)
+  }
+  next.splice(insertAt, 0, { ...moved, category: targetCategory })
   return next
+}
+
+/**
+ * Where a run of *category*'s entries BELONGS in an entry list that
+ * currently holds none of them (v0.85.1 -- see reorderEntriesLocally's
+ * 'category' branch). Ranks by position in *categories*, the panel's
+ * ordered category-name list; the uncategorized head region ('') always
+ * ranks first, and a name missing from the list ranks last. Returns the
+ * index of the first entry whose category ranks strictly AFTER the target,
+ * else the list length.
+ */
+export function emptyCategoryInsertIndex(entries, category, categories) {
+  const order = Array.isArray(categories) ? categories : []
+  const rankOf = (name) => {
+    const value = name || ''
+    if (value === '') return -1 // the head region precedes every '#' block
+    const index = order.indexOf(value)
+    return index === -1 ? order.length : index
+  }
+  const targetRank = rankOf(category)
+  for (let i = 0; i < entries.length; i++) {
+    if (rankOf(entries[i].category) > targetRank) return i
+  }
+  return entries.length
 }
 
 /** reorderEntriesLocally()'s sibling for a multiselect drag
@@ -4415,9 +4473,9 @@ function reorderEntriesLocally(entries, name, target) {
  * batch route's own per-name loop (routes_notebook.py's
  * post_notebook_move), so the optimistic order matches what the batch
  * response will confirm. */
-function reorderEntriesLocallyMany(entries, names, target) {
+function reorderEntriesLocallyMany(entries, names, target, categories) {
   let next = entries
-  for (const name of names) next = reorderEntriesLocally(next, name, target)
+  for (const name of names) next = reorderEntriesLocally(next, name, target, categories)
   return next
 }
 
@@ -4480,7 +4538,8 @@ async function performMove(state, name, target, { force = false } = {}) {
   if (state.busy) return
   // Optimistic reorder (finding 3): land the row at its new slot BEFORE the
   // round trip -- see reorderEntriesLocally()'s own doc for the rollback story.
-  state.entries = reorderEntriesLocally(state.entries, name, target)
+  const entriesBeforeMove = state.entries
+  state.entries = reorderEntriesLocally(state.entries, name, target, state.categories)
   renderList(state)
   state.busy = true
   updateSaveButtonEnabled(state)
@@ -4501,7 +4560,7 @@ async function performMove(state, name, target, { force = false } = {}) {
     // entry's own content didn't change, but a stale baseMtime here would
     // make the NEXT save/delete/move spuriously 409 against this move's own
     // write (§3.5's conflict check is file-wide, not per-entry).
-    state.baseMtime = typeof data.mtime === 'number' ? data.mtime : state.baseMtime
+    noteFileMtime(state, data.mtime)
     syncNotebookCache(state, data) // session cache (file header)
     // A move only reorders/recategorizes — it never adds or removes
     // entries — so the current selection/active stay exactly as they were;
@@ -4516,6 +4575,13 @@ async function performMove(state, name, target, { force = false } = {}) {
     if (await recoverFromWriteTimeout(state, error)) {
       // handled: reloaded to check what landed
     } else if (error?.status === 409) {
+      // v0.85.1: undo the optimistic reorder FIRST. The server refused, so
+      // leaving the row at its new slot showed a move that never happened
+      // (owner report 2026-08-28: the conflict banner appeared AND the
+      // entry appeared moved -- two lies at once). Restore the pre-drag
+      // order, then let the banner offer Reload/Overwrite over the truth.
+      state.entries = entriesBeforeMove
+      renderList(state)
       showConflict(state, 'File changed on disk', {
         onReload: () => reloadNow(state),
         onOverwrite: () => performMove(state, name, target, { force: true })
@@ -4556,7 +4622,8 @@ async function performMoveRun(state, names, target, { force = false } = {}) {
     showLoadError(state)
     return
   }
-  state.entries = reorderEntriesLocallyMany(state.entries, names, target)
+  const entriesBeforeMove = state.entries
+  state.entries = reorderEntriesLocallyMany(state.entries, names, target, state.categories)
   renderList(state)
   state.busy = true
   updateSaveButtonEnabled(state)
@@ -4578,6 +4645,10 @@ async function performMoveRun(state, names, target, { force = false } = {}) {
     updateDeleteButtonEnabled(state)
     if (await recoverFromWriteTimeout(state, error)) return
     if (error?.status === 409) {
+      // v0.85.1: see performMove() -- undo the optimistic reorder before
+      // showing the banner, so the panel never displays a refused move.
+      state.entries = entriesBeforeMove
+      renderList(state)
       showConflict(state, 'File changed on disk', {
         onReload: () => reloadNow(state),
         onOverwrite: () => performMoveRun(state, names, target, { force: true })
@@ -4595,7 +4666,7 @@ async function performMoveRun(state, names, target, { force = false } = {}) {
   }
 
   state.entries = Array.isArray(data.entries) ? data.entries : state.entries
-  state.baseMtime = typeof data.mtime === 'number' ? data.mtime : state.baseMtime
+  noteFileMtime(state, data.mtime)
   syncNotebookCache(state, data) // session cache (file header)
 
   state.busy = false
@@ -4646,7 +4717,7 @@ async function performMoveCategory(state, category, target, { force = false } = 
     state.busy = false
     state.entries = Array.isArray(data.entries) ? data.entries : state.entries
     state.categories = Array.isArray(data.categories) ? data.categories : state.categories
-    state.baseMtime = typeof data.mtime === 'number' ? data.mtime : state.baseMtime
+    noteFileMtime(state, data.mtime)
     syncNotebookCache(state, data) // session cache (file header)
     renderList(state)
     updateSaveButtonEnabled(state)
@@ -5095,7 +5166,7 @@ async function renameCategoryRequest(state, name, renameTo, force) {
 function applyRenameResult(state, kind, name, renameTo, data) {
   if (Array.isArray(data?.entries)) state.entries = data.entries
   if (Array.isArray(data?.categories)) state.categories = data.categories
-  if (typeof data?.mtime === 'number') state.baseMtime = data.mtime
+  noteFileMtime(state, data?.mtime)
   // Session cache (file header): the body/description travels with the
   // renamed entry/category (finding 5, 2026-08-26 responsiveness round adds
   // the category half -- see noteCategoryDescription()'s call sites).
@@ -5298,7 +5369,7 @@ async function confirmNewEntry(state, rawName) {
     state.lastSavedText = ''
     state.nameFieldEl.value = name
     state.lastSavedName = name
-    state.baseMtime = typeof data.mtime === 'number' ? data.mtime : null
+    noteFileMtime(state, data.mtime)
     state.textarea.disabled = false
     state.nameFieldEl.disabled = false
     setDirty(state, false)
@@ -5497,7 +5568,7 @@ async function performDeleteRun(state, names, { force = false } = {}) {
   }
 
   state.entries = Array.isArray(data.entries) ? data.entries : state.entries
-  state.baseMtime = typeof data.mtime === 'number' ? data.mtime : state.baseMtime
+  noteFileMtime(state, data.mtime)
   for (const name of names) forgetEntryText(state, name) // session cache (file header)
   syncNotebookCache(state, data)
 
@@ -5574,7 +5645,7 @@ async function performDeleteCategory(state, { force = false } = {}) {
 
   state.busy = false
   // Disk truth first, unconditionally -- performSave()'s 2026-07-30 rule.
-  state.baseMtime = typeof data.mtime === 'number' ? data.mtime : state.baseMtime
+  noteFileMtime(state, data.mtime)
   state.entries = Array.isArray(data.entries) ? data.entries : state.entries
   state.categories = Array.isArray(data.categories) ? data.categories : state.categories
   forgetCategoryDescription(state, category) // session cache (file header): the heading is gone
@@ -5670,7 +5741,7 @@ async function performSave(state, { force = false } = {}) {
     // the list showing pre-rename names (a later save/delete addressed at
     // the old name would then re-CREATE it -- the server's upsert treats an
     // unknown name as a create).
-    state.baseMtime = typeof data.mtime === 'number' ? data.mtime : state.baseMtime
+    noteFileMtime(state, data.mtime)
     state.entries = Array.isArray(data.entries) ? data.entries : state.entries
     // Session cache (file header): the body the server STORED, under the
     // committed name, then the fold -- before the moved-on early return,
@@ -5796,7 +5867,7 @@ async function performSaveCategory(state, { force = false } = {}) {
     })
     state.busy = false
     // Disk truth first, unconditionally -- performSave()'s 2026-07-30 rule.
-    state.baseMtime = typeof data.mtime === 'number' ? data.mtime : state.baseMtime
+    noteFileMtime(state, data.mtime)
     state.entries = Array.isArray(data.entries) ? data.entries : state.entries
     state.categories = Array.isArray(data.categories) ? data.categories : state.categories
     // §3.4 demote-don't-refuse fold, same rules as performSave() above --
