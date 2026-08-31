@@ -442,6 +442,70 @@ out.writeSeam = {
   out.announceSkippedDuringGraphConfigure = receivedDuringConfigure
 }
 
+// --- v0.86.0 cross-machine matching (M3) ---
+{
+  const live = (arr) => {
+    const o = {}
+    arr.forEach((x, i) => { o[x.id] = { class: x.class, title: x.title, order: i } })
+    return o
+  }
+  const crossState = [
+    { id: '493', class: 'LoraLibraryNotebook', title: 'EPS Prompt Notebook' },
+    { id: '496', class: 'EPSModelSwitcher', title: 'EPS Model Switcher' },
+    { id: '12', class: 'EPSResolution', title: 'EPS Resolution' }
+  ]
+  const crossLive = live([
+    { id: '12', class: 'EPSResolution', title: 'EPS Resolution' },
+    { id: '700', class: 'LoraLibraryNotebook', title: 'EPS Prompt Notebook' },
+    { id: '701', class: 'EPSModelSwitcher', title: 'EPS Model Switcher' }
+  ])
+  const titleState = [
+    { id: '1', class: 'EPSResolution', title: 'Hero' },
+    { id: '2', class: 'EPSResolution', title: 'Thumb' }
+  ]
+  const titleLive = live([
+    { id: '50', class: 'EPSResolution', title: 'Thumb' },
+    { id: '51', class: 'EPSResolution', title: 'Hero' }
+  ])
+  const dupState = [
+    { id: '1', class: 'EPSResolution', title: 'EPS Resolution' },
+    { id: '2', class: 'EPSResolution', title: 'EPS Resolution' }
+  ]
+  const dupLive = live([
+    { id: '60', class: 'EPSResolution', title: 'EPS Resolution' },
+    { id: '61', class: 'EPSResolution', title: 'EPS Resolution' }
+  ])
+  out.matching = {
+    crossMachine: m.resolveMatches(crossState, crossLive),
+    byTitle: m.resolveMatches(titleState, titleLive),
+    byPosition: m.resolveMatches(dupState, dupLive),
+    fewerLive: m.resolveMatches(dupState, live([
+      { id: '70', class: 'EPSResolution', title: 'EPS Resolution' }
+    ])),
+    idBeatsTitle: m.resolveMatches(
+      [{ id: '9', class: 'EPSResolution', title: 'Wrong Name' }],
+      live([{ id: '9', class: 'EPSResolution', title: 'Renamed Since' }])
+    ),
+    classMismatchFallsThrough: m.resolveMatches(
+      [{ id: '5', class: 'EPSResolution', title: 'T' }],
+      live([{ id: '5', class: 'EPSDistributor', title: 'T' }])
+    ),
+    empty: m.resolveMatches([], {})
+  }
+  out.summaryHow = m.summarizeApply(
+    {
+      matched: [
+        { how: 'id', writes: [], invalid: [] },
+        { how: 'title', writes: [], invalid: [] },
+        { how: 'class', writes: [], invalid: [] }
+      ],
+      missing: [],
+      skipped: []
+    },
+    { classes: {} }
+  )
+}
+
 process.stdout.write(JSON.stringify(out))
 """
 
@@ -606,10 +670,15 @@ class TestApplyPlan:
         assert matched_ids == {"1", "3", "20"}
 
     def test_class_mismatch_and_not_found_are_both_missing(self, controller_api: dict) -> None:
+        # v0.86.0: a saved id whose live node is a DIFFERENT class no longer
+        # gets its own reason -- the matcher simply never claims it (the id
+        # pass requires the class to agree, and the title/class passes find
+        # no candidate of that class), so it lands in the one honest
+        # bucket: not found.
         plan = controller_api["applyPlanBasic"]
         missing_by_id = {m["id"]: m["reason"] for m in plan["missing"]}
         assert missing_by_id["404"] == "not-found"
-        assert missing_by_id["9"] == "class-mismatch"  # live id 9 is "SomethingElse"
+        assert missing_by_id["9"] == "not-found"  # live id 9 is "SomethingElse"
 
     def test_unregistered_class_counts_as_missing(self, controller_api: dict) -> None:
         plan = controller_api["applyPlanBasic"]
@@ -1255,3 +1324,63 @@ class TestWidgetsChangedExternallyAnnounce:
         self, controller_api: dict
     ) -> None:
         assert controller_api["announceSkippedDuringGraphConfigure"] == []
+
+
+# ------------- v0.86.0: matching a state onto ANOTHER machine's graph
+
+
+class TestCrossMachineMatching:
+    """Owner report 2026-08-28: "applying a universal state on two
+    computers even when using the same nodes with the same names ...
+    Applied 1 of 4 - 3 not found". M1 matched on the stored pathId alone,
+    which only agrees when both machines opened the same workflow file."""
+
+    def test_same_names_different_ids_all_match(self, controller_api: dict) -> None:
+        got = controller_api["matching"]["crossMachine"]
+        assert [m and m["how"] for m in got] == ["title", "title", "id"]
+        assert [m and m["pathId"] for m in got] == ["700", "701", "12"]
+
+    def test_titles_disambiguate_two_nodes_of_one_class(self, controller_api: dict) -> None:
+        got = controller_api["matching"]["byTitle"]
+        # 'Hero' must find 51 and 'Thumb' 50 -- never paired by order
+        assert [m["pathId"] for m in got] == ["51", "50"]
+        assert {m["how"] for m in got} == {"title"}
+
+    def test_identical_titles_pair_by_position_without_colliding(
+        self, controller_api: dict
+    ) -> None:
+        got = controller_api["matching"]["byPosition"]
+        assert [m["pathId"] for m in got] == ["60", "61"]
+        assert {m["how"] for m in got} == {"class"}
+
+    def test_a_live_node_is_never_claimed_twice(self, controller_api: dict) -> None:
+        got = controller_api["matching"]["fewerLive"]
+        assert got[0]["pathId"] == "70"
+        assert got[1] is None  # nothing left to match -> honestly not found
+
+    def test_exact_id_wins_over_a_renamed_node(self, controller_api: dict) -> None:
+        got = controller_api["matching"]["idBeatsTitle"]
+        assert got[0] == {"pathId": "9", "how": "id"}
+
+    def test_a_matching_id_of_the_wrong_class_never_matches(
+        self, controller_api: dict
+    ) -> None:
+        assert controller_api["matching"]["classMismatchFallsThrough"] == [None]
+
+    def test_empty_inputs_are_safe(self, controller_api: dict) -> None:
+        assert controller_api["matching"]["empty"] == []
+
+    def test_the_summary_names_how_they_matched(self, controller_api: dict) -> None:
+        text = controller_api["summaryHow"]["text"]
+        assert "Applied 3 of 3" in text
+        assert "1 by name" in text
+        assert "1 by position" in text
+
+    def test_exclusions_key_off_the_live_node_not_the_saved_id(self, source: str) -> None:
+        # A state saved elsewhere carries foreign ids; the Included-nodes
+        # property is about THIS canvas.
+        assert "exclusions?.nodes?.[match.pathId] === false" in source
+
+    def test_double_click_a_row_applies_it(self, source: str) -> None:
+        assert "row.addEventListener('dblclick'" in source
+        assert "this._onApplyClick()" in source

@@ -3621,6 +3621,28 @@ SELECTED state's own slug (the backend already overwrote when handed one —
 an edited name field renames in place rather than forking (§6.2's 2026-07-22
 rule).
 
+**M3 cross-machine matching (v0.86.0, owner report 2026-08-28: "applying a
+universal state on two computers even when using the same nodes with the
+same names … Applied 1 of 4 · 3 not found").** M1 matched on the stored
+pathId alone, which only agrees when both machines opened the SAME workflow
+file — rebuild the graph anywhere and every id shifts, so a state saved on
+one box matched almost nothing on the other. `resolveMatches` now runs
+three claiming passes (each live node claimed at most once, so two entries
+can never collide on one node):
+`id` (stored pathId, class confirmed — exact) → `title` (same class AND
+title, only when exactly ONE unclaimed live node qualifies; ambiguous
+titles deliberately fall through rather than guess) → `class` (same class,
+paired state-order against discovery-order — right for the ordinary
+one-node-per-class graph, a positional guess when there are several).
+`summarizeApply` names the non-exact counts ("Applied 4 of 4 (3 by name)")
+so a guess is visible rather than discovered in the output, and
+`liveIndex` carries `title`/`order` for the passes to work with.
+Exclusions now key off the MATCHED live pathId, never the foreign id the
+state was saved with — the Included-nodes property is about this canvas.
+Also: double-clicking a state row applies it (owner ask, same round), the
+click having already selected it.
+
+
 ## §7 Frontend surfaces
 
 **§7.2 amendment — load-failure is an explicit, value-preserving ERROR

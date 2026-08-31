@@ -276,6 +276,13 @@ modes, save prefixes — and applies it back later, or in another session.
   checkboxes). Untick what a state shouldn't touch — the choice saves with
   the workflow. Everything is included by default; new nodes join
   automatically.
+- **States carry between computers (v0.86.0).** Applying a state matches
+  your nodes by id first, then by node **name**, then by type — so a state
+  saved on one machine applies on another even though every node id there
+  is different. The report tells you how it matched ("Applied 4 of 4 (3 by
+  name)"), so a positional guess is never silent.
+- **Double-click a state to apply it** — same as clicking it and pressing
+  Apply State.
 - **New State vs Save State** work like the Lora State Controller's: *New
   State* captures a new one, *Save State* overwrites the selected state in
   place (renaming it if you edited the name), so re-saving never forks a

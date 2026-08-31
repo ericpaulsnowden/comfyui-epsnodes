@@ -343,29 +343,108 @@ export function buildStatePayload(nodesInfo, registry, exclusions) {
  *   missing: Array<{id,class,title,reason}>,
  *   skipped: Array<{id,class,title,reason}>}}
  */
+/**
+ * Pair each state entry with a LIVE node on this canvas (v0.86.0 — the
+ * roadmap's M3 matching, brought forward by the owner's 2026-08-28 report:
+ * "applying on two computers ... even when using the same nodes with the
+ * same names ... Applied 1 of 4 · 3 not found"). M1 matched on the stored
+ * pathId alone, which only ever agrees when both machines opened the SAME
+ * workflow file — rebuild the graph anywhere and every id shifts.
+ *
+ * Three passes, each claiming a live node at most once so two state
+ * entries can never collide on one node:
+ *  1. `id`    — the stored pathId, class confirmed. Exact, always right.
+ *  2. `title` — same class AND same title, when exactly ONE unclaimed live
+ *               node qualifies. Ambiguous titles fall through rather than
+ *               guess (that is what pass 3 is for, and it says so).
+ *  3. `class` — same class, paired in order (state order vs discovery
+ *               order). The last resort: correct for the ordinary "one
+ *               Model Switcher per graph" case, a POSITIONAL GUESS when
+ *               there are several, which is why `summarizeApply` reports
+ *               the count separately instead of burying it.
+ *
+ * Returns an array parallel to *stateNodes*: `{pathId, how}` or `null`.
+ */
+export function resolveMatches(stateNodes, liveIndex) {
+  const entries = Array.isArray(stateNodes) ? stateNodes : []
+  const results = new Array(entries.length).fill(null)
+  const index = liveIndex || {}
+  const claimed = new Set()
+  const liveList = Object.keys(index)
+    .map((id) => ({ id, ...index[id] }))
+    .sort((a, b) => (a.order || 0) - (b.order || 0))
+
+  entries.forEach((entry, i) => {
+    const live = index[entry?.id]
+    if (live && live.class === entry.class && !claimed.has(entry.id)) {
+      claimed.add(entry.id)
+      results[i] = { pathId: entry.id, how: 'id' }
+    }
+  })
+
+  entries.forEach((entry, i) => {
+    if (results[i] || !entry) return
+    const title = (entry.title || '').trim()
+    if (!title) return
+    const candidates = liveList.filter(
+      (live) =>
+        !claimed.has(live.id) && live.class === entry.class && (live.title || '').trim() === title
+    )
+    if (candidates.length !== 1) return
+    claimed.add(candidates[0].id)
+    results[i] = { pathId: candidates[0].id, how: 'title' }
+  })
+
+  const poolByClass = new Map()
+  for (const live of liveList) {
+    if (claimed.has(live.id)) continue
+    if (!poolByClass.has(live.class)) poolByClass.set(live.class, [])
+    poolByClass.get(live.class).push(live)
+  }
+  entries.forEach((entry, i) => {
+    if (results[i] || !entry) return
+    const pool = poolByClass.get(entry.class)
+    if (!pool || !pool.length) return
+    const pick = pool.shift()
+    claimed.add(pick.id)
+    results[i] = { pathId: pick.id, how: 'class' }
+  })
+
+  return results
+}
+
 export function applyPlan(stateNodes, liveIndex, registry, exclusions) {
   const matched = []
   const missing = []
   const skipped = []
-  for (const entry of stateNodes || []) {
-    const live = liveIndex?.[entry.id]
-    if (!live || live.class !== entry.class) {
+  const entries = Array.isArray(stateNodes) ? stateNodes : []
+  const matches = resolveMatches(entries, liveIndex)
+  entries.forEach((entry, entryIndex) => {
+    const match = matches[entryIndex]
+    const live = match ? liveIndex?.[match.pathId] : null
+    if (!live) {
       missing.push({
         id: entry.id,
         class: entry.class,
         title: entry.title,
-        reason: live ? 'class-mismatch' : 'not-found'
+        reason: 'not-found'
       })
-      continue
+      return
     }
-    if (exclusions?.classes?.[entry.class] === false || exclusions?.nodes?.[entry.id] === false) {
-      skipped.push({ id: entry.id, class: entry.class, title: entry.title, reason: 'excluded' })
-      continue
+    // Exclusions are about THIS canvas's nodes, so they key off the LIVE
+    // pathId the match resolved to -- never the id the state was saved
+    // with on another machine (v0.86.0).
+    if (
+      exclusions?.classes?.[entry.class] === false ||
+      exclusions?.nodes?.[match.pathId] === false
+    ) {
+      skipped.push({ id: match.pathId, class: entry.class, title: entry.title, reason: 'excluded' })
+      return
     }
     const regClass = registry?.classes?.[entry.class]
     if (!regClass || !regClass.widgets) {
       missing.push({ id: entry.id, class: entry.class, title: entry.title, reason: 'unregistered' })
-      continue
+      return
     }
     const writes = []
     const invalid = []
@@ -389,8 +468,16 @@ export function applyPlan(stateNodes, liveIndex, registry, exclusions) {
       }
       writes.push({ name, value: widgetWriteValue(desc, value) })
     }
-    matched.push({ id: entry.id, class: entry.class, title: entry.title, writes, invalid })
-  }
+    matched.push({
+      id: match.pathId,
+      savedId: entry.id,
+      how: match.how,
+      class: entry.class,
+      title: entry.title,
+      writes,
+      invalid
+    })
+  })
   return { matched, missing, skipped }
 }
 
@@ -601,6 +688,16 @@ export function summarizeApply(plan, registry) {
   const pieces = [`Applied ${matched.length} of ${total}`]
   if (missing.length) pieces.push(`${missing.length} not found (${describeNodeEntries(missing, registry)})`)
   if (skipped.length) pieces.push(`${skipped.length} skipped (${describeSkipReasons(skipped)})`)
+  // v0.86.0: say HOW they matched. A `title`/`class` match means the state
+  // came from another machine (or a rebuilt graph) and this run guessed --
+  // correctly in the ordinary one-node-per-class case, but the user should
+  // be able to see it rather than discover it in the output.
+  const byTitle = matched.filter((m) => m.how === 'title').length
+  const byClass = matched.filter((m) => m.how === 'class').length
+  const how = []
+  if (byTitle) how.push(`${byTitle} by name`)
+  if (byClass) how.push(`${byClass} by position`)
+  if (how.length) pieces[0] += ` (${how.join(', ')})`
   const partial = matched.filter((m) => (m.invalid || []).length > 0).length
   if (partial) pieces.push(`${partial} with skipped field(s)`)
   return { text: pieces.join(' · '), severity: matched.length === 0 ? 'warn' : 'success' }
@@ -748,13 +845,15 @@ function readWidgetValues(node, widgetNames) {
 /** `discoverStateNodes()`'s output -> `applyPlan()`'s `liveIndex` shape. */
 function buildLiveIndex(discovered) {
   const index = {}
+  let order = 0
   for (const d of discovered) {
     const widgets = {}
     for (const widget of d.node.widgets || []) {
       if (!widget || typeof widget.name !== 'string') continue
       widgets[widget.name] = { value: widget.value, options: widget.options }
     }
-    index[d.pathId] = { class: d.class, widgets }
+    index[d.pathId] = { class: d.class, title: d.title || '', order, widgets }
+    order += 1
   }
   return index
 }
@@ -1554,6 +1653,18 @@ export function registerControllerNode() {
               })
               row.addEventListener('click', () => {
                 this._guarded('state row click', () => this._onStatePicked(entry.label))
+              })
+              // Owner ask 2026-08-28: "double clicking on elements ...
+              // should apply them." The click above has already selected
+              // the row, so this only has to fire the apply -- the same
+              // path the Apply State button takes.
+              row.addEventListener('dblclick', (event) => {
+                event.preventDefault()
+                event.stopPropagation()
+                this._guarded('state row dblclick', () => {
+                  this._onStatePicked(entry.label)
+                  this._onApplyClick()
+                })
               })
               row.addEventListener('keydown', (event) => {
                 if (event.key !== 'Enter' && event.key !== ' ') return

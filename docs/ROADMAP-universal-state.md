@@ -42,7 +42,7 @@ masters. Default INCLUDED; the `'Included nodes'` property stores only
 exclusions, so new nodes join automatically and the property stays small.
 Per workflow by construction.
 
-## M3 — cross-workflow apply (owner's word)
+## M3 — cross-workflow apply (SHIPPED v0.86.0)
 
 Layered matching when pathIds don't line up: exact id → node title →
 class+position; a PRE-APPLY dry-run diff dialog ("9 matched · 2 by title ·
