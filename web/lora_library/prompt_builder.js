@@ -2,13 +2,33 @@
  * @file EPS Prompt Builder DOM widget (companion to the EPS Prompt Notebook,
  * FORMAT.md §7.2-family conventions) — attaches to `EPSPromptBuilder` nodes.
  * LEFT pane: a read-only, searchable mirror of a Notebook's `.md` file (same
- * order/names the Notebook shows — no add/rename/delete here, all editing
- * stays in the Notebook). RIGHT pane: an ordered list of BLOCKS — live
- * references to prompt NAMES, appended by double-clicking a left row,
- * drag-reordered, and removed with ✕ (which only splices this list, never
- * touches the file). The combined text is assembled by the BACKEND at run
- * time (`separator`-joined); this panel only ever writes the two hidden
- * widgets `file` and `blocks`.
+ * order/names the Notebook shows, GROUPED under the same category headers —
+ * no add/rename/delete here, all editing stays in the Notebook). RIGHT pane:
+ * an ordered list of BLOCKS — live references to prompt NAMES, appended by
+ * double-clicking a left row, drag-reordered, and removed with ✕ (which only
+ * splices this list, never touches the file). The combined text is assembled
+ * by the BACKEND at run time (`separator`-joined); this panel only ever
+ * writes the two hidden widgets `file` and `blocks`.
+ *
+ * Owner ask 2026-09-01: "you should not be able to add a prompt more than
+ * once. The left column should have the same groups as the notebook it is
+ * mirroring." Two changes, both load-bearing:
+ *  - A name already in `blocks` reads as added (dimmed row + badge) and its
+ *    left row's double-click listener is never attached — see the `added`
+ *    branch in renderLeftPane() below. The actual guard lives one layer
+ *    down, in appendBlock() itself, so it holds regardless of which gesture
+ *    tries to add a name a second time (today only double-click; a restored
+ *    `blocks` value containing a repeat is guarded separately, in
+ *    parseBlocks() — see its own doc).
+ *  - renderLeftPane() groups `state.entries` by `.category` (already on
+ *    every entry markdown_store.py's `list_entries()` returns — no backend
+ *    change needed) via groupEntriesByCategory() below, and renders a
+ *    collapsible header per named group exactly like notebook.js's own left
+ *    column: the leading, un-headed `''` category never gets a header of
+ *    its own, and collapse persists in the same-named `Collapsed sections`
+ *    node PROPERTY (never a widget — pure view state, §7.9/§8) via
+ *    notebook.js's own exported pure parse/toggle/query helpers, reused
+ *    verbatim rather than reinvented.
  *
  * Backend contract (pre-agreed, comfyClass `EPSPromptBuilder`): widgets in
  * order `file` (STRING, hidden), `blocks` (STRING, hidden, JSON array of
@@ -51,6 +71,13 @@
  *    reused here via its exported `notebookCacheGet`/`notebookCacheSet`/
  *    `isUnchangedResponse` rather than reimplemented, so this panel and any
  *    open Notebook on the SAME file share one browser-session cache.
+ *  - Collapsed groups (notebook.js's `PROP_COLLAPSED_SECTIONS` section):
+ *    its exported `parseCollapsedSections`/`toggleCollapsedSection`/
+ *    `isSectionCollapsed` are pure and already do exactly what this panel's
+ *    read-only category headers need, so they're imported rather than
+ *    re-written — only the property NAME (`'Collapsed sections'`, a local
+ *    const here, same posture as `NOTEBOOK_CLASS_ID` below) is duplicated,
+ *    since each node owns its own `properties` object.
  *
  * Drag-to-reorder here is DELIBERATELY plain HTML5 `draggable`/dragover/drop
  * — NOT notebook.js's pointer-based technique. notebook.js explains why it
@@ -70,7 +97,7 @@
 import { app } from '../../../scripts/app.js'
 import * as api from './api.js'
 import { walkLiveNodes } from './api.js'
-import { notebookCacheGet, notebookCacheSet, isUnchangedResponse } from './notebook.js'
+import { notebookCacheGet, notebookCacheSet, isUnchangedResponse, parseCollapsedSections, toggleCollapsedSection, isSectionCollapsed } from './notebook.js'
 
 /** FORMAT.md — frozen once shipped. */
 export const CLASS_ID = 'EPSPromptBuilder'
@@ -185,7 +212,12 @@ function sharedReloadFetch(file, knownMtime) {
  * Tolerant parse of the `blocks` widget's raw JSON-array-of-names value.
  * Anything malformed (not JSON, not an array, non-string members) degrades
  * to `[]` rather than throwing — a hand-edited or pre-M0 workflow must never
- * crash the panel.
+ * crash the panel. Also DEDUPES (owner ask 2026-09-01: "you should not be
+ * able to add a prompt more than once") — a repeat surviving into a saved
+ * `blocks` value (a hand edit, or a workflow saved before this guard
+ * existed) is silently dropped here rather than rendered as two rows or
+ * fixed up loudly; same known/seen membership-before-collect posture as
+ * missingBlockNames() below, first occurrence wins.
  * @param {unknown} raw
  * @returns {string[]}
  */
@@ -198,7 +230,14 @@ export function parseBlocks(raw) {
     return []
   }
   if (!Array.isArray(parsed)) return []
-  return parsed.filter((name) => typeof name === 'string')
+  const seen = new Set()
+  const out = []
+  for (const name of parsed) {
+    if (typeof name !== 'string' || seen.has(name)) continue
+    seen.add(name)
+    out.push(name)
+  }
+  return out
 }
 
 /**
@@ -244,11 +283,19 @@ export function reorderBlocks(list, fromIdx, toIdx) {
 
 /**
  * Append *name* to the end of *list* — a double-clicked left row's write.
+ * A no-op when *name* is already present (owner ask 2026-09-01: "you should
+ * not be able to add a prompt more than once") — this is the single choke
+ * point every add path runs through (today only the left row's dblclick;
+ * the guard living here rather than only in the UI means any future path —
+ * a drag, a hand-triggered call — inherits it too), same membership-check-
+ * before-mutating posture missingBlockNames() below already uses.
  * @param {string[]} list @param {string} name @returns {string[]}
  */
 export function appendBlock(list, name) {
   const arr = Array.isArray(list) ? list.slice() : []
-  if (typeof name === 'string' && name) arr.push(name)
+  if (typeof name !== 'string' || !name) return arr
+  if (arr.includes(name)) return arr
+  arr.push(name)
   return arr
 }
 
@@ -326,6 +373,37 @@ export function missingBlockNames(blocks, entryNames) {
     out.push(name)
   }
   return out
+}
+
+/**
+ * Groups *entries* (the `include_text=1` shape:
+ * `[{name, category, text, ...}]` — `list_entries()`'s own field, arriving
+ * unchanged) into contiguous runs by `.category`, in FILE ORDER — never
+ * re-sorted, mirroring notebook.js's own left column exactly (owner ask
+ * 2026-09-01: "the left column should have the same groups as the notebook
+ * it is mirroring"). A missing/non-string `.category` degrades to `''`,
+ * markdown_store.py's own convention for the notebook's leading, un-headed
+ * region (FORMAT.md §3.1) — notebook.js's renderList() never renders a
+ * header for that region either, and renderLeftPane() below matches that.
+ * Never throws: a non-array *entries*, or a non-object member, degrades to
+ * `[]`/skipped rather than crashing the panel.
+ * @param {{name?: string, category?: string}[]} entries
+ * @returns {{category: string, entries: object[]}[]}
+ */
+export function groupEntriesByCategory(entries) {
+  const list = Array.isArray(entries) ? entries : []
+  const groups = []
+  let current = null
+  for (const entry of list) {
+    if (!entry || typeof entry !== 'object') continue
+    const category = typeof entry.category === 'string' ? entry.category : ''
+    if (!current || current.category !== category) {
+      current = { category, entries: [] }
+      groups.push(current)
+    }
+    current.entries.push(entry)
+  }
+  return groups
 }
 
 // ---------------------------------------------------------------------------
@@ -459,6 +537,35 @@ const CSS_TEXT = `
   user-select: none;
 }
 .eps-pb-row-left:hover { background: var(--content-hover-bg, #2a2a2a); }
+.eps-pb-row-left-added {
+  opacity: 0.5;
+  cursor: default;
+}
+.eps-pb-row-left-added:hover { background: transparent; }
+.eps-pb-added-badge {
+  margin-left: 6px;
+  color: var(--descrip-text, #999);
+  font-size: 9px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+.eps-pb-group-header {
+  padding: 3px 7px;
+  margin: 3px 0 1px;
+  border-radius: 3px;
+  font-size: 9.5px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: var(--descrip-text, #999);
+  cursor: pointer;
+  user-select: none;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.eps-pb-group-header:hover { background: var(--content-hover-bg, #2a2a2a); }
 .eps-pb-row-right {
   display: flex;
   align-items: center;
@@ -575,6 +682,13 @@ export function attachPromptBuilderPanel(node) {
 
     const state = createState(node, fileWidget, blocksWidget)
     buildUi(state)
+    // Collapsed groups persist WITH THE WORKFLOW (§7.9) — must run after
+    // buildUi() (state.leftListEl has to exist for the wrapped
+    // onPropertyChanged's eventual renderLeftPane() calls) and before this
+    // function returns, so it's in place before ComfyUI's next
+    // node.configure() call for a restored node — notebook.js's own
+    // registerCollapsedSectionsProperty() placement, verbatim.
+    registerCollapsedSectionsProperty(state)
     hideWidgetBothWays(fileWidget, node)
     hideWidgetBothWays(blocksWidget, node)
     wireNodeCleanup(state)
@@ -617,6 +731,11 @@ function createState(node, fileWidget, blocksWidget) {
     // sync by every write helper and re-synced from the widget on configure.
     blocks: parseBlocks(blocksWidget.value),
     searchQuery: '',
+    // Left-column category collapse — the render-time cache backing the
+    // `Collapsed sections` node PROPERTY (registerCollapsedSectionsProperty
+    // below); a fresh node's default until that registration (or a
+    // restored node's configure()) applies the real saved value.
+    collapsedSections: [],
     // Selector's current option list + a signature to change-gate rebuilds.
     notebookOptions: [],
     notebookOptionsSignature: '',
@@ -1008,6 +1127,105 @@ function writeFileWidget(state, value) {
 }
 
 // ---------------------------------------------------------------------------
+// Collapsed groups — a node PROPERTY, not a widget (§7.9: pure view state
+// carries no §8 positional `widgets_values` hazard). Reuses notebook.js's
+// own pure parse/toggle/query helpers verbatim, under the SAME property
+// NAME (`Collapsed sections`), so this mirrors its `PROP_COLLAPSED_SECTIONS`
+// exactly rather than inventing a second, parallel convention.
+// ---------------------------------------------------------------------------
+
+/** Same string notebook.js's own (un-exported) `PROP_COLLAPSED_SECTIONS`
+ * uses — duplicated rather than imported, same posture as
+ * `NOTEBOOK_CLASS_ID` above (a small, stable, cross-file constant is
+ * cheaper to keep byte-identical by inspection than to import a private
+ * one — each node owns its own `properties` object regardless). */
+const PROP_COLLAPSED_SECTIONS = 'Collapsed sections'
+
+/**
+ * Registers the property and wires it live — called once from
+ * attachPromptBuilderPanel(), right after buildUi(). notebook.js's own
+ * registerCollapsedSectionsProperty(), verbatim: `addProperty()` never
+ * fires `onPropertyChanged`, so a FRESH node needs the explicit
+ * applyCollapsedSectionsFromProperty() call at the end; a RESTORED node's
+ * `configure()` (which runs right after this function returns) overwrites
+ * the property with the FILE's saved array and fires the wrapped
+ * `onPropertyChanged` for it, which re-applies and repaints — so the saved
+ * value always wins last, before any entries-populated render exists to
+ * show a flash.
+ */
+function registerCollapsedSectionsProperty(state) {
+  const node = state.node
+  if (typeof node.addProperty === 'function') {
+    node.addProperty(PROP_COLLAPSED_SECTIONS, [], 'array')
+  } else {
+    node.properties = node.properties || {}
+    if (!(PROP_COLLAPSED_SECTIONS in node.properties)) node.properties[PROP_COLLAPSED_SECTIONS] = []
+  }
+  const original = node.onPropertyChanged
+  node.onPropertyChanged = function (name, value, prevValue) {
+    const result = original?.call(this, name, value, prevValue)
+    if (name === PROP_COLLAPSED_SECTIONS) {
+      // Covers BOTH configure()'s restore and a live hand-edit through the
+      // node's right-click Properties panel.
+      applyCollapsedSectionsFromProperty(state)
+      renderLeftPane(state)
+    }
+    return result
+  }
+  // addProperty() alone never fires onPropertyChanged (see above) — sync a
+  // FRESH node's list explicitly now; a RESTORED node's configure() does
+  // this again momentarily with the real saved value via the wrapper above.
+  applyCollapsedSectionsFromProperty(state)
+}
+
+/** READ half — replaces `state.collapsedSections` with whatever the node
+ * property currently says. Never writes the property or dirties the
+ * canvas — see syncCollapsedSectionsProperty() for the write half. */
+function applyCollapsedSectionsFromProperty(state) {
+  state.collapsedSections = parseCollapsedSections(state.node.properties?.[PROP_COLLAPSED_SECTIONS])
+}
+
+/** WRITE half — folds the CURRENT `state.collapsedSections` back into the
+ * node property and dirties the canvas so the workflow's next save
+ * captures it — called from toggleGroupCollapse() below. */
+function syncCollapsedSectionsProperty(state) {
+  const node = state.node
+  node.properties = node.properties || {}
+  node.properties[PROP_COLLAPSED_SECTIONS] = state.collapsedSections
+  node.graph?.setDirtyCanvas(true, true)
+}
+
+/** A tap on a category header only ever toggles collapse — no category-mode
+ * selection, no rename, no delete: every edit still stays in the Notebook
+ * (owner spec, "read-only here"), unlike notebook.js's own dual-purpose
+ * header tap. */
+function toggleGroupCollapse(state, category) {
+  state.collapsedSections = toggleCollapsedSection(state.collapsedSections, category)
+  syncCollapsedSectionsProperty(state)
+  renderLeftPane(state)
+}
+
+/**
+ * A collapsible category header for the left column: arrow + name + a
+ * per-group entry count (owner spec), shown whether collapsed or not.
+ * Mirrors notebook.js's own header affordance, reduced to this panel's
+ * read-only posture — see toggleGroupCollapse()'s own doc.
+ */
+function buildGroupHeaderRow(state, category, count) {
+  const collapsed = isSectionCollapsed(state.collapsedSections, category)
+  const row = el('div', {
+    className: 'eps-pb-group-header',
+    text: `${collapsed ? '▸' : '▾'} ${category} (${count})`,
+    attrs: { tabindex: '0', title: category }
+  })
+  row.addEventListener('click', (event) => {
+    event.stopPropagation()
+    toggleGroupCollapse(state, category)
+  })
+  return row
+}
+
+// ---------------------------------------------------------------------------
 // Left pane — entries (read-only mirror of the Notebook's file)
 // ---------------------------------------------------------------------------
 
@@ -1077,7 +1295,12 @@ function firstChars(text, n) {
 }
 
 /** Deliberately no add/rename/delete affordance anywhere in here — every
- * edit stays in the Notebook (owner spec, "read-only here"). */
+ * edit stays in the Notebook (owner spec, "read-only here"). Groups by
+ * category (groupEntriesByCategory(), owner ask 2026-09-01) and marks a row
+ * already present in `blocks` as added — dimmed, badged, and with no
+ * dblclick listener at all, so the gesture that normally adds a name simply
+ * has nothing to call for a row already added (appendBlock() itself is the
+ * data-layer backstop for every OTHER path in — see its own doc). */
 function renderLeftPane(state) {
   state.leftListEl.replaceChildren()
 
@@ -1086,6 +1309,7 @@ function renderLeftPane(state) {
     return
   }
 
+  const filtering = (state.searchQuery || '').trim().length > 0
   const filtered = filterEntries(state.entries, state.searchQuery)
   if (!filtered.length) {
     const text = state.entries.length
@@ -1095,18 +1319,46 @@ function renderLeftPane(state) {
     return
   }
 
-  for (const entry of filtered) {
-    const name = typeof entry?.name === 'string' ? entry.name : ''
-    const row = el('div', {
-      className: 'eps-pb-row-left',
-      text: name,
-      attrs: { tabindex: '0', title: firstChars(entry?.text, TOOLTIP_CHARS) }
-    })
-    row.addEventListener('dblclick', (event) => {
-      event.stopPropagation()
-      onEntryDoubleClick(state, name)
-    })
-    state.leftListEl.append(row)
+  const blockSet = new Set(state.blocks)
+  for (const group of groupEntriesByCategory(filtered)) {
+    // The leading, un-headed "" region (FORMAT.md §3.1) never gets a header
+    // row of its own — notebook.js's renderList() convention, matched here
+    // so this column reads exactly like the notebook it mirrors. A group
+    // that produced no entries never reaches this loop at all (it simply
+    // isn't in groupEntriesByCategory()'s output for the FILTERED list), so
+    // a search that empties a category hides its header too.
+    if (group.category) {
+      state.leftListEl.append(buildGroupHeaderRow(state, group.category, group.entries.length))
+      // §7.2 search (notebook.js's own renderList() rule, matched here): a
+      // collapsed category still shows its matching entries WHILE
+      // filtering — a match hidden inside a collapsed group would read as
+      // "search is broken". Collapse only actually hides entries once the
+      // search box is empty again.
+      if (!filtering && isSectionCollapsed(state.collapsedSections, group.category)) continue
+    }
+    for (const entry of group.entries) {
+      const name = typeof entry?.name === 'string' ? entry.name : ''
+      const added = blockSet.has(name)
+      const row = el('div', {
+        className: 'eps-pb-row-left' + (added ? ' eps-pb-row-left-added' : ''),
+        text: name,
+        attrs: {
+          tabindex: '0',
+          title: added
+            ? `"${name}" is already in the Blocks list on the right.`
+            : firstChars(entry?.text, TOOLTIP_CHARS)
+        }
+      })
+      if (added) {
+        row.append(el('span', { className: 'eps-pb-added-badge', text: 'added' }))
+      } else {
+        row.addEventListener('dblclick', (event) => {
+          event.stopPropagation()
+          onEntryDoubleClick(state, name)
+        })
+      }
+      state.leftListEl.append(row)
+    }
   }
 }
 
@@ -1133,6 +1385,10 @@ function writeBlocksWidget(state, list) {
     state.node.graph?.setDirtyCanvas(true, true)
   }
   renderRightPane(state)
+  // The left column's added-badge/dblclick-gate (renderLeftPane's own doc)
+  // depends on `state.blocks` too — a block removed here must re-enable its
+  // left row immediately, not on the next unrelated repaint.
+  renderLeftPane(state)
 }
 
 function onRemoveBlockClick(state, idx) {

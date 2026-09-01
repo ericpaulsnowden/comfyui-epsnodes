@@ -3269,6 +3269,30 @@ hand-bypassing groups. Roadmap: `research/roadmap-eps-distributor.md`.
   other 2; two off saves exactly 1; ALL off reports `success` with nothing
   saved; `{"out_2": null}` stays enabled.
 
+
+**`Outputs` is a FLOOR, not a record (v0.89.0, owner: "if you remove items
+from the output, the slots don't go away. This is inconsistent with other
+nodes").** Auto-grow used to WRITE the grown count back into the property,
+which made growth permanent and indistinguishable from a number the user
+typed -- so unwiring dropped `highestWiredSlot` while the property still
+remembered the old total, and the node never shrank. The visible count is now
+DERIVED live: `clamp(max(Outputs, highestWiredSlot + 1), MIN, MAX)`. Only the
+wired-floor refusal (never hide a wired socket) still writes the property;
+the auto-grow spare never does. Unwiring therefore shrinks the node on its
+own with no separate shrink path, matching §6.17 Number Controller's fully
+derived row count -- which is the consistency the owner meant. A user who
+types `Outputs = 8` still always gets at least 8.
+
+**Migration.** Workflows saved before this carry the old grown number baked
+in, so `healMigratedOutputsProperty` runs on restore: a stored value greater
+than the default AND `<= highestWiredSlot + 1` is consistent with having been
+auto-grown, and resets to the default so it can float again; anything larger
+exceeds what auto-grow could have produced and is kept as deliberate. The
+ambiguous case is safe -- a user who really set 10 with 9 wired still derives
+`max(3, 10) == 10`, visibly identical either way. Known gap, documented in the
+function: with NOTHING wired at restore there is no evidence to tell a
+grown-then-abandoned value from a deliberate one, so it is kept.
+
 ## §6.12 `EPSCheckpointSwitcher` (display: "EPS Checkpoint Switcher") — tick N checkpoints, run N times
 
 **Bulk-load VRAM parking (v0.80.0 sweep-performance round).** With ≥2
@@ -3818,6 +3842,31 @@ category "EPSNodes"; class id frozen once shipped (§8).
   BOTH ways (§7.5: options.hidden for Vue + widget.hidden for canvas).
   All state lives in the two widgets — nothing in localStorage.
 
+
+**No duplicate blocks (v0.89.0, owner ask).** `appendBlock()` is the single
+choke point for adding to `blocks` and refuses a name already present;
+`parseBlocks()` dedupes on read too, so a hand-edited or pre-fix value with a
+repeat loads clean instead of double-rendering. The left pane marks an
+already-added row (dimmed + an `added` badge) and never attaches its
+double-click handler, so the gesture and the data guard agree rather than one
+silently overruling the other.
+
+**The left pane groups by category (v0.89.0, owner: "The left column should
+have the same groups as the notebook it is mirroring").** No backend work was
+needed -- `markdown_store.list_entries()` already returns `category` on every
+entry and the panel's existing GET carries it; the builder simply ignored it.
+`groupEntriesByCategory()` reduces the entries into contiguous FILE-order runs
+(never re-sorted); each named group gets a collapsible header with a count,
+and the leading un-headed region stays header-less exactly as notebook.js
+renders it. Collapse persists in a `Collapsed sections` node PROPERTY -- the
+SAME name and the same pure helpers (`parseCollapsedSections`/
+`toggleCollapsedSection`/`isSectionCollapsed`, imported from notebook.js
+rather than reimplemented), because the owner has repeatedly reported groups
+behaving inconsistently between nodes. Search filters BEFORE grouping, so an
+emptied category's header disappears with it, and a collapsed group's matches
+still show while a search is active (a match hidden behind a stale collapse
+reads as "search is broken").
+
 ## §6.16 `EPSUniversalStateController` (display: "EPS Universal State Controller") — states for every EPS node
 
 New in v0.83.0 (owner spec 2026-08-26; four choices confirmed same day: the
@@ -4004,6 +4053,27 @@ min/max, seed-style randomize, and step/scrub.
   mirroring §6.11's absent-key default); a broken entry → that slot warns and
   reads 0 without touching its neighbours.
 - **§6.16 registry:** `values` declared `json_object`, `key_pattern "^num_\d+$"`.
+
+
+**The panel FILLS the node's available height (v0.89.0, owner: "Increasing the
+height of the Number Controller node doesn't increase the height of the
+scrollable area, it just adds unusable grey space to the bottom of the
+node").** `attachDomWidget` reported the same value from `getMinHeight` AND
+`getMaxHeight` -- resolution.js's "exact height" shape, wrong for a scrollable
+list -- so litegraph's `_arrangeWidgets` had no slack to hand the widget no
+matter how tall the node was dragged. Now fill-style, notebook.js's and
+picker.js's shape: `getMinHeight` only (the natural height for the current row
+count, a floor it can never collapse below), no `getMaxHeight` (an unset max
+means "take all remaining space"). Rig-verified: every +300px on the node is
++300px of scrollable list, at every size. `growNodeToFitRows` is the only
+thing that still writes `node.size`, change-gated on the row count actually
+moving and always via `Math.max`, never an absolute overwrite -- so a manual
+drag survives a later row add, a keystroke, or a rebuild (§7.9). Its growth
+baseline resets before any WHOLESALE `values` replacement (a `configure()`
+restore or a Universal State apply), guarding picker.js's 2026-08-14
+compounding-growth bug. Separately fixed: the reported height now accounts for
+the pack's documented `computedHeight - 2*margin` DOM-widget gotcha, which it
+had been undercounting by `2*margin`.
 
 ## §7 Frontend surfaces
 

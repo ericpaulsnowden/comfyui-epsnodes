@@ -155,27 +155,42 @@
  *    `onConnectionsChange`; see that function's docstring for the two
  *    litegraph findings both files depend on).
  *
- *    Two deliberate differences from the switcher, both forced by outputs
- *    being a fundamentally different resource than inputs:
- *      - **Bounded, not unbounded.** The switcher's `image_N` inputs can grow
- *        forever because ComfyUI resolves inputs BY NAME through
- *        `INPUT_TYPES`' dict-like proxy, so a socket the class never declared
- *        still binds. Outputs resolve POSITIONALLY: a link serializes as
- *        `[origin_id, origin_slot]` and core indexes that straight into the
- *        class's `RETURN_TYPES` tuple, read ONCE at registration. So the
- *        backend must declare every socket up front and `MAX_OUTPUTS` is a
- *        real ceiling, raised 8 -> 16 alongside this feature. Raising it is
- *        append-only and therefore safe for saved workflows (every existing
- *        `origin_slot` still points at the same output); LOWERING it would
- *        silently repoint live links, so it must never happen.
- *      - **Grows only, never shrinks.** The switcher CONVERGES: it also
- *        removes surplus trailing empties. Here a socket the user has already
- *        seen stays put, because unlike an input an output can carry a
- *        user-typed rename (`wireOutputRename`) that removal would discard,
- *        and because `Outputs` is a hand-editable property whose value would
- *        otherwise be fought over. Shrinking stays fully available, just
- *        explicitly: set `Outputs` down by hand, subject to item 2's
- *        refuse-if-wired rule.
+ *    One deliberate difference from the switcher, forced by outputs being a
+ *    fundamentally different resource than inputs: **bounded, not
+ *    unbounded.** The switcher's `image_N` inputs can grow forever because
+ *    ComfyUI resolves inputs BY NAME through `INPUT_TYPES`' dict-like proxy,
+ *    so a socket the class never declared still binds. Outputs resolve
+ *    POSITIONALLY: a link serializes as `[origin_id, origin_slot]` and core
+ *    indexes that straight into the class's `RETURN_TYPES` tuple, read ONCE
+ *    at registration. So the backend must declare every socket up front and
+ *    `MAX_OUTPUTS` is a real ceiling, raised 8 -> 16 alongside this feature.
+ *    Raising it is append-only and therefore safe for saved workflows (every
+ *    existing `origin_slot` still points at the same output); LOWERING it
+ *    would silently repoint live links, so it must never happen.
+ *
+ *    **2026-09-01 fix -- growth is DERIVED, not stored** (owner report: "if
+ *    you remove items from the output, the slots don't go away. This is
+ *    inconsistent with other nodes"). Through v0.88.0 this section read
+ *    "grows only, never shrinks" and meant it literally:
+ *    `applyVisibleOutputCount` wrote the grown count straight into the
+ *    `Outputs` PROPERTY (`node.properties[PROP_OUTPUTS] = desired`), so a
+ *    spare socket revealed by wiring became permanent and indistinguishable
+ *    from a number the user actually typed -- unwiring never brought it back
+ *    down. Fixed by making `Outputs` a pure MINIMUM rather than a record of
+ *    the current count: the visible count is now `clamp(max(Outputs,
+ *    highestWiredSlot + 1), MIN, MAX)`, recomputed from scratch on every call,
+ *    with only the wired-floor-refusal half of that ever written back (see
+ *    `applyVisibleOutputCount`'s own docstring for exactly which half
+ *    persists, and why). Because the grown half never persists, unwiring
+ *    drops `highestWiredSlot` and the max collapses on its own the next time
+ *    anything re-derives it -- no separate shrink path to maintain, the same
+ *    "shrinks the moment the reason for the extra socket goes away" feel
+ *    `number_controller.js`'s own visible-row count already has. A user who
+ *    explicitly sets `Outputs` above the wired floor still always gets at
+ *    least that many -- their intent is respected, which is why the property
+ *    became a floor instead of being removed outright.
+ *    `healMigratedOutputsProperty` below handles a workflow SAVED with the
+ *    old bug's baked-in grown value.
  * 4. **Type adoption (v0.75.0)** -- `syncSlotTypes`/`collectLinkTypes`/
  *    `resolveAdoptedType`/`isAllowedType`/`inputLabelFor` below. The backend
  *    (`nodes_distributor.py`) went type-agnostic: `image` is now typed `*`
@@ -379,7 +394,11 @@ export const MAX_OUTPUTS = 16
 export const MIN_OUTPUTS = 1
 const OUTPUT_NAME_RE = /^out_(\d+)$/
 
-/** Right-click Property controlling how many of the fixed outputs show. */
+/** Right-click Property controlling the MINIMUM number of the fixed outputs
+ * shown (2026-09-01: a floor, not a record of the current count -- the
+ * actual visible count also floats up to cover the highest wired slot plus
+ * one spare, and never below what's set here; see `applyVisibleOutputCount`
+ * and `growVisibleCount`). */
 export const PROP_OUTPUTS = 'Outputs'
 export const DEFAULT_VISIBLE_OUTPUTS = 3
 
@@ -475,9 +494,14 @@ export function clampOutputsCount(value) {
  * ask 2026-07-29: "EPS Distributor should have more than three outputs.
  * Just like EPS Image Switcher the number of nodes needs to be able to grow").
  *
- * Grows only, never shrinks: a socket the user has already seen (or set via
- * the `Outputs` property) stays put, exactly as Switcher never renumbers a
- * connected row. `MAX_OUTPUTS` is the hard ceiling — outputs are resolved
+ * Never shrinks relative to *current* -- the return is always
+ * `max(current, wiredFloor)`. That is a claim about THIS pure function's
+ * inputs only, not about the node over time (2026-09-01):
+ * `applyVisibleOutputCount` passes its freshly-derived `refused` value as
+ * *current* on EVERY call, not a sticky memory of the highest count ever
+ * shown, so the NODE's visible count does shrink once *highestWiredIndex*
+ * drops -- see that function's own docstring for why. `MAX_OUTPUTS` is the
+ * hard ceiling — outputs are resolved
  * POSITIONALLY against the backend's `RETURN_TYPES`, so unlike Switcher's
  * name-resolved inputs they cannot be unbounded (see the backend module's
  * `MAX_OUTPUTS` note). At the ceiling this returns the ceiling, so the last
@@ -498,6 +522,51 @@ export function clampVisibleCount(requested, highestWiredIndex) {
   const wired = Math.round(Number(highestWiredIndex))
   const wiredFloor = Number.isFinite(wired) && wired > 0 ? Math.min(wired, MAX_OUTPUTS) : 0
   return Math.max(rangeClamped, wiredFloor)
+}
+
+/**
+ * Migration heal for a workflow SAVED before this fix (2026-09-01): the
+ * `Outputs` property used to record the auto-grown count permanently (see
+ * `applyVisibleOutputCount`'s docstring), so a workflow saved while grown
+ * would otherwise restore pinned at that number forever -- the exact bug
+ * this file now fixes for a live session, reappearing on reload from an old
+ * save. If *stored* looks like it could ONLY have come from that old
+ * auto-grow bug -- greater than `DEFAULT_VISIBLE_OUTPUTS` (so growth, not
+ * the default, produced it) and no larger than `highestWiredIndex + 1` (so
+ * it doesn't exceed what auto-grow would ever have produced on its own) --
+ * this resets it back to the default so it can float again. A *stored*
+ * ABOVE `highestWiredIndex + 1` exceeds anything auto-grow could have
+ * written, so it must have been typed deliberately; left untouched.
+ *
+ * This heuristic is deliberately ambiguous-SAFE, not merely ambiguous: in
+ * the one case it truly cannot tell apart -- a user who really DID type
+ * exactly `highestWiredIndex + 1` themselves (e.g. wired out_9 and
+ * explicitly set `Outputs` to 10) -- healing back to the default changes
+ * only the STORED property, never the visible result: `growVisibleCount`
+ * derives `max(DEFAULT_VISIBLE_OUTPUTS, 10) = 10` from the healed value,
+ * identical to what the un-healed `10` would have derived on its own. The
+ * user sees the same 10 sockets either way; only the (right-click-only)
+ * property panel's number differs, and only in a case nothing on canvas can
+ * actually distinguish. One known, accepted gap: a workflow saved AFTER
+ * fully unwiring (`highestWiredIndex` is 0 at restore) never heals, because
+ * with nothing wired ANY stored value could equally be a deliberate
+ * pre-declaration -- there is no wiring evidence left to tell the two
+ * apart, so this conservatively leaves it alone rather than guessing.
+ *
+ * Pure; exported for tests.
+ * @param {*} stored the raw `Outputs` property value as restored
+ * @param {number} highestWiredIndex from `highestWiredSlot(node)`, taken
+ *   AFTER configure() has restored links
+ * @returns {*} the healed value, or *stored* unchanged
+ */
+export function healMigratedOutputsProperty(stored, highestWiredIndex) {
+  const numericStored = Number(stored)
+  if (!Number.isFinite(numericStored)) return stored
+  const wired = Math.round(Number(highestWiredIndex))
+  const wiredFloor = Number.isFinite(wired) && wired > 0 ? wired : 0
+  const looksAutoGrown =
+    numericStored > DEFAULT_VISIBLE_OUTPUTS && numericStored <= wiredFloor + 1
+  return looksAutoGrown ? DEFAULT_VISIBLE_OUTPUTS : stored
 }
 
 /**
@@ -1114,47 +1183,64 @@ function syncSlotTypes(node) {
  * any output that is currently wired. See module docstring for why "clamp
  * back up" means "up to the highest wired slot", not "back to the
  * pre-edit count". Idempotent: safe to call redundantly from
- * onPropertyChanged/attach() regardless of whether `configure()` already
- * applied the saved outputs array for a reloaded workflow (resolution.js's
- * identical idempotency argument for its own two-mechanism hide/reveal
- * applies here unchanged -- every add/remove below is guarded by a fresh
- * name lookup, and `configure()`'s own wholesale `node.outputs` clone is
- * authoritative for link data no synthetic addOutput() call could
- * reconstruct).
+ * onPropertyChanged/onConfigure/attach()/the live wiring path regardless of
+ * whether `configure()` already applied the saved outputs array for a
+ * reloaded workflow (resolution.js's identical idempotency argument for its
+ * own two-mechanism hide/reveal applies here unchanged -- every add/remove
+ * below is guarded by a fresh name lookup, and `configure()`'s own
+ * wholesale `node.outputs` clone is authoritative for link data no
+ * synthetic addOutput() call could reconstruct).
  *
- * `grow` (v0.40.0) opts in to the auto-grow spare socket and is passed ONLY
- * by the live connection path (`wireOutputGrowth`). Deliberately NOT set on
- * the property or restore paths:
- *   - A number the user typed into the `Outputs` panel is an explicit
- *     instruction; growing past it would fight the edit. Lowering it while the
- *     last socket is wired must clamp back to exactly the wired floor and say
- *     so -- with growth in that path the clamped-up value already covered the
- *     floor, which made the refusal SILENT again (caught on the rig, and the
- *     silent refusal is the original owner-reported bug).
- *   - A loaded workflow's saved output set is authoritative; growing it on
- *     load would mutate (and dirty) a graph the user only opened. A spare that
- *     was there when they saved is still there; one that wasn't appears the
- *     next time they wire the last socket.
+ * **2026-09-01 -- two DIFFERENT numbers, only one of which persists** (owner
+ * report: unwiring never shrank the node back down). This computes two
+ * candidate counts from the stored `Outputs` property, and only the FIRST
+ * is ever written back to it:
+ *   - `refused` -- the property clamped up to `highestWiredSlot` when
+ *     necessary, so the property itself can never claim a count that would
+ *     hide a wired socket (mechanism 2, unchanged by this fix). This DOES
+ *     persist: it corrects what the property already said, rather than
+ *     inventing a number the property never asked for, and the toast below
+ *     tells the user their own edit got clamped.
+ *   - `desired` -- `refused` plus the auto-grow spare-socket floor
+ *     (mechanism 3, `growVisibleCount`), which is what actually gets shown
+ *     on the node. This is NEVER written back. Before this fix, the growth
+ *     step wrote `desired` into `node.properties[PROP_OUTPUTS]`
+ *     unconditionally, which made a grown count permanent and
+ *     indistinguishable from a number the user typed -- unwiring dropped
+ *     `highestWiredSlot`, but the stored property still remembered the old
+ *     grown number, so the node never shrank back. Now `desired` is
+ *     recomputed from `refused` (itself derived fresh from the property and
+ *     the CURRENT wiring) on every single call, so it collapses back down
+ *     on its own the moment `highestWiredSlot` drops -- no separate shrink
+ *     path to maintain, matching `number_controller.js`'s fully-derived
+ *     visible-row count.
+ *
+ * One consequence worth flagging: through v0.88.0, growth was gated behind
+ * a `grow`-only opt-in passed ONLY by the live wiring path
+ * (`wireOutputGrowth`), specifically because growth used to persist, and a
+ * restore/property-edit growing the STORED count would have been a real,
+ * visible mutation of a graph the user only opened (or would have masked
+ * the wired-refusal toast -- lowering `Outputs` while the last socket was
+ * wired produced an already-grown value that already covered the floor,
+ * making `refused > rangeClamped` read false). Neither concern applies
+ * anymore -- `desired` never touches the property, and the toast condition
+ * is computed from `refused` alone, before growth ever runs -- so growth is
+ * now unconditional and computed identically on every call site:
+ * onPropertyChanged, onConfigure, attach(), and the live wiring path all see
+ * the same one-spare-socket-below-the-highest-wired-slot floor.
  */
-function applyVisibleOutputCount(node, { grow = false } = {}) {
+function applyVisibleOutputCount(node) {
   if (!node.properties) node.properties = {}
 
   const wiredMax = highestWiredSlot(node)
   const stored = node.properties[PROP_OUTPUTS]
   const rangeClamped = clampOutputsCount(stored)
-  // The refusal is computed from what was REQUESTED, before any growth, so
-  // that growth can never mask it (see the `grow` note above).
+  // The refusal floor -- clamped up to the highest wired slot when the
+  // property claims fewer -- IS written back (see this function's own
+  // docstring's "two different numbers" section for why only this half
+  // persists).
   const refused = clampVisibleCount(stored, wiredMax)
-  // AUTO-GROW (2026-07-29 owner ask): keep one spare socket below the highest
-  // wired one, so wiring the last visible output reveals the next -- the
-  // Switcher's growing feel.
-  const desired = grow ? growVisibleCount(refused, wiredMax) : refused
-
-  // Compared against the STORED value, not against the other derived numbers:
-  // growth moves the target without touching the property, and `grown ===
-  // desired` holds in the ordinary growth case, so comparing those two would
-  // silently no-op and leave the panel one short of the sockets on screen.
-  if (stored !== desired) node.properties[PROP_OUTPUTS] = desired
+  if (refused !== stored) node.properties[PROP_OUTPUTS] = refused
   if (refused > rangeClamped) {
     // The plain range clamp alone would have hidden a wired output --
     // refused, clamped back up to the highest wired slot instead
@@ -1168,6 +1254,12 @@ function applyVisibleOutputCount(node, { grow = false } = {}) {
     console.warn(PREFIX, message)
     toast(node, 'warn', message)
   }
+
+  // AUTO-GROW (2026-07-29 owner ask, made derived-only 2026-09-01): one
+  // spare socket always sits below the highest wired one. Computed fresh
+  // from `refused` on every call and NEVER written back into the property
+  // -- see this function's own docstring's "two different numbers" section.
+  const desired = growVisibleCount(refused, wiredMax)
 
   const entries = outputEntries(node)
   const currentCount = entries.length
@@ -1276,15 +1368,21 @@ function wireOutputGrowth(node) {
       // and syncSlotTypes has its own internal change-gating, so there is
       // no no-op cost to paying for it even when growth itself is a no-op.
       syncSlotTypes(target)
-      // Bail unless the pass would land somewhere other than the stored
-      // value. This hook fires on EVERY connect and disconnect, and
-      // `applyVisibleOutputCount` also re-derives the node's height
-      // (`resyncSize`), which would otherwise snap back a manual resize each
-      // time the user wires anything.
+      // Bail unless the DERIVED visible count would actually land somewhere
+      // other than what's on screen right now. This hook fires on EVERY
+      // connect and disconnect, and `applyVisibleOutputCount` also
+      // re-derives the node's height (`resyncSize`), which would otherwise
+      // snap back a manual resize each time the user wires anything.
+      // Compared against the CURRENT output count, not the stored property
+      // (2026-09-01): growth is pure derivation now, never written into the
+      // property (see `applyVisibleOutputCount`'s docstring), so the
+      // property can sit below the derived count indefinitely without that
+      // meaning anything actually changed.
       const stored = target.properties?.[PROP_OUTPUTS]
       const wiredMax = highestWiredSlot(target)
-      if (growVisibleCount(clampVisibleCount(stored, wiredMax), wiredMax) === stored) return
-      applyVisibleOutputCount(target, { grow: true })
+      const desired = growVisibleCount(clampVisibleCount(stored, wiredMax), wiredMax)
+      if (desired === outputEntries(target).length) return
+      applyVisibleOutputCount(target)
     } catch (error) {
       console.warn(PREFIX, 'applyVisibleOutputCount (deferred) failed', error)
     }
@@ -1769,6 +1867,20 @@ export function attach(node) {
     node.onConfigure = function (info) {
       const result = originalOnConfigure?.apply(this, arguments)
       try {
+        // 2026-09-01 migration: heal a workflow SAVED with the pre-fix
+        // auto-grow bug's baked-in `Outputs` value BEFORE deriving the
+        // visible count from it, so an already-grown save floats again
+        // instead of restoring pinned at its old stuck number forever.
+        // Must run here, before applyVisibleOutputCount -- that call reads
+        // `this.properties[PROP_OUTPUTS]` as the floor immediately below.
+        // See healMigratedOutputsProperty's own docstring for the exact
+        // condition and why it's safe in the one case it can't disambiguate.
+        if (!this.properties) this.properties = {}
+        const healed = healMigratedOutputsProperty(
+          this.properties[PROP_OUTPUTS],
+          highestWiredSlot(this)
+        )
+        if (healed !== this.properties[PROP_OUTPUTS]) this.properties[PROP_OUTPUTS] = healed
         applyVisibleOutputCount(this)
         // Mechanism 4: a reloaded workflow's saved slot types (or a lack
         // thereof, for a save from before this feature existed) must be

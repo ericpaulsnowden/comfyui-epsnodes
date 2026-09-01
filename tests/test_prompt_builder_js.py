@@ -75,12 +75,20 @@ def test_prompt_builder_js_parses() -> None:
 
 
 def test_only_the_three_documented_imports(source: str) -> None:
+    # 2026-09-01: the notebook.js import grew three more named pure helpers
+    # (parseCollapsedSections/toggleCollapsedSection/isSectionCollapsed,
+    # reused verbatim for the left column's collapsible category headers
+    # instead of reinventing the same logic) -- still the same THREE source
+    # files (app.js, api.js, notebook.js), so the assertion shape is
+    # unchanged, only this one line's literal grew.
     imports = re.findall(r"^import .*$", source, flags=re.MULTILINE)
     assert imports == [
         "import { app } from '../../../scripts/app.js'",
         "import * as api from './api.js'",
         "import { walkLiveNodes } from './api.js'",
-        "import { notebookCacheGet, notebookCacheSet, isUnchangedResponse } from './notebook.js'",
+        "import { notebookCacheGet, notebookCacheSet, isUnchangedResponse, "
+        "parseCollapsedSections, toggleCollapsedSection, isSectionCollapsed } "
+        "from './notebook.js'",
     ]
 
 
@@ -102,7 +110,8 @@ const out = {
     hasRemoveBlockAt: typeof m.removeBlockAt === 'function',
     hasNotebookOptionsOf: typeof m.notebookOptionsOf === 'function',
     hasFilterEntries: typeof m.filterEntries === 'function',
-    hasMissingBlockNames: typeof m.missingBlockNames === 'function'
+    hasMissingBlockNames: typeof m.missingBlockNames === 'function',
+    hasGroupEntriesByCategory: typeof m.groupEntriesByCategory === 'function'
   }
 }
 
@@ -115,7 +124,8 @@ out.parseBlocks = {
   notJson: m.parseBlocks('not json'),
   notArray: m.parseBlocks('{"a":1}'),
   mixedMembers: m.parseBlocks('["a",1,null,"b",{}]'),
-  emptyArray: m.parseBlocks('[]')
+  emptyArray: m.parseBlocks('[]'),
+  dedupesRepeats: m.parseBlocks('["a","b","a","c","b"]')
 }
 
 // ----------------------------------------------------------- serializeBlocks
@@ -148,13 +158,19 @@ out.reorderBlocks = {
 out.appendBlock = {
   toEmpty: m.appendBlock([], 'x'),
   toExisting: m.appendBlock(['a'], 'b'),
-  duplicateAllowed: m.appendBlock(['a'], 'a'),
+  duplicateRejected: m.appendBlock(['a'], 'a'),
+  duplicateRejectedMidList: m.appendBlock(['a', 'b', 'c'], 'b'),
   nonStringIgnored: m.appendBlock(['a'], 42),
   nonArrayList: m.appendBlock(null, 'a'),
   neverMutatesInput: (() => {
     const original = ['a']
     const result = m.appendBlock(original, 'b')
     return { original, result }
+  })(),
+  neverMutatesInputOnDuplicate: (() => {
+    const original = ['a', 'b']
+    const result = m.appendBlock(original, 'a')
+    return { original, result, sameRef: original === result }
   })()
 }
 
@@ -214,6 +230,30 @@ out.missingBlockNames = {
   nonArrayEntryNames: m.missingBlockNames(['A'], null)
 }
 
+// ----------------------------------------------------- groupEntriesByCategory
+out.groupEntriesByCategory = {
+  basic: m.groupEntriesByCategory([
+    { name: 'One', category: '' },
+    { name: 'Two', category: '' },
+    { name: 'Three', category: 'Characters' },
+    { name: 'Four', category: 'Characters' },
+    { name: 'Five', category: 'Styles' }
+  ]),
+  allUngrouped: m.groupEntriesByCategory([
+    { name: 'A' },
+    { name: 'B', category: '' }
+  ]),
+  missingCategoryField: m.groupEntriesByCategory([{ name: 'A' }, { name: 'B' }]),
+  nonStringCategory: m.groupEntriesByCategory([{ name: 'A', category: 42 }]),
+  skipsNullAndNonObjectEntries: m.groupEntriesByCategory([
+    null,
+    { name: 'A', category: 'X' },
+    'not-an-object'
+  ]),
+  nonArrayInput: m.groupEntriesByCategory(null),
+  empty: m.groupEntriesByCategory([])
+}
+
 process.stdout.write(JSON.stringify(out))
 """
 
@@ -267,6 +307,16 @@ def test_parse_blocks_is_tolerant_and_filters_non_strings(probe_api: dict) -> No
     assert got["emptyArray"] == []
 
 
+def test_parse_blocks_dedupes_a_repeat_on_restore(probe_api: dict) -> None:
+    """Owner ask 2026-09-01: a `blocks` value saved with a repeat (a hand
+    edit, or a workflow from before the duplicate guard existed) must load
+    back with the repeat silently dropped, never thrown on and never shown
+    as two rows -- first occurrence wins, same as missingBlockNames()'s own
+    dedupe."""
+    got = probe_api["parseBlocks"]
+    assert got["dedupesRepeats"] == ["a", "b", "c"]
+
+
 def test_serialize_blocks_round_trips_and_drops_non_strings(probe_api: dict) -> None:
     got = probe_api["serializeBlocks"]
     assert got["normal"] == '["a","b"]'
@@ -297,15 +347,24 @@ def test_reorder_blocks_never_mutates_its_input(probe_api: dict) -> None:
     assert got["sameRef"] is False
 
 
-def test_append_block_pushes_to_the_end_and_allows_duplicates(probe_api: dict) -> None:
+def test_append_block_pushes_to_the_end_and_rejects_duplicates(probe_api: dict) -> None:
+    """Owner ask 2026-09-01: "you should not be able to add a prompt more
+    than once" -- this REPLACES the old `duplicateAllowed` behavior (a
+    second add used to push a second copy). appendBlock() is the single
+    choke point every add goes through, so the guard lives here rather than
+    only in the UI's dblclick gate (renderLeftPane's own doc)."""
     got = probe_api["appendBlock"]
     assert got["toEmpty"] == ["x"]
     assert got["toExisting"] == ["a", "b"]
-    assert got["duplicateAllowed"] == ["a", "a"]
+    assert got["duplicateRejected"] == ["a"]
+    assert got["duplicateRejectedMidList"] == ["a", "b", "c"]
     assert got["nonStringIgnored"] == ["a"]
     assert got["nonArrayList"] == ["a"]
     assert got["neverMutatesInput"]["original"] == ["a"]
     assert got["neverMutatesInput"]["result"] == ["a", "b"]
+    assert got["neverMutatesInputOnDuplicate"]["original"] == ["a", "b"]
+    assert got["neverMutatesInputOnDuplicate"]["result"] == ["a", "b"]
+    assert got["neverMutatesInputOnDuplicate"]["sameRef"] is False
 
 
 def test_remove_block_at_splices_only_the_given_index(probe_api: dict) -> None:
@@ -354,6 +413,52 @@ def test_missing_block_names_dedupes_preserves_order_and_excludes_known(probe_ap
     assert got["allKnown"] == []
     assert got["emptyBlocks"] == []
     assert got["nonArrayEntryNames"] == ["A"]
+
+
+def test_group_entries_by_category_builds_groups_in_file_order(probe_api: dict) -> None:
+    """Owner ask 2026-09-01: "the left column should have the same groups
+    as the notebook it is mirroring" -- entries arrive already in FILE
+    order (markdown_store.py's list_entries()); this groups them into
+    contiguous runs by `.category` without re-sorting anything."""
+    got = probe_api["groupEntriesByCategory"]
+    assert got["basic"] == [
+        {
+            "category": "",
+            "entries": [{"name": "One", "category": ""}, {"name": "Two", "category": ""}],
+        },
+        {
+            "category": "Characters",
+            "entries": [
+                {"name": "Three", "category": "Characters"},
+                {"name": "Four", "category": "Characters"},
+            ],
+        },
+        {"category": "Styles", "entries": [{"name": "Five", "category": "Styles"}]},
+    ]
+    assert got["empty"] == []
+    assert got["nonArrayInput"] == []
+
+
+def test_group_entries_by_category_treats_bad_or_missing_category_as_ungrouped(
+    probe_api: dict,
+) -> None:
+    """A missing `.category` field, or a non-string one, degrades to `''`
+    -- markdown_store.py's own convention for the notebook's leading,
+    un-headed region -- rather than throwing or growing a header of its
+    own. A non-object entry (or `null`) is skipped, never crashes."""
+    got = probe_api["groupEntriesByCategory"]
+    assert got["allUngrouped"] == [
+        {"category": "", "entries": [{"name": "A"}, {"name": "B", "category": ""}]}
+    ]
+    assert got["missingCategoryField"] == [
+        {"category": "", "entries": [{"name": "A"}, {"name": "B"}]}
+    ]
+    assert got["nonStringCategory"] == [
+        {"category": "", "entries": [{"name": "A", "category": 42}]}
+    ]
+    assert got["skipsNullAndNonObjectEntries"] == [
+        {"category": "X", "entries": [{"name": "A", "category": "X"}]}
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -498,6 +603,90 @@ def test_left_pane_has_no_edit_or_delete_controls(source: str) -> None:
     for forbidden in ("removeBlockAt", "contentEditable", "eps-pb-remove", "input.value ="):
         assert forbidden not in left, forbidden
     assert "eps-pb-row-left" in left
+
+
+def test_left_pane_marks_already_added_rows_and_gates_the_dblclick(source: str) -> None:
+    """Owner ask 2026-09-01 ("you should not be able to add a prompt more
+    than once"): a row already in `blocks` reads as added (dimmed row +
+    badge) and its dblclick listener is never attached at all -- the
+    gesture that normally adds a name simply has nothing to call for a row
+    that's already added. appendBlock() is the data-layer backstop for
+    every other path in (see its own doc)."""
+    left = _body(source, "renderLeftPane(state)")
+    assert "const blockSet = new Set(state.blocks)" in left
+    assert "const added = blockSet.has(name)" in left
+    assert "eps-pb-row-left-added" in left
+    assert "eps-pb-added-badge" in left
+    assert "if (added) {" in left
+    assert left.count("addEventListener('dblclick'") == 1
+
+
+def test_write_blocks_widget_repaints_left_pane_too(source: str) -> None:
+    """So a block removed on the right re-enables its left row (added
+    badge gone, dblclick re-attached) the instant it's removed, not on the
+    next unrelated repaint."""
+    write_blocks = _body(source, "writeBlocksWidget(state, list)")
+    assert "renderRightPane(state)" in write_blocks
+    assert "renderLeftPane(state)" in write_blocks
+
+
+def test_left_pane_groups_by_category_and_search_never_hides_a_match(source: str) -> None:
+    """Owner ask 2026-09-01: the left column groups under the notebook's
+    own category headers, in file order, via groupEntriesByCategory().
+    Grouping runs on the FILTERED list, so a search that empties a
+    category's matches removes that group (and its header) from the loop
+    entirely -- no leftover empty heading. notebook.js's own renderList()
+    rule is matched too: a persisted collapse never hides a match while a
+    search is active."""
+    left = _body(source, "renderLeftPane(state)")
+    assert "groupEntriesByCategory(filtered)" in left
+    assert "if (group.category) {" in left
+    assert "buildGroupHeaderRow(state, group.category, group.entries.length)" in left
+    assert (
+        "if (!filtering && isSectionCollapsed(state.collapsedSections, group.category)) continue"
+        in left
+    )
+
+
+def test_group_header_row_toggles_collapse_and_shows_the_count(source: str) -> None:
+    header = _body(source, "buildGroupHeaderRow(state, category, count)")
+    assert "isSectionCollapsed(state.collapsedSections, category)" in header
+    assert "toggleGroupCollapse(state, category)" in header
+    assert "${category} (${count})" in header
+    assert "eps-pb-group-header" in header
+
+
+def test_collapsed_sections_property_mirrors_notebook_exactly(source: str) -> None:
+    """Owner ask 2026-09-01: collapse persists in a node PROPERTY (§7.9 --
+    pure view state, no §8 positional `widgets_values` hazard), same NAME
+    and the same pure parse/toggle/query idiom as notebook.js's own
+    `Collapsed sections` -- imported rather than reinvented, so this is
+    byte-identical to the Notebook's own convention rather than a second,
+    parallel one."""
+    assert "const PROP_COLLAPSED_SECTIONS = 'Collapsed sections'" in source
+    assert (
+        "parseCollapsedSections, toggleCollapsedSection, isSectionCollapsed } "
+        "from './notebook.js'" in source
+    )
+    register = _body(source, "registerCollapsedSectionsProperty(state)")
+    assert "node.addProperty(PROP_COLLAPSED_SECTIONS, [], 'array')" in register
+    assert "applyCollapsedSectionsFromProperty(state)" in register
+    assert "renderLeftPane(state)" in register
+    apply_fn = _body(source, "applyCollapsedSectionsFromProperty(state)")
+    assert (
+        "state.collapsedSections = parseCollapsedSections("
+        "state.node.properties?.[PROP_COLLAPSED_SECTIONS])" in apply_fn
+    )
+    sync_fn = _body(source, "syncCollapsedSectionsProperty(state)")
+    assert "node.properties[PROP_COLLAPSED_SECTIONS] = state.collapsedSections" in sync_fn
+    assert "node.graph?.setDirtyCanvas(true, true)" in sync_fn
+    toggle_fn = _body(source, "toggleGroupCollapse(state, category)")
+    assert "toggleCollapsedSection(state.collapsedSections, category)" in toggle_fn
+    assert "syncCollapsedSectionsProperty(state)" in toggle_fn
+    assert "renderLeftPane(state)" in toggle_fn
+    entry = source.split("export function attachPromptBuilderPanel(node) {", 1)[1]
+    entry = entry.split("\n}\n", 1)[0]
+    assert "registerCollapsedSectionsProperty(state)" in entry
 
 
 def test_right_pane_shows_missing_badge_using_missing_block_names(source: str) -> None:

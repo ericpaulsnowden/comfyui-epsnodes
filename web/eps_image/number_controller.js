@@ -147,6 +147,35 @@
  * (unlike Distributor) no separate refusal path is needed -- one fewer
  * moving part.
  *
+ * **The panel fills the node's available height (owner bug report
+ * 2026-09-01: "Increasing the height of the Number Controller node doesn't
+ * increase the height of the scrollable area, it just adds unusable grey
+ * space to the bottom of the node").** `attachDomWidget` used to report the
+ * SAME value from `getMinHeight` and `getMaxHeight` (resolution.js's "exact
+ * height" shape, right for a size GRID that must never be free-resizable,
+ * wrong here) -- litegraph's `_arrangeWidgets` then had no slack to hand
+ * the widget no matter how tall the node was dragged, so a manual drag's
+ * extra height became dead grey space below a panel pinned at its old
+ * size. Now fill-style, `lora_library/notebook.js`'s/`picker.js`'s
+ * identical shape: `getMinHeight` only (the floor -- the panel's own
+ * natural height for its CURRENT row count, `panelHeightFor`, can never
+ * collapse below that), no `getMaxHeight` (an unset max means "take all
+ * remaining space" -- `LGraphNode._arrangeWidgets`'s `distributeSpace()`).
+ * `growNodeToFitRows` (called from `renderRows`'s tail, change-gated on the
+ * row count actually moving) is the ONLY thing that still writes
+ * `node.size` here, and only to grow the node when a NEW row needs more
+ * room than it currently has -- always `Math.max` against both the node's
+ * CURRENT height and the freshly computed floor, never an absolute
+ * overwrite, so a user's own taller drag survives any later row
+ * add/remove, keystroke, or rebuild (see that function's own docstring for
+ * the compounding-growth bug this must avoid across a `configure()`
+ * restore or a Universal State Controller Apply, both of which reset the
+ * growth baseline first). Separately, `getMinHeight`'s reported number
+ * itself was ALSO undercounting by `2*margin` (`panelHeightFor` below,
+ * this pack's documented computedHeight-minus-2*margin gotcha) -- fixed
+ * alongside the fill-style change since both bugs live in the same two
+ * callbacks.
+ *
  * **A live edit must never delete the row out from under the cursor.**
  * Discovered while designing this file, not on the rig: naively re-running
  * `computeVisibleRowCount` on every keystroke means clearing a row's name
@@ -283,11 +312,18 @@ const PANEL_WIDGET_TYPE = 'eps_number_controller_panel'
  * wrapping at the platform's default UI font. */
 export const MIN_NODE_WIDTH = 290
 
-/** Panel height constants -- `panelHeightFor` below; kept small since this
- * is a plain list of rows, not a scrollable editor. */
+/** Panel height constants -- `panelContentHeight`/`panelHeightFor` below.
+ * `ROW_HEIGHT` doubles as the per-row growth quantum `growNodeToFitRows`
+ * uses to grow/shrink the NODE when a row appears/disappears. */
 const HINT_HEIGHT = 20
 const ROW_HEIGHT = 26
 const PANEL_PADDING = 10
+
+/** `BaseDOMWidgetImpl.DEFAULT_MARGIN` on the installed frontend -- only
+ * used when a widget instance doesn't expose its own `margin`.
+ * resolution.js's/sets.js's identical fallback constant, copied verbatim
+ * (each `eps_image/*.js` module keeps its own copy). */
+const DOM_WIDGET_MARGIN_FALLBACK = 10
 
 /** Nodes we've already wired, guarding against a double `nodeCreated`
  * (distributor.js's/switcher.js's identical guard). */
@@ -814,16 +850,64 @@ function reconnectRememberedTargets(node, idx, remembered) {
   }
 }
 
-/** Recompute layout after an outputs/rows change: grow the width to fit if
- * needed and set the height ABSOLUTELY -- distributor.js's identical
- * `resyncSize`, minus its no-DOM-widget caveat (this node's DOM widget's
- * own `getMinHeight` is what actually drives the number; this just makes
- * litegraph re-run `computeSize()` against it). */
-function resyncSize(node) {
-  if (typeof node.computeSize !== 'function' || typeof node.setSize !== 'function') return
-  const computed = node.computeSize()
-  node.setSize([Math.max(node.size[0], computed[0]), computed[1]])
-  node.setDirtyCanvas?.(true, true)
+/**
+ * Grows the NODE (never shrinks it below `computeSize()`'s current floor)
+ * when the panel's own row count just changed -- `lora_library/picker.js`'s
+ * `syncSelectedGrowth`/`notebook.js`'s `syncPinnedNodeHeight`, the same
+ * shape applied to this node's rows. Owner bug report 2026-09-01: dragging
+ * the node taller left the panel pinned at its OLD exact size (dead grey
+ * space below it) because `getMinHeight`/`getMaxHeight` used to report the
+ * SAME value -- litegraph's `_arrangeWidgets` then had no slack to hand the
+ * widget no matter how tall the node was dragged. `attachDomWidget` below
+ * now reports `getMinHeight` only (notebook.js's/picker.js's fill-style
+ * shape: an unset max means "take all remaining space"), so a manual drag
+ * already flows straight through to the widget's own box with NO help from
+ * this function -- this function's only job is the auto-grow-by-row-count
+ * half of the contract (module docstring's "no Outputs property" section):
+ * a NEW row must still grow the node's natural height today, exactly as it
+ * always has.
+ *
+ * Change-gated on `state.rows.length` actually differing from the last
+ * call (`state.lastRowCount`) -- never runs merely because `renderRows`
+ * repainted (a keystroke, a blur, an unrelated field edit), which is what
+ * makes it safe to call unconditionally from the tail of every
+ * `renderRows` pass rather than threading a "did the count change" flag
+ * through every caller. `Math.max(node.size[1] + delta, floor)`, never an
+ * absolute overwrite -- distributor.js's `resyncSize` grows WIDTH via
+ * `Math.max` for the identical reason; this applies the same rule to
+ * HEIGHT so a user's own taller drag survives a later row addition that
+ * doesn't itself need the extra room the drag already provided. A row
+ * REMOVAL only gives back that row's own `ROW_HEIGHT`, never snaps the
+ * node down to the bare floor -- `Math.max` against `floor` is only
+ * ever a backstop for the case a shrink would otherwise dip below it.
+ *
+ * `state.lastRowCount` MUST be reset to `null` immediately before any
+ * WHOLESALE external replacement of `widget.value` (a `configure()`
+ * restore, a Universal State Controller Apply) -- see the reset calls at
+ * both those call sites. Skipping that reset reproduces picker.js's own
+ * 2026-08-14 bug verbatim: the pre-restore row count would still be sitting
+ * in `state.lastRowCount` when the restored value's row count is first
+ * measured, so this function would compute a delta between two counts that
+ * were never actually adjacent in time and pile that (wrong) delta ON TOP
+ * of the size `configure()` (or the Apply) had just legitimately set --
+ * compounding a little more on every tab switch. `previous == null` (the
+ * post-reset state) computes `delta = 0`, which is exactly "trust whatever
+ * size just landed, only enforce the floor" -- the correct behavior for a
+ * wholesale replacement.
+ */
+function growNodeToFitRows(state) {
+  const node = state.node
+  const count = state.rows.length
+  const previous = state.lastRowCount
+  state.lastRowCount = count
+  if (previous === count) return
+  if (!node?.size || typeof node.setSize !== 'function') return
+  const floor = typeof node.computeSize === 'function' ? node.computeSize()[1] : 0
+  const delta = previous == null ? 0 : (count - previous) * ROW_HEIGHT
+  const nextHeight = Math.max(node.size[1] + delta, floor)
+  if (nextHeight === node.size[1]) return
+  node.setSize([node.size[0], nextHeight])
+  node.graph?.setDirtyCanvas(true, true)
 }
 
 /** The slot number of whichever row currently has focus (name OR value
@@ -956,7 +1040,11 @@ function applyVisibleRowCount(state) {
     for (const entry of toRemove) node.removeOutput(entry.idx)
   }
 
-  resyncSize(node)
+  // No node-height write here (unlike distributor.js's identical-shaped
+  // function, which has no DOM widget of its own): `renderRows`, called
+  // right after this by every caller, is where `state.rows.length` becomes
+  // authoritative for the new count, and `growNodeToFitRows` there is what
+  // actually grows/shrinks the node -- see that function's own docstring.
 }
 
 /**
@@ -1187,9 +1275,56 @@ function tooltipForType(jsonType) {
   return 'Not wired yet. Connect this output to fix it as a whole number or a decimal.'
 }
 
-function panelHeightFor(state) {
-  const rows = state.rows ? state.rows.length : MIN_SLOTS
+/**
+ * The panel's own CONTENT height for *rowCount* visible rows -- hint strip
+ * + one row per slot + bottom padding. This is "the intended visible box":
+ * what `.epsnc-list` actually needs to show every row without scrolling.
+ * *rowCount* below `MIN_SLOTS` (including `undefined`/non-finite) floors at
+ * `MIN_SLOTS`, matching every other row-count formula in this file never
+ * producing zero rows. Pure; exported for tests. */
+export function panelContentHeight(rowCount) {
+  const rows =
+    typeof rowCount === 'number' && Number.isFinite(rowCount) && rowCount > 0 ? rowCount : MIN_SLOTS
   return HINT_HEIGHT + rows * ROW_HEIGHT + PANEL_PADDING
+}
+
+/** `domWidget.margin` when the instance exposes a real number, else
+ * `DOM_WIDGET_MARGIN_FALLBACK` -- resolution.js's/sets.js's identical
+ * fallback idiom. Takes the widget-like object itself (not a node/state)
+ * so it stays a plain pure helper; exported for tests. */
+export function resolveDomWidgetMargin(domWidget) {
+  return typeof domWidget?.margin === 'number' ? domWidget.margin : DOM_WIDGET_MARGIN_FALLBACK
+}
+
+/**
+ * The height THIS file actually reports to litegraph (via `getMinHeight`)
+ * for *rowCount* rows: `panelContentHeight` PLUS `2 * margin`. A DOM
+ * widget's visible box is `computedHeight - 2*margin` (this pack's
+ * documented gotcha -- sets.js's `PIN_ROW_HEIGHT`/`state.outerHeight`,
+ * resolution.js's grid, cross_sweep.js's readout all pre-compensate the
+ * same way), so reporting the bare content height alone silently
+ * undersizes the panel by `2*margin` the instant litegraph turns this
+ * number into the widget's actual `computedHeight`. Rig-reproduced before
+ * this fix: with `getMinHeight`/`getMaxHeight` both returning the
+ * un-compensated content height, `.epsnc-list`'s `scrollHeight` measured
+ * TALLER than its own `offsetHeight` even at the panel's own natural/floor
+ * size -- the list was already clipped-and-scrolling before the node was
+ * ever dragged. Pure; exported for tests -- assert
+ * `panelHeightFor(n, m) - 2*m === panelContentHeight(n)` so this
+ * arithmetic can never regress. */
+export function panelHeightFor(rowCount, margin) {
+  const m = typeof margin === 'number' && Number.isFinite(margin) ? margin : DOM_WIDGET_MARGIN_FALLBACK
+  return panelContentHeight(rowCount) + 2 * m
+}
+
+/** state-bound convenience: `panelHeightFor` over the panel's CURRENT row
+ * count and the real DOM widget's own margin (falling back before the
+ * widget exists yet -- e.g. the very first `getMinHeight` probe, which can
+ * run from inside `addDOMWidget` itself, strictly before this file gets a
+ * chance to stash the returned widget on `state.domWidget`). */
+function currentPanelHeight(state) {
+  const rows = state.rows ? state.rows.length : MIN_SLOTS
+  return panelHeightFor(rows, resolveDomWidgetMargin(state.domWidget))
 }
 
 /**
@@ -1350,7 +1485,7 @@ function renderRows(state) {
     row.el.className = enabled ? 'epsnc-row' : 'epsnc-row epsnc-row-disabled'
   }
 
-  resyncSize(state.node)
+  growNodeToFitRows(state)
 }
 
 function buildUi(state) {
@@ -1366,18 +1501,30 @@ function buildUi(state) {
 }
 
 /**
- * Wraps `node.addDOMWidget`. Both `getMinHeight`/`getMaxHeight` return the
- * SAME value (resolution.js's "exact height" shape for its size grid) --
- * this panel is precisely as tall as its current row count, no free
- * resizing to get stuck in.
+ * Wraps `node.addDOMWidget`. Fill-style (`getMinHeight` only, no
+ * `getMaxHeight`) -- `lora_library/notebook.js`'s/`picker.js`'s identical
+ * shape, both cited in their own file headers against
+ * `LGraphNode._arrangeWidgets`'s `distributeSpace()`: an unset max means
+ * "take all remaining space", i.e. "the widget fills available height"
+ * (FORMAT.md's own §7.2 line for the Notebook: "The node is resizable; the
+ * widget fills available height.").
+ *
+ * Owner bug report 2026-09-01, fixed here: this used to return the SAME
+ * value from both callbacks (resolution.js's "exact height" shape, right
+ * for a size GRID that must never be free-resizable, wrong for a plain
+ * scrollable row list) -- pinning the widget's own box to an exact height
+ * no matter how tall the node was dragged, so the extra height became dead
+ * grey space below a panel that could never grow into it. `getMinHeight`
+ * alone remains the FLOOR -- `growNodeToFitRows` is what keeps the node
+ * from ever being SMALLER than it (never below the panel's own natural
+ * size for its current row count).
  */
 function attachDomWidget(state) {
   installMinWidth(state.node, MIN_NODE_WIDTH)
   const domWidget = state.node.addDOMWidget(PANEL_WIDGET_NAME, PANEL_WIDGET_TYPE, state.root, {
     hideOnZoom: true,
     serialize: false, // excludes from the API prompt (utils/executionUtil.ts)
-    getMinHeight: () => panelHeightFor(state),
-    getMaxHeight: () => panelHeightFor(state)
+    getMinHeight: () => currentPanelHeight(state)
   })
   // Excludes from the workflow JSON -- a DIFFERENT flag from options.serialize
   // above (notebook.js's attachDomWidget() header explains why both exist).
@@ -1385,6 +1532,11 @@ function attachDomWidget(state) {
   // in the `values` widget, which serializes itself normally.
   domWidget.serialize = false
   domWidget.serializeValue = () => undefined
+  // Stashed so `currentPanelHeight`/`resolveDomWidgetMargin` can read the
+  // widget's REAL margin once it exists (the very first `getMinHeight`
+  // probe above, which can fire from inside this same `addDOMWidget` call,
+  // falls back to `DOM_WIDGET_MARGIN_FALLBACK` gracefully either way).
+  state.domWidget = domWidget
   return domWidget
 }
 
@@ -1468,9 +1620,12 @@ function autoReenableNewlyWiredRows(state) {
  * -- a type can change on a MIDDLE slot without moving the total count) and
  * always repaints the DOM, but only calls the count-changing
  * `applyVisibleRowCount` when the derived count actually differs from what
- * is already on screen -- an unconditional pass would otherwise re-run
- * `resyncSize` (and so fight a manual node resize) on every single connect
- * and disconnect, distributor.js's identical `wireOutputGrowth` lesson.
+ * is already on screen -- an unconditional pass would otherwise add/remove
+ * `node.outputs` entries needlessly on every single connect and disconnect,
+ * distributor.js's identical `wireOutputGrowth` lesson. `renderRows`'s own
+ * `growNodeToFitRows` call, always reached at the tail of this pass
+ * regardless, is separately change-gated on the row count actually moving
+ * (its own docstring), so it never fights a manual node resize either.
  * Deliberately does NOT call `applyEnabledStateToWiring` (unlike the
  * general `syncNode`) -- this pass IS the live connection event; running
  * the external-write reconciler here too would risk exactly the ambiguity
@@ -1593,7 +1748,11 @@ export function attach(node) {
 
     hideValuesWidget(node, widget)
 
-    const state = { node, widget, rows: [], root: null, listEl: null }
+    // `lastRowCount: null` -- `growNodeToFitRows`'s own docstring: `null`
+    // means "no baseline yet", so its very first call trusts whatever size
+    // the node already has (only enforcing the floor) instead of computing
+    // a delta against a row count that never actually preceded it.
+    const state = { node, widget, rows: [], root: null, listEl: null, domWidget: null, lastRowCount: null }
     buildUi(state)
     wireRowSync(state)
     wireTypeVeto(node)
@@ -1601,7 +1760,16 @@ export function attach(node) {
     // Universal State Controller Apply fix (module docstring): publish this
     // node's reload seam and make sure the one shared subscription to the
     // announce event is installed.
-    node.__epsNcReload = () => syncNode(state)
+    node.__epsNcReload = () => {
+      // An Apply replaces `values` WHOLESALE from outside this file's own
+      // increment-by-one row logic -- forget the growth baseline first so
+      // `growNodeToFitRows`'s delta is computed against the node's CURRENT
+      // size, not a stale pre-Apply row count (picker.js's identical
+      // `reloadFromWidget` fix, owner report 2026-08-14: compounding growth
+      // on every reload -- `growNodeToFitRows`'s own docstring).
+      state.lastRowCount = null
+      syncNode(state)
+    }
     installExternalWriteSubscription()
 
     // The re-render law's other race leg (module docstring): `onConfigure`
@@ -1613,6 +1781,11 @@ export function attach(node) {
     node.onConfigure = function (info) {
       const result = originalOnConfigure?.apply(this, arguments)
       try {
+        // Same reset, same reason as `__epsNcReload` above: `configure()`
+        // just replaced `widget.value` (and `node.size`) WHOLESALE, so the
+        // pre-restore row count in `state.lastRowCount` must not be diffed
+        // against the freshly-restored one.
+        state.lastRowCount = null
         syncNode(state)
       } catch (error) {
         console.warn(PREFIX, 'post-configure sync failed', error)

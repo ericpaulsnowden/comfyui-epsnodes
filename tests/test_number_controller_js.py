@@ -36,6 +36,25 @@ fake and walked directly. See `test_rebuild_then_repaint_preserves_a_mid_edit_fi
 Skips cleanly when Node isn't installed; the LIVE mechanics (an actual
 connection reaching `onConnectOutput`, a real tab switch, the property
 panel) are verified on the rig, not here.
+
+**Fill-style panel sizing (owner bug report 2026-09-01, "dragging the node
+taller ... just adds unusable grey space").** `panelContentHeight`/
+`panelHeightFor`/`resolveDomWidgetMargin` are pure exported functions
+(same convention as the values-map/row-count helpers above) covering the
+documented computedHeight-minus-2*margin gotcha directly. The actual
+node-growth mechanism (`growNodeToFitRows`, change-gated `Math.max`
+against both the node's current height and its floor -- never an
+absolute overwrite, so a manual drag survives a row add/remove) is
+exercised live, end to end, through the same fake litegraph node as the
+re-render-law tests above -- `makeFakeNode`'s `computeSize()` was
+widened for this: it now reads the DOM panel's OWN `getMinHeight()` once
+attached (this node's actual visual footprint, "No canvas drawing, by
+construction" -- module docstring) rather than raw `outputs.length`
+(distributor.js's identical-shaped fake genuinely has no DOM widget and so
+depends on socket count alone -- not representative here, and it would
+otherwise read a wildly inflated floor from the backend's full 16 raw
+`RETURN_NAMES` sockets during the split second before `attach()`'s own
+first prune settles them down to the true visible count).
 """
 
 from __future__ import annotations
@@ -262,6 +281,41 @@ OUTPUT_LINK_CASES = [
     ("floating set is not a Set", "{ links: [], _floatingLinks: {} }", False),
 ]
 
+#: (rowCount, expected panelContentHeight()) -- HINT_HEIGHT(20) +
+#: rows*ROW_HEIGHT(26) + PANEL_PADDING(10). Non-positive/non-finite floors
+#: at MIN_SLOTS(1), matching every other row-count formula in this file
+#: never producing zero rows.
+PANEL_CONTENT_HEIGHT_CASES = [
+    (1, 56),
+    (2, 82),
+    (3, 108),
+    (16, 446),
+    (0, 56),
+    (None, 56),
+    (-5, 56),
+]
+
+#: (rowCount, margin) pairs fed to panelHeightFor() -- deliberately several
+#: DIFFERENT margins, not just the DOM_WIDGET_MARGIN_FALLBACK default, so
+#: the off-by-2*margin gotcha (sets.js's PIN_ROW_HEIGHT precedent) could
+#: not regress by accident matching only the fallback case.
+PANEL_HEIGHT_FOR_MARGIN_CASES = [
+    (1, 10),
+    (1, 0),
+    (3, 6),
+    (16, 12),
+]
+
+#: (domWidget-like object, expected resolveDomWidgetMargin()).
+#: DOM_WIDGET_MARGIN_FALLBACK is 10 (resolution.js's/sets.js's own copy of
+#: `BaseDOMWidgetImpl.DEFAULT_MARGIN`).
+RESOLVE_DOM_WIDGET_MARGIN_CASES = [
+    ({"margin": 6}, 6),
+    ({"margin": 0}, 0),
+    ({}, 10),
+    (None, 10),
+]
+
 PROBE_JS = """
 import * as nc from './extensions/comfyui-epsnodes/eps_image/number_controller.js'
 
@@ -319,6 +373,10 @@ out.pure.resolveAdopted = %(resolve_adopted_inputs)s.map((v) => nc.resolveAdopte
 out.pure.jsonTypeFor = %(json_type_inputs)s.map((v) => nc.jsonTypeFor(v))
 out.pure.typeBadgeFor = %(type_badge_inputs)s.map((v) => nc.typeBadgeFor(v))
 out.pure.linkChecks = [%(link_cases)s].map((output) => nc.isOutputConnected(output))
+
+out.pure.panelContentHeight = %(panel_content_inputs)s.map((n) => nc.panelContentHeight(n))
+out.pure.panelHeightFor = %(panel_height_inputs)s.map(([n, m]) => nc.panelHeightFor(n, m))
+out.pure.resolveDomWidgetMargin = %(margin_widget_inputs)s.map((w) => nc.resolveDomWidgetMargin(w))
 
 // ---------------------------------------------------------------------------
 // Part 2: a from-scratch DOM/litegraph-node stub, just enough for the REAL
@@ -466,7 +524,24 @@ function makeFakeNode(valuesJson, id) {
     widgets: [widget],
     graph: null,
     size: [300, 100],
-    computeSize() { return [300, 40 + this.outputs.length * 26] },
+    // Driven by the DOM PANEL's own reported getMinHeight() once attached,
+    // not by raw `outputs.length` (file header: this node's actual visual
+    // footprint is the DOM panel, "No canvas drawing, by construction" --
+    // unlike distributor.js's identical-shaped fake, which has no DOM
+    // widget and genuinely depends on socket count alone). This also
+    // sidesteps a transient-state trap: `node.outputs` briefly holds the
+    // backend's full 16 raw sockets before `applyVisibleRowCount`'s very
+    // first prune, and a socket-count-driven computeSize() would read a
+    // wildly inflated floor during that split second, before
+    // growNodeToFitRows's own once-only gating could ever correct it back
+    // down (Math.max never shrinks).
+    computeSize() {
+      const domWidget = this.widgets.find(
+        (w) => w.options && typeof w.options.getMinHeight === 'function'
+      )
+      const widgetHeight = domWidget ? domWidget.options.getMinHeight() : 0
+      return [300, 40 + widgetHeight]
+    },
     setSize(s) { this.size = s },
     setDirtyCanvas() {},
     addOutput(name, type) { this.outputs.push({ name, type, links: null }) },
@@ -804,6 +879,101 @@ const dom = out.dom
   }
 }
 
+// ---------------------------------------------------------------------------
+// Fill-style panel sizing (owner bug report 2026-09-01, file header) --
+// Tests J-M.
+// ---------------------------------------------------------------------------
+
+// --- Test J: the DOM widget options object litegraph actually receives is
+// fill-style -- getMinHeight only, no getMaxHeight at all (an unset max is
+// litegraph's own "take all remaining space" rule -- notebook.js's/
+// picker.js's identical citation; the real arrangement itself is a rig-only
+// concern, file header) -- and getMinHeight's reported number tracks the
+// CURRENT row count, margin-compensated exactly like the pure function
+// above. ---
+{
+  const node = makeFakeNode('{}')
+  nc.attach(node)
+  const panelWidget = node.widgets[1]
+  const minHeightAt1Row = panelWidget.options.getMinHeight()
+  rowsOf(node)[0].valueInput.value = '5'
+  rowsOf(node)[0].valueInput.dispatch('input') // 1 -> 2 rows
+  rowsOf(node)[1].valueInput.value = '6'
+  rowsOf(node)[1].valueInput.dispatch('input') // 2 -> 3 rows
+  dom.fillStyleSizing = {
+    hasGetMaxHeight: typeof panelWidget.options.getMaxHeight,
+    hasGetMinHeight: typeof panelWidget.options.getMinHeight,
+    minHeightAt1Row,
+    minHeightAt3Rows: panelWidget.options.getMinHeight(),
+    expectedAt1Row: nc.panelContentHeight(1) + 20,
+    expectedAt3Rows: nc.panelContentHeight(3) + 20,
+    rowCountAfter: rowsOf(node).length
+  }
+}
+
+// --- Test K: the FLOOR holds -- growNodeToFitRows must never leave the
+// node SMALLER than its current natural minimum, even when a rebuild
+// restores an undersized `size` (module docstring's "A minimum height so
+// the panel can never collapse to unusable" requirement -- e.g. a
+// workflow saved back when this node still reported an exact, too-small
+// height). ---
+{
+  const node = makeFakeNode('{}')
+  nc.attach(node)
+  const saved = JSON.stringify({
+    num_1: { name: 'a', value: 1, type: '*' },
+    num_2: { name: 'b', value: 2, type: '*' }
+  })
+  node.widgets[0].value = saved
+  node.size = [300, 10] // absurdly small -- below any real floor
+  node.onConfigure({})
+  dom.floorHolds = {
+    rowCountAfter: rowsOf(node).length, // 2 saved + 1 spare
+    sizeAfter: node.size[1],
+    floorAfter: node.computeSize()[1]
+  }
+}
+
+// --- Test L: a MANUAL height survives a rebuild (owner bug report
+// 2026-09-01, THE bug this whole fix exists for) -- dragging the node
+// taller, then a tab switch / undo / redo / reload (attach() then
+// onConfigure(), litegraph's real ordering) must not snap the node back
+// down to its bare natural height. ---
+{
+  const node = makeFakeNode('{}')
+  nc.attach(node)
+  node.setSize([300, 900]) // the user's own drag, well past the natural floor
+  const saved = JSON.stringify({
+    num_1: { name: 'a', value: 1, type: '*' },
+    num_2: { name: 'b', value: 2, type: '*' }
+  })
+  node.widgets[0].value = saved
+  node.onConfigure({})
+  dom.manualHeightSurvivesRebuild = {
+    rowCountAfter: rowsOf(node).length,
+    sizeAfter: node.size[1]
+  }
+}
+
+// --- Test M: a manual height ALSO survives an ORGANIC row addition
+// (typing past the last spare row) that doesn't itself need more room than
+// the drag already provided -- growNodeToFitRows's Math.max, never an
+// absolute overwrite (distributor.js's width-growth reasoning, mirrored
+// for height here). The node grows by exactly one row's worth ON TOP OF
+// the manual size, never resets to the bare floor. ---
+{
+  const node = makeFakeNode('{}')
+  nc.attach(node)
+  node.setSize([300, 900])
+  const row1 = rowsOf(node)[0]
+  row1.valueInput.value = '5'
+  row1.valueInput.dispatch('input') // organic growth: 1 -> 2 rows
+  dom.manualHeightSurvivesRowAdd = {
+    rowCountAfter: rowsOf(node).length,
+    sizeAfter: node.size[1]
+  }
+}
+
 process.stdout.write(JSON.stringify(out))
 """
 
@@ -855,6 +1025,9 @@ def number_controller_api(tmp_path_factory: pytest.TempPathFactory) -> dict:
             "json_type_inputs": json.dumps([v for v, _ in JSON_TYPE_FOR_CASES]),
             "type_badge_inputs": json.dumps([v for v, _ in TYPE_BADGE_FOR_CASES]),
             "link_cases": ", ".join(js for _, js, _ in OUTPUT_LINK_CASES),
+            "panel_content_inputs": json.dumps([n for n, _ in PANEL_CONTENT_HEIGHT_CASES]),
+            "panel_height_inputs": json.dumps([[n, m] for n, m in PANEL_HEIGHT_FOR_MARGIN_CASES]),
+            "margin_widget_inputs": json.dumps([w for w, _ in RESOLVE_DOM_WIDGET_MARGIN_CASES]),
         },
         encoding="utf-8",
     )
@@ -1265,6 +1438,116 @@ def test_universal_state_apply_detaches_a_stale_link(number_controller_api: dict
     )
 
 
+# ------------------------------------------------- fill-style panel sizing
+# (owner bug report 2026-09-01: "Increasing the height of the Number
+# Controller node doesn't increase the height of the scrollable area, it
+# just adds unusable grey space to the bottom of the node".) Pure-function
+# margin arithmetic first, then the live growNodeToFitRows mechanism through
+# the same fake litegraph node as the checkbox/re-render-law tests above.
+
+
+def test_panel_content_height(number_controller_api: dict) -> None:
+    pure = number_controller_api["pure"]
+    assert pure["panelContentHeight"] == [expected for _, expected in PANEL_CONTENT_HEIGHT_CASES]
+
+
+def test_resolve_dom_widget_margin(number_controller_api: dict) -> None:
+    pure = number_controller_api["pure"]
+    assert pure["resolveDomWidgetMargin"] == [
+        expected for _, expected in RESOLVE_DOM_WIDGET_MARGIN_CASES
+    ]
+
+
+def _expected_panel_content_height(row_count: int) -> int:
+    """Python mirror of `panelContentHeight`'s own formula -- HINT_HEIGHT(20)
+    + rows*ROW_HEIGHT(26) + PANEL_PADDING(10) -- the same hand-computed
+    convention PANEL_CONTENT_HEIGHT_CASES already uses above, kept as a
+    function here so the margin-arithmetic test below reads as one
+    equation rather than a table lookup."""
+    rows = row_count if isinstance(row_count, int) and row_count > 0 else 1  # MIN_SLOTS
+    return 20 + rows * 26 + 10
+
+
+def test_panel_height_for_accounts_for_the_margin_gotcha(number_controller_api: dict) -> None:
+    """The documented gotcha: a DOM widget's visible box is `computedHeight
+    - 2*margin` (sets.js's `PIN_ROW_HEIGHT`/`state.outerHeight`,
+    resolution.js's grid, cross_sweep.js's readout all pre-compensate the
+    same way). `panelHeightFor`'s reported number must equal the panel's
+    intended CONTENT box plus exactly `2*margin` -- checked for several
+    DIFFERENT margins, not just the DOM_WIDGET_MARGIN_FALLBACK default, so
+    a future frontend exposing a different `widget.margin` can't silently
+    regress this arithmetic without a test noticing."""
+    reported = number_controller_api["pure"]["panelHeightFor"]
+    assert len(reported) == len(PANEL_HEIGHT_FOR_MARGIN_CASES)
+    for (rows, margin), height in zip(PANEL_HEIGHT_FOR_MARGIN_CASES, reported, strict=True):
+        assert height - 2 * margin == _expected_panel_content_height(rows), (
+            f"panelHeightFor({rows}, {margin}) should exceed panelContentHeight({rows}) "
+            f"by exactly 2*{margin}"
+        )
+
+
+def test_fill_style_sizing_has_no_get_max_height(number_controller_api: dict) -> None:
+    """Owner bug report 2026-09-01: `getMinHeight`/`getMaxHeight` used to
+    return the SAME value, pinning the panel to an exact height no matter
+    how tall the node was dragged -- litegraph's `_arrangeWidgets` then had
+    no slack to hand the widget. The fix is fill-style: `getMinHeight` only
+    (the floor), no `getMaxHeight` at all -- an unset max is litegraph's own
+    "take all remaining space" rule (notebook.js's/picker.js's identical
+    citation). The actual live arrangement is a rig-only concern (file
+    header); this pins the OPTIONS OBJECT shape this file hands litegraph,
+    which is the actual mechanism the fix depends on."""
+    fs = number_controller_api["dom"]["fillStyleSizing"]
+    assert fs["hasGetMaxHeight"] == "undefined"
+    assert fs["hasGetMinHeight"] == "function"
+
+
+def test_panel_min_height_tracks_row_count_with_margin_compensated(
+    number_controller_api: dict,
+) -> None:
+    """The panel's reported height tracks the node's row count (the floor
+    itself grows as rows are added) and stays margin-compensated live, not
+    just in the pure function above."""
+    fs = number_controller_api["dom"]["fillStyleSizing"]
+    assert fs["rowCountAfter"] == 3
+    assert fs["minHeightAt1Row"] == fs["expectedAt1Row"]
+    assert fs["minHeightAt3Rows"] == fs["expectedAt3Rows"]
+    assert fs["minHeightAt3Rows"] > fs["minHeightAt1Row"]
+
+
+def test_floor_holds_across_an_undersized_restore(number_controller_api: dict) -> None:
+    """"A minimum height so the panel can never collapse to unusable" --
+    growNodeToFitRows must never leave the node SMALLER than its own
+    current natural minimum, even when a rebuild restores an undersized
+    `size` (e.g. a workflow saved back when this node still reported an
+    exact, too-small height)."""
+    floor = number_controller_api["dom"]["floorHolds"]
+    assert floor["rowCountAfter"] == 3  # 2 saved rows + one spare
+    assert floor["sizeAfter"] == floor["floorAfter"], (
+        "the node must never be left smaller than its own natural floor"
+    )
+
+
+def test_manual_height_survives_a_rebuild(number_controller_api: dict) -> None:
+    """THE bug this whole fix exists for (owner report 2026-09-01): a
+    manually-dragged-taller node must not snap back to its natural height
+    on a tab switch / undo / redo / reload (attach() then onConfigure(),
+    litegraph's real ordering)."""
+    rebuild = number_controller_api["dom"]["manualHeightSurvivesRebuild"]
+    assert rebuild["rowCountAfter"] == 3
+    assert rebuild["sizeAfter"] == 900
+
+
+def test_manual_height_survives_an_organic_row_addition(number_controller_api: dict) -> None:
+    """A NEW row must still grow the node (module docstring's "no `Outputs`
+    property" section: the node grows as it fills), but only by that row's
+    own height, ON TOP of whatever the user last dragged -- never a reset
+    to the bare floor (distributor.js's width-`Math.max` reasoning, mirrored
+    for height here)."""
+    grown = number_controller_api["dom"]["manualHeightSurvivesRowAdd"]
+    assert grown["rowCountAfter"] == 2
+    assert grown["sizeAfter"] == 900 + 26  # ROW_HEIGHT
+
+
 # ------------------------------------------------------- source structure
 # The pieces below only run inside attach() against a real litegraph node's
 # live connection/configure hooks -- pinned via SOURCE-TEXT assertions,
@@ -1582,6 +1865,42 @@ def test_min_width_uses_set_size_not_a_dead_array_guard(source: str) -> None:
 
 def test_min_width_guard_flag_is_namespaced(source: str) -> None:
     assert "__epsNumberControllerMinWidthInstalled" in source
+
+
+def test_attach_dom_widget_reports_no_get_max_height(source: str) -> None:
+    """Owner bug report 2026-09-01 (file header): the fix is fill-style --
+    `getMinHeight` only, no `getMaxHeight` -- so litegraph's own
+    `_arrangeWidgets` has the slack to hand a dragged-taller node's extra
+    room to the widget."""
+    body = _function_body(source, "attachDomWidget(state)")
+    assert "getMinHeight: () => currentPanelHeight(state)" in body
+    assert "getMaxHeight" not in body
+
+
+def test_grow_node_to_fit_rows_never_writes_an_absolute_height(source: str) -> None:
+    """A user's manual height must not be stomped by a later row change
+    unless the natural minimum genuinely exceeds it (task/owner
+    requirement) -- `Math.max` against the node's CURRENT height, mirroring
+    distributor.js's own width-growth reasoning; never an unconditional
+    `node.setSize([..., floor])` overwrite."""
+    body = _function_body(source, "growNodeToFitRows(state)")
+    assert "Math.max(node.size[1] + delta, floor)" in body
+    assert "node.setSize([node.size[0], floor])" not in body
+
+
+def test_growth_baseline_resets_on_wholesale_replacement(source: str) -> None:
+    """picker.js's own 2026-08-14 compounding-growth bug, guarded against
+    here the same way: `state.lastRowCount` must be reset to `null`
+    immediately before BOTH kinds of wholesale `values`-widget replacement
+    (a `configure()` restore and a Universal State Controller Apply) --
+    otherwise growNodeToFitRows would diff two row counts that were never
+    actually adjacent in time and pile a bogus delta on top of the size
+    that replacement had just legitimately set."""
+    reload_body = _function_body(source, "attach(node)")
+    assert "state.lastRowCount = null" in reload_body
+    assert reload_body.count("state.lastRowCount = null") >= 2, (
+        "expected a reset in both node.__epsNcReload and the onConfigure wrap"
+    )
 
 
 def test_attach_never_throws(source: str) -> None:

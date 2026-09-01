@@ -264,9 +264,16 @@ happen there — and the Builder assembles prompts *out of* it:
   Notebook on the canvas — the Builder mirrors the selected one's Markdown
   file; with a single notebook on the canvas it picks it automatically. The
   list is read-only here on purpose: one place to edit, no drift.
+- **Grouped like your notebook.** Prompts sit under the same group headings,
+  in the same order, with a count on each. Click a heading to collapse it —
+  remembered per node. Searching still works across groups, and a group with
+  no matches disappears heading and all rather than leaving an empty title.
 - **Right pane: building blocks.** Double-click a prompt on the left and it's
   appended as a block. Drag blocks to reorder; the ✕ removes a block from
   this list only — the notebook entry is untouched.
+- **Each prompt only once.** A prompt already in the block list shows dimmed
+  with an *added* tag and won't respond to a second double-click. Remove it
+  from the right first if you want it somewhere else in the order.
 - **Blocks are live references, not copies.** A block stores the entry's
   *name*; its text is read from the file at run time, so polishing a prompt
   in the Notebook flows straight into every Builder that uses it. A block
@@ -724,6 +731,11 @@ save and recall the whole set at once — which is the point of it.
   them — and applying that state really does unplug and re-plug the wires, not
   just repaint the ticks.
 
+- **Drag it taller to see more rows.** The list of rows fills whatever height you
+  give the node, so a tall node shows more numbers at once and a short one
+  scrolls. Your chosen height sticks — adding a row or switching workflows
+  won't snap it back.
+
 - **Nothing resets when you switch workflows.** Names, numbers, which rows are
   off, and where the off rows were plugged in all survive tabbing away and back
   — and a field you are actively typing in is never overwritten underneath you.
@@ -748,6 +760,13 @@ rewiring, no dragging bypass boxes around groups.
   the list grows. Existing image workflows load and run unchanged. Try
   `examples/eps-test-distributor-text.json` (one prompt, three Preview-as-Text
   branches, nothing to download).
+
+- **Sockets come back when you unplug them.** Wiring the last output reveals a
+  spare, and unwiring hides it again — the node grows and shrinks with your
+  wiring instead of only ever getting bigger. If you'd rather fix a number of
+  sockets, set `Outputs` in the node's properties and it's treated as a
+  minimum you always get, whatever you unplug. A socket that's still wired is
+  never taken away.
 
 - **A toggle on every output,** plus a tri-state **Toggle All** header (all
   on / all off / a dash for mixed, with a live `enabled/total` count — the

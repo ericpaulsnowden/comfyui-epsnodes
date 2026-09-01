@@ -2,7 +2,8 @@
 
 ``web/eps_image/distributor.js`` factors its toggle-box geometry and its
 toggles/property contract into PURE exported functions (`toggleBoxRect`,
-`clampOutputsCount`, `clampVisibleCount`, `parseToggles`, `isSlotEnabled`,
+`clampOutputsCount`, `clampVisibleCount`, `growVisibleCount`,
+`healMigratedOutputsProperty`, `parseToggles`, `isSlotEnabled`,
 `outputName`/`parseOutputSlot`) precisely so this file can drive them under
 Node without a litegraph node stub -- the exact convention
 ``tests/test_resolution_grid_js.py`` established (that file's own docstring:
@@ -121,6 +122,71 @@ GROW_VISIBLE_CASES = [
     (99, 16, 16),
 ]
 
+#: (stored `Outputs` property, highestWiredIndex) -> the DERIVED visible
+#: count `applyVisibleOutputCount` actually shows, i.e.
+#: growVisibleCount(clampVisibleCount(stored, wired), wired) -- the exact
+#: two-function composition that function uses. This is the pure-math core
+#: of the 2026-09-01 fix (owner report: "if you remove items from the
+#: output, the slots don't go away"): `stored` is NEVER mutated by growth
+#: (only by the wired-floor refusal, a different and much rarer case -- see
+#: test_apply_visible_output_count_only_persists_the_refusal_half), so
+#: re-deriving from the SAME unmodified `stored` after a wired slot is
+#: unwired collapses the visible count back down on its own.
+DERIVED_VISIBLE_CASES = [
+    # fresh node, nothing wired: exactly the default
+    (3, 0, 3),
+    # wiring the LAST visible output reveals a spare (mechanism 3)
+    (3, 3, 4),
+    # an explicitly-raised property is a FLOOR that unwiring never drops
+    # below, even once nothing is wired at all
+    (10, 0, 10),
+    (10, 9, 10),
+    # counterfactual regression marker, not a real scenario: this is what
+    # "stuck" looks like. If the pre-fix bug's write-back had survived,
+    # wiring out_3 (stored=3, wired=3 above) would have persisted stored=4,
+    # and deriving from THAT stored=4 with nothing wired would incorrectly
+    # still read 4 here -- instead of collapsing to 3 the way the first case
+    # above does from the untouched stored=3. Proves the fix is about WHAT
+    # gets fed into `stored`, not about growVisibleCount's own math (which
+    # is unchanged and still, correctly, never shrinks its OWN `current`
+    # argument -- see GROW_VISIBLE_CASES above).
+    (4, 0, 4),
+]
+
+#: (stored, highestWiredIndex, expected healed value). Migration heal
+#: (2026-09-01): a workflow SAVED with the pre-fix auto-grow bug's baked-in
+#: `Outputs` value must float again after reload, not restore pinned at its
+#: old stuck number forever -- see healMigratedOutputsProperty's own
+#: docstring in distributor.js for the exact "auto-grown vs. deliberately
+#: set" heuristic and why it's safe in the one case it can't disambiguate.
+HEAL_MIGRATED_OUTPUTS_CASES = [
+    # auto-grown: out_3 wired, stored sits exactly at wired+1 -> heals back
+    # to the default so it can float again
+    (4, 3, 3),
+    # the genuinely ambiguous case the docstring calls out: a user who
+    # really DID type exactly highestWiredIndex + 1 themselves (wired out_9,
+    # typed 10) still heals -- but the VISIBLE result is unaffected either
+    # way (growVisibleCount(3, 9) == growVisibleCount(10, 9) == 10, per
+    # DERIVED_VISIBLE_CASES' own (10, 9, 10) case above), so only the
+    # invisible stored number differs.
+    (10, 9, 3),
+    # deliberately set: stored exceeds anything auto-grow could have
+    # produced from this wiring (wired=2 -> auto-grow tops out at 3) -> kept
+    (10, 2, 10),
+    # exactly the default, or below the wired floor: never counts as
+    # "grown" in the first place (growth only ever produces MORE than the
+    # default)
+    (3, 0, 3),
+    (3, 5, 3),
+    # nothing wired at all: a known, documented gap -- with no wiring
+    # evidence left, ANY stored value could equally be a deliberate
+    # pre-declaration, including the exact stuck-at-4 shape from the bug
+    # report's own repro. Conservatively left alone rather than guessed at.
+    (4, 0, 4),
+    # non-finite: never touched
+    ("abc", 3, "abc"),
+]
+
 #: (rawValue, expected parsed map). parseToggles must never throw.
 PARSE_TOGGLES_CASES = [
     ("{}", {}),
@@ -164,9 +230,11 @@ IS_ENABLED_CASES = [
 ]
 
 #: `applyVisibleOutputCount`'s declaration, as the source-structure tests
-#: below have to match it verbatim. `grow` is opt-in per call path (see
-#: test_growth_is_opt_in_per_call_path).
-APPLY_SIGNATURE = "applyVisibleOutputCount(node, { grow = false } = {})"
+#: below have to match it verbatim. No `grow` option since 2026-09-01: growth
+#: no longer persists into the property, so it applies unconditionally on
+#: every call path instead of being opted into per call site (see
+#: test_growth_is_unconditional_across_call_paths).
+APPLY_SIGNATURE = "applyVisibleOutputCount(node)"
 
 #: (type, expected isAllowedType()). v0.75.0/mechanism 4: litegraph's own
 #: generic forms always pass regardless of ALLOWED_TYPES; membership is
@@ -244,6 +312,12 @@ const out = {
   clampOutputs: %(clamp_outputs_inputs)s.map((v) => d.clampOutputsCount(v)),
   clampVisible: %(clamp_visible_inputs)s.map(([req, wired]) => d.clampVisibleCount(req, wired)),
   growVisible: %(grow_visible_inputs)s.map(([now, wired]) => d.growVisibleCount(now, wired)),
+  derivedVisible: %(derived_visible_inputs)s.map(
+    ([stored, wired]) => d.growVisibleCount(d.clampVisibleCount(stored, wired), wired)
+  ),
+  healMigratedOutputs: %(heal_inputs)s.map(
+    ([stored, wired]) => d.healMigratedOutputsProperty(stored, wired)
+  ),
   parseToggles: %(parse_toggles_inputs)s.map((v) => d.parseToggles(v)),
   isEnabled: %(is_enabled_inputs)s.map(([map, name]) => d.isSlotEnabled(map, name)),
   isAllowed: %(is_allowed_inputs)s.map((v) => d.isAllowedType(v)),
@@ -289,6 +363,8 @@ def distributor_api(tmp_path_factory: pytest.TempPathFactory) -> dict:
 
     clamp_visible_inputs = [[req, wired] for req, wired, _ in CLAMP_VISIBLE_CASES]
     grow_visible_inputs = [[now, wired] for now, wired, _ in GROW_VISIBLE_CASES]
+    derived_visible_inputs = [[stored, wired] for stored, wired, _ in DERIVED_VISIBLE_CASES]
+    heal_inputs = [[stored, wired] for stored, wired, _ in HEAL_MIGRATED_OUTPUTS_CASES]
     probe = layout / "probe.mjs"
     probe.write_text(
         PROBE_JS
@@ -298,6 +374,8 @@ def distributor_api(tmp_path_factory: pytest.TempPathFactory) -> dict:
             "clamp_outputs_inputs": json.dumps([v for v, _ in CLAMP_OUTPUTS_CASES]),
             "clamp_visible_inputs": json.dumps(clamp_visible_inputs),
             "grow_visible_inputs": json.dumps(grow_visible_inputs),
+            "derived_visible_inputs": json.dumps(derived_visible_inputs),
+            "heal_inputs": json.dumps(heal_inputs),
             "parse_toggles_inputs": json.dumps([v for v, _ in PARSE_TOGGLES_CASES]),
             "is_enabled_inputs": json.dumps([[m, n] for m, n, _ in IS_ENABLED_CASES]),
             "is_allowed_inputs": json.dumps([v for v, _ in IS_ALLOWED_TYPE_CASES]),
@@ -471,6 +549,39 @@ def test_grow_visible_count_stays_within_bounds(distributor_api: dict) -> None:
         assert 1 <= got <= 16
 
 
+def test_derived_visible_count_never_accumulates_growth(distributor_api: dict) -> None:
+    """The pure-math core of the 2026-09-01 fix (owner report: unwiring never
+    shrank the node back down), exercised with no litegraph node needed:
+    `growVisibleCount(clampVisibleCount(stored, wired), wired)` is exactly
+    what `applyVisibleOutputCount` computes as `desired`, and DERIVED_VISIBLE_CASES
+    pins that composed formula directly, including the counterfactual case
+    that shows what the pre-fix bug's stuck behavior looked like."""
+    pairs = zip(DERIVED_VISIBLE_CASES, distributor_api["derivedVisible"], strict=True)
+    for (stored, wired, expected), got in pairs:
+        msg = (
+            f"growVisibleCount(clampVisibleCount({stored!r}, {wired!r}), {wired!r}) "
+            f"-> {got!r}, wanted {expected!r}"
+        )
+        assert got == expected, msg
+
+
+def test_heal_migrated_outputs_property_distinguishes_auto_grown_from_deliberate(
+    distributor_api: dict,
+) -> None:
+    """`healMigratedOutputsProperty` must reset a stored `Outputs` value back
+    to the default ONLY when it is consistent with having been produced by
+    the pre-fix auto-grow bug (`DEFAULT < stored <= highestWiredIndex + 1`),
+    and leave anything a user could only have typed deliberately untouched --
+    including the documented gap where nothing is wired at restore time."""
+    pairs = zip(HEAL_MIGRATED_OUTPUTS_CASES, distributor_api["healMigratedOutputs"], strict=True)
+    for (stored, wired, expected), got in pairs:
+        msg = (
+            f"healMigratedOutputsProperty({stored!r}, {wired!r}) -> {got!r}, "
+            f"wanted {expected!r}"
+        )
+        assert got == expected, msg
+
+
 def test_growth_is_wired_through_both_hooks(distributor_source: str) -> None:
     """`wireOutputGrowth` must be installed from attach() and must chain BOTH
     litegraph hooks the mechanism needs: `configure` (for the `restoring`
@@ -536,27 +647,51 @@ def test_growth_never_masks_the_wired_refusal(distributor_source: str) -> None:
     assert "clampOutputsCount(stored)" in body, "the range clamp must also read the request"
 
 
-def test_growth_is_opt_in_per_call_path(distributor_source: str) -> None:
-    """Auto-growth applies ONLY to the live connection path. A number typed
-    into the `Outputs` panel is an explicit instruction (and growing past it is
-    what masked the refusal above), and a loaded workflow's saved output set is
-    authoritative -- growing it on load would mutate a graph the user only
-    opened. So the parameter defaults to off and exactly one caller sets it."""
+def test_growth_is_unconditional_across_call_paths(distributor_source: str) -> None:
+    """2026-09-01: auto-growth used to be opt-in to ONLY the live connection
+    path (a `grow` flag, set by exactly one caller), specifically because
+    growth used to PERSIST into the property -- growing a loaded workflow's
+    saved count, or a property the user just typed, would have been a real,
+    visible mutation the owner never asked for. Now that growth never
+    touches the property (see test_apply_visible_output_count_only_persists_the_refusal_half),
+    that concern is gone, so `applyVisibleOutputCount` takes no options at
+    all and `growVisibleCount` runs unconditionally on every call path --
+    onPropertyChanged, onConfigure, attach(), and the live wiring path all
+    derive the same way."""
+    assert "function " + APPLY_SIGNATURE + " {" in distributor_source, (
+        "applyVisibleOutputCount must no longer take a `grow` option"
+    )
+    assert "{ grow" not in distributor_source, "no opt-in flag should remain anywhere in the file"
     body = _function_body(distributor_source, APPLY_SIGNATURE)
-    assert "grow ? growVisibleCount(" in body, "growth must be gated on the flag"
-    opted_in = re.findall(r"applyVisibleOutputCount\([^)]*\{\s*grow:\s*true", distributor_source)
-    assert len(opted_in) == 1, f"exactly one caller may opt in, found {len(opted_in)}"
+    assert "const desired = growVisibleCount(refused, wiredMax)" in body, (
+        "growth must run unconditionally, not behind a flag"
+    )
     growth_body = _function_body(distributor_source, "wireOutputGrowth(node)")
-    assert "applyVisibleOutputCount(target, { grow: true })" in growth_body
+    assert "applyVisibleOutputCount(target)" in growth_body, (
+        "the live wiring path's call must no longer pass an options object"
+    )
 
 
-def test_apply_visible_output_count_persists_the_result(distributor_source: str) -> None:
-    """The write-back must be gated on the STORED property value. Comparing the
-    derived numbers to each other instead silently no-ops in the ordinary
-    growth case -- they are equal whenever the clamps don't bite -- leaving the
-    right-click panel showing a count one short of the sockets on screen."""
+def test_apply_visible_output_count_only_persists_the_refusal_half(
+    distributor_source: str,
+) -> None:
+    """2026-09-01 fix (owner report: unwiring never shrank the node back
+    down). Two different numbers are computed -- `refused` (the property
+    clamped up to the wired floor) and `desired` (`refused` plus the
+    auto-grow spare-socket floor) -- and only `refused` may ever be written
+    back. Before this fix, `desired` (the GROWN number) was written into
+    the property, which made a grown count permanent and indistinguishable
+    from one the user typed; unwiring dropped the wired floor but the
+    property still remembered the old grown number, so the node never
+    shrank back. This is the exact regression pin: the property write-back
+    must read `refused`, and `desired` must never appear on the left of a
+    `node.properties[PROP_OUTPUTS] =` assignment anywhere in this
+    function."""
     body = _function_body(distributor_source, APPLY_SIGNATURE)
-    assert "if (stored !== desired) node.properties[PROP_OUTPUTS] = desired" in body
+    assert "if (refused !== stored) node.properties[PROP_OUTPUTS] = refused" in body
+    assert "node.properties[PROP_OUTPUTS] = desired" not in body, (
+        "the grown value must never be written back into the property"
+    )
 
 
 def test_resync_size_only_runs_on_a_genuine_count_change(distributor_source: str) -> None:
@@ -589,13 +724,15 @@ def test_deferred_growth_skips_no_op_passes(distributor_source: str) -> None:
     `applyVisibleOutputCount` re-derives the node height (`resyncSize`), so an
     unconditional pass would snap back a manual resize each time the user
     wires anything. The deferred run must therefore bail unless growth
-    genuinely changes the count."""
+    genuinely changes the count. 2026-09-01: compared against the CURRENT
+    output count (`outputEntries(target).length`), not the stored property
+    -- growth no longer touches the property, so comparing against `stored`
+    would false-negative (never bail) once anything has ever grown."""
     body = _function_body(distributor_source, "wireOutputGrowth(node)")
-    guard = next(
-        (line for line in body.split("\n") if "growVisibleCount(" in line and "return" in line),
-        None,
+    assert "const desired = growVisibleCount(clampVisibleCount(stored, wiredMax), wiredMax)" in body
+    assert "if (desired === outputEntries(target).length) return" in body, (
+        "deferred run must short-circuit against the CURRENT count, not the stored property"
     )
-    assert guard, "deferred run must short-circuit when growth is a no-op"
 
 
 def test_is_output_connected_counts_floating_links_too(distributor_api: dict) -> None:
@@ -711,6 +848,24 @@ def test_sync_slot_types_is_called_from_every_settle_point(distributor_source: s
     assert "syncSlotTypes(node)" in attach_body  # attach()'s own final call
 
 
+def test_on_configure_heals_the_property_before_deriving(distributor_source: str) -> None:
+    """The migration heal (2026-09-01, healMigratedOutputsProperty) must run
+    inside the onConfigure wrap BEFORE applyVisibleOutputCount derives the
+    visible count from `Outputs` -- otherwise a workflow saved with the
+    pre-fix bug's baked-in grown value would never get the chance to heal
+    before that stale number is used."""
+    attach_body = _function_body(distributor_source, "attach(node)")
+    assert "healMigratedOutputsProperty(" in attach_body
+    heal_at = attach_body.index("healMigratedOutputsProperty(")
+    # The onConfigure wrap's OWN `applyVisibleOutputCount(this)` call is not
+    # the first one in attach_body -- the onPropertyChanged wrap (installed
+    # earlier in attach()) also calls `applyVisibleOutputCount(this)` for an
+    # `Outputs` edit, unrelated to restore. Search forward from the heal
+    # call itself so this targets the onConfigure wrap's call specifically.
+    configure_apply_at = attach_body.index("applyVisibleOutputCount(this)", heal_at)
+    assert heal_at < configure_apply_at, "heal must run before deriving the visible count"
+
+
 def test_sync_slot_types_never_touches_output_name(distributor_source: str) -> None:
     """Positional/toggles contract (FORMAT.md section 6.4): syncSlotTypes may
     set .type/.label on a slot, never .name -- a rename lives in .label, and
@@ -725,12 +880,17 @@ def test_deferred_pass_still_has_the_growth_short_circuit(distributor_source: st
     """The pre-existing no-op guard (test_deferred_growth_skips_no_op_passes
     above) must survive the v0.75.0 restructure that made syncSlotTypes run
     unconditionally ahead of it -- growth itself must still be skippable
-    independently of the (now unconditional) type sync."""
+    independently of the (now unconditional) type sync. Pinned line updated
+    2026-09-01: the short-circuit now compares the derived count against the
+    CURRENT output count rather than the stored property (see
+    test_deferred_growth_skips_no_op_passes for why)."""
     body = _function_body(distributor_source, "wireOutputGrowth(node)")
     assert (
-        "if (growVisibleCount(clampVisibleCount(stored, wiredMax), wiredMax) === stored) return"
-        in body
-    ), "the existing growth short-circuit must be untouched"
+        "const desired = growVisibleCount(clampVisibleCount(stored, wiredMax), wiredMax)" in body
+    ), "the existing growth derivation must be untouched"
+    assert "if (desired === outputEntries(target).length) return" in body, (
+        "the existing growth short-circuit must be untouched"
+    )
     assert "syncSlotTypes(target)" in body
 
 
