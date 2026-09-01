@@ -259,8 +259,17 @@ def _capture_notebook(
             node_id,
         )
         return None
+    # v0.86.0: forward the audition `drafts` buffer (§6.1). A pin's whole
+    # promise is "exactly what this run used" -- without this it would bake
+    # the STALE on-disk text whenever the user queued an unsaved edit,
+    # which is precisely the case the drafts feature exists to support.
+    # Tolerant: a wired/absent/non-string value degrades to "no drafts",
+    # matching resolve_selection's own posture.
+    drafts = inputs.get("drafts", "{}")
+    if not isinstance(drafts, str):
+        drafts = "{}"
     try:
-        texts, names = nodes_notebook.resolve_selection(context, file, entry)
+        texts, names = nodes_notebook.resolve_selection(context, file, entry, drafts)
     except Exception as exc:  # ValueError / MarkdownStoreError / OSError -- never fail the queue
         logger.warning(
             "EPS Save Image: could not resolve Prompt Notebook %s for pinning (%s); "

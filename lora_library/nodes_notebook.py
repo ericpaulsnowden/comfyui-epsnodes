@@ -17,6 +17,23 @@ dropped image recreate byte-for-byte after the notebook was edited; the
 frontend shows the pinned (old) text on the node with a one-click unpin.
 A malformed pin, or one with no entries, logs a warning and falls back to
 live rather than failing the queue.
+
+**Unsaved-edit drafts (v0.86.0, owner ask 2026-08-28: "if you change a
+prompt that is selected and run it without saving, it should run the
+changed prompt").** A second TAIL-appended, hidden ``drafts`` STRING
+widget (default ``"{}"``), a JSON object mapping selected entry name ->
+unsaved text. ``resolve_selection`` -- the shared LIVE path ``read_entry``
+and §6.14's pin capture both call -- applies a draft ON TOP OF the file's
+text for any selected name ``drafts`` names, text only, never position
+(FILE order, v0.85.0, is unaffected). A draft naming an unselected or
+nonexistent entry is silently ignored (never an error -- like ``pinned``,
+this is a scratch buffer the panel maintains, not a contract the queue can
+enforce), and a malformed ``drafts`` value degrades to "no drafts" with a
+logged warning, same philosophy as :func:`parse_pinned`. Pinned mode wins
+outright: while ``pinned`` holds a valid pin, drafts are never consulted
+(the pin already IS the frozen text a run used). ``IS_CHANGED`` folds the
+effective (draft-overridden) text into its content digest, so a changed
+draft alone re-executes the node.
 """
 
 from __future__ import annotations
@@ -100,7 +117,7 @@ def _load_notebook_cached(path: Path) -> tuple[Any, float | None, str]:
 
 
 def _selection_token(
-    context: LibraryContext | None, file: str, entry: str, pinned: str
+    context: LibraryContext | None, file: str, entry: str, pinned: str, drafts: str = "{}"
 ) -> str:
     """Content-derived ``IS_CHANGED`` token (v0.80.0 sweep-performance
     round). Through v0.79.0 this was the whole file's mtime+size -- so
@@ -112,15 +129,21 @@ def _selection_token(
 
     - a valid pin -> the constant ``"pinned"``: the pin JSON itself is a
       widget already inside core's input-hash key, and while pinned the
-      FILE is irrelevant to the output -- so file edits must not re-run a
-      pinned node at all;
+      FILE is irrelevant to the output -- so file edits (and drafts) must
+      not re-run a pinned node at all;
     - live -> a sha1 over the resolved path plus each SELECTED entry's
-      name and CURRENT text (``<missing>`` for an absent name, so an entry
-      appearing or disappearing still flips the token). Unselected entries
-      can change freely without invalidating a thing.
+      name and CURRENT EFFECTIVE text (a v0.86.0 ``drafts`` override when
+      one names that entry, else the file's text; ``<missing>`` for an
+      absent name -- a draft never rescues one, matching
+      :func:`resolve_selection`), so an entry appearing/disappearing OR a
+      draft being typed/cleared all flip the token. Unselected entries can
+      change freely without invalidating a thing.
 
     Missing file / unreachable dir / no context degrade to coarse string
-    tokens that still change when that situation changes."""
+    tokens that still change when that situation changes. Belt-and-braces
+    only: ``drafts`` is itself a WIDGET, already inside core's own
+    input-hash key, so a changed draft re-executes regardless of this
+    token -- see the module docstring's "Unsaved-edit drafts" paragraph."""
     if parse_pinned(pinned) is not None:
         return "pinned"
     if context is None:
@@ -132,10 +155,14 @@ def _selection_token(
     parsed, mtime, _line_ending = _load_notebook_cached(path)
     if mtime is None:
         return f"missing:{path}"
+    draft_map = parse_drafts(drafts)
     digest = hashlib.sha1(str(path).encode("utf-8", "replace"))
     for name in _selected_names(entry):
         found = markdown_store.get_entry(parsed, name)
-        text = (found or {}).get("text", "\x00<missing>")
+        if found is None:
+            text: Any = "\x00<missing>"
+        else:
+            text = draft_map.get(name, found["text"])
         digest.update(b"\x1f")
         digest.update(name.encode("utf-8", "replace"))
         digest.update(b"\x1e")
@@ -150,6 +177,11 @@ PIN_FORMAT = 1
 #: The widget's name -- EPS Save Image bakes it into the workflow/prompt
 #: chunks by this name (FORMAT.md §6.14), the frontend reads it by this name.
 PIN_WIDGET = "pinned"
+
+#: The unsaved-edits widget's name (v0.86.0, FORMAT.md §6.1) -- TAIL-appended
+#: after ``pinned`` (§8: widgets_values restores positionally). The panel
+#: writes/clears it; nothing else ever should.
+DRAFTS_WIDGET = "drafts"
 
 
 def parse_pinned(raw: Any) -> list[dict[str, str]] | None:
@@ -210,6 +242,48 @@ def make_pin(
         "entries": [{"name": e["name"], "text": e["text"]} for e in entries],
         "source": {"file": file, "token": token, "captured": captured},
     }
+
+
+def parse_drafts(raw: Any) -> dict[str, str]:
+    """The unsaved-edit overrides a ``drafts`` widget value holds (v0.86.0,
+    owner ask 2026-08-28: "if you change a prompt that is selected and run
+    it without saving, it should run the changed prompt") -- a JSON object
+    mapping entry name -> unsaved text.
+
+    ``""`` / a non-string / unparseable JSON / anything that isn't a JSON
+    object degrades to ``{}`` (no drafts) with a logged warning -- same
+    degrade-not-raise philosophy as :func:`parse_pinned`, since this is a
+    scratch buffer the panel maintains, not a contract the queue can
+    enforce. A malformed INDIVIDUAL entry (a non-string key or a non-string
+    value) is dropped on its own with its own warning; the rest of an
+    otherwise-valid object still applies -- one bad key must not blank out
+    every other unsaved edit in a multi-select run.
+    """
+    if not isinstance(raw, str) or not raw.strip():
+        return {}
+    try:
+        data = json.loads(raw)
+    except ValueError:
+        logger.warning(
+            "EPS Prompt Notebook: drafts value is not JSON (%r); ignoring unsaved edits",
+            raw[:80],
+        )
+        return {}
+    if not isinstance(data, dict):
+        logger.warning(
+            "EPS Prompt Notebook: drafts value is not a JSON object (%r); ignoring unsaved edits",
+            type(data).__name__,
+        )
+        return {}
+    out: dict[str, str] = {}
+    for name, text in data.items():
+        if not isinstance(name, str) or not isinstance(text, str):
+            logger.warning(
+                "EPS Prompt Notebook: drafts entry %r is malformed; ignoring it", name
+            )
+            continue
+        out[name] = text
+    return out
 
 
 def _selected_names(entry: str) -> list[str]:
@@ -275,7 +349,7 @@ def _unreachable_library_dir_hint(resolved: Path) -> str:
 
 
 def resolve_selection(
-    context: LibraryContext, file: str, entry: str
+    context: LibraryContext, file: str, entry: str, drafts: str = "{}"
 ) -> tuple[list[str], list[str]]:
     """The LIVE path: resolve *file*, parse it, and return the selected
     entries' ``(texts, names)`` in selection order -- exactly what
@@ -285,7 +359,16 @@ def resolve_selection(
     Image's pin capture (§6.14), which resolves the same file/selection
     through this very function at save time and skips the node on any
     raise -- so a pin can never name an entry the run itself would not
-    have read."""
+    have read.
+
+    *drafts* (v0.86.0, :func:`parse_drafts`) overrides each resolved
+    entry's TEXT with the panel's unsaved edit, when one names that entry
+    -- position (the v0.85.0 FILE-order sort below) is never affected, and
+    a draft naming an entry that didn't resolve here (unselected, or not
+    found at all) is silently ignored. This is what makes §6.14's pin
+    capture -- which calls this exact function -- record the draft text
+    the run actually used, not the stale on-disk text, whenever the
+    caller passes the widget's current ``drafts`` value through."""
     try:
         path = context.resolve_notebook_file(file)
     except OSError:
@@ -348,11 +431,23 @@ def resolve_selection(
         for index, item in enumerate(markdown_store.list_entries(parsed))
     }
     ranked = sorted(
-        zip(result_names, texts),
+        zip(result_names, texts, strict=True),
         key=lambda pair: order.get(pair[0], len(order)),
     )
     result_names = [name for name, _text in ranked]
     texts = [text for _name, text in ranked]
+
+    # v0.86.0: apply unsaved-edit overrides LAST, after the file-order sort
+    # -- a draft changes TEXT only, never the position `entry`/the file
+    # order already settled above. Names not in `draft_map` (the common
+    # case: no draft, or a draft for some OTHER selected name) pass through
+    # via `.get(name, text)` unchanged.
+    draft_map = parse_drafts(drafts)
+    if draft_map:
+        texts = [
+            draft_map.get(name, text)
+            for name, text in zip(result_names, texts, strict=True)
+        ]
 
     return (texts, result_names)
 
@@ -424,6 +519,9 @@ class LoraLibraryNotebook:
     #: Controller may capture/apply, declared next to the parser that owns
     #: their shape. ``pinned`` is excluded -- it is baked provenance from
     #: EPS Save Image (§6.14), not something a user picks in the panel.
+    #: ``drafts`` (v0.86.0) is excluded for the same reason as `pinned`:
+    #: it's mid-edit scratch text the panel maintains, never something a
+    #: state save/apply should carry.
     EPS_STATE_WIDGETS: ClassVar[dict[str, Any]] = {
         "format": 1,
         "widgets": {
@@ -432,6 +530,7 @@ class LoraLibraryNotebook:
         },
         "excluded": {
             PIN_WIDGET: "provenance from a baked image, not user intent",
+            DRAFTS_WIDGET: "unsaved mid-edit scratch text, not user-chosen state",
         },
     }
 
@@ -490,6 +589,27 @@ class LoraLibraryNotebook:
                         ),
                     },
                 ),
+                # Unsaved-edit drafts (v0.86.0, FORMAT.md §6.1/§8, owner ask
+                # 2026-08-28): TAIL-APPENDED after `pinned` -- §8 again, this
+                # is the only new-widget-safe spot. `optional` with default
+                # "{}" so every saved workflow/hand-built /prompt that
+                # predates it parses to "no drafts" (parse_drafts) and reads
+                # exactly as before. Same both-ways hide flag as `pinned`.
+                DRAFTS_WIDGET: (
+                    "STRING",
+                    {
+                        "default": "{}",
+                        "multiline": False,
+                        "hidden": True,
+                        "tooltip": (
+                            "Unsaved edits from the panel, applied on top of "
+                            "the live file for whatever is selected -- lets "
+                            "you audition a changed prompt without saving it "
+                            "first. Maintained automatically by the panel; "
+                            "you don't need to touch this directly."
+                        ),
+                    },
+                ),
             },
         }
 
@@ -505,22 +625,25 @@ class LoraLibraryNotebook:
         return True
 
     @classmethod
-    def IS_CHANGED(cls, file: str, entry: str, pinned: str = "") -> str:
+    def IS_CHANGED(cls, file: str, entry: str, pinned: str = "", drafts: str = "{}") -> str:
         # v0.80.0: content-derived, not whole-file mtime -- see
-        # _selection_token. The pin/entry/file WIDGET values are already in
-        # core's input-hash key, so a selection or pin change re-executes
-        # regardless of this token; this only has to track what the file's
-        # CONTENT contributes to the output.
-        return _selection_token(_context, file, entry, pinned)
+        # _selection_token. The pin/entry/file/drafts WIDGET values are
+        # already in core's input-hash key, so a selection, pin, or draft
+        # change re-executes regardless of this token; this only has to
+        # track what the file's (or a draft's) CONTENT contributes to the
+        # output.
+        return _selection_token(_context, file, entry, pinned, drafts)
 
     def read_entry(
-        self, file: str, entry: str, pinned: str = ""
+        self, file: str, entry: str, pinned: str = "", drafts: str = "{}"
     ) -> tuple[list[str], list[str]]:
         # Provenance M3 (FORMAT.md §6.1): a pin wins outright -- the pinned
         # entries' text/name lists come back IN PIN ORDER and the file is
         # never opened (it may have been edited, renamed or deleted since
         # the image was saved; that is the whole point). A malformed pin
-        # already warned inside parse_pinned and reads live below.
+        # already warned inside parse_pinned and reads live below. Drafts
+        # are never consulted here either -- a pin already IS the frozen
+        # text a run used (v0.86.0).
         pinned_entries = parse_pinned(pinned)
         if pinned_entries is not None:
             return (
@@ -531,4 +654,4 @@ class LoraLibraryNotebook:
         context = _context
         if context is None:
             raise RuntimeError("EPSNodes: EPS Prompt Notebook has no context configured")
-        return resolve_selection(context, file, entry)
+        return resolve_selection(context, file, entry, drafts)

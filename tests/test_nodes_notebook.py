@@ -443,7 +443,10 @@ class TestPinnedM3:
     def test_widget_is_tail_appended_optional_hidden_string(self) -> None:
         spec = nodes_notebook.LoraLibraryNotebook.INPUT_TYPES()
         assert list(spec["required"]) == ["file", "entry"]
-        assert list(spec["optional"]) == ["pinned"]  # the tail -- FORMAT.md §8
+        # `drafts` (v0.86.0) is appended AFTER `pinned` -- FORMAT.md §8's
+        # tail-only law: the final declaration order is
+        # required=[file, entry], optional=[pinned, drafts].
+        assert list(spec["optional"]) == ["pinned", "drafts"]  # the tail -- FORMAT.md §8
         kind, options = spec["optional"]["pinned"]
         assert kind == "STRING"
         assert options["default"] == ""
@@ -608,3 +611,238 @@ class TestPinnedM3:
             nodes_notebook.resolve_selection(context, "loras.md", "")
         with pytest.raises(ValueError, match=r"other\.md"):
             nodes_notebook.resolve_selection(context, "other.md", "A")
+
+
+# ---------------------------------------------------- M4 unsaved-edit `drafts`
+#
+# v0.86.0 (owner ask 2026-08-28: "if you change a prompt that is selected and
+# run it without saving, it should run the changed prompt"). A TAIL-appended
+# (after `pinned`), hidden `drafts` STRING widget, default "{}" -- a JSON
+# object mapping selected entry name -> unsaved text. `resolve_selection`
+# applies a draft ON TOP OF the file's text for a selected name it names;
+# text only, never position. Ignored while pinned. Malformed -> warning +
+# no drafts, never a raise.
+
+
+class TestDraftsM4:
+    def test_widget_is_tail_appended_after_pinned_optional_hidden_string(self) -> None:
+        spec = nodes_notebook.LoraLibraryNotebook.INPUT_TYPES()
+        assert list(spec["required"]) == ["file", "entry"]
+        assert list(spec["optional"]) == ["pinned", "drafts"]  # the tail -- FORMAT.md §8
+        kind, options = spec["optional"]["drafts"]
+        assert kind == "STRING"
+        assert options["default"] == "{}"
+        assert options["multiline"] is False
+        assert options["hidden"] is True  # Vue-nodes hide flag (§7.5)
+        assert nodes_notebook.DRAFTS_WIDGET == "drafts"
+
+    def test_drafts_is_excluded_from_the_state_registry(self) -> None:
+        # Like `pinned`, a draft is scratch text the panel maintains, not
+        # something a Universal State Controller save/apply should carry.
+        excluded = nodes_notebook.LoraLibraryNotebook.EPS_STATE_WIDGETS["excluded"]
+        assert nodes_notebook.DRAFTS_WIDGET in excluded
+
+    # ------------------------------------------------------------- parse_drafts
+
+    def test_parse_drafts_shapes(self) -> None:
+        assert nodes_notebook.parse_drafts("") == {}
+        assert nodes_notebook.parse_drafts("   ") == {}
+        assert nodes_notebook.parse_drafts(None) == {}
+        assert nodes_notebook.parse_drafts("{}") == {}
+        assert nodes_notebook.parse_drafts(json.dumps({"A": "unsaved text"})) == {
+            "A": "unsaved text"
+        }
+        assert nodes_notebook.parse_drafts(json.dumps({"A": "a", "B": "b"})) == {
+            "A": "a",
+            "B": "b",
+        }
+
+    @pytest.mark.parametrize(
+        "bad",
+        ["not json", "[]", "42", '"just a string"'],
+    )
+    def test_parse_drafts_malformed_shape_warns_and_degrades_to_none(
+        self, caplog: pytest.LogCaptureFixture, bad: str
+    ) -> None:
+        with caplog.at_level(logging.WARNING, logger="lora_library"):
+            assert nodes_notebook.parse_drafts(bad) == {}
+        assert any("ignoring unsaved edits" in r.message for r in caplog.records)
+
+    def test_parse_drafts_drops_one_malformed_entry_and_keeps_the_rest(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        # A scratch buffer, not a contract: one bad key/value must not blank
+        # out every other unsaved edit in a multi-select run.
+        raw = json.dumps({"A": "good", "B": 7, "C": "also good"})
+        with caplog.at_level(logging.WARNING, logger="lora_library"):
+            assert nodes_notebook.parse_drafts(raw) == {"A": "good", "C": "also good"}
+        assert any("malformed" in r.message for r in caplog.records)
+
+    # ------------------------------------------------------- resolve_selection
+
+    def test_resolve_selection_applies_a_draft_to_a_selected_entry(
+        self, library_dir: Path, context: LibraryContext
+    ) -> None:
+        _write_notebook(library_dir, "loras.md", "## A\non disk\n")
+        drafts = json.dumps({"A": "auditioned, unsaved text"})
+        assert nodes_notebook.resolve_selection(context, "loras.md", "A", drafts) == (
+            ["auditioned, unsaved text"],
+            ["A"],
+        )
+
+    def test_resolve_selection_ignores_a_draft_for_an_unselected_entry(
+        self, library_dir: Path, context: LibraryContext
+    ) -> None:
+        _write_notebook(library_dir, "loras.md", "## A\nbodyA\n## B\nbodyB\n")
+        # Only "A" is selected -- a draft naming "B" (selected nowhere) must
+        # not surface in the output at all, and must not error.
+        drafts = json.dumps({"B": "should never appear"})
+        assert nodes_notebook.resolve_selection(context, "loras.md", "A", drafts) == (
+            ["bodyA"],
+            ["A"],
+        )
+
+    def test_resolve_selection_ignores_a_draft_for_a_nonexistent_entry(
+        self, library_dir: Path, context: LibraryContext
+    ) -> None:
+        _write_notebook(library_dir, "loras.md", "## A\nbodyA\n")
+        # "Ghost" is neither in the file nor selected -- a scratch buffer,
+        # not a contract: this must never raise.
+        drafts = json.dumps({"Ghost": "text for an entry that doesn't exist"})
+        assert nodes_notebook.resolve_selection(context, "loras.md", "A", drafts) == (
+            ["bodyA"],
+            ["A"],
+        )
+
+    def test_resolve_selection_preserves_file_order_with_drafts_applied(
+        self, library_dir: Path, context: LibraryContext
+    ) -> None:
+        # v0.85.0 file-order sort is untouched by drafts -- a draft changes
+        # TEXT only. Selection is click-ordered ("B\nA"); output must still
+        # come back in FILE order (A, B), each with its own draft applied.
+        _write_notebook(library_dir, "loras.md", "## A\nbodyA\n## B\nbodyB\n")
+        drafts = json.dumps({"A": "draft A", "B": "draft B"})
+        assert nodes_notebook.resolve_selection(context, "loras.md", "B\nA", drafts) == (
+            ["draft A", "draft B"],
+            ["A", "B"],
+        )
+
+    def test_resolve_selection_malformed_drafts_degrades_to_the_file_text(
+        self, library_dir: Path, context: LibraryContext, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        _write_notebook(library_dir, "loras.md", "## A\non disk\n")
+        with caplog.at_level(logging.WARNING, logger="lora_library"):
+            result = nodes_notebook.resolve_selection(context, "loras.md", "A", "not json")
+        assert result == (["on disk"], ["A"])
+        assert any("ignoring unsaved edits" in r.message for r in caplog.records)
+
+    def test_resolve_selection_default_drafts_is_backward_compatible(
+        self, library_dir: Path, context: LibraryContext
+    ) -> None:
+        # eps_image/nodes_save_image.py's pin-capture path calls this with
+        # exactly 3 positional args (context, file, entry) -- the drafts
+        # parameter must default to "no drafts" so that call keeps reading
+        # the plain file text, unchanged from before v0.86.0.
+        _write_notebook(library_dir, "loras.md", "## A\non disk\n")
+        assert nodes_notebook.resolve_selection(context, "loras.md", "A") == (
+            ["on disk"],
+            ["A"],
+        )
+
+    # -------------------------------------------------------------- read_entry
+
+    def test_read_entry_runs_the_draft_text_not_the_file_text(
+        self, library_dir: Path
+    ) -> None:
+        # The owner's ask, verbatim: "run it without saving ... run the
+        # changed prompt."
+        _write_notebook(library_dir, "loras.md", "## A\nsaved text\n")
+        node = nodes_notebook.LoraLibraryNotebook()
+        drafts = json.dumps({"A": "changed, unsaved text"})
+        assert node.read_entry(file="loras.md", entry="A", drafts=drafts) == (
+            ["changed, unsaved text"],
+            ["A"],
+        )
+
+    def test_read_entry_pinned_wins_and_ignores_drafts_entirely(
+        self, library_dir: Path
+    ) -> None:
+        _write_notebook(library_dir, "loras.md", "## A\non disk\n")
+        node = nodes_notebook.LoraLibraryNotebook()
+        pin = _pin([{"name": "A", "text": "pinned text"}])
+        drafts = json.dumps({"A": "a draft that must be ignored"})
+        assert node.read_entry(file="loras.md", entry="A", pinned=pin, drafts=drafts) == (
+            ["pinned text"],
+            ["A"],
+        )
+
+    # -------------------------------------------------------------- IS_CHANGED
+
+    def test_is_changed_changes_when_a_draft_changes_for_the_same_selection(
+        self, library_dir: Path
+    ) -> None:
+        # The cache-identity contract: same file, same selection, only the
+        # draft differs -- the token (and so the node's cache identity)
+        # must differ too.
+        _write_notebook(library_dir, "loras.md", "## A\non disk\n")
+        cls = nodes_notebook.LoraLibraryNotebook
+        no_draft = cls.IS_CHANGED(file="loras.md", entry="A")
+        draft_one = cls.IS_CHANGED(file="loras.md", entry="A", drafts=json.dumps({"A": "one"}))
+        draft_two = cls.IS_CHANGED(file="loras.md", entry="A", drafts=json.dumps({"A": "two"}))
+        assert len({no_draft, draft_one, draft_two}) == 3
+
+    def test_is_changed_ignores_a_draft_for_an_unselected_entry(
+        self, library_dir: Path
+    ) -> None:
+        _write_notebook(library_dir, "loras.md", "## A\nbodyA\n## B\nbodyB\n")
+        cls = nodes_notebook.LoraLibraryNotebook
+        before = cls.IS_CHANGED(file="loras.md", entry="A")
+        after = cls.IS_CHANGED(file="loras.md", entry="A", drafts=json.dumps({"B": "unrelated"}))
+        assert before == after
+
+    def test_is_changed_pinned_is_unaffected_by_drafts(self, library_dir: Path) -> None:
+        # Pinned mode wins outright: the constant "pinned" token must not
+        # move just because a (moot) draft changed.
+        _write_notebook(library_dir, "loras.md", "## A\nx\n")
+        cls = nodes_notebook.LoraLibraryNotebook
+        pin_x = _pin([{"name": "A", "text": "x"}])
+        token_one = cls.IS_CHANGED(
+            file="loras.md", entry="A", pinned=pin_x, drafts=json.dumps({"A": "one"})
+        )
+        token_two = cls.IS_CHANGED(
+            file="loras.md", entry="A", pinned=pin_x, drafts=json.dumps({"A": "two"})
+        )
+        assert token_one == token_two == "pinned"
+
+    def test_is_changed_malformed_drafts_does_not_raise(self, library_dir: Path) -> None:
+        _write_notebook(library_dir, "loras.md", "## A\nx\n")
+        token = nodes_notebook.LoraLibraryNotebook.IS_CHANGED(
+            file="loras.md", entry="A", drafts="not json"
+        )
+        assert isinstance(token, str)
+
+    # ------------------------------------------------- §6.14 pin-capture path
+    #
+    # `eps_image/nodes_save_image.py`'s `_capture_notebook` (read-only for
+    # this change) builds a pin by calling THIS `resolve_selection` with
+    # whatever `file`/`entry` the queued PROMPT carried -- see FORMAT.md
+    # §6.14 and the module docstring's "Unsaved-edit drafts" paragraph. This
+    # pins the mechanism that path depends on: once a caller also forwards
+    # the queued `drafts` value through (as this call does), the entries it
+    # gets back -- and so the pin it bakes -- already carry the draft text a
+    # run actually used, never the stale on-disk text. (`_capture_notebook`
+    # itself does not yet extract/forward `inputs["drafts"]`; see this
+    # session's report for that one-line follow-up, out of scope here since
+    # eps_image/nodes_save_image.py is read-only for this change.)
+
+    def test_resolve_selection_is_the_mechanism_pin_capture_needs_for_drafts(
+        self, library_dir: Path, context: LibraryContext
+    ) -> None:
+        _write_notebook(library_dir, "loras.md", "## A\nstale on-disk text\n")
+        drafts = json.dumps({"A": "the text this run actually used"})
+        texts, names = nodes_notebook.resolve_selection(context, "loras.md", "A", drafts)
+        # This is exactly the shape `_capture_notebook` zips into
+        # `{"name": n, "text": t}` pairs before `make_pin()` -- a pin built
+        # from this result records the DRAFT text, not the file's.
+        entries = [{"name": n, "text": t} for t, n in zip(texts, names, strict=True)]
+        assert entries == [{"name": "A", "text": "the text this run actually used"}]

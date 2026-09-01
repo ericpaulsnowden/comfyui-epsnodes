@@ -403,6 +403,37 @@
  * pure halves (`parsePinned`, `pinnedDrift`, `pinnedBadgeText`) are
  * exported for tests/test_m3_pinning_js.py.
  *
+ * Unsaved-edit drafts (v0.86.0, owner ask 2026-08-28: "if you change a
+ * prompt that is selected and run it without saving, it should run the
+ * changed prompt"). A second TAIL STRING widget `drafts` (same both-ways
+ * hide flag as `pinned`, default `"{}"`) holds a JSON object mapping
+ * selected entry name -> unsaved text; `resolve_selection` (the backend's
+ * shared live path) applies it on top of the file's text for whatever it
+ * names, so a queued run picks up an edit that was never saved. The panel
+ * keeps it in sync with whatever the textarea shows for the ACTIVE entry:
+ * `commitDraftForActiveEntry` writes (`setDraft`) when the text differs
+ * from `state.lastSavedText` (the disk baseline) or clears (`clearDraft`)
+ * when it matches -- clearing is always immediate (Save landing, a Reload/
+ * discard, or typing back to the original all run through the shared
+ * `refreshDirty`, which clears at once), writing is debounced
+ * (`scheduleDraftSync`, `DRAFT_SYNC_DEBOUNCE_MS` — never on every
+ * keystroke) with an immediate `flushDraftSync` fired from
+ * `populateEditor` right before the editor pane shows something else, so a
+ * fast "type then click a different row" never loses the edit to a timer
+ * that would otherwise fire against the NEW active entry instead. A draft
+ * for an entry that falls out of the selection is pruned at the same
+ * `setSelection` choke point every selection change already goes through
+ * (`pruneDraftsToSelection`) -- `drafts` only ever carries what a run
+ * would actually use. Nothing here ever shows draft text differently from
+ * live text in the editor pane itself; visibility is the muted selection
+ * hint instead (`updateSelectionHint`: "N unsaved edit(s) — runs as
+ * edited", never shown while pinned, since a pin ignores drafts outright).
+ * `wireConfigureReload`'s reconcile (`syncDraftsFromWidget`, mirroring
+ * `syncPinnedFromWidget`) picks up a `drafts` value restored by
+ * `configure()` (a workflow saved mid-audition) so the hint is right
+ * without a click. Pure halves (`parseDraftsWidgetValue`) are exported;
+ * pins in tests/test_notebook_restore_js.py.
+ *
  * Session cache + `known_mtime` (library-on-a-NAS round, owner 2026-08-22:
  * "Sometimes the Notebook looks broken but it just takes over a minute to
  * load, even when just tabbing between open workflows"). A tab switch
@@ -452,6 +483,21 @@ const PINNED_WIDGET_NAME = 'pinned'
 /** Height of the §7.2 pin badge row (`.llnb-pinbar`), added to
  * getMinHeight while pinned so the panel makes room and nothing crops. */
 const PIN_BAR_HEIGHT = 26
+
+/** FORMAT.md §6.1 (unsaved-edit drafts, v0.86.0, owner ask 2026-08-28: "if
+ * you change a prompt that is selected and run it without saving, it
+ * should run the changed prompt"). The backend's TAIL STRING widget
+ * (default `"{}"`) holding a JSON object of entry name -> unsaved text.
+ * Looked up by NAME, same as `pinned` -- a backend that predates it simply
+ * leaves every draft path below a no-op. */
+const DRAFTS_WIDGET_NAME = 'drafts'
+/** Debounce for writing the active entry's edit into the `drafts` widget
+ * (owner ask, same file: "do NOT write on every keystroke") -- coalesces a
+ * typing burst into one widget write / canvas repaint, same idiom as
+ * FILE_CHANGE_DEBOUNCE_MS/SEARCH_DEBOUNCE_MS above. Going CLEAN (text back
+ * to what's on disk) is never debounced -- see refreshDirty() -- only
+ * writing a new/changed draft is. */
+const DRAFT_SYNC_DEBOUNCE_MS = 400
 
 /** FORMAT.md §7.2: "resizable via getMinHeight (~180)". */
 const MIN_WIDGET_HEIGHT = 180
@@ -1200,10 +1246,13 @@ export function attachNotebookWidget(node) {
     // null on a backend that predates it, in which case every pin path
     // below is a no-op and the panel is exactly the pre-M3 panel.
     const pinnedWidget = findWidget(node, PINNED_WIDGET_NAME) || null
+    // Unsaved-edit drafts (v0.86.0) -- null on a backend that predates it,
+    // same no-op-below convention as `pinnedWidget`.
+    const draftsWidget = findWidget(node, DRAFTS_WIDGET_NAME) || null
 
     attachedNodes.add(node)
 
-    const state = createState(node, fileWidget, entryWidget, pinnedWidget)
+    const state = createState(node, fileWidget, entryWidget, pinnedWidget, draftsWidget)
     buildUi(state)
     // Collapsed sections persist with the workflow (file header "Single-tap
     // collapse" -> "Collapsed sections persist WITH THE WORKFLOW"): must run
@@ -1214,6 +1263,7 @@ export function attachNotebookWidget(node) {
     registerCollapsedSectionsProperty(state)
     hideFileWidget(state)
     hidePinnedWidget(state)
+    hideDraftsWidget(state)
     wireFileWidget(state)
     wirePinnedWidget(state)
     wireConfigureReload(state)
@@ -1254,7 +1304,7 @@ export function attachNotebookWidget(node) {
 // State
 // ---------------------------------------------------------------------------
 
-function createState(node, fileWidget, entryWidget, pinnedWidget = null) {
+function createState(node, fileWidget, entryWidget, pinnedWidget = null, draftsWidget = null) {
   return {
     node,
     fileWidget,
@@ -1272,6 +1322,21 @@ function createState(node, fileWidget, entryWidget, pinnedWidget = null) {
     pinnedActive: null,
     pinBarEl: null,
     pinGrown: false,
+    // Unsaved-edit drafts (v0.86.0, owner ask 2026-08-28): the backend's
+    // tail `drafts` STRING widget (null on an older backend) and the
+    // panel's in-memory mirror of it -- {name: unsaved text}, one entry per
+    // NAME with a dirty edit (in practice at most the ACTIVE entry, since
+    // only one entry is ever open in the textarea at a time; the shape is
+    // a map so a multi-select audition can carry more than one). The
+    // PANEL is the only writer (setDraft/clearDraft/pruneDraftsToSelection
+    // -> syncDraftsWidget); configure() is reconciled the other way via
+    // syncDraftsFromWidget() (wireConfigureReload), same "assigns
+    // widget.value directly, no callback" reason `pinned` needs it. See
+    // the file header's "Unsaved-edit drafts" paragraph. `draftSyncTimer`
+    // is the pending debounced write (scheduleDraftSync/flushDraftSync).
+    draftsWidget,
+    drafts: {},
+    draftSyncTimer: null,
     file: null,
     // §7.2 "never reset unless the user resets" (owner report 2026-08-03):
     // non-null after a FAILED notebook load -- {file, message}. While set,
@@ -1532,7 +1597,14 @@ function buildUi(state) {
       performSave(state).catch((error) => api.warn('save failed', error))
     }
   })
-  state.textarea.addEventListener('input', () => refreshDirty(state))
+  state.textarea.addEventListener('input', () => {
+    refreshDirty(state)
+    // Unsaved-edit drafts (v0.86.0): only the textarea's OWN `input` event
+    // arms the debounced write -- refreshDirty() itself only ever CLEARS
+    // (see its doc comment), so a keystroke never triggers a widget write
+    // on its own; this debounce is what coalesces a typing burst into one.
+    scheduleDraftSync(state)
+  })
   state.textarea.addEventListener('keydown', (event) => event.stopPropagation())
   state.saveBtn.addEventListener('click', () => {
     performSave(state).catch((error) => api.warn('save failed', error))
@@ -1776,6 +1848,10 @@ function wireConfigureReload(state) {
       // reload above (or the live entries already loaded) feeds the drift
       // comparison as soon as it lands.
       syncPinnedFromWidget(state)
+      // Unsaved-edit drafts (v0.86.0): same "configure() bypasses
+      // callbacks" reason, so a workflow saved mid-audition restores its
+      // hint without a click.
+      syncDraftsFromWidget(state)
     } catch (error) {
       api.warn('post-configure notebook reload failed', error)
     }
@@ -1828,6 +1904,7 @@ function teardown(state) {
   if (state.fileChangeDebounceTimer) clearTimeout(state.fileChangeDebounceTimer)
   if (state.attachLoadTimer) clearTimeout(state.attachLoadTimer) // v0.68.1
   if (state.searchTimer) clearTimeout(state.searchTimer) // v0.68.1
+  if (state.draftSyncTimer) clearTimeout(state.draftSyncTimer) // v0.86.0
   // File panel rework (FORMAT.md §7.2 amendment) — see updateFilePanelPath().
   state.filePanelResizeObserver?.disconnect()
   // A node removal mid-drag (e.g. undo, right-click delete) would otherwise
@@ -3206,12 +3283,28 @@ export function orderNamesByList(names, entries) {
 
 /** Dumb setter: replace the selection + active entry, sync the `entry`
  * widget, and re-render. Does not touch the editor pane — callers that
- * change the ACTIVE entry are responsible for loading (or clearing) it. */
+ * change the ACTIVE entry are responsible for loading (or clearing) it.
+ *
+ * Unsaved-edit drafts (v0.86.0): flushes any pending debounced draft-sync
+ * for the OUTGOING active entry BEFORE reassigning `state.activeName` --
+ * commitDraftForActiveEntry() reads `state.activeName`/the textarea, so it
+ * MUST run while both still describe the entry being left, not the one
+ * about to become active (a flush from inside populateEditor(), which
+ * runs later, would already be too late here since this function is what
+ * moves `state.activeName` in the first place). Guarded on an actual
+ * identity change -- ctrl-click toggling a DIFFERENT, non-active row
+ * leaves `active` unchanged and must never touch the entry that's
+ * currently open (same rule chooseSelection()'s own early-return
+ * documents). Prunes any draft that falls out of the NEW selection right
+ * after -- the one choke point every selection change already goes
+ * through. */
 function setSelection(state, names, active) {
+  if (active !== state.activeName) flushDraftSync(state)
   // v0.85.0: store in LIST order, never click order (orderNamesByList).
   state.selection = orderNamesByList(names, state.entries)
   state.activeName = active
   syncEntryWidget(state)
+  pruneDraftsToSelection(state)
   renderList(state)
   updateDeleteButtonEnabled(state)
   updateSelectionHint(state)
@@ -3247,8 +3340,19 @@ function fetchCategory(state, name) {
  * (`lastSaved*`, `baseMtime`) always update — they describe the DISK — and
  * `refreshDirty` (not a blanket `setDirty(false)`) then re-derives dirty, so
  * preserved mid-edit typing correctly re-enables Save against the fresh
- * baseline. */
+ * baseline.
+ *
+ * Unsaved-edit drafts (v0.86.0): flushes any pending debounced draft-sync
+ * FIRST, before anything below reassigns `lastSavedText`/the textarea --
+ * this is the category-mode transition's flush point (entering/leaving
+ * category mode never touches `state.activeName`, so setSelection()'s own
+ * flush never fires for it; reading `state.activeName` here is still
+ * correct since it hasn't moved). Redundant-but-harmless for an ordinary
+ * entry-to-entry switch, where setSelection() already flushed against the
+ * OUTGOING name before this function was ever called for the incoming
+ * one -- flushDraftSync() no-ops with nothing pending. */
 function populateEditor(state, text, mtime, name) {
+  flushDraftSync(state)
   const nameMidEdit =
     document.activeElement === state.nameFieldEl &&
     currentNameFieldValue(state) !== state.lastSavedName
@@ -3437,7 +3541,15 @@ function handleEntryClick(state, name, modifiers) {
 /** Muted status-area hint (owner ask): visible only for 2+ selected, since
  * that's when OUTPUT_IS_LIST fan-out (§6.1) actually changes queue behavior.
  * Lives in its own element (not statusTextEl) so Saving…/Deleted…/conflict
- * messages never clobber it and vice versa. */
+ * messages never clobber it and vice versa.
+ *
+ * Unsaved-edit drafts (v0.86.0, owner ask 2026-08-28): also where auditioning
+ * an unsaved edit is surfaced ("must not be invisible") -- a factual count,
+ * appended after the fan-out hint rather than replacing it, since both can
+ * be true at once (a multi-select run with one of its prompts edited but
+ * unsaved). Never shown while pinned: a pin ignores drafts outright (M3
+ * wins), so a leftover draft from before the pin arrived would be actively
+ * misleading there. */
 function updateSelectionHint(state) {
   if (!state.statusHintEl) return
   // M3: while pinned the node outputs the PINNED entries, so the fan-out
@@ -3448,9 +3560,21 @@ function updateSelectionHint(state) {
       pinnedCount >= 2 ? `${pinnedCount} pinned prompts — queue runs once per prompt.` : ''
     return
   }
+  const parts = []
   const count = state.selection.length
-  state.statusHintEl.textContent =
-    count >= 2 ? `${count} prompts selected — queue runs once per prompt.` : ''
+  if (count >= 2) parts.push(`${count} prompts selected — queue runs once per prompt.`)
+  // Intersected with the CURRENT selection defensively (pruneDraftsToSelection
+  // already keeps `state.drafts` a subset of it), so a stale entry can never
+  // inflate this count even for one repaint.
+  const draftCount = Object.keys(state.drafts).filter((n) => state.selection.includes(n)).length
+  if (draftCount >= 1) {
+    parts.push(
+      draftCount === 1
+        ? '1 unsaved edit — runs as edited.'
+        : `${draftCount} unsaved edits — run as edited.`
+    )
+  }
+  state.statusHintEl.textContent = parts.join(' ')
 }
 
 // ---------------------------------------------------------------------------
@@ -5749,6 +5873,12 @@ async function performSave(state, { force = false } = {}) {
     if (renameTo) forgetEntryText(state, name)
     noteEntryText(state, renameTo || name, typeof data.text === 'string' ? data.text : text)
     syncNotebookCache(state, data)
+    // Unsaved-edit drafts (v0.86.0): the save landed under `name` (whatever
+    // was active when Save was clicked) -- clear its draft unconditionally,
+    // ahead of the "selection moved on" branch below, since that branch
+    // returns early and never reaches refreshDirty()'s own clear (which
+    // covers the ordinary, still-active-entry continuation for free).
+    clearDraft(state, name)
     if (state.activeName !== name) {
       // Selection moved on while the request was in flight. The EDITOR
       // bookkeeping below (field values, lastSaved* baselines) belongs to the
@@ -5948,11 +6078,29 @@ function currentNameFieldValue(state) {
 /** Recomputes `state.dirty` from BOTH the textarea (body/description) and
  * the name field — Save now commits whichever of the two changed, in one
  * request (performSave()/performSaveCategory()), so either one alone must
- * enable it. Called from both fields' `input` listeners (buildUi()). */
+ * enable it. Called from both fields' `input` listeners (buildUi()).
+ *
+ * Unsaved-edit drafts (v0.86.0): also the ONE place that clears a draft the
+ * instant the textarea matches disk again -- a successful Save (the
+ * baseline becomes what was stored, so this fires right after), a Reload/
+ * discard (populateEditor() repaints the disk text, same reasoning), or
+ * simply typing back to the original all funnel through here. This never
+ * WRITES a new/changed draft -- that stays the debounced path
+ * (scheduleDraftSync(), armed only by the textarea's own `input` listener)
+ * so a keystroke alone never triggers a widget write. Category mode has no
+ * `drafts` concept (a description isn't a run's prompt text), and pinned
+ * mode never lets typing reach here in the first place (readOnly). */
 function refreshDirty(state) {
   const textChanged = state.textarea.value !== state.lastSavedText
   const nameChanged = currentNameFieldValue(state) !== state.lastSavedName
   setDirty(state, textChanged || nameChanged)
+  if (!textChanged && !isPinned(state) && state.activeCategory == null && state.activeName) {
+    if (state.draftSyncTimer) {
+      clearTimeout(state.draftSyncTimer)
+      state.draftSyncTimer = null
+    }
+    clearDraft(state, state.activeName)
+  }
 }
 
 function updateSaveButtonEnabled(state) {
@@ -5980,6 +6128,191 @@ function updateDeleteButtonEnabled(state) {
     ? `Delete the "${state.activeCategory}" heading. Its entries move into the section `
       + 'above — nothing is deleted with it. Click twice to confirm.'
     : 'Delete the selected entry from the file. Click twice to confirm.'
+}
+
+// ---------------------------------------------------------------------------
+// Unsaved-edit drafts (FORMAT.md §6.1, v0.86.0) -- see the file header's
+// "Unsaved-edit drafts" paragraph. Nothing here ever shows draft text
+// differently in the editor pane itself (it's always just whatever the
+// textarea holds) -- this section only ever WRITES/CLEARS the `drafts`
+// widget to match, and surfaces the count via updateSelectionHint().
+// ---------------------------------------------------------------------------
+
+/**
+ * Parse the `drafts` widget's raw value: a JSON object mapping entry name
+ * -> unsaved text. `""` / non-string / unparseable / non-object / an array
+ * all degrade to `{}` (= no drafts) -- same lenient-degrade shape as
+ * parsePinned, mirrored on the PYTHON side by
+ * nodes_notebook.parse_drafts (which additionally logs a warning; this
+ * side stays silent, matching parsePinned's own convention). A non-string
+ * value for a given name is dropped -- that one entry only, never thrown.
+ * @param {unknown} raw
+ * @returns {Record<string, string>}
+ */
+export function parseDraftsWidgetValue(raw) {
+  if (typeof raw !== 'string' || raw.trim() === '') return {}
+  let parsed
+  try {
+    parsed = JSON.parse(raw)
+  } catch {
+    return {}
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return {}
+  const out = {}
+  for (const [name, text] of Object.entries(parsed)) {
+    if (typeof text === 'string') out[name] = text
+  }
+  return out
+}
+
+/** Writes `state.drafts` into the `drafts` widget (JSON) through the
+ * widget's real setter + callback -- same idiom as syncEntryWidget -- and
+ * refreshes the muted hint (updateSelectionHint), since the unsaved-edit
+ * count just changed. No-op on a backend that predates the widget (null),
+ * though `state.drafts` itself is still tracked either way so the hint
+ * stays honest even without one. */
+function syncDraftsWidget(state) {
+  const widget = state.draftsWidget
+  if (!widget) {
+    updateSelectionHint(state)
+    return
+  }
+  const next = JSON.stringify(state.drafts)
+  if (widget.value === next) {
+    updateSelectionHint(state)
+    return
+  }
+  widget.value = next
+  try {
+    widget.callback?.(next)
+  } catch (error) {
+    api.warn('drafts widget callback threw', error)
+  }
+  state.node.graph?.setDirtyCanvas(true, true)
+  updateSelectionHint(state)
+}
+
+/** Records *text* as *name*'s unsaved draft. No-op (no widget write, no
+ * repaint) when the value is already exactly this -- mirrors
+ * syncEntryWidget's equal-value guard. */
+function setDraft(state, name, text) {
+  if (state.drafts[name] === text) return
+  state.drafts = { ...state.drafts, [name]: text }
+  syncDraftsWidget(state)
+}
+
+/** Removes *name*'s draft, if it has one. No-op otherwise -- callers (the
+ * debounce, flush, and prune below) call this unconditionally rather than
+ * checking first, so the no-op guard is what keeps that cheap. */
+function clearDraft(state, name) {
+  if (!(name in state.drafts)) return
+  const next = { ...state.drafts }
+  delete next[name]
+  state.drafts = next
+  syncDraftsWidget(state)
+}
+
+/**
+ * A draft for an entry that is no longer selected must not linger (design
+ * law: `drafts` only ever carries what a run would actually use) --
+ * called from setSelection(), the ONE choke point every selection change
+ * (click, ctrl/shift-click, delete/move reassignment, rename remap, the
+ * §7.2 restore/reconcile paths) already goes through. No-op when nothing
+ * needs pruning, so calling it unconditionally on every selection change
+ * costs nothing extra on the common "nothing to prune" path.
+ */
+function pruneDraftsToSelection(state) {
+  const keep = new Set(state.selection)
+  let changed = false
+  const next = {}
+  for (const [name, text] of Object.entries(state.drafts)) {
+    if (keep.has(name)) next[name] = text
+    else changed = true
+  }
+  if (changed) {
+    state.drafts = next
+    syncDraftsWidget(state)
+  }
+}
+
+/** Writes (or clears) `state.activeName`'s draft to match the textarea's
+ * CURRENT value against the CURRENT `lastSavedText` baseline. No-op in
+ * category mode (a description has no `drafts` concept), without an
+ * active entry, or while pinned (typing can't reach here then -- the
+ * textarea is `readOnly` -- but a timer armed just before a pin arrived
+ * could otherwise still fire). Called from the debounce timer
+ * (scheduleDraftSync) and from flushDraftSync (the immediate, no-wait
+ * variant used right before the editor pane shows something else). */
+function commitDraftForActiveEntry(state) {
+  if (isPinned(state) || state.activeCategory != null || !state.activeName) return
+  if (state.textarea.value !== state.lastSavedText) {
+    setDraft(state, state.activeName, state.textarea.value)
+  } else {
+    clearDraft(state, state.activeName)
+  }
+}
+
+/** Debounced write path (owner ask 2026-08-28: "if you change a prompt
+ * that is selected and run it without saving, it should run the changed
+ * prompt") -- schedules commitDraftForActiveEntry() instead of running it
+ * per keystroke, same idiom as scheduleSearchRender()/
+ * onFileWidgetChanged(). Armed ONLY by the textarea's `input` listener;
+ * flushDraftSync() below is the immediate variant used everywhere else a
+ * pending write needs to land right away. */
+function scheduleDraftSync(state) {
+  if (state.draftSyncTimer) clearTimeout(state.draftSyncTimer)
+  state.draftSyncTimer = setTimeout(() => {
+    state.draftSyncTimer = null
+    commitDraftForActiveEntry(state)
+  }, DRAFT_SYNC_DEBOUNCE_MS)
+}
+
+/**
+ * Commits any pending debounced draft-sync AT ONCE, using whatever the
+ * textarea/`state.activeName` hold RIGHT NOW -- called from
+ * populateEditor() right before it replaces the editor pane's content, so
+ * a fast "type, then click a different row/category" never loses the edit
+ * to a timer that would otherwise fire later against whatever became
+ * active BY THEN (the timer reads `state.activeName` fresh at fire time,
+ * which a switch changes out from under it). No-op absent a pending timer
+ * -- in which case there is nothing to flush; the debounce already landed,
+ * or nothing was ever dirty.
+ */
+function flushDraftSync(state) {
+  if (!state.draftSyncTimer) return
+  clearTimeout(state.draftSyncTimer)
+  state.draftSyncTimer = null
+  commitDraftForActiveEntry(state)
+}
+
+/** Both hide flags, exactly hideFileWidget()'s pair (§7.5): canvas reads
+ * `widget.hidden`, Vue nodes read `options.hidden`. No-op without the
+ * widget (a backend that predates v0.86.0). */
+function hideDraftsWidget(state) {
+  const widget = state.draftsWidget
+  if (!widget) return
+  widget.hidden = true
+  widget.options = { ...(widget.options || {}), hidden: true }
+  state.node.graph?.setDirtyCanvas(true, true)
+}
+
+/**
+ * Reconcile `state.drafts` with the `drafts` widget's CURRENT value --
+ * the same "configure() assigns widget.value directly, no callback" reason
+ * `pinned` needs syncPinnedFromWidget (wireConfigureReload calls this right
+ * alongside it), so a workflow saved mid-audition restores its unsaved-
+ * edit hint without a click. Deliberately does NOT prune against
+ * `state.selection` here (unlike every other write path above) -- at this
+ * exact point in a restore the selection may not have caught up yet, and
+ * trusting what was serialized (which was written FROM a consistent
+ * selection) is safer than risking a wrongful prune; the ordinary
+ * setSelection()-driven prune takes over the moment the user changes
+ * anything. No-op on a backend that predates the widget. */
+function syncDraftsFromWidget(state) {
+  const widget = state.draftsWidget
+  if (!widget) return
+  state.drafts = parseDraftsWidgetValue(widget.value)
+  updateSelectionHint(state)
 }
 
 // ---------------------------------------------------------------------------

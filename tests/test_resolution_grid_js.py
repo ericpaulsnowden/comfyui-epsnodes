@@ -383,9 +383,14 @@ _SOURCE = (REPO_ROOT / "web" / "eps_image" / "resolution.js").read_text(encoding
 
 def test_height_and_draw_agree_on_one_gate() -> None:
     # Both the height math and the draw must ask the same question, or the
-    # second line can render outside the element box.
+    # second line can render outside the element box. 2026-08-28: both now
+    # route through the shared `currentSourceLine` (itself
+    # `sourceLineForSummary(resolveIncomingImageSummary(node))`), which
+    # replaced the old one-hop `readIncomingImageSize(node) !== null` gate
+    # when the readout widened to walk through pass-through nodes.
     assert "hasSourceLine(node)" in _SOURCE
-    assert "readIncomingImageSize(node) !== null" in _SOURCE
+    assert "currentSourceLine(node) !== null" in _SOURCE
+    assert _SOURCE.count("currentSourceLine(node)") >= 2  # hasSourceLine AND drawGrid
 
 
 def test_size_is_read_from_the_upstream_nodes_own_image() -> None:
@@ -485,12 +490,18 @@ class TestCopyFromImageV0630:
         self, source: str
     ) -> None:
         """Same read the source line uses (so the two can never disagree),
-        and the same writeSize() every drag goes through."""
+        and the same writeSize() every drag goes through. 2026-08-28: reads
+        `resolveIncomingImageSummary` directly (not the thin
+        `readIncomingImageSize` wrapper) so it can refuse-with-a-message on
+        a 'mixed' walk result instead of guessing."""
         body = _function_body(source, "attachCopyFromImage(node)")
-        assert "readIncomingImageSize(node)" in body
+        assert "resolveIncomingImageSummary(node)" in body
         assert "writeSize(node, size.width, size.height)" in body
         # EXACT pixels -- "copy" means copy; multiple_of still rounds at run
-        # time exactly as it would for a hand-typed size.
+        # time exactly as it would for a hand-typed size. (The ratio lock's
+        # OWN multiple_of snap, when a ratio is actually locked, lives in
+        # conformNodeSizeToRatio -- a separate function -- not literally in
+        # this one's own source text.)
         assert "multiple_of" not in body
 
     def test_both_failure_modes_toast_differently(self, source: str) -> None:

@@ -505,6 +505,31 @@ execution — **the file is the truth; the UI is a view.**
 
 ### §6.1 `LoraLibraryNotebook` (display: "EPS Prompt Notebook")
 
+**Unsaved-edit `drafts` (v0.87.0, owner ask 2026-08-28: "if you change a
+prompt that is selected and run it without saving, it should run the
+changed prompt").** A TAIL-appended (after `pinned`, §8) hidden `drafts`
+STRING widget, default `"{}"` — a JSON object mapping selected entry name
+→ unsaved text. `resolve_selection` (the shared live path `read_entry` AND
+§6.14's pin capture both call) applies a draft on top of the file's text
+for any SELECTED name it holds; text only, so v0.85.0's file-order sort is
+untouched. A draft naming an unselected or nonexistent entry is ignored
+(scratch buffer, not a contract); malformed JSON degrades to "no drafts"
+with a warning, `parse_pinned`'s posture. **Pinned mode wins outright.**
+`IS_CHANGED` folds the EFFECTIVE (draft-overridden) text into its digest,
+so a changed draft alone re-executes — without that, auditioning an edit
+would silently replay the cached render. §6.14's `_capture_notebook`
+forwards `drafts` too, so a baked pin records the text the run actually
+used rather than the stale file. The panel keeps `drafts` in sync with the
+active entry (400 ms debounce; cleared immediately on save or on typing
+back to the saved text; pruned when selection changes) and the muted hint
+gains "N unsaved edit(s) — runs as edited". The §6.15 Prompt Builder is
+unaffected BY DESIGN — it reads the file directly, never through
+`resolve_selection`; its contract is "a live reference to what's saved".
+The §6.16 state registry EXCLUDES `drafts` ("unsaved mid-edit scratch
+text, not user-chosen state") so a Universal State can never capture or
+replay someone's half-finished sentence.
+
+
 **Three drag/write defects (v0.85.1, owner report 2026-08-28).**
 1. *"If the top group has nothing in it you can't drag new items into it —
    they always end up in the last group."* `reorderEntriesLocally`'s
@@ -1454,6 +1479,43 @@ only the prefix and IO type substituted:
   successful queue, proving the lazy skip (the loader would have raised).
 
 ## §6.5 `EPSResolution` (display: "EPS Resolution") — M1 core
+
+**M4 — ratio lock (v0.87.0, owner ask 2026-08-28).** A VISIBLE `ratio`
+combo — `none` (default), `1:1`, `5:4`, `4:5`, `9:16`, `16:9` — appended
+LAST in `INPUT_TYPES` (after the hidden `presets`; §8's tail law, so every
+saved workflow's positional `widgets_values` is undisturbed). ONE uniform
+rule: whenever width or height changes for ANY reason, a locked ratio
+derives the other. A typed edit anchors on the field just touched; the
+grid drag, `copy from image`, a selected preset and picking the ratio
+itself all anchor on WIDTH. `multiple_of` snaps only the DERIVED
+dimension, after the ratio math — up to `multiple_of/2` px of drift, named
+in the tooltip rather than hidden. Presets and `copy from image` are
+CONFORMED to an active lock rather than applied as-is, and the panel says
+so naming both the requested and applied size. Orthogonal to presets by
+construction (reuses v0.67.1's `state.applying` guard): locking never
+clears a preset, picking a preset never clears the lock.
+`nodes_resolution.py`'s `parse_ratio`/`conform_to_ratio` are the contract
+for API callers who never load the panel (`"none"` default keeps every old
+payload byte-identical); `resolution.js` mirrors the rule as a separate
+implementation (documented `Math.round` vs banker's-rounding divergence of
+≤1 px at exact `.5` ties).
+
+**Pass-through incoming-size walk (v0.87.0, owner report 2026-08-28: "if
+an image is plugged into a switcher, and then into a resolution node, the
+app can't tell what the resolution is").** NOT the v0.67.1 fix, which was
+§6.10's run-COUNTING through switchers/Resolution — a different mechanism
+that sounds identical. `readIncomingImageSize` was deliberately ONE HOP
+("a wrong number here would be worse than no number"), so a Switcher
+between the loader and this node hid the size. It now walks a bounded
+(8-hop, cycle-guarded) path through KNOWN pass-through classes only —
+`EPSSwitcher` (its ENABLED, wired `image_N` slots), `EPSDistributor`, core
+`Reroute` and `Reroute (rgthree)` — and treats every other class as a
+wall. `summarizeIncomingSizes` is the pure decision: zero sources →
+`none` (unchanged); all agreeing → `single` (unchanged readout);
+disagreeing → `mixed`, reported honestly (`in mixed: 1024x1024,
+832x1216`), with `copy from image` REFUSING rather than picking one. The
+original caution is upheld, not discarded.
+
 
 **v0.68.1 audit round (backend):** in MULTI-image mode the shared target is
 the BOX — a 0 axis derived from the FIRST wired image's aspect,

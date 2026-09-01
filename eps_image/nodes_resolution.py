@@ -61,6 +61,15 @@ MULTIPLE_OF_MAX = 1024
 #: nodes_checkpoint_switcher.DEFAULT_SELECTION's identical convention).
 DEFAULT_PRESETS = "[]"
 
+#: FORMAT.md §6.5 ratio-lock combo (owner ask 2026-08-28) -- user-facing,
+#: stable identifiers exactly like RESIZE_METHODS/INTERPOLATIONS above
+#: (widget values persist in saved workflows). "none" is the off state and
+#: MUST stay first/default: every hand-built `/prompt` payload that omits
+#: `ratio` entirely gets this same value via `resolve()`'s own default,
+#: so an API caller who has never heard of this feature runs unaffected.
+RATIO_OPTIONS = ["none", "1:1", "5:4", "4:5", "9:16", "16:9"]
+DEFAULT_RATIO = "none"
+
 #: Maps our public interpolation names to the identifiers core's
 #: ``comfy.utils.common_upscale`` (and, beneath it, ``torch.nn.functional.
 #: interpolate``) actually expects — mirrors core ``ImageScale.upscale_methods``
@@ -182,6 +191,79 @@ def _floor_to_multiple(value: int, multiple_of: int) -> int:
     return floored if floored >= multiple_of else value
 
 
+#: "W:H" (positive integers only) -- what a RATIO_OPTIONS entry other than
+#: "none" looks like. Anchored (fullmatch) so "1:1x" or "a1:1" never parse.
+_RATIO_RE = re.compile(r"(\d+):(\d+)")
+
+
+def parse_ratio(value: Any) -> tuple[int, int] | None:
+    """"W:H" -> ``(w, h)`` ints, or ``None`` for "none"/empty/malformed/
+    non-positive (owner ask 2026-08-28, FORMAT.md §6.5). Mirrors
+    ``resolution.js``'s ``parseRatio`` exactly -- own implementation, same
+    documented rule, tested against the same cases on both sides
+    (own-your-helpers, this pack's usual convention for frontend/backend
+    parity). Never raises: a bad ratio string -- including a value this
+    module never shipped, e.g. a hand-edited workflow or a future frontend
+    build -- degrades to "no lock" rather than failing a run, the same
+    fail-soft posture as :func:`_parse_preset_names` above.
+    """
+    if not isinstance(value, str):
+        return None
+    match = _RATIO_RE.fullmatch(value.strip())
+    if not match:
+        return None
+    ratio_w, ratio_h = int(match.group(1)), int(match.group(2))
+    if ratio_w <= 0 or ratio_h <= 0:
+        return None
+    return (ratio_w, ratio_h)
+
+
+def conform_to_ratio(
+    width: int, height: int, ratio: str, multiple_of: int, anchor: str = "width"
+) -> tuple[int, int]:
+    """Applies the ratio lock (owner ask 2026-08-28, FORMAT.md §6.5): ONE
+    uniform rule -- *anchor*'s own dimension is kept exactly, and the OTHER
+    dimension is recalculated to satisfy *ratio*, discarding whatever value
+    it previously held (typed, image-aspect-derived, or a preset's own
+    stored size -- the lock always wins). The recalculated dimension is
+    THEN snapped to *multiple_of* (via :func:`_round_to_multiple`) when it
+    is > 0 -- derive-from-ratio-first, snap-second, per the owner's own
+    ordering; that snap can cost up to ``multiple_of / 2`` px of exact
+    ratio, the documented trade for opting into a size constraint (same
+    honesty :func:`_floor_to_multiple`'s docstring already applies to
+    "keep aspect (fit)").
+
+    ``ratio == "none"`` (or anything :func:`parse_ratio` can't read) is a
+    no-op passthrough -- *width*/*height* come back unchanged, so a node
+    with the lock off (the default) behaves byte-identically to before this
+    feature existed. *anchor*'s own dimension must be a POSITIVE concrete
+    value to derive from; a non-positive anchor (nothing to lock to yet --
+    e.g. both axes still ``0``, before any image-aspect derivation has run)
+    also passes *width*/*height* through unchanged, leaving the caller's
+    own 0-axis handling to run first.
+
+    Mirrored (not shared) in ``resolution.js``'s ``conformToRatio`` -- same
+    rule, separate implementation, tests on both. The one deliberate
+    divergence: the PANEL knows which widget the user just edited and
+    anchors on that; this stateless entrypoint has no such signal, so
+    callers here (:func:`_resolve_one`) pick an anchor from whichever of
+    *width*/*height* is concrete, preferring width -- see its own comment.
+    """
+    parsed = parse_ratio(ratio)
+    if parsed is None:
+        return width, height
+    ratio_w, ratio_h = parsed
+    if anchor == "height":
+        if height <= 0:
+            return width, height
+        derived_w = max(1, round(height * ratio_w / ratio_h))
+        return _round_to_multiple(derived_w, multiple_of), height
+    if width <= 0:
+        return width, height
+    derived_h = max(1, round(width * ratio_h / ratio_w))
+    return width, _round_to_multiple(derived_h, multiple_of)
+
+
 def _fit_dimensions(orig_w: int, orig_h: int, box_w: int, box_h: int) -> tuple[int, int]:
     """The largest size that fits within *box_w* x *box_h*, preserving aspect.
 
@@ -247,6 +329,7 @@ def _resolve_run(
     multiple_of: int,
     image: Any,
     extra_images: dict[int, Any],
+    ratio: str = DEFAULT_RATIO,
 ) -> tuple[Any, ...]:
     """One run's 13-tuple of output values (FORMAT.md §6.5 v0.61.0).
 
@@ -264,9 +347,17 @@ def _resolve_run(
     ``original_width``, ``original_height`` -- emit blockers (owner
     decision: with N inputs there is no one "original"); an unwired slot
     among the wired ones blocks only its own ``resized_N``.
+
+    *ratio* (owner ask 2026-08-28) is the SAME node-level lock regardless of
+    mode or which image(s) are wired -- it is not a per-preset field (see
+    :meth:`EPSResolution.resolve`), so it is threaded through every
+    :func:`_resolve_one` call here, including the MULTI-mode box probe:
+    the box itself gets conformed once, and re-conforming it again per
+    image below is a provable no-op (the box already satisfies the ratio),
+    never a second, possibly-different answer.
     """
     if not extra_images:
-        base = _resolve_one(width, height, resize_method, interpolation, multiple_of, image)
+        base = _resolve_one(width, height, resize_method, interpolation, multiple_of, image, ratio)
         blocker = _execution_blocker()
         return base + (blocker,) * 7
 
@@ -278,14 +369,14 @@ def _resolve_run(
     # 1:1 made resized_2 512x512 and flipped with wiring order). Each image
     # is then resized with the REAL method into that one box.
     _, _, target_w, target_h, _, _ = _resolve_one(
-        width, height, "stretch", interpolation, multiple_of, first
+        width, height, "stretch", interpolation, multiple_of, first, ratio
     )
 
     def _resized(img: Any) -> Any:
         if img is None:
             return _execution_blocker()
         return _resolve_one(
-            target_w, target_h, resize_method, interpolation, multiple_of, img
+            target_w, target_h, resize_method, interpolation, multiple_of, img, ratio
         )[1]
 
     blocker = _execution_blocker()
@@ -339,6 +430,7 @@ def _resolve_one(
     interpolation: str,
     multiple_of: int,
     image: Any,
+    ratio: str = DEFAULT_RATIO,
 ) -> tuple[Any, Any, int, int, int, int]:
     """The exact pre-M3 computation: resize *image* (or act as a pure size
     calculator when *image* is ``None``) per FORMAT.md §6.5. Factored out of
@@ -347,17 +439,38 @@ def _resolve_one(
     preset's five values, run once per preset) share ONE implementation --
     see :meth:`EPSResolution.resolve`'s own docstring for how the two are
     composed into its ``OUTPUT_IS_LIST`` lists. Body unchanged from the
-    pre-M3 ``resolve()`` method it was extracted from.
+    pre-M3 ``resolve()`` method it was extracted from, except for the
+    *ratio* lock (owner ask 2026-08-28) applied right after the existing
+    0-axis derivation below.
     """
     original_width = original_height = 0
     target_w, target_h = width, height
+
+    # Ratio-lock anchor (FORMAT.md §6.5): this stateless entrypoint has no
+    # "the user just edited this one" signal the panel tracks, so it prefers
+    # WIDTH -- the same default the panel itself uses the instant a ratio is
+    # picked with neither freshly edited ("Selecting a ratio while none was
+    # set recomputes HEIGHT from the current width"), and also the tie-break
+    # when NEITHER axis is concrete yet (both 0, before any image-aspect
+    # derivation runs). HEIGHT is the anchor only in the one case where it
+    # is the sole concrete axis (width is the 0 "derive" sentinel, height is
+    # not) -- a caller who set only height keeps THEIR height, never an
+    # intermediate value the image's own aspect happened to produce for
+    # width in between. Decided from the RAW width/height *parameters*,
+    # before the 0-axis-from-image derivation below can turn a 0 into
+    # something concrete.
+    ratio_anchor = "height" if width <= 0 and height > 0 else "width"
 
     if image is not None:
         # IMAGE tensors are [B, H, W, C] (ComfyUI convention).
         original_height, original_width = int(image.shape[1]), int(image.shape[2])
 
         # 0 on an axis = derive it from the other axis + the image's
-        # aspect (mirrors core ImageScale's own derivation, nodes.py).
+        # aspect (mirrors core ImageScale's own derivation, nodes.py). A
+        # locked ratio (right below) can still override this the moment
+        # EITHER axis is concrete; with both still 0 there is nothing to
+        # anchor a ratio to yet, so this derivation runs first and hands
+        # the ratio pass a concrete width (or height) to work from.
         if target_w == 0 and target_h == 0:
             target_w, target_h = original_width, original_height
         elif target_w == 0:
@@ -365,6 +478,13 @@ def _resolve_one(
         elif target_h == 0:
             target_h = max(1, round(original_height * target_w / original_width))
     # else: no image to derive an aspect from — an explicit 0 stays 0.
+
+    # Ratio lock (owner ask 2026-08-28): ONE uniform rule for every caller
+    # of this function -- resolve()'s own typed-fields path AND its
+    # per-preset fan-out both land here, so "the lock wins" needs no
+    # special-casing per caller. A no-op when `ratio` is "none"/unreadable,
+    # or when the anchor axis is still 0 (nothing concrete to lock to).
+    target_w, target_h = conform_to_ratio(target_w, target_h, ratio, multiple_of, ratio_anchor)
 
     resized_image = None
     final_w, final_h = target_w, target_h
@@ -518,7 +638,10 @@ class EPSResolution:
         "connect them) and every one is resized to the same target in one "
         "run, each on its own resized_N output. The 'copy from image' "
         "button fills width/height with the wired image's own size in one "
-        "click."
+        "click. Lock 'ratio' to a fixed aspect and the other dimension is "
+        "always recalculated to match -- including from a preset or "
+        "'copy from image', which then conform to the lock instead of "
+        "being applied as-is."
     )
 
     #: §6.16 state registry (v0.83.0): the widgets a Universal State
@@ -526,7 +649,10 @@ class EPSResolution:
     #: their shape. ``presets`` carries only the ticked preset NAMES (see
     #: ``_parse_preset_names`` above / FORMAT.md §6.5 M3) -- a plain string
     #: array, nothing richer. The ``image``/``image_2``..``image_8`` sockets
-    #: are IMAGE-typed, not widgets, and never appear here.
+    #: are IMAGE-typed, not widgets, and never appear here. ``ratio`` (owner
+    #: ask 2026-08-28) is a plain combo like ``resize_method``/
+    #: ``interpolation`` -- an Apply write to it goes through the same
+    #: widget ``.callback`` resolution.js already wraps for the ratio lock.
     EPS_STATE_WIDGETS: ClassVar[dict[str, Any]] = {
         "format": 1,
         "widgets": {
@@ -536,6 +662,7 @@ class EPSResolution:
             "interpolation": {"kind": "choice"},
             "multiple_of": {"kind": "int", "min": MULTIPLE_OF_MIN, "max": MULTIPLE_OF_MAX},
             "presets": {"kind": "json_array", "items": "string"},
+            "ratio": {"kind": "choice"},
         },
     }
 
@@ -660,6 +787,35 @@ class EPSResolution:
                         ),
                     },
                 ),
+                # §8 LAW: appended LAST, after every other real widget
+                # (including the hidden `presets` above) -- `widgets_values`
+                # restores POSITIONALLY, so a saved workflow's array never
+                # shifts for this new field; a workflow saved before it
+                # existed simply runs one entry short and this widget stays
+                # at its construction default ("none"), matching
+                # `resolve()`'s own default for a hand-built `/prompt` that
+                # omits `ratio` entirely.
+                "ratio": (
+                    RATIO_OPTIONS,
+                    {
+                        "default": DEFAULT_RATIO,
+                        "tooltip": (
+                            "Lock width/height to this aspect ratio. "
+                            "Whichever of width/height you just changed is "
+                            "kept and the other is recalculated to match -- "
+                            "picking a ratio while both were already set "
+                            "recalculates height from the current width "
+                            "(width is the anchor). multiple_of, if set, "
+                            "still rounds the recalculated side afterward, "
+                            "which can cost up to multiple_of / 2 pixels of "
+                            "exact ratio. A selected preset or 'copy from "
+                            "image' is conformed to the lock the same way "
+                            "-- width kept, height recalculated -- rather "
+                            "than applied as-is; the panel says so when it "
+                            "happens. 'none' turns the lock off."
+                        ),
+                    },
+                ),
             }),
         }
 
@@ -695,6 +851,7 @@ class EPSResolution:
         multiple_of: int = 0,
         image: Any = None,
         presets: str = DEFAULT_PRESETS,
+        ratio: str = DEFAULT_RATIO,
         **extra: Any,
     ) -> tuple[list[Any], ...]:
         # v0.61.0 (FORMAT.md §6.5 multi-image): collect wired image_N
@@ -713,7 +870,14 @@ class EPSResolution:
             # wrapped in a length-1 list, OUTPUT_IS_LIST's degenerate
             # one-run case (class docstring).
             run = _resolve_run(
-                width, height, resize_method, interpolation, multiple_of, image, extra_images
+                width,
+                height,
+                resize_method,
+                interpolation,
+                multiple_of,
+                image,
+                extra_images,
+                ratio,
             )
             return tuple([value] for value in run)  # type: ignore[return-value]
 
@@ -734,6 +898,13 @@ class EPSResolution:
         columns: list[list[Any]] = [[] for _ in range(len(self.RETURN_NAMES))]
         for name in names:
             preset = stored_presets[name]
+            # `ratio` is a node-level lock, NOT one of the five stored
+            # preset fields (owner ask 2026-08-28: orthogonal to presets) --
+            # so every preset run shares the SAME lock, conformed inside
+            # _resolve_one/_resolve_run exactly like the typed-fields path
+            # above. "The lock wins": a preset's own stored width/height is
+            # discarded on the derived axis just like a hand-typed value
+            # would be.
             run = _resolve_run(
                 preset["width"],
                 preset["height"],
@@ -742,6 +913,7 @@ class EPSResolution:
                 preset["multiple_of"],
                 image,
                 extra_images,
+                ratio,
             )
             for column, value in zip(columns, run, strict=True):
                 column.append(value)

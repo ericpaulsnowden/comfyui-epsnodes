@@ -475,7 +475,8 @@ const out = {
     isUnchangedResponse: typeof nb.isUnchangedResponse === 'function',
     parseCollapsedSections: typeof nb.parseCollapsedSections === 'function',
     toggleCollapsedSection: typeof nb.toggleCollapsedSection === 'function',
-    isSectionCollapsed: typeof nb.isSectionCollapsed === 'function'
+    isSectionCollapsed: typeof nb.isSectionCollapsed === 'function',
+    parseDraftsWidgetValue: typeof nb.parseDraftsWidgetValue === 'function'
   }
 }
 out.missBeforeSet = nb.notebookCacheGet('a.md')
@@ -588,6 +589,24 @@ out.relativize = {
   alreadyRelative: nb.relativizeToLibrary('x.md', '/lib/docs'),
   noBase: nb.relativizeToLibrary('/lib/docs/x.md', null),
   empty: nb.relativizeToLibrary('', '/lib')
+}
+// Unsaved-edit drafts (v0.86.0, owner ask 2026-08-28) -- the `drafts`
+// widget's JSON parser, mirrored on the PYTHON side by
+// nodes_notebook.parse_drafts (which additionally logs a warning; this
+// side stays silent, matching parsePinned's own convention).
+out.drafts = {
+  empty: nb.parseDraftsWidgetValue(''),
+  whitespace: nb.parseDraftsWidgetValue('   '),
+  blankObject: nb.parseDraftsWidgetValue('{}'),
+  oneEntry: nb.parseDraftsWidgetValue(JSON.stringify({ A: 'unsaved text' })),
+  twoEntries: nb.parseDraftsWidgetValue(JSON.stringify({ A: 'a', B: 'b' })),
+  nonStringValueDropped: nb.parseDraftsWidgetValue(JSON.stringify({ A: 'ok', B: 7 })),
+  notJson: nb.parseDraftsWidgetValue('not json'),
+  jsonArray: nb.parseDraftsWidgetValue('[]'),
+  jsonNumber: nb.parseDraftsWidgetValue('42'),
+  jsonString: nb.parseDraftsWidgetValue('"just a string"'),
+  nullValue: nb.parseDraftsWidgetValue(null),
+  undefinedValue: nb.parseDraftsWidgetValue(undefined)
 }
 process.stdout.write(JSON.stringify(out))
 """
@@ -1094,7 +1113,10 @@ def test_collapsed_sections_export_list_is_additive(source: str) -> None:
     by name (tests/test_prompt_builder_js.py, tests/test_pll_bridge_js.py)
     -- and the three collapse helpers are exported alongside them, plus the
     two delete-a-section-header wording helpers added 2026-08-25
-    (tests/test_notebook_delete_category_js.py drives those under Node)."""
+    (tests/test_notebook_delete_category_js.py drives those under Node), plus
+    the v0.86.0 unsaved-edit-drafts parser (owner ask 2026-08-28: "if you
+    change a prompt that is selected and run it without saving, it should
+    run the changed prompt") -- see `parseDraftsWidgetValue` below."""
     pre_existing = (
         "export function attachNotebookWidget(node)",
         "export function pickServerFolder(options = {})",
@@ -1119,7 +1141,12 @@ def test_collapsed_sections_export_list_is_additive(source: str) -> None:
     )
     for signature in added_this_round:
         assert signature in source, signature
-    assert source.count("\nexport function ") == len(pre_existing) + len(added_this_round)
+    added_v0_86_0 = ("export function parseDraftsWidgetValue(raw)",)
+    for signature in added_v0_86_0:
+        assert signature in source, signature
+    assert source.count("\nexport function ") == (
+        len(pre_existing) + len(added_this_round) + len(added_v0_86_0)
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1613,3 +1640,168 @@ class TestEmptyCategoryDropPlacement:
         assert "state.baseMtime = mtime" in source
         assert "state.paintedMtime = mtime" in source
         assert "state.baseMtime = typeof data.mtime" not in source
+
+
+# ---------------------------------------------------------------------------
+# M4 unsaved-edit `drafts` (v0.86.0, owner ask 2026-08-28: "if you change a
+# prompt that is selected and run it without saving, it should run the
+# changed prompt"). `parseDraftsWidgetValue` is a pure exported helper
+# (real-Node probe, cache_api); the panel wiring around it -- the debounce,
+# the immediate clear-on-not-dirty, the prune-on-selection-change, and the
+# hint text -- is closure-bound like the rest of this file's reload/pin
+# machinery, so those are SOURCE-TEXT pins, this file's established
+# convention (see the module docstring).
+# ---------------------------------------------------------------------------
+
+
+class TestDraftsM4:
+    def test_parser_is_exported(self, cache_api: dict) -> None:
+        assert cache_api["exports"]["parseDraftsWidgetValue"] is True
+
+    def test_parses_a_well_formed_object(self, cache_api: dict) -> None:
+        d = cache_api["drafts"]
+        assert d["oneEntry"] == {"A": "unsaved text"}
+        assert d["twoEntries"] == {"A": "a", "B": "b"}
+        assert d["blankObject"] == {}
+
+    def test_a_non_string_entry_value_is_dropped_not_fatal(self, cache_api: dict) -> None:
+        assert cache_api["drafts"]["nonStringValueDropped"] == {"A": "ok"}
+
+    def test_malformed_or_blank_shapes_degrade_to_no_drafts(self, cache_api: dict) -> None:
+        d = cache_api["drafts"]
+        for key in (
+            "empty",
+            "whitespace",
+            "notJson",
+            "jsonArray",
+            "jsonNumber",
+            "jsonString",
+            "nullValue",
+            "undefinedValue",
+        ):
+            assert d[key] == {}, key
+
+    # --------------------------------------------------- panel wiring (source)
+
+    def test_widget_is_looked_up_hidden_both_ways_at_attach(self, source: str) -> None:
+        attach = source.split("export function attachNotebookWidget(node)", 1)[1]
+        attach = attach.split("\n}\n", 1)[0]
+        assert "findWidget(node, DRAFTS_WIDGET_NAME)" in attach
+        assert "hideDraftsWidget(state)" in attach
+        hide = source.split("function hideDraftsWidget(state)", 1)[1]
+        hide = hide.split("\n}\n", 1)[0]
+        assert "widget.hidden = true" in hide
+        assert "hidden: true" in hide  # options.hidden, the Vue-nodes flag (§7.5)
+
+    def test_configure_reconciles_drafts_same_as_pinned(self, source: str) -> None:
+        # configure() assigns widget.value directly (no callback) -- the
+        # same reason `pinned` needs its own reconcile call right here.
+        configure = source.split("function wireConfigureReload(state)", 1)[1]
+        configure = configure.split("\nfunction ", 1)[0]
+        assert "syncPinnedFromWidget(state)" in configure
+        assert "syncDraftsFromWidget(state)" in configure
+
+    def test_only_the_textareas_own_input_listener_schedules_a_write(
+        self, source: str
+    ) -> None:
+        # The debounce is armed ONLY by direct typing -- refreshDirty() (run
+        # from other call sites too: populateEditor, save success, category
+        # saves) must never itself arm a new write, or a poll/save/reload
+        # could resurrect a debounced write for content nobody just typed.
+        # 2 occurrences total: the function's own definition line, plus its
+        # ONE call site (the textarea's input listener) -- never a third.
+        assert source.count("scheduleDraftSync(state)") == 2
+        listener = source.split("state.textarea.addEventListener('input', () => {", 1)[1]
+        listener = listener.split("\n  })\n", 1)[0]
+        assert "refreshDirty(state)" in listener
+        assert "scheduleDraftSync(state)" in listener
+
+    def test_debounce_constant_matches_the_owner_ask(self, source: str) -> None:
+        # "do NOT write on every keystroke" -- a real debounce, not 0/1ms.
+        assert "const DRAFT_SYNC_DEBOUNCE_MS = 400" in source
+        schedule = source.split("function scheduleDraftSync(state)", 1)[1]
+        schedule = schedule.split("\n}\n", 1)[0]
+        assert "setTimeout(" in schedule
+        assert "DRAFT_SYNC_DEBOUNCE_MS" in schedule
+        assert "commitDraftForActiveEntry(state)" in schedule
+
+    def test_refresh_dirty_clears_the_draft_the_instant_text_matches_disk(
+        self, source: str
+    ) -> None:
+        # Covers Save landing, Reload/discard, and typing back to the
+        # original -- refreshDirty() is what every one of those funnels
+        # through (populateEditor(), the save-success paths, the textarea's
+        # own input listener) -- with ONE shared rule, never a per-caller
+        # special case.
+        block = source.split("function refreshDirty(state) {", 1)[1]
+        block = block.split("\n}\n", 1)[0]
+        assert "if (!textChanged" in block
+        assert "clearDraft(state, state.activeName)" in block
+        # Never a WRITE from here -- only scheduleDraftSync (the textarea's
+        # own input listener) arms a new/changed draft.
+        assert "setDraft(" not in block
+
+    def test_save_success_clears_the_draft_for_the_saved_name(self, source: str) -> None:
+        save = source.split("async function performSave(state,", 1)[1]
+        save = save.split("\nasync function ", 1)[0]
+        assert "clearDraft(state, name)" in save
+
+    def test_prune_runs_from_the_one_selection_choke_point(self, source: str) -> None:
+        # setSelection() is the dumb setter every selection-changing path
+        # (click, ctrl/shift-click, delete/move reassignment, rename remap)
+        # already goes through -- pruning there, once, covers all of them.
+        set_selection = source.split("function setSelection(state, names, active) {", 1)[1]
+        set_selection = set_selection.split("\n}\n", 1)[0]
+        assert "pruneDraftsToSelection(state)" in set_selection
+        # 2 occurrences total: the function's own definition line, plus its
+        # ONE call site (inside setSelection above) -- no per-caller
+        # duplication anywhere else in the file.
+        assert source.count("pruneDraftsToSelection(state)") == 2
+
+    def test_prune_is_a_subset_filter_keyed_by_current_selection(self, source: str) -> None:
+        prune = source.split("function pruneDraftsToSelection(state) {", 1)[1]
+        prune = prune.split("\n}\n", 1)[0]
+        assert "new Set(state.selection)" in prune
+        assert "keep.has(name)" in prune
+
+    def test_switching_active_entry_flushes_before_reassigning_it(self, source: str) -> None:
+        # commitDraftForActiveEntry() reads state.activeName -- the flush
+        # MUST run before setSelection() moves it, or a fast "type, click
+        # another row" would attribute the outgoing entry's text to the
+        # incoming name.
+        set_selection = source.split("function setSelection(state, names, active) {", 1)[1]
+        set_selection = set_selection.split("\n}\n", 1)[0]
+        lines = set_selection.splitlines()
+        flush_line = next(i for i, ln in enumerate(lines) if "flushDraftSync(state)" in ln)
+        active_name_line = next(
+            i for i, ln in enumerate(lines) if "state.activeName = active" in ln
+        )
+        assert flush_line < active_name_line
+        assert "if (active !== state.activeName)" in set_selection
+
+    def test_populate_editor_flushes_first_for_the_category_mode_transition(
+        self, source: str
+    ) -> None:
+        # Entering/leaving category mode never touches state.activeName, so
+        # setSelection()'s own flush never fires for it -- populateEditor()
+        # is the only choke point both transitions share.
+        populate = source.split("function populateEditor(state, text, mtime, name) {", 1)[1]
+        populate = populate.split("\n}\n", 1)[0]
+        lines = [ln for ln in populate.splitlines() if ln.strip()]
+        assert lines[0].strip() == "flushDraftSync(state)"
+
+    def test_hint_shows_unsaved_edit_count_when_not_pinned(self, source: str) -> None:
+        hint = source.split("function updateSelectionHint(state) {", 1)[1]
+        hint = hint.split("\n}\n", 1)[0]
+        assert "draftCount" in hint
+        assert "1 unsaved edit — runs as edited." in hint
+        assert "unsaved edits — run as edited." in hint
+
+    def test_hint_never_counts_drafts_while_pinned(self, source: str) -> None:
+        # A pin ignores drafts outright (M3 wins) -- showing a leftover
+        # draft's count there would be actively misleading.
+        hint = source.split("function updateSelectionHint(state) {", 1)[1]
+        hint = hint.split("\n}\n", 1)[0]
+        pinned_branch = hint.split("if (isPinned(state)) {", 1)[1].split("\n  }\n", 1)[0]
+        assert "draftCount" not in pinned_branch
+        assert "drafts" not in pinned_branch

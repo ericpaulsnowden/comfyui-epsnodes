@@ -170,7 +170,10 @@ class TestWidgetIndex:
         assert m.widget_index(LoraLibraryNotebook, "pinned") == 2
         # [set, strength_scale, loader_slot, pinned_state] -- sockets are not widgets
         assert m.widget_index(LoraLibraryApplySet, "pinned_state") == 3
-        assert m.widget_defaults(LoraLibraryNotebook) == ["loras.md", "", ""]
+        # v0.86.0 appended the `drafts` audition buffer as a TAIL widget
+        # (§8), so the defaults list grew by one -- the pin's own index is
+        # unchanged, which is the property this test exists to protect.
+        assert m.widget_defaults(LoraLibraryNotebook) == ["loras.md", "", "", "{}"]
         assert m.widget_defaults(LoraLibraryApplySet) == ["None", 1.0, 0, ""]
         assert m._multiplier_widget_defaults() == m.widget_defaults(EPSCrossSweep)
 

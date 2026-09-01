@@ -379,7 +379,10 @@ class TestRoute:
         notebook = body["classes"]["LoraLibraryNotebook"]
         assert notebook["widgets"]["entry"] == {"kind": "lines"}
         assert notebook["excluded"] == {
-            "pinned": "provenance from a baked image, not user intent"
+            "pinned": "provenance from a baked image, not user intent",
+            # v0.86.0: an audition buffer is mid-edit scratch text -- a
+            # Universal State must never capture or replay it.
+            "drafts": "unsaved mid-edit scratch text, not user-chosen state",
         }
 
     async def test_out_of_scope_classes_serve_empty_widgets(self, client) -> None:

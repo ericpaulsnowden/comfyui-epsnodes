@@ -205,6 +205,12 @@ captions).
   there instead of in the last group. And if a save is ever refused because
   the file changed underneath, the list snaps back to the truth instead of
   showing a move that didn't happen.
+- **Audition an edit before saving (v0.87.0).** Change a selected prompt's
+  text and queue — even without clicking Save, the run uses what's on
+  screen, not the saved file. The status line says so ("1 unsaved edit —
+  runs as edited") so it's never invisible, and saving (or undoing back to
+  the saved text) returns to normal. Images saved during an audition record
+  the text they actually used.
 - **Selected prompts run in list order (v0.85.0).** The order prompts run
   in — and the `t1`, `t2`, `t3` parts of your filenames — follows the order
   they appear in the notebook, not the order you happened to click them.
@@ -835,6 +841,22 @@ dimensions. It replaces a resize node + a reroute + a get-image-size node.
   them (it won't hide one that's still wired).
 - Deliberately thin — pipe `width`/`height` into a heavier resize node for
   anything fancier.
+
+### Ratio lock and seeing through switchers (v0.87.0)
+
+- **Lock to a ratio**: the `ratio` dropdown — `none`, `1:1`, `5:4`, `4:5`,
+  `9:16`, `16:9` — keeps width and height locked together. Edit either and
+  the other follows; picking a ratio recalculates height from the current
+  width. `multiple_of` still rounds the recalculated side afterward. A lock
+  beats a preset or *copy from image* too — width kept, height
+  recalculated — and the node tells you when it did, naming both the size
+  you picked and the size applied. Locking never un-selects a preset, and
+  picking a preset never unlocks the ratio.
+- **See past a switcher**: the incoming-size readout and *copy from image*
+  now look through an EPS Switcher, EPS Distributor or Reroute to the real
+  loaders. If a switcher has several differently-sized images enabled at
+  once, the readout says so (`in mixed: 717x1600, 839x1200`) and *copy from
+  image* refuses to guess rather than picking one at random.
 
 ## EPS Image Grid (shipped)
 

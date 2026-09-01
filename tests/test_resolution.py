@@ -735,7 +735,10 @@ class TestMultiImage:
         assert "image_9" not in optional
         assert "image_" not in optional
         # static entries untouched, and iteration still shows only them
-        assert set(optional) == {"image", "presets"}
+        # ("ratio" appended LAST -- §8, owner ask 2026-08-28: see
+        # TestRatioLock's own tail-position test below for the ordering
+        # itself, not just set membership).
+        assert set(optional) == {"image", "presets", "ratio"}
 
     def test_two_images_same_target_both_resized(
         self, fake_execution_blocker: type
@@ -851,3 +854,265 @@ class TestMultiImageFitBoxV0681:
         assert swapped[2][0] == 1024 and swapped[3][0] == 1024
         assert tuple(swapped[1][0].shape) == (1, 1024, 1024, 3)
         assert tuple(swapped[6][0].shape) == (1, 512, 1024, 3)
+
+
+# ------------------------------------------------------------- ratio lock
+
+
+class TestParseRatio:
+    """``parse_ratio`` (owner ask 2026-08-28, FORMAT.md §6.5): "W:H" -> a
+    tuple, or ``None`` for anything else. Mirrored, not shared, by
+    ``resolution.js``'s ``parseRatio`` -- ``test_resolution_ratio_js.py``
+    runs the identical case list through the JS side."""
+
+    @pytest.mark.parametrize(
+        "value,expected",
+        [
+            ("1:1", (1, 1)),
+            ("5:4", (5, 4)),
+            ("4:5", (4, 5)),
+            ("9:16", (9, 16)),
+            ("16:9", (16, 9)),
+        ],
+    )
+    def test_all_five_ratio_options_parse(self, value: str, expected: tuple[int, int]) -> None:
+        assert nodes_resolution.parse_ratio(value) == expected
+
+    @pytest.mark.parametrize(
+        "value",
+        ["none", "", "bogus", "1:0", "0:1", "-1:1", "1:-1", "1:1:1", "1", ":", None, 42, 1.5],
+    )
+    def test_everything_else_is_no_lock(self, value: object) -> None:
+        assert nodes_resolution.parse_ratio(value) is None
+
+    def test_whitespace_is_tolerated(self) -> None:
+        assert nodes_resolution.parse_ratio("  4:5  ") == (4, 5)
+
+
+class TestConformToRatio:
+    """``conform_to_ratio`` truth table: all 5 ratios, both anchors,
+    ``multiple_of`` interaction, and ``"none"`` as a pure passthrough."""
+
+    def test_none_is_a_passthrough(self) -> None:
+        assert nodes_resolution.conform_to_ratio(777, 333, "none", 0, "width") == (777, 333)
+        assert nodes_resolution.conform_to_ratio(777, 333, "bogus", 64, "height") == (777, 333)
+
+    @pytest.mark.parametrize(
+        "ratio,width,expected_height",
+        [
+            ("1:1", 1000, 1000),
+            ("5:4", 1000, 800),
+            ("4:5", 1000, 1250),
+            ("9:16", 900, 1600),
+            ("16:9", 1600, 900),
+        ],
+    )
+    def test_width_anchor_keeps_width_and_derives_height(
+        self, ratio: str, width: int, expected_height: int
+    ) -> None:
+        assert nodes_resolution.conform_to_ratio(width, 1, ratio, 0, "width") == (
+            width,
+            expected_height,
+        )
+
+    @pytest.mark.parametrize(
+        "ratio,height,expected_width",
+        [
+            ("1:1", 1000, 1000),
+            ("5:4", 800, 1000),
+            ("4:5", 1250, 1000),
+            ("9:16", 1600, 900),
+            ("16:9", 900, 1600),
+        ],
+    )
+    def test_height_anchor_keeps_height_and_derives_width(
+        self, ratio: str, height: int, expected_width: int
+    ) -> None:
+        assert nodes_resolution.conform_to_ratio(1, height, ratio, 0, "height") == (
+            expected_width,
+            height,
+        )
+
+    def test_multiple_of_snaps_the_derived_dimension_only(self) -> None:
+        # width=1000 anchored, "4:5" derives height = 1000 * 5/4 = 1250,
+        # which multiple_of=64 does NOT divide evenly -- proving only the
+        # DERIVED side is snapped: the anchor comes back exactly 1000,
+        # untouched, even though 1000 isn't itself a multiple of 64.
+        width, height = nodes_resolution.conform_to_ratio(1000, 1, "4:5", 64, "width")
+        assert width == 1000
+        assert height == nodes_resolution._round_to_multiple(1250, 64) == 1280
+
+    def test_multiple_of_off_leaves_the_derived_dimension_exact(self) -> None:
+        assert nodes_resolution.conform_to_ratio(1000, 1, "5:4", 0, "width") == (1000, 800)
+
+    def test_nonpositive_anchor_is_a_noop(self) -> None:
+        # Nothing concrete to lock to yet -- e.g. both axes still 0 before
+        # any image-aspect derivation has run.
+        assert nodes_resolution.conform_to_ratio(0, 500, "1:1", 0, "width") == (0, 500)
+        assert nodes_resolution.conform_to_ratio(500, 0, "1:1", 0, "height") == (500, 0)
+        assert nodes_resolution.conform_to_ratio(0, 0, "1:1", 0, "width") == (0, 0)
+
+
+class TestRatioLockTailPosition:
+    """§8 LAW: `ratio` is a NEW widget-bearing input and must be the very
+    LAST real widget declared, after the existing hidden `presets` --
+    litegraph restores `widgets_values` POSITIONALLY, so anything else
+    shifts every already-saved workflow's values."""
+
+    def test_ratio_is_the_last_key_in_optional(self) -> None:
+        optional = nodes_resolution.EPSResolution.INPUT_TYPES()["optional"]
+        assert list(optional.keys())[-1] == "ratio"
+
+    def test_full_widget_order_required_then_optional(self) -> None:
+        # The exact order litegraph builds real (non-socket) widgets in:
+        # every `required` entry, in declared order, then every `optional`
+        # entry that is itself a widget (skipping the IMAGE socket) --
+        # confirmed empirically against resolution.js's own widget-order
+        # documentation (the M3 "widget-order divergence" section).
+        spec = nodes_resolution.EPSResolution.INPUT_TYPES()
+        required_names = list(spec["required"].keys())
+        optional_widget_names = [
+            name for name, definition in spec["optional"].items() if definition[0] != "IMAGE"
+        ]
+        assert required_names == [
+            "height",
+            "width",
+            "resize_method",
+            "interpolation",
+            "multiple_of",
+        ]
+        assert optional_widget_names == ["presets", "ratio"]
+
+    def test_ratio_default_is_none(self) -> None:
+        optional = nodes_resolution.EPSResolution.INPUT_TYPES()["optional"]
+        assert optional["ratio"][1]["default"] == "none"
+        assert optional["ratio"][0] == nodes_resolution.RATIO_OPTIONS
+
+    def test_ratio_options_are_exactly_the_owners_five_plus_none(self) -> None:
+        assert nodes_resolution.RATIO_OPTIONS == ["none", "1:1", "5:4", "4:5", "9:16", "16:9"]
+
+
+class TestRatioLockEPSStateWidgets:
+    """§6.16: `ratio` is a plain combo, declared like `resize_method`/
+    `interpolation` -- the Universal State Controller's completeness test
+    (tests/test_state_registry.py) enforces every widget-bearing input is
+    declared or excluded; this pins the specific declaration."""
+
+    def test_ratio_is_declared_as_a_choice(self) -> None:
+        widgets = nodes_resolution.EPSResolution.EPS_STATE_WIDGETS["widgets"]
+        assert widgets["ratio"] == {"kind": "choice"}
+
+
+class TestRatioLockOmittedIsSafeDefault:
+    """A hand-built `/prompt` payload that omits `ratio` entirely -- every
+    workflow saved before this feature existed -- must behave EXACTLY as
+    before: `resolve()`'s own default is `"none"`, a pure passthrough."""
+
+    def test_omitting_ratio_matches_explicit_none(self) -> None:
+        image = _make_image(height=100, width=200)
+        node_a, node_b = _node(), _node()
+        omitted = node_a.resolve(width=64, height=64, image=image)
+        explicit = node_b.resolve(width=64, height=64, image=image, ratio="none")
+        assert omitted[2] == explicit[2] and omitted[3] == explicit[3]
+        assert torch.equal(omitted[1][0], explicit[1][0])
+
+
+class TestRatioLockIntegration:
+    """The uniform rule end-to-end through `resolve()`/`_resolve_one`: the
+    ratio, once locked, always wins over whatever width/height would
+    otherwise have been -- typed values, image-aspect 0-axis derivation, or
+    (with a preset selected) the preset's own stored size."""
+
+    def test_width_anchor_when_width_is_concrete(self) -> None:
+        node = _node()
+        _, _, width, height, _, _ = _resolve_scalar(
+            node, width=1000, height=1, resize_method="stretch", ratio="4:5"
+        )
+        assert (width, height) == (1000, 1250)
+
+    def test_height_anchor_when_width_is_the_zero_sentinel(self) -> None:
+        node = _node()
+        _, _, width, height, _, _ = _resolve_scalar(
+            node, width=0, height=800, resize_method="stretch", ratio="5:4"
+        )
+        assert (width, height) == (1000, 800)
+
+    def test_both_zero_with_no_image_stays_inert(self) -> None:
+        # Nothing concrete anywhere to anchor a lock to -- unchanged "0 and
+        # 0 with no image stays 0" behavior.
+        node = _node()
+        _, _, width, height, orig_w, orig_h = _resolve_scalar(
+            node, width=0, height=0, resize_method="stretch", ratio="1:1"
+        )
+        assert (width, height) == (0, 0)
+        assert (orig_w, orig_h) == (0, 0)
+
+    def test_both_zero_with_image_conforms_after_aspect_derivation(self) -> None:
+        # Image-aspect derivation runs first (0,0 -> original size), THEN
+        # the lock overrides height from that now-concrete width -- "one
+        # uniform rule, no special cases" applies even here.
+        image = _make_image(height=100, width=200)  # 2:1, original size 200x100
+        node = _node()
+        _, resized, width, height, orig_w, orig_h = _resolve_scalar(
+            node, width=0, height=0, resize_method="stretch", ratio="1:1", image=image
+        )
+        assert (orig_w, orig_h) == (200, 100)
+        assert (width, height) == (200, 200)  # width kept from derivation, height conformed
+        assert resized.shape == (1, 200, 200, 3)
+
+    def test_multiple_of_applies_after_the_ratio_derivation(self) -> None:
+        # No image wired: `_resolve_one`'s pure-size-source path rounds
+        # BOTH final dimensions to multiple_of (pre-existing, unrelated to
+        # the ratio lock -- true even with no ratio at all). The RATIO's
+        # own contribution is specifically that HEIGHT is derived from
+        # width via the ratio (800 = 1000 * 4/5) BEFORE that final rounding
+        # ever sees it -- `conform_to_ratio`'s own snap (`_round_to_multiple`
+        # of 800) and the pipeline's later re-round of the same value agree
+        # (idempotent), which is what this pins.
+        node = _node()
+        _, _, width, height, _, _ = _resolve_scalar(
+            node, width=1000, height=1, resize_method="stretch", ratio="5:4", multiple_of=64
+        )
+        assert width == nodes_resolution._round_to_multiple(1000, 64) == 1024
+        assert height == nodes_resolution._round_to_multiple(800, 64) == 768
+
+    def test_none_ratio_is_unchanged_behavior(self) -> None:
+        image = _make_image(height=100, width=200)
+        node_a, node_b = _node(), _node()
+        locked_off = node_a.resolve(
+            width=50, height=999, resize_method="stretch", image=image, ratio="none"
+        )
+        unset = node_b.resolve(width=50, height=999, resize_method="stretch", image=image)
+        assert locked_off[2] == unset[2] and locked_off[3] == unset[3]
+
+    def test_preset_fanout_the_lock_wins_over_every_presets_own_stored_size(
+        self, context: LibraryContext
+    ) -> None:
+        # Two presets with DIFFERENT stored sizes -- the SAME node-level
+        # ratio lock overrides both, per-run, since `ratio` is not one of
+        # the five stored preset fields (orthogonal to presets).
+        presets_store.save_preset(context, "P1", _other_values(width=1000, height=1))
+        presets_store.save_preset(context, "P2", _other_values(width=500, height=999))
+        node = _node()
+        result = node.resolve(
+            width=1, height=1, presets=json.dumps(["P1", "P2"]), ratio="1:1"
+        )
+        assert result[2] == [1000, 500]  # each preset's own width kept (the anchor)
+        assert result[3] == [1000, 500]  # height conformed to match width, per preset
+
+
+class TestRatioLockMultiImage:
+    """The lock is a single node-level field, threaded through every
+    `_resolve_one` call in multi-image mode -- the shared BOX gets
+    conformed once and stays conformed for every image resized into it."""
+
+    def test_box_is_conformed_and_shared_by_every_image(
+        self, fake_execution_blocker: type
+    ) -> None:
+        a = _make_image(height=64, width=64)
+        b = _make_image(height=48, width=48)
+        node = _node()
+        result = node.resolve(width=1000, height=1, image=a, image_2=b, ratio="5:4")
+        assert result[2][0] == 1000 and result[3][0] == 800
+        assert tuple(result[1][0].shape) == (1, 800, 1000, 3)
+        assert tuple(result[6][0].shape) == (1, 800, 1000, 3)

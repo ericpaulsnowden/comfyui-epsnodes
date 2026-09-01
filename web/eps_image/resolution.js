@@ -234,6 +234,11 @@ const PASSTHROUGH_NAME = 'image'
 const ORIGINAL_SIZE_NAMES = ['original_width', 'original_height']
 const ORIGINAL_SIZE_TYPE = 'INT'
 
+//: eps_image/nodes_resolution.py INPUT_TYPES' `ratio` combo (owner ask
+//: 2026-08-28, M4 section below) -- a real, VISIBLE backend widget, unlike
+//: `presets` above.
+const RATIO_WIDGET_NAME = 'ratio'
+
 // --------------------------------------------------------------- utilities
 
 function outputIndexByName(node, name) {
@@ -600,49 +605,6 @@ export function getSourceReadoutLine(width, height) {
   }
 }
 
-/**
- * The incoming image's natural pixel size, read LIVE off whatever the
- * upstream node is already displaying — `{width, height}` or `null`.
- *
- * Why the upstream's rendered `<img>` and not a backend value: this has to
- * be useful BEFORE a Run (choosing a target size is the thing you do
- * first), and core already loads the real file for any node that shows a
- * preview — `LoadImage` from the moment a file is picked, a decode/grid
- * node after its own run. `naturalWidth/Height` on those elements is the
- * true source resolution, not the on-canvas thumbnail size.
- *
- * Deliberately shallow (no walking further up a chain of pass-through
- * nodes): one hop is what the owner's wiring is, and a wrong number here
- * would be worse than no number. Everything is optional-chained — a
- * missing graph, an unlinked slot, a `getInputNode` that a fork renamed,
- * or an upstream mid-load all degrade to `null`.
- */
-function readIncomingImageSize(node) {
-  try {
-    const slot = imageInputSlot(node)
-    if (slot < 0) return null
-    const upstream =
-      typeof node.getInputNode === 'function' ? node.getInputNode(slot) : null
-    const imgs = upstream?.imgs
-    if (!Array.isArray(imgs) || !imgs.length) return null
-    // The focused cell when the upstream is showing one (a grid pager), else
-    // its first image -- the same "which image is this node about" rule the
-    // rest of the pack uses for `imgs`/`imageIndex`.
-    const index =
-      typeof upstream.imageIndex === 'number' && upstream.imageIndex >= 0
-        ? upstream.imageIndex
-        : 0
-    const img = imgs[index] || imgs[0]
-    const w = Number(img?.naturalWidth) || 0
-    const h = Number(img?.naturalHeight) || 0
-    if (!(w > 0 && h > 0)) return null
-    return { width: w, height: h }
-  } catch (error) {
-    console.warn(PREFIX, 'could not read the incoming image size', error)
-    return null
-  }
-}
-
 /** Index of this node's `image` input, or -1. Name-based, never positional:
  * §6.5's input ORDER is not frozen the way its output order is. */
 function imageInputSlot(node) {
@@ -651,11 +613,295 @@ function imageInputSlot(node) {
   return inputs.findIndex((input) => input && input.name === 'image')
 }
 
+// ----------------------------------------------- pass-through incoming-size walk
+//
+// Owner report 2026-08-28: "If an image is plugged into a switcher, and
+// then into a resolution node, the app can't tell what the resolution is."
+// `readIncomingImageSize`'s own docstring already explained the caution
+// that shaped its original one-hop design: "a wrong number here would be
+// worse than no number." This section widens the walk WITHOUT abandoning
+// that principle -- it only ever steps through classes it can positively
+// identify as pure pass-throughs (`EPSSwitcher`, `EPSDistributor`, core
+// `Reroute`/rgthree's `Reroute (rgthree)`); anything else, known or not, is
+// a WALL whose own displayed image (if any) is read, never assumed to
+// forward something else's.
+
+//: Class ids/`.type` values this walk treats as pass-throughs. Verified
+//: against THIS repo, not guessed: `eps_image/nodes_distributor.py` class
+//: `EPSDistributor`, `eps_image/nodes_switcher.py`'s
+//: `_make_switcher_ns(class_id="EPSSwitcher", prefix="image", ...)`
+//: (root `__init__.py` registers both under these exact
+//: NODE_CLASS_MAPPINGS keys, which is what `comfyClass` carries at
+//: runtime), and core's Reroute node id -- `web/eps_image/cross_sweep.js`'s
+//: own `REROUTE_CLASSES`/`frame_saver.js`'s `resolveWiredVideo` already
+//: independently pin the same two reroute strings (own-your-helpers: this
+//: is a fresh copy, not an import, per this pack's usual convention for
+//: frontend/backend AND cross-file parity alike).
+const REROUTE_TYPES = new Set(['Reroute', 'Reroute (rgthree)'])
+
+//: Bounded walk depth (own ask: "Bounded depth (e.g. 8) and cycle-guarded")
+//: -- generous for any real workflow, small enough that a malformed graph
+//: (a cycle the id-based guard somehow missed, or a very long reroute
+//: chain) can never make this walk expensive.
+const MAX_INCOMING_WALK_DEPTH = 8
+
+/** *node*'s classId the way the rest of this pack resolves one off a LIVE
+ * litegraph node -- `comfyClass` first (real ComfyUI nodes), then
+ * `constructor.comfyClass`, then the bare litegraph `.type` (what a plain
+ * core Reroute carries, having no comfyClass of its own). Identical
+ * fallback chain to `distributor.js`/`switcher.js`'s own `classIdOf`-shaped
+ * helpers and `frame_saver.js`'s `resolveWiredVideo` -- own copy, not
+ * shared. */
+function classIdOf(node) {
+  return node?.comfyClass || node?.constructor?.comfyClass || node?.type || null
+}
+
+/** The live upstream NODE wired into *node*'s input at *slotIndex*, via
+ * litegraph's own `getInputNode` (the same API `readIncomingImageSize`
+ * always used) -- `null` for an unwired slot, a missing/renamed API, or
+ * any thrown error (fail-soft: an unreadable graph is a wall, never a
+ * guess). */
+function upstreamNodeAt(node, slotIndex) {
+  if (slotIndex < 0 || typeof node?.getInputNode !== 'function') return null
+  try {
+    return node.getInputNode(slotIndex) || null
+  } catch (error) {
+    console.warn(PREFIX, 'getInputNode failed during the incoming-size walk', error)
+    return null
+  }
+}
+
+/**
+ * The `toggles` widget value as a plain object -- own copy of
+ * `nodes_switcher.py`'s `_parse_toggles`/`cross_sweep.js`'s own
+ * `parseToggles` degrade rule (mirrored, not imported, per the round
+ * brief): malformed JSON, or JSON that isn't a plain object, degrades to
+ * "no overrides recorded" (every wired slot enabled) -- never throws.
+ */
+function parseSwitcherToggles(raw) {
+  if (typeof raw !== 'string' || raw.trim() === '') return {}
+  try {
+    const parsed = JSON.parse(raw)
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) return parsed
+  } catch {
+    // malformed -> every connected slot enabled, same as the backend.
+  }
+  return {}
+}
+
+/** Every ENABLED, WIRED `image_N` input slot of an `EPSSwitcher` node, as
+ * upstream NODE objects -- nodes_switcher.py's exact enabled rule: a
+ * toggles key is disabled ONLY when explicitly `false`; an absent key, a
+ * malformed/non-object toggles value, or a non-boolean-false value all
+ * mean enabled. Own copy of the rule `cross_sweep.js`'s `enabledSlotLinks`
+ * implements for the run-count estimator's SERIALIZED-graph view -- this
+ * one reads the LIVE litegraph node instead (`node.inputs` is an array of
+ * `{name, link}` here, not the estimator's name-keyed map), so it is
+ * re-derived rather than imported. */
+function switcherSlotUpstreams(node) {
+  const toggles = parseSwitcherToggles(widgetByName(node, 'toggles')?.value)
+  const inputs = Array.isArray(node?.inputs) ? node.inputs : []
+  const upstreams = []
+  for (let i = 0; i < inputs.length; i++) {
+    const input = inputs[i]
+    if (!input || !/^image_\d+$/.test(input.name || '')) continue
+    if (input.link == null) continue
+    if (toggles[input.name] === false) continue
+    const upstream = upstreamNodeAt(node, i)
+    if (upstream) upstreams.push(upstream)
+  }
+  return upstreams
+}
+
+/** *node*'s single upstream at the named input (or slot 0 when *inputName*
+ * is `null`, core Reroute's shape), as a one-element (or empty) array --
+ * kept the same shape `switcherSlotUpstreams` returns so the walk can
+ * treat every pass-through class uniformly. `EPSDistributor` has exactly
+ * ONE real `image` input regardless of how many of ITS OWN outputs are
+ * individually gated -- which of its outputs this walk arrived through
+ * never matters, the source is the same either way. */
+function singlePassThroughUpstream(node, inputName) {
+  const inputs = Array.isArray(node?.inputs) ? node.inputs : []
+  const slot =
+    inputName == null ? 0 : inputs.findIndex((input) => input && input.name === inputName)
+  if (slot < 0 || slot >= inputs.length) return []
+  const upstream = upstreamNodeAt(node, slot)
+  return upstream ? [upstream] : []
+}
+
+/** The live pixel size *node* itself is displaying -- generalizes the
+ * original `readIncomingImageSize`'s `.imgs`/`imageIndex` read (same
+ * fields, same "focused cell or first image" rule) so it can be applied to
+ * ANY wall node the walk reaches, not only a directly-wired one. `null`
+ * when there is nothing decoded yet to show. */
+function ownDisplayedImageSize(node) {
+  const imgs = node?.imgs
+  if (!Array.isArray(imgs) || !imgs.length) return null
+  const index =
+    typeof node.imageIndex === 'number' && node.imageIndex >= 0 ? node.imageIndex : 0
+  const img = imgs[index] || imgs[0]
+  const w = Number(img?.naturalWidth) || 0
+  const h = Number(img?.naturalHeight) || 0
+  return w > 0 && h > 0 ? { width: w, height: h } : null
+}
+
+/**
+ * Walks UP from *node*'s `image` input through pass-through classes only
+ * (`EPSSwitcher` fans into its own enabled+wired slots; `EPSDistributor`
+ * and both Reroute flavors follow their one input), collecting every
+ * reachable WALL node's own live pixel size. Bounded to
+ * `MAX_INCOMING_WALK_DEPTH` hops and cycle-guarded by node id -- a
+ * revisited node stops that branch rather than looping, so even a
+ * malformed graph (a genuine cycle) terminates. An unknown class is always
+ * a wall: its own `.imgs` is read, never assumed to forward anything.
+ *
+ * Not pure (it reads the live graph), but exported so tests can drive it
+ * against small fake node/graph fixtures the way `resolveWiredVideo`-style
+ * helpers elsewhere in this pack are tested.
+ * @param {object} node
+ * @returns {Array<{width:number, height:number}>}
+ */
+export function collectIncomingImageSizes(node) {
+  const slot = imageInputSlot(node)
+  const start = upstreamNodeAt(node, slot)
+  if (!start) return []
+
+  const sizes = []
+  const seen = new Set()
+  let frontier = [start]
+  for (let depth = 0; depth < MAX_INCOMING_WALK_DEPTH && frontier.length > 0; depth++) {
+    const next = []
+    for (const candidate of frontier) {
+      const id = candidate?.id
+      const key = id != null ? `id:${id}` : candidate
+      if (seen.has(key)) continue
+      seen.add(key)
+
+      const classId = classIdOf(candidate)
+      if (classId === 'EPSSwitcher') {
+        next.push(...switcherSlotUpstreams(candidate))
+      } else if (classId === 'EPSDistributor') {
+        next.push(...singlePassThroughUpstream(candidate, 'image'))
+      } else if (REROUTE_TYPES.has(candidate?.type) || REROUTE_TYPES.has(classId)) {
+        next.push(...singlePassThroughUpstream(candidate, null))
+      } else {
+        const size = ownDisplayedImageSize(candidate)
+        if (size) sizes.push(size)
+      }
+    }
+    frontier = next
+  }
+  return sizes
+}
+
+/**
+ * The walk's DECISION over a plain array of sizes -- pure, no graph
+ * touched, so the mixed/single/none logic is unit-tested without a live
+ * node. `'none'` for zero reachable sources (today's behavior, unchanged);
+ * `'single'` when every reachable source agrees on one width×height
+ * (reported exactly as today); `'mixed'` when they differ -- `sizes` lists
+ * each DISTINCT width×height once, in first-seen order, for an honest
+ * "mixed: …" readout rather than silently picking one ("a wrong number
+ * here would be worse than no number", generalized to a wrong CHOICE
+ * between several real numbers).
+ * @param {Array<{width:number, height:number}>} sizes
+ * @returns {{kind:'none'}
+ *   | {kind:'single', width:number, height:number}
+ *   | {kind:'mixed', sizes:Array<{width:number, height:number}>}}
+ */
+export function summarizeIncomingSizes(sizes) {
+  const valid = (Array.isArray(sizes) ? sizes : []).filter(
+    (s) => s && Number(s.width) > 0 && Number(s.height) > 0
+  )
+  if (valid.length === 0) return { kind: 'none' }
+  const first = { width: Number(valid[0].width), height: Number(valid[0].height) }
+  const allSame = valid.every(
+    (s) => Number(s.width) === first.width && Number(s.height) === first.height
+  )
+  if (allSame) return { kind: 'single', width: first.width, height: first.height }
+  const seen = new Set()
+  const distinct = []
+  for (const s of valid) {
+    const width = Number(s.width)
+    const height = Number(s.height)
+    const key = `${width}x${height}`
+    if (seen.has(key)) continue
+    seen.add(key)
+    distinct.push({ width, height })
+  }
+  return { kind: 'mixed', sizes: distinct }
+}
+
+/** `summarizeIncomingSizes(collectIncomingImageSizes(node))` -- the one
+ * live-graph entry point every caller below (the readout, the probe, and
+ * `copy from image`) shares, so they can never disagree about what is
+ * currently reachable. */
+function resolveIncomingImageSummary(node) {
+  return summarizeIncomingSizes(collectIncomingImageSizes(node))
+}
+
+/**
+ * The incoming image's natural pixel size -- `{width, height}` for a
+ * SINGLE unambiguous reachable source, else `null` (zero reachable
+ * sources, same as before this feature existed; and a MIXED result too --
+ * "a wrong number here would be worse than no number" extends to picking
+ * one of several disagreeing sources, which is exactly the "worse than no
+ * number" case, not a wrong-but-plausible read). Kept as the plain
+ * `{width,height}|null` shape for any caller that only wants a trustworthy
+ * single answer; `resolveIncomingImageSummary`/`currentSourceLine` are
+ * what the readout and `copy from image` use directly to also surface
+ * "mixed" distinctly from "nothing yet".
+ *
+ * Historically ONE HOP only (`getInputNode` straight off the `image`
+ * slot); since the 2026-08-28 owner report ("plugged into a switcher …
+ * the app can't tell what the resolution is") it walks UP through
+ * `collectIncomingImageSizes`'s pass-through classes first. Everything
+ * remains optional-chained/try-caught throughout that walk, so a missing
+ * graph, an unlinked slot, a renamed API, or an upstream mid-load all
+ * still degrade to `null` here exactly as before.
+ */
+function readIncomingImageSize(node) {
+  const summary = resolveIncomingImageSummary(node)
+  return summary.kind === 'single' ? { width: summary.width, height: summary.height } : null
+}
+
+/**
+ * The SOURCE readout line's content for *summary* -- the ordinary
+ * `getSourceReadoutLine` shape for `'single'`, a single combined `mixed`
+ * STRING (owner ask: report the ambiguity honestly, e.g. "mixed: 1024x1024,
+ * 832x1216" -- several differing sizes have no one aspect or megapixel
+ * count to show, so those two fields are dropped for this case) for
+ * `'mixed'`, and `null` for `'none'` (draw nothing, exactly today's
+ * behavior for an unconnected/empty-upstream node). Pure over
+ * `summarizeIncomingSizes`'s own result; exported for tests.
+ * @param {{kind:string, width?:number, height?:number,
+ *   sizes?:Array<{width:number, height:number}>}} summary
+ * @returns {null | {mixed:string} | {dims:string, mp:string, aspect:string}}
+ */
+export function sourceLineForSummary(summary) {
+  if (!summary) return null
+  if (summary.kind === 'single') return getSourceReadoutLine(summary.width, summary.height)
+  if (summary.kind === 'mixed' && Array.isArray(summary.sizes) && summary.sizes.length > 0) {
+    const parts = summary.sizes.map((s) => `${Math.round(s.width)}x${Math.round(s.height)}`)
+    return { mixed: `mixed: ${parts.join(', ')}` }
+  }
+  return null
+}
+
+/** `sourceLineForSummary(resolveIncomingImageSummary(node))` -- the ONE
+ * shared computation `hasSourceLine` (height math) and `drawGrid` (the
+ * actual draw) both call, so they can never disagree about whether/what
+ * the second readout line shows (the same "ask the same question"
+ * discipline that closed the original line-2-clipped bug class). */
+function currentSourceLine(node) {
+  return sourceLineForSummary(resolveIncomingImageSummary(node))
+}
+
 /** Whether the source line should be drawn right now (and therefore
  * whether the readout strip is two lines tall). One place, so the draw
  * code and every height calculation can never disagree. */
 function hasSourceLine(node) {
-  return readIncomingImageSize(node) !== null
+  return currentSourceLine(node) !== null
 }
 
 //: How long to keep watching for a just-wired upstream image to finish
@@ -693,7 +939,7 @@ function scheduleSourceProbe(node) {
     if (!node._epsGrid || node._epsGrid !== state) return // node gone/replaced
     state.sourceProbe = null
     if (!state.canvas?.isConnected) return
-    if (readIncomingImageSize(node)) {
+    if (currentSourceLine(node)) {
       applyGridHeight(node)
       applyWidthDrivenNodeSize(node)
       renderGrid(node)
@@ -781,12 +1027,29 @@ function setWidgetValue(widget, value) {
 }
 
 /** Writes both axes as real numbers (never 0 — FORMAT.md §6.5 M2) and
- * repaints. This is the ONLY function that turns a drag into widget state.
+ * repaints. This is the ONLY function that turns a drag (or `copy from
+ * image`, its other caller) into widget state.
  * (The two setWidgetValue callbacks each request a repaint too; since
- * v0.68.1 `renderGrid` coalesces all three into one paint per frame.) */
+ * v0.68.1 `renderGrid` coalesces all three into one paint per frame.)
+ *
+ * `conformNodeSizeToRatio` (M4, owner ask 2026-08-28) runs FIRST, width as
+ * the anchor, before either field is written -- computing the FINAL
+ * numbers up front, rather than writing the raw pair and hoping a wrapped
+ * width/height callback's own re-derivation lands correctly, matters here:
+ * `setWidgetValue`'s value+callback idiom means writing width THEN height
+ * separately would let width's own ratio-lock callback wrap (installed by
+ * `wireRatioLock`, forward-referenced -- see this function's own module
+ * position) derive and write height from the JUST-WRITTEN width, only for
+ * the very next line here to immediately overwrite it with the UNCONFORMED
+ * raw `height` argument, silently undoing the lock. Pre-conforming once,
+ * here, and writing the already-correct pair sidesteps that ordering
+ * hazard entirely -- the ratio-lock wrap's own re-derivation on top of an
+ * already-conformed pair is then a providable no-op (same inputs, same
+ * deterministic math), never a second, different answer. */
 function writeSize(node, width, height) {
-  setWidgetValue(widgetByName(node, 'width'), width)
-  setWidgetValue(widgetByName(node, 'height'), height)
+  const conformed = conformNodeSizeToRatio(node, width, height, 'width')
+  setWidgetValue(widgetByName(node, 'width'), conformed.width)
+  setWidgetValue(widgetByName(node, 'height'), conformed.height)
   renderGrid(node)
 }
 
@@ -1057,14 +1320,19 @@ function drawGrid(node, ctx, cssW) {
   ctx.textAlign = 'right'
   ctx.fillText(lines.mp, cssW - READOUT_INSET_X, baseY)
 
-  // Line 2 (2026-07-29 owner ask): the INCOMING image, same shape as line 1
-  // -- dims, then the reduced aspect, with megapixels right-aligned -- but
-  // entirely muted and prefixed "in", so the target size stays the one
-  // thing that reads as the node's own value. Drawn only when there is a
-  // real number to show; `hasSourceLine` gates the strip height off the
-  // exact same check, so the text can never land outside the element.
-  const source = readIncomingImageSize(node)
-  const sourceLine = source && getSourceReadoutLine(source.width, source.height)
+  // Line 2 (2026-07-29 owner ask, widened 2026-08-28 to walk through
+  // pass-through nodes): the INCOMING image, same shape as line 1 -- dims,
+  // then the reduced aspect, with megapixels right-aligned -- but entirely
+  // muted and prefixed "in", so the target size stays the one thing that
+  // reads as the node's own value. When the walk finds several DIFFERING
+  // sizes reachable (a switcher fanning in more than one size, say), that
+  // shape has no single aspect/MP to show, so `sourceLineForSummary`
+  // returns one combined "mixed: …" string instead -- drawn plain, no
+  // aspect/MP fields. Drawn only when there is a real number (or a mixed
+  // summary) to show; `hasSourceLine` gates the strip height off the exact
+  // same `currentSourceLine` call, so the text can never land outside the
+  // element.
+  const sourceLine = currentSourceLine(node)
   if (!sourceLine) scheduleSourceProbe(node)
   if (sourceLine) {
     const baseY2 = plotY + side + READOUT_LINE2_BASELINE
@@ -1074,11 +1342,15 @@ function drawGrid(node, ctx, cssW) {
     ctx.fillText(SOURCE_PREFIX, READOUT_INSET_X, baseY2)
     const prefixWidth = ctx.measureText(SOURCE_PREFIX).width
     const dimsX = READOUT_INSET_X + prefixWidth + SOURCE_PREFIX_GAP
-    ctx.fillText(sourceLine.dims, dimsX, baseY2)
-    const sourceDimsWidth = ctx.measureText(sourceLine.dims).width
-    ctx.fillText(sourceLine.aspect, dimsX + sourceDimsWidth + READOUT_ASPECT_GAP, baseY2)
-    ctx.textAlign = 'right'
-    ctx.fillText(sourceLine.mp, cssW - READOUT_INSET_X, baseY2)
+    if (sourceLine.mixed) {
+      ctx.fillText(sourceLine.mixed, dimsX, baseY2)
+    } else {
+      ctx.fillText(sourceLine.dims, dimsX, baseY2)
+      const sourceDimsWidth = ctx.measureText(sourceLine.dims).width
+      ctx.fillText(sourceLine.aspect, dimsX + sourceDimsWidth + READOUT_ASPECT_GAP, baseY2)
+      ctx.textAlign = 'right'
+      ctx.fillText(sourceLine.mp, cssW - READOUT_INSET_X, baseY2)
+    }
   }
   ctx.restore()
 }
@@ -1851,7 +2123,18 @@ function wireManualEditClearsSelection(node, state) {
  * behind if the user picks back to "(none)", is worth the two-line cost.
  * Missing/garbled preset data (deleted elsewhere between fetch and click) is
  * silently a no-op here; the backend is what "errors loudly at run time"
- * (req. 5), not this preview path. */
+ * (req. 5), not this preview path.
+ *
+ * Ratio lock wins here too (M4, owner ask 2026-08-28): a locked ratio
+ * conforms the preset's own stored size -- width kept, height recalculated
+ * -- exactly like a hand-typed pair would be, and since the preset asked
+ * for a SPECIFIC size, the panel says so (a toast naming both the
+ * requested and the applied size) rather than silently handing back
+ * something else ("a wrong number is worse than no number", applied to a
+ * silent override too). Runs inside the SAME `state.applying` guard as the
+ * plain field writes above, for the SAME reason: this is a courtesy write,
+ * not a manual edit, and must not itself clear the very selection that
+ * just produced it. */
 function applyPresetValues(node, name) {
   const state = presetsState(node)
   if (!state) return
@@ -1865,6 +2148,21 @@ function applyPresetValues(node, name) {
     for (const field of PRESET_FIELD_NAMES) {
       if (!(field in values)) continue
       setWidgetValue(widgetByName(node, field), values[field])
+    }
+    const requestedW = Number(values.width)
+    const requestedH = Number(values.height)
+    if (Number.isFinite(requestedW) && Number.isFinite(requestedH)) {
+      const conformed = conformNodeSizeToRatio(node, requestedW, requestedH, 'width')
+      if (conformed.width !== requestedW || conformed.height !== requestedH) {
+        setWidgetValue(widgetByName(node, 'width'), conformed.width)
+        setWidgetValue(widgetByName(node, 'height'), conformed.height)
+        toast(
+          node,
+          'warn',
+          `Preset "${name}" is ${requestedW} x ${requestedH}; conformed to the locked ratio -- ` +
+            `applied ${conformed.width} x ${conformed.height}.`
+        )
+      }
     }
   } finally {
     state.applying = false
@@ -2561,6 +2859,228 @@ function attachPresetsUi(node) {
   }
 }
 
+// --------------------------------------------------------------- M4: ratio lock
+//
+// Owner ask 2026-08-28: "it should be possible to select a ratio and lock
+// to it." A VISIBLE `ratio` combo (backend `nodes_resolution.py`
+// INPUT_TYPES, appended LAST -- §8 tail law, see that module's own
+// comment) plus the ONE uniform rule: whenever width or height changes for
+// ANY reason, if a ratio is locked the OTHER dimension is derived to
+// satisfy it. `conformToRatio` below is the pure math (mirrored, not
+// shared, by nodes_resolution.py's `conform_to_ratio` -- same documented
+// rule, separate implementation, tests on both). This section is only the
+// LIVE-graph glue around it: reading the current ratio/multiple_of
+// widgets, and hooking every place width/height can change so the rule is
+// never special-cased per caller.
+//
+// Orthogonal to presets (owner ask, explicit): locking a ratio must not
+// clear a preset, and choosing a preset must not clear the lock. The
+// preset feature's own `state.applying` flag (v0.67.1,
+// `clearsPresetOnManualEdit`) already exists to mark "this width/height
+// write is OURS, not a manual edit" -- `withRatioApplyGuard` below reuses
+// that EXACT flag for the ratio's own derived writes, so a ratio pick
+// never reads as a manual field edit and never clears an active selection.
+
+/** "W:H" -> `{w, h}` ints, or `null` for "none"/malformed/non-positive.
+ * Mirrors nodes_resolution.py's `parse_ratio` exactly -- own
+ * implementation, identical documented rule, tested against the same
+ * cases on both sides (own-your-helpers). Pure; exported for tests.
+ * @param {unknown} value @returns {{w:number,h:number}|null}
+ */
+export function parseRatio(value) {
+  if (typeof value !== 'string') return null
+  const match = /^(\d+):(\d+)$/.exec(value.trim())
+  if (!match) return null
+  const w = Number(match[1])
+  const h = Number(match[2])
+  if (!(w > 0) || !(h > 0)) return null
+  return { w, h }
+}
+
+/** Rounds *value* to the nearest multiple of *multipleOf* -- mirrors
+ * nodes_resolution.py's `_round_to_multiple` (off when `multipleOf <= 0`;
+ * floored at one multiple so a positive value never collapses to 0). A
+ * separate copy from this file's own `snapTo` (the grid drag's plain
+ * nearest-multiple, no floor) since the two have different edge-case
+ * contracts and `conformToRatio`'s cost must match the backend's bit for
+ * bit, not the drag's.
+ * @param {number} value @param {number} multipleOf @returns {number}
+ */
+function roundToMultipleOf(value, multipleOf) {
+  if (!(multipleOf > 0) || !(value > 0)) return value
+  const rounded = Math.round(value / multipleOf) * multipleOf
+  return Math.max(multipleOf, rounded)
+}
+
+/**
+ * Applies the ratio lock: keeps *anchor*'s own dimension of *dims* exactly,
+ * recalculates the OTHER dimension to satisfy *ratio*, then snaps that
+ * RECALCULATED dimension to *multipleOf* (when > 0) -- derive-from-ratio-
+ * first, snap-second, matching the owner's own ordering; that snap can
+ * cost up to `multipleOf / 2` px of exact ratio, the documented trade for
+ * opting into a size constraint. `ratio` unreadable by `parseRatio` (incl.
+ * `"none"`) is a no-op passthrough: *dims* comes back unchanged, so a node
+ * with the lock off behaves byte-identically to before this feature
+ * existed. *anchor*'s own dimension must be a POSITIVE concrete value to
+ * derive from; a non-positive anchor also passes *dims* through unchanged.
+ * Pure; exported for tests. Mirrored (not shared) in nodes_resolution.py's
+ * `conform_to_ratio` -- same rule, separate implementation, tests on both.
+ * @param {{width:number, height:number}} dims
+ * @param {string} ratio
+ * @param {'width'|'height'} anchor
+ * @param {number} multipleOf
+ * @returns {{width:number, height:number}}
+ */
+export function conformToRatio(dims, ratio, anchor, multipleOf) {
+  const width = Number(dims?.width) || 0
+  const height = Number(dims?.height) || 0
+  const parsed = parseRatio(ratio)
+  if (!parsed) return { width, height }
+  if (anchor === 'height') {
+    if (!(height > 0)) return { width, height }
+    const derived = Math.max(1, Math.round((height * parsed.w) / parsed.h))
+    return { width: roundToMultipleOf(derived, multipleOf), height }
+  }
+  if (!(width > 0)) return { width, height }
+  const derived = Math.max(1, Math.round((width * parsed.h) / parsed.w))
+  return { width, height: roundToMultipleOf(derived, multipleOf) }
+}
+
+/** The `ratio` widget's current value, or `'none'` when the widget is
+ * missing (pre-this-feature workflow mid-restore, or a build that never
+ * attached it -- fail-soft, same posture as every other widget read in
+ * this file). */
+function currentRatioValue(node) {
+  const value = widgetByName(node, RATIO_WIDGET_NAME)?.value
+  return typeof value === 'string' ? value : 'none'
+}
+
+/** Live-graph glue: reads the node's CURRENT `ratio`/`multiple_of` widgets
+ * and applies `conformToRatio`. The one function every write path below
+ * (a typed edit, the grid drag, `copy from image`, a preset apply, and the
+ * ratio widget's own pick) funnels through, so they can never compute the
+ * lock differently. */
+function conformNodeSizeToRatio(node, width, height, anchor) {
+  const multipleOf = Number(widgetByName(node, 'multiple_of')?.value) || 0
+  return conformToRatio({ width, height }, currentRatioValue(node), anchor, multipleOf)
+}
+
+/**
+ * Runs *fn* with the presets feature's OWN `state.applying` flag held true
+ * -- the exact re-entrancy guard `clearsPresetOnManualEdit` already
+ * consults (v0.67.1) to tell "a courtesy preset-value write" apart from "a
+ * genuine manual edit". The ratio lock's own derived writes (picking a
+ * ratio, or reconciling on reload) are neither a manual edit NOR a preset
+ * write, but they must be invisible to that same guard for the identical
+ * reason: "locking a ratio must not clear a preset" (owner ask, explicit
+ * orthogonality). A no-op passthrough (still calls *fn*) when the presets
+ * feature never attached, so this is safe to call unconditionally.
+ * try/finally so a throwing *fn* can never leave the flag stuck on.
+ */
+function withRatioApplyGuard(node, fn) {
+  const state = presetsState(node)
+  if (!state) {
+    fn()
+    return
+  }
+  state.applying = true
+  try {
+    fn()
+  } finally {
+    state.applying = false
+  }
+}
+
+/**
+ * Installs the ratio lock's live wiring on *node*:
+ *
+ * - The `ratio` widget's OWN pick: width is the anchor (owner tooltip
+ *   choice -- "selecting a ratio while none was set recomputes HEIGHT from
+ *   the current width"), guarded so it never reads as a manual preset-field
+ *   edit.
+ * - `width`/`height`'s OWN callbacks (chained on top of the M2 grid's
+ *   repaint wrap and the presets feature's manual-edit-clears-selection
+ *   wrap, both installed earlier in `attach()`): a genuine hand-typed edit
+ *   anchors on WHICHEVER field the user just touched, per the owner's own
+ *   wording ("the dimension the user just edited is the anchor"). This one
+ *   is intentionally NOT guarded -- typing directly into width/height
+ *   already clears an active preset by the pre-existing v0.67.1 rule,
+ *   unrelated to the ratio lock, and that is correct here too.
+ * - `onConfigure`: a saved workflow whose stored width/height don't
+ *   satisfy its own stored (locked) ratio -- possible only via a hand-built
+ *   or externally edited workflow file, since the panel always keeps them
+ *   in sync on every edit -- is silently reconciled (width anchor, no
+ *   toast: this is a load-time repair, not a user action to narrate) so
+ *   the panel never shows a lock alongside numbers that contradict it.
+ *
+ * `writeSize` (the grid drag and `copy from image`'s shared write path)
+ * and `applyPresetValues` each conform explicitly at their own call sites
+ * instead of relying on these wraps' side effects -- both write width AND
+ * height together, and this file's `setWidgetValue`-triggers-callback
+ * ordering would otherwise let a later explicit height write silently
+ * undo an earlier wrap-triggered conform. See each function's own comment.
+ */
+function wireRatioLock(node) {
+  const ratioWidget = widgetByName(node, RATIO_WIDGET_NAME)
+  if (ratioWidget) {
+    const originalRatioCallback = ratioWidget.callback
+    ratioWidget.callback = function (...args) {
+      let result
+      try {
+        result = originalRatioCallback?.apply(this, args)
+      } finally {
+        withRatioApplyGuard(node, () => {
+          const w = Number(widgetByName(node, 'width')?.value) || 0
+          const h = Number(widgetByName(node, 'height')?.value) || 0
+          const conformed = conformNodeSizeToRatio(node, w, h, 'width')
+          setWidgetValue(widgetByName(node, 'height'), conformed.height)
+        })
+        renderGrid(node)
+      }
+      return result
+    }
+  }
+
+  for (const name of ['width', 'height']) {
+    const widget = widgetByName(node, name)
+    if (!widget) continue
+    const originalCallback = widget.callback
+    widget.callback = function (...args) {
+      let result
+      try {
+        result = originalCallback?.apply(this, args)
+      } finally {
+        const w = Number(widgetByName(node, 'width')?.value) || 0
+        const h = Number(widgetByName(node, 'height')?.value) || 0
+        const conformed = conformNodeSizeToRatio(node, w, h, name)
+        const otherName = name === 'width' ? 'height' : 'width'
+        setWidgetValue(widgetByName(node, otherName), conformed[otherName])
+      }
+      return result
+    }
+  }
+
+  const originalOnConfigure = node.onConfigure
+  node.onConfigure = function ratioLockOnConfigure(info) {
+    let result
+    try {
+      result = originalOnConfigure?.call(this, info)
+    } finally {
+      try {
+        withRatioApplyGuard(this, () => {
+          const w = Number(widgetByName(this, 'width')?.value) || 0
+          const h = Number(widgetByName(this, 'height')?.value) || 0
+          const conformed = conformNodeSizeToRatio(this, w, h, 'width')
+          if (conformed.height !== h) setWidgetValue(widgetByName(this, 'height'), conformed.height)
+        })
+      } catch (error) {
+        console.warn(PREFIX, 'ratio-lock post-configure reconcile failed', error)
+      }
+    }
+    return result
+  }
+}
+
 // --------------------------------------------------------------- lifecycle
 
 /** Frontend-only one-time setup: inject the grid's stylesheet once. */
@@ -2673,8 +3193,24 @@ const COPY_FROM_IMAGE_LABEL = 'copy from image'
  */
 function attachCopyFromImage(node) {
   const button = node.addWidget('button', COPY_FROM_IMAGE_LABEL, null, () => {
-    const size = readIncomingImageSize(node)
-    if (!size) {
+    // 2026-08-28: the walk (`resolveIncomingImageSummary`) may now find
+    // SEVERAL differing reachable sizes through a switcher/distributor --
+    // "worse than no number" applies to picking one of those just as much
+    // as to a wrong pixel count, so this refuses with a message instead of
+    // guessing (owner ask: "make copy from image refuse-with-a-message
+    // rather than pick one").
+    const summary = resolveIncomingImageSummary(node)
+    if (summary.kind === 'mixed') {
+      const parts = summary.sizes.map((s) => `${s.width} x ${s.height}`).join(', ')
+      toast(
+        node,
+        'warn',
+        `The wired sources report different sizes (${parts}) -- copy from image won't guess ` +
+          'which one you mean. Wire a single unambiguous source, or set width/height by hand.'
+      )
+      return
+    }
+    if (summary.kind !== 'single') {
       const wired = imageInputSlot(node) >= 0 && node.inputs?.[imageInputSlot(node)]?.link != null
       toast(
         node,
@@ -2685,7 +3221,22 @@ function attachCopyFromImage(node) {
       )
       return
     }
+    const size = { width: summary.width, height: summary.height }
+    // Ratio lock wins here too (owner ask 2026-08-28): width kept, height
+    // recalculated -- and since the image asked for a SPECIFIC size, say so
+    // rather than silently handing back something else. `writeSize` itself
+    // performs the identical conform before writing; this second call is
+    // only to decide whether the two differ enough to be worth a toast.
+    const conformed = conformNodeSizeToRatio(node, size.width, size.height, 'width')
     writeSize(node, size.width, size.height)
+    if (conformed.width !== size.width || conformed.height !== size.height) {
+      toast(
+        node,
+        'warn',
+        `The wired image is ${size.width} x ${size.height}; conformed to the locked ratio -- ` +
+          `applied ${conformed.width} x ${conformed.height}.`
+      )
+    }
     node.graph?.setDirtyCanvas(true, true)
   })
   // BOTH flags, and they are NOT interchangeable (executionUtil.ts says so
@@ -2768,6 +3319,10 @@ export function attach(node) {
 
   attachSizeGrid(node)
   attachPresetsUi(node)
+  // After attachPresetsUi: wireRatioLock reuses the presets feature's own
+  // `state.applying` guard (withRatioApplyGuard), which only exists once
+  // attachPresetsUi has run (fail-soft either way -- see that guard's doc).
+  wireRatioLock(node)
   // Last, so the unshift lands above widgets that are all already present.
   attachCopyFromImage(node)
 
