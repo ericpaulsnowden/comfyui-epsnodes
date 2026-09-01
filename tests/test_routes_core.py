@@ -922,3 +922,67 @@ class TestMountedFilesystemDiscovery:
         )
         entries = lora_routes._platform_root_entries(False)
         assert [e["path"] for e in entries] == ["/mnt/nas", "/"]
+
+
+# --------- v0.87.1: an unready server must not take the whole pack down
+
+
+class TestRegisterGuardsAnUnreadyServer:
+    """Owner report 2026-08-28 ("the nodes aren't loading ... as if the
+    plugin doesn't exist"): `__init__.py` calls `routes.register()` at
+    MODULE SCOPE, so an exception there aborted the import and ComfyUI
+    registered ZERO nodes. The guard turns that into a diagnosable error
+    the caller degrades on -- nodes load, panels stay inert."""
+
+    @staticmethod
+    def _with_prompt_server(monkeypatch, instance):
+        import sys
+        import types
+
+        module = types.ModuleType("server")
+
+        class _PromptServer:
+            pass
+
+        _PromptServer.instance = instance
+        module.PromptServer = _PromptServer
+        monkeypatch.setitem(sys.modules, "server", module)
+
+    def test_instance_none_raises_a_named_error_not_attributeerror(
+        self, monkeypatch, context
+    ) -> None:
+        import pytest
+
+        from lora_library import routes
+
+        self._with_prompt_server(monkeypatch, None)
+        with pytest.raises(RuntimeError, match="PromptServer is not ready"):
+            routes.register(context)
+
+    def test_instance_without_routes_raises_the_same_named_error(
+        self, monkeypatch, context
+    ) -> None:
+        import pytest
+
+        from lora_library import routes
+
+        class _Half:
+            routes = None
+
+        self._with_prompt_server(monkeypatch, _Half())
+        with pytest.raises(RuntimeError, match="PromptServer is not ready"):
+            routes.register(context)
+
+    def test_the_message_says_nodes_still_work(self, monkeypatch, context) -> None:
+        import pytest
+
+        from lora_library import routes
+
+        self._with_prompt_server(monkeypatch, None)
+        with pytest.raises(RuntimeError) as excinfo:
+            routes.register(context)
+        message = str(excinfo.value)
+        # The half that still works must be named, or the log reads as a
+        # total failure and sends the owner hunting the wrong thing.
+        assert "NODES still work" in message
+        assert "panels" in message

@@ -4197,6 +4197,34 @@ dated 2026-08-26 comments at each site:
   v0.5.74 (save/open/browse off-loop + cprb's 5 s fs-browse timeout);
   comfyui-premiere-bridge needed nothing (hardened 2026-08-08).
 
+## §7.8 Import-time failure containment (v0.87.1)
+
+Owner report 2026-08-28: "the nodes aren't loading into ComfyUI on the
+linux machine — all of the nodes show up as errors as if the plugin
+doesn't exist." `__init__.py` builds the `LibraryContext` and registers the
+core library routes at MODULE SCOPE, and those two lines were the last
+UNGUARDED ones in the file — every other registration has been wrapped
+since the 2026-07-26 import-hazard audit. Any exception there (an unready
+`PromptServer`, an unreachable library mount, a permissions error) aborted
+the module import, so ComfyUI registered ZERO nodes and every node in
+every saved workflow rendered red — a total failure indistinguishable from
+"the pack isn't installed".
+
+Both are now guarded, LOUDLY (the audit's other half — a masked failure
+that looks like a working pack is worse than a noisy one): the log names
+what broke AND what still works. `routes.register` additionally raises a
+NAMED `RuntimeError` when `PromptServer.instance`/`.routes` is missing
+instead of a bare `AttributeError` on `None`, because ComfyUI only
+guarantees the server exists before custom-node import on its normal
+launch path — a headless/embedded/API-only start, or a future startup
+reorder, can invert it. Verified: with `PromptServer.instance = None`, all
+17 backend nodes still register and only the panels degrade.
+
+**The failure ladder is now**: context fails → nodes load, library-backed
+nodes refuse at queue time with a named error; routes fail → nodes load
+and run, panels are inert; a feature module fails → only that feature is
+missing. Nothing can take the whole pack down but a syntax error.
+
 ## §8 Versioning & stability
 
 - Backend version: `lora_library/version.py` (source of truth); frontend:

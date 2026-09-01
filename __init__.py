@@ -95,8 +95,36 @@ def _build_context() -> LibraryContext:
     )
 
 
-_context = _build_context()
-_routes.register(_context)
+# v0.87.1 (owner report 2026-08-28: "the nodes aren't loading into ComfyUI
+# on the linux machine -- all of the nodes show up as errors as if the
+# plugin doesn't exist"). These two lines run at MODULE SCOPE, so ANY
+# exception here aborted the whole import and ComfyUI registered ZERO
+# nodes -- every node in every saved workflow rendering red. Every OTHER
+# registration in this file has been guarded for exactly this reason since
+# the 2026-07-26 import-hazard audit; these two were the last unguarded
+# ones. Guarded LOUDLY, never silently (that audit's other half): the log
+# names what broke AND what still works, because a masked failure that
+# looks like a working pack is worse than a noisy one.
+try:
+    _context = _build_context()
+except Exception:
+    logger.exception(
+        "EPSNodes: could not build the library context. The NODES still "
+        "load and appear in the menu, but anything that reads the library "
+        "folder (Prompt Notebook, Prompt Builder, LoRA Picker, the State "
+        "Controllers) will refuse at queue time until this is fixed."
+    )
+    _context = None
+
+if _context is not None:
+    try:
+        _routes.register(_context)
+    except Exception:
+        logger.exception(
+            "EPSNodes: the library routes failed to register. Every NODE "
+            "still loads and runs; the on-node PANELS will be blank or "
+            "inert because their HTTP routes are missing."
+        )
 
 # Class ids are FROZEN once shipped (FORMAT.md §8): saved workflows reference
 # nodes by id, and renaming one silently breaks every workflow containing it.

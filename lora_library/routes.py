@@ -1250,5 +1250,24 @@ def register(context: LibraryContext) -> None:
     """
     from server import PromptServer  # ComfyUI's module; import only inside ComfyUI
 
-    _register_all(context, PromptServer.instance.routes)
+    # v0.87.1: name the failure instead of raising a bare AttributeError on
+    # `None.routes`. ComfyUI normally constructs PromptServer before it
+    # imports custom nodes, but a headless/embedded/API-only launch (or a
+    # future startup reorder) can invert that -- and because __init__.py
+    # calls this at MODULE SCOPE, the old AttributeError took the ENTIRE
+    # pack down with it: every node in every saved workflow rendered as a
+    # red "missing node". The caller now degrades instead (nodes load,
+    # panels stay inert), and this message says which half is broken.
+    server = getattr(PromptServer, "instance", None)
+    routes = getattr(server, "routes", None)
+    if routes is None:
+        raise RuntimeError(
+            "ComfyUI's PromptServer is not ready yet (PromptServer.instance"
+            f"{'' if server is None else '.routes'} is None), so the EPSNodes "
+            "library routes cannot be attached. The NODES still work; the "
+            "panels (Prompt Notebook, LoRA Picker, State Controllers) need "
+            "these routes. This usually means custom nodes were imported "
+            "before the server was constructed."
+        )
+    _register_all(context, routes)
     logger.info("EPSNodes: routes registered")
