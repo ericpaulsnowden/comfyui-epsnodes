@@ -3359,7 +3359,22 @@ function populateEditor(state, text, mtime, name) {
   const textMidEdit =
     document.activeElement === state.textarea &&
     state.textarea.value !== state.lastSavedText
-  if (!textMidEdit) state.textarea.value = text ?? ''
+  // v0.87.3 (owner report 2026-08-28: "tabbing to another workflow and
+  // tabbing back erases any changes"). A tab switch tears the panel down
+  // and rebuilds it, so this ran with the FILE's text and painted it over
+  // an unsaved edit -- and because refreshDirty() below then saw
+  // textarea === lastSavedText, it CLEARED the draft too. The edit was not
+  // just hidden, it was destroyed, by a repaint the user never asked for.
+  //
+  // The draft is the text to SHOW; the file text stays `lastSavedText`,
+  // the baseline every dirty/Save comparison is against. Restoring the two
+  // separately is what makes an audition survive a repaint while Save
+  // still knows exactly what changed. Only a real user action (selecting
+  // another entry, saving, or typing back to the saved text) clears a
+  // draft -- never a re-render.
+  const draft = draftTextFor(state, name)
+  const shown = draft !== null ? draft : text ?? ''
+  if (!textMidEdit) state.textarea.value = shown
   state.lastSavedText = text ?? ''
   state.baseMtime = typeof mtime === 'number' ? mtime : null
   state.textarea.disabled = false
@@ -6165,6 +6180,25 @@ export function parseDraftsWidgetValue(raw) {
   return out
 }
 
+/**
+ * The unsaved text this panel is holding for *name*, or `null` when there
+ * is none (v0.87.3). `null` rather than `''` on purpose: an empty string
+ * is a legitimate draft (the user cleared the box and hasn't saved), and
+ * collapsing the two would silently discard exactly that edit.
+ *
+ * Only ever consulted for a LIVE entry: a pinned panel shows the pin, and
+ * category mode has no entry text at all.
+ */
+export function draftTextFor(state, name) {
+  if (typeof name !== 'string' || !name) return null
+  if (isPinned(state)) return null
+  if (state.activeCategory != null) return null
+  const drafts = state.drafts
+  if (!drafts || !Object.prototype.hasOwnProperty.call(drafts, name)) return null
+  const value = drafts[name]
+  return typeof value === 'string' ? value : null
+}
+
 /** Writes `state.drafts` into the `drafts` widget (JSON) through the
  * widget's real setter + callback -- same idiom as syncEntryWidget -- and
  * refreshes the muted hint (updateSelectionHint), since the unsaved-edit
@@ -6313,6 +6347,34 @@ function syncDraftsFromWidget(state) {
   if (!widget) return
   state.drafts = parseDraftsWidgetValue(widget.value)
   updateSelectionHint(state)
+  restoreDraftIntoEditor(state)
+}
+
+/**
+ * Put the active entry's draft back into the textarea (v0.87.3, the second
+ * half of the tab-switch fix).
+ *
+ * `populateEditor` consulting `draftTextFor` is not enough on its own: on
+ * a restore, `reloadNow`'s INSTANT CACHED PAINT can reach the editor
+ * before `syncDraftsFromWidget` has parsed the widget, so it paints the
+ * file's text while `state.drafts` is still empty. Re-applying here covers
+ * that order; `populateEditor` covers the other (a network reload landing
+ * after the sync). Both are idempotent, so whichever runs second is a
+ * no-op.
+ *
+ * Never fights a live cursor: if the user is typing in the textarea right
+ * now, their keystrokes are the truth and the debounced sync will catch
+ * up.
+ */
+function restoreDraftIntoEditor(state) {
+  const name = state.activeName
+  if (!name) return // selection not restored yet -- populateEditor covers it
+  const draft = draftTextFor(state, name)
+  if (draft === null) return
+  if (document.activeElement === state.textarea) return
+  if (state.textarea.value === draft) return
+  state.textarea.value = draft
+  refreshDirty(state)
 }
 
 // ---------------------------------------------------------------------------

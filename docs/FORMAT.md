@@ -505,6 +505,25 @@ execution — **the file is the truth; the UI is a view.**
 
 ### §6.1 `LoraLibraryNotebook` (display: "EPS Prompt Notebook")
 
+**A repaint must never destroy a draft (v0.87.3, owner report
+2026-08-28: "tabbing to another workflow and tabbing back erases any
+changes ... switching between workflows shouldn't ever reset anything in
+our nodes").** A tab switch tears the panel down and rebuilds it, and the
+rebuild repainted the editor from the FILE — then `refreshDirty()` saw
+`textarea === lastSavedText` and CLEARED the draft. The edit wasn't merely
+hidden, it was destroyed by a re-render the user never asked for. Fixed on
+both sides of the restore race, because either can win: `populateEditor`
+now shows `draftTextFor(state, name)` when one exists (keeping the FILE's
+text as `lastSavedText`, so dirty/Save comparisons are unchanged), and
+`syncDraftsFromWidget` re-applies the draft to the editor afterwards for
+the case where `reloadNow`'s INSTANT CACHED PAINT beat the widget parse.
+Both are idempotent and neither ever overwrites a textarea the user is
+typing in. `draftTextFor` returns `null`, never `''`, so "cleared the box
+and hasn't saved" stays a real draft. RULE: only a user ACTION clears a
+draft — saving, typing back to the saved text, or selecting a different
+entry (the owner's own list of acceptable resets). A re-render is not an
+action.
+
 **Unsaved-edit `drafts` (v0.87.0, owner ask 2026-08-28: "if you change a
 prompt that is selected and run it without saving, it should run the
 changed prompt").** A TAIL-appended (after `pinned`, §8) hidden `drafts`

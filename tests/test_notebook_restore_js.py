@@ -608,6 +608,19 @@ out.drafts = {
   nullValue: nb.parseDraftsWidgetValue(null),
   undefinedValue: nb.parseDraftsWidgetValue(undefined)
 }
+// v0.87.3: a repaint must SHOW the draft, never overwrite it
+{
+  const base = (drafts, extra) => ({ drafts, activeCategory: null, pinned: '', ...extra })
+  out.draftLookup = {
+    present: nb.draftTextFor(base({ A: 'edited' }), 'A'),
+    absent: nb.draftTextFor(base({ B: 'x' }), 'A'),
+    emptyStringIsADraft: nb.draftTextFor(base({ A: '' }), 'A'),
+    noName: nb.draftTextFor(base({ A: 'x' }), ''),
+    noDrafts: nb.draftTextFor(base(null), 'A'),
+    nonString: nb.draftTextFor(base({ A: 42 }), 'A'),
+    categoryMode: nb.draftTextFor(base({ A: 'x' }, { activeCategory: 'Cat' }), 'A')
+  }
+}
 process.stdout.write(JSON.stringify(out))
 """
 
@@ -1141,7 +1154,10 @@ def test_collapsed_sections_export_list_is_additive(source: str) -> None:
     )
     for signature in added_this_round:
         assert signature in source, signature
-    added_v0_86_0 = ("export function parseDraftsWidgetValue(raw)",)
+    added_v0_86_0 = (
+        "export function parseDraftsWidgetValue(raw)",
+        "export function draftTextFor(state, name)",
+    )
     for signature in added_v0_86_0:
         assert signature in source, signature
     assert source.count("\nexport function ") == (
@@ -1805,3 +1821,40 @@ class TestDraftsM4:
         pinned_branch = hint.split("if (isPinned(state)) {", 1)[1].split("\n  }\n", 1)[0]
         assert "draftCount" not in pinned_branch
         assert "drafts" not in pinned_branch
+
+
+# ------------- v0.87.3: switching workflows must not erase an audition
+
+
+class TestDraftSurvivesARepaint:
+    """Owner report 2026-08-28: "tabbing to another workflow and tabbing
+    back erases any changes you've made ... switching between workflows
+    shouldn't ever reset anything in our nodes." A tab switch rebuilds the
+    panel, which repainted the editor from the FILE -- and refreshDirty()
+    then saw textarea === lastSavedText and CLEARED the draft, so the edit
+    wasn't merely hidden, it was destroyed by a re-render."""
+
+    def test_draft_lookup_truth_table(self, cache_api: dict) -> None:
+        d = cache_api["draftLookup"]
+        assert d["present"] == "edited"
+        assert d["absent"] is None
+        assert d["noName"] is None
+        assert d["noDrafts"] is None
+        assert d["nonString"] is None
+        assert d["categoryMode"] is None
+
+    def test_an_empty_draft_is_still_a_draft(self, cache_api: dict) -> None:
+        # Clearing the box and not saving is a real edit; collapsing '' to
+        # "no draft" would silently discard exactly that.
+        assert cache_api["draftLookup"]["emptyStringIsADraft"] == ""
+
+    def test_populate_editor_shows_the_draft_but_keeps_the_file_baseline(
+        self, source: str
+    ) -> None:
+        body = source.split("function populateEditor(state, text, mtime, name)", 1)[1]
+        body = body.split("\nfunction ", 1)[0]
+        assert "const draft = draftTextFor(state, name)" in body
+        assert "const shown = draft !== null ? draft : text ?? ''" in body
+        assert "state.textarea.value = shown" in body
+        # the dirty/Save baseline stays the FILE's text, never the draft
+        assert "state.lastSavedText = text ?? ''" in body

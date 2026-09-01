@@ -224,7 +224,9 @@ captions).
   screen, not the saved file. The status line says so ("1 unsaved edit —
   runs as edited") so it's never invisible, and saving (or undoing back to
   the saved text) returns to normal. Images saved during an audition record
-  the text they actually used.
+  the text they actually used. Switching workflow tabs never disturbs it —
+  only saving, undoing back to the saved text, or selecting a different
+  prompt resets an audition.
 - **Selected prompts run in list order (v0.85.0).** The order prompts run
   in — and the `t1`, `t2`, `t3` parts of your filenames — follows the order
   they appear in the notebook, not the order you happened to click them.
