@@ -343,13 +343,36 @@ def _warn_on_duplicate_installs() -> None:
         )
 
 
-_warn_on_duplicate_installs()
+try:
+    _warn_on_duplicate_installs()
+except Exception:  # a diagnostic must never be the thing that breaks startup
+    logger.exception("EPSNodes: duplicate-install check failed (harmless)")
 
 __all__ = ["NODE_CLASS_MAPPINGS", "NODE_DISPLAY_NAME_MAPPINGS", "WEB_DIRECTORY", "__version__"]
+
+# v0.87.2 (owner traceback 2026-08-28, the CONFIRMED cause of "all of the
+# nodes show up as errors as if the plugin doesn't exist"): this banner
+# used to call `_context.library_dir()`, and that method CREATES the
+# folder (`_ensure_dir` -> `mkdir(parents=True)`). On the owner's Linux box
+# the library lives on a gvfs SMB mount that is not mounted yet when
+# ComfyUI starts, so the mkdir raised FileNotFoundError at MODULE SCOPE and
+# took the entire pack down -- 18 nodes hidden by a LOG LINE.
+#
+# `configured_library_dir()` is the pure twin (its own docstring: "no
+# mkdir, no stat, never raises"), which is all a banner ever needed: it
+# NAMES the folder. Nothing at import time should create anything on a
+# network mount -- the stores create it on first real use, where a failure
+# has somewhere sane to surface.
+try:
+    _library_display = (
+        _context.configured_library_dir() if _context is not None else "(context unavailable)"
+    )
+except Exception:  # pragma: no cover -- documented pure, belt and braces
+    _library_display = "(unknown)"
 
 logger.info(
     "EPSNodes v%s loaded (%d nodes; library: %s)",
     __version__,
     len(NODE_CLASS_MAPPINGS),
-    _context.library_dir(),
+    _library_display,
 )

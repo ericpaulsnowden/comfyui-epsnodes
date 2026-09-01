@@ -4220,6 +4220,22 @@ launch path — a headless/embedded/API-only start, or a future startup
 reorder, can invert it. Verified: with `PromptServer.instance = None`, all
 17 backend nodes still register and only the panels degrade.
 
+**CONFIRMED cause (v0.87.2, owner traceback 2026-08-28).** The startup
+banner called `_context.library_dir()` — and that method CREATES the
+folder (`_ensure_dir` → `mkdir(parents=True)`). With the library on a gvfs
+SMB mount that is not mounted when ComfyUI starts, the mkdir raised
+`FileNotFoundError` at module scope and hid all 18 nodes. **A log line was
+taking the pack down.** It now uses `configured_library_dir()`, the pure
+twin ("no mkdir, no stat, never raises") — a banner only ever needed to
+NAME the folder. RULE: nothing at import time may create anything on a
+network mount; the stores create it on first real use, where a failure has
+somewhere sane to surface (and still raises loudly there — unchanged).
+`_warn_on_duplicate_installs()` is guarded for the same reason: a
+diagnostic must never be what breaks startup. NOTE: no startup script has
+ever gated ComfyUI on the NAS being mounted — the pack is mount-AWARE (the
+§5 Browse… picker lists only mounted shares; routes degrade with named
+errors) but must never mount-DEPEND at import.
+
 **The failure ladder is now**: context fails → nodes load, library-backed
 nodes refuse at queue time with a named error; routes fail → nodes load
 and run, panels are inert; a feature module fails → only that feature is

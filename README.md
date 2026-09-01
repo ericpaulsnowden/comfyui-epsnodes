@@ -112,6 +112,20 @@ Two dials on *your* side that measurably matter at scale:
   exploratory sweeps and small iteration sweeps in separate workflows and
   the caches work for you.
 
+### If the pack doesn't load at all
+
+Every node showing red ("missing node") means the pack failed to import.
+Since v0.87.2 that can no longer be caused by your library folder: if the
+NAS/share isn't mounted when ComfyUI starts, the nodes still load and only
+the library-backed panels are affected — the ComfyUI console will say
+which half is broken. Check the console for lines starting `EPSNodes:`.
+
+Note the pack never blocks or delays ComfyUI startup waiting for a mount.
+If you want ComfyUI itself to wait for a share on Linux, that belongs in
+your own service/launch setup — and prefer a system mount (fstab/systemd
+`.mount`) over a gvfs one, since gvfs shares belong to a desktop login
+session and often aren't visible to a service-started ComfyUI at all.
+
 ## EPS Prompt Notebook (shipped)
 
 `EPSNodes → EPS Prompt Notebook`: a two-pane editor inside the node — entry

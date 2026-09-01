@@ -986,3 +986,60 @@ class TestRegisterGuardsAnUnreadyServer:
         # total failure and sends the owner hunting the wrong thing.
         assert "NODES still work" in message
         assert "panels" in message
+
+
+class TestBannerNeverCreatesTheLibrary:
+    """Owner traceback 2026-08-28: __init__.py's startup banner called
+    `_context.library_dir()`, which CREATES the folder -- on a gvfs mount
+    that wasn't mounted yet the mkdir raised at MODULE SCOPE and hid all
+    18 nodes. A log line must never create anything on a network mount."""
+
+    def test_configured_library_dir_never_creates_an_unreachable_path(
+        self, context, tmp_path
+    ) -> None:
+        # The owner's exact shape: a configured library under a mount point
+        # that does not exist. Naming it must succeed and create NOTHING --
+        # no mkdir, hence no FileNotFoundError to escape at import.
+        unreachable = tmp_path / "not-a-mount" / "share" / "docs"
+        context.save_config({"library_dir": str(unreachable)})
+        named = context.configured_library_dir()
+        assert named == unreachable
+        assert not unreachable.exists()
+        assert not unreachable.parent.exists()
+
+    def test_library_dir_still_raises_on_an_unreachable_mount(
+        self, context, tmp_path
+    ) -> None:
+        # The behaviour the STORES rely on is unchanged: a real caller that
+        # needs the folder still gets a loud OSError, which routes surface
+        # as a clean error instead of a dead pack.
+        import pytest
+
+        unreachable = tmp_path / "nope" / "share"
+        context.save_config({"library_dir": str(unreachable / "docs")})
+        (tmp_path / "nope").mkdir()
+        (tmp_path / "nope").chmod(0o500)  # unwritable -> mkdir fails
+        try:
+            with pytest.raises(OSError):
+                context.library_dir()
+        finally:
+            (tmp_path / "nope").chmod(0o700)
+
+    def test_library_dir_still_creates_for_real_callers(self, context) -> None:
+        # The banner switched away from this one; the STORES still rely on
+        # it creating the folder on first real use.
+        created = context.library_dir()
+        assert created.is_dir()
+
+    def test_the_banner_uses_the_pure_twin(self) -> None:
+        from pathlib import Path as _P
+
+        source = (_P(__file__).resolve().parents[1] / "__init__.py").read_text(encoding="utf-8")
+        banner = source.split("EPSNodes v%s loaded", 1)[1]
+        assert "_library_display" in banner
+        # No CODE may call the creating twin at module scope (the comment
+        # above the fix names it, so strip comment lines before checking).
+        code = "\n".join(
+            line for line in source.splitlines() if not line.lstrip().startswith("#")
+        )
+        assert "_context.library_dir()" not in code
