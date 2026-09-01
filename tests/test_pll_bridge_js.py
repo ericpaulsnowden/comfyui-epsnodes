@@ -570,6 +570,12 @@ def _method_body(source_text: str, signature: str) -> str:
     return source_text[start : start + end.start()]
 
 
+#: `_beginCategoryRename`'s signature (2026-08-28: gained a 2nd, defaulted
+#: `initialText` param for the tab-switch draft restore) -- shared by both
+#: `_method_body()` lookups below, so it is spelled out exactly once.
+BEGIN_CATEGORY_RENAME_SIGNATURE = "_beginCategoryRename(category, initialText = category)"
+
+
 def test_layout_token_bumps_in_save_and_guards_the_poll(controller_source: str) -> None:
     """Owner report 2026-08-20 (a reorder "moved, then moved back, then showed
     up where I had moved them"): the sets-poll's layout GET used to paint
@@ -777,9 +783,12 @@ def test_group_headers_rename_in_place_on_double_click(controller_source: str) -
     header = _method_body(controller_source, "_buildCategoryHeader(category)")
     assert "header.addEventListener('dblclick'" in header
     assert "this._beginCategoryRename(category)" in header
-    begin = _method_body(controller_source, "_beginCategoryRename(category)")
+    # 2026-08-28: gained a 2nd, defaulted param (initialText) for the
+    # tab-switch draft restore below -- the call site above stays 1-arg.
+    begin = _method_body(controller_source, BEGIN_CATEGORY_RENAME_SIGNATURE)
     assert "const header = this._headerElOf(category)" in begin  # the CURRENT element, post re-render
     assert "className: 'llsc-inline-rename'" in begin
+    assert "input.value = initialText" in begin
     assert "if (event.key === 'Enter') {" in begin
     assert "} else if (event.key === 'Escape') {" in begin
     assert "input.addEventListener('blur'" in begin
@@ -892,7 +901,8 @@ const out = {
   exports: {
     statesLocationLine: typeof c.statesLocationLine === 'function',
     setsDirOf: typeof c.setsDirOf === 'function',
-    parseCollapsedGroups: typeof c.parseCollapsedGroups === 'function'
+    parseCollapsedGroups: typeof c.parseCollapsedGroups === 'function',
+    parseRenameDraft: typeof c.parseRenameDraft === 'function'
   },
   // Task 3 (2026-08-25): notebook.js's parseCollapsedSections() tolerance
   // pins, by hand, against controller.js's own duplicate.
@@ -908,6 +918,25 @@ const out = {
     c.parseCollapsedGroups(undefined),
     c.parseCollapsedGroups(42),
     c.parseCollapsedGroups({ A: true }) // a plain object, not an array
+  ],
+  // Tab-switch rename fix (2026-08-28): PROP_RENAME_DRAFT's own fail-soft
+  // parser, same tolerance shape as parseCollapsedGroups() above.
+  renameDraftParse: [
+    c.parseRenameDraft(['Group A', 'Group A2']),
+    c.parseRenameDraft('["Group A","Group A2"]'), // a hand-edited JSON string round-trips
+    c.parseRenameDraft([]), // no open rename
+    c.parseRenameDraft(['Group A']), // wrong length
+    c.parseRenameDraft(['Group A', 'x', 'y']), // wrong length
+    c.parseRenameDraft(['', 'x']), // empty category
+    c.parseRenameDraft([1, 'x']), // non-string category
+    c.parseRenameDraft(['Group A', 1]), // non-string text
+    c.parseRenameDraft('not json'), // malformed JSON
+    c.parseRenameDraft(''), // blank string
+    c.parseRenameDraft('   '), // whitespace-only string
+    c.parseRenameDraft(null),
+    c.parseRenameDraft(undefined),
+    c.parseRenameDraft(42),
+    c.parseRenameDraft({ category: 'Group A', text: 'x' }) // a plain object, not an array
   ],
   defaultSameDir: c.statesLocationLine({ library_dir: '/home/u/lib', default_library_dir: '/home/u/lib/' }),
   defaultWinSeparators: c.statesLocationLine({ library_dir: 'C:\\\\Users\\\\e\\\\lib', default_library_dir: 'C:/Users/e/lib' }),
@@ -1486,6 +1515,153 @@ class TestCollapsedGroupsPersistPerWorkflowV20260825:
     def test_never_reaches_for_localstorage(self, controller_source: str) -> None:
         """Persist WITH THE WORKFLOW (a node property) -- not a browser-local
         stash that would desync between machines or a re-imported workflow."""
+        assert "localStorage" not in controller_source
+
+
+class TestRenameDraftSurvivesTabSwitchV20260828:
+    """Owner report 2026-08-28: "tabbing to another workflow and tabbing
+    back erases any changes you've made ... switching between workflows
+    shouldn't ever reset anything." A tab switch tears the controller node
+    down and rebuilds it; `_categoryRename` (the open inline group-rename
+    `<input>`, see `_beginCategoryRename()`) was pure in-memory/DOM state --
+    `onRemoved()` just nulled it, uncommitted. The fix mirrors
+    notebook.js's v0.87.3/v0.87.4 `drafts` widget fix (same bug class, a
+    different file) using this file's own established idiom instead: a
+    node PROPERTY (`PROP_RENAME_DRAFT`, same shape as `PROP_COLLAPSED_GROUPS`
+    just above), a fail-soft parser (`parseRenameDraft`), and a 2-phase
+    restore (`onPropertyChanged` stashes it, `_restorePendingRenameDraft()`
+    -- called from `_renderStateList()`'s tail -- reopens the editor once
+    the category's header actually exists)."""
+
+    def test_pure_parser_is_exported_and_tolerant(self, controller_api: dict) -> None:
+        assert controller_api["exports"]["parseRenameDraft"] is True
+        parsed = controller_api["renameDraftParse"]
+        assert parsed == [
+            {"category": "Group A", "text": "Group A2"},
+            {"category": "Group A", "text": "Group A2"},
+            None,  # []
+            None,  # wrong length (1)
+            None,  # wrong length (3)
+            None,  # empty category
+            None,  # non-string category
+            None,  # non-string text
+            None,  # malformed JSON
+            None,  # blank string
+            None,  # whitespace-only string
+            None,  # null
+            None,  # undefined
+            None,  # 42
+            None,  # a plain object, not an array
+        ]
+
+    def test_property_declared_right_after_collapsed_groups_and_applied_explicitly(
+        self, controller_source: str
+    ) -> None:
+        ctor = _method_body(controller_source, "constructor(title = NODE_TITLE)")
+        assert "const PROP_RENAME_DRAFT = 'Group rename draft'" in controller_source
+        assert "this.addProperty(PROP_RENAME_DRAFT, [], 'array')" in ctor
+        # addProperty() never fires onPropertyChanged -- a fresh node needs
+        # the explicit apply, BEFORE _buildWidgets()'s first render.
+        assert ctor.index("this.addProperty(PROP_RENAME_DRAFT, [], 'array')") < ctor.index(
+            "this._guarded('build widgets', () => this._buildWidgets())"
+        )
+        assert "this._applyRenameDraftFromProperty()" in ctor
+        assert ctor.index("this.addProperty(PROP_RENAME_DRAFT, [], 'array')") < ctor.index(
+            "this._applyRenameDraftFromProperty()"
+        )
+
+    def test_on_property_changed_stashes_and_restores(self, controller_source: str) -> None:
+        changed = _method_body(controller_source, "onPropertyChanged(name, value)")
+        assert "if (name === PROP_RENAME_DRAFT) {" in changed
+        branch = changed.split("if (name === PROP_RENAME_DRAFT) {", 1)[1]
+        assert "this._applyRenameDraftFromProperty()" in branch
+        assert "this._restorePendingRenameDraft()" in branch
+
+    def test_read_write_and_clear_halves(self, controller_source: str) -> None:
+        read = _method_body(controller_source, "_applyRenameDraftFromProperty()")
+        assert "parseRenameDraft(this.properties?.[PROP_RENAME_DRAFT])" in read
+        assert "this._pendingRenameDraft = " in read
+
+        write = _method_body(controller_source, "_syncRenameDraftProperty()")
+        assert (
+            "this.properties[PROP_RENAME_DRAFT] = rename ? "
+            "[rename.category, rename.inputEl.value] : []"
+        ) in write
+        assert "this.setDirtyCanvas(true, true)" in write
+
+        clear = _method_body(controller_source, "_clearRenameDraftProperty()")
+        assert "this.properties[PROP_RENAME_DRAFT] = []" in clear
+        assert "this.setDirtyCanvas(true, true)" in clear
+
+    def test_begin_category_rename_syncs_on_open_and_every_keystroke(
+        self, controller_source: str
+    ) -> None:
+        begin = _method_body(controller_source, BEGIN_CATEGORY_RENAME_SIGNATURE)
+        assert "this._categoryRename = rename" in begin
+        assert begin.index("this._categoryRename = rename") < begin.index(
+            "this._syncRenameDraftProperty()"
+        ), "must sync on open, before the first keystroke can"
+        assert "input.addEventListener('input', () => this._syncRenameDraftProperty())" in begin
+
+    def test_commit_and_cancel_both_clear_the_draft(self, controller_source: str) -> None:
+        """Only a real end-of-edit (Enter/blur commit, or Escape cancel) may
+        clear the draft -- never a re-render (onRemoved, checked below,
+        deliberately does NOT call this)."""
+        cancel = _method_body(controller_source, "_cancelCategoryRename()")
+        assert "this._categoryRename = null" in cancel
+        assert "this._clearRenameDraftProperty()" in cancel
+        assert cancel.index("this._categoryRename = null") < cancel.index(
+            "this._clearRenameDraftProperty()"
+        )
+
+        commit = _method_body(controller_source, "_commitCategoryRename()")
+        assert "this._categoryRename = null" in commit
+        assert "this._clearRenameDraftProperty()" in commit
+        # cleared unconditionally, before any of the empty/duplicate/gone
+        # refusal branches -- editing is over the instant this line runs.
+        assert commit.index("this._categoryRename = null") < commit.index(
+            "this._clearRenameDraftProperty()"
+        )
+        assert commit.index("this._clearRenameDraftProperty()") < commit.index(
+            "const from = rename.category"
+        )
+
+    def test_on_removed_does_not_clear_the_draft(self, controller_source: str) -> None:
+        """The whole point of the property: an involuntary teardown
+        (onRemoved, a tab switch) must NOT be treated as an end-of-edit."""
+        removed = _method_body(controller_source, "onRemoved()")
+        assert "this._categoryRename = null" in removed
+        assert "_clearRenameDraftProperty" not in removed
+        assert "_syncRenameDraftProperty" not in removed
+
+    def test_render_state_list_restores_pending_draft_after_headers_are_built(
+        self, controller_source: str
+    ) -> None:
+        render = _method_body(controller_source, "_renderStateList()")
+        assert "this._restorePendingRenameDraft()" in render
+        # after the row-building loop (headers must exist in `dragRows`
+        # first, see `_headerElOf()`), not before.
+        assert render.index("if (scrollTop) listEl.scrollTop = scrollTop") < render.index(
+            "this._restorePendingRenameDraft()"
+        )
+
+    def test_restore_is_idempotent_and_gated(self, controller_source: str) -> None:
+        restore = _method_body(controller_source, "_restorePendingRenameDraft()")
+        assert "if (!pending || this._removed || this._categoryRename) return" in restore
+        # never clobbers a live edit, and matches the category by NAME
+        # against the loaded layout -- not blindly reopened.
+        assert "this._layoutCache.categories.includes(pending.category)" in restore
+        assert "this._pendingRenameDraft = null" in restore
+        assert (
+            "this._guarded('restore rename draft', () => "
+            "this._beginCategoryRename(pending.category, pending.text))"
+        ) in restore
+        # a header that never shows up (layout confirmed loaded, category
+        # genuinely gone) drops the stale draft instead of leaking it
+        # forever.
+        assert "if (this._layoutLoaded) {" in restore
+
+    def test_never_reaches_for_localstorage(self, controller_source: str) -> None:
         assert "localStorage" not in controller_source
 
 

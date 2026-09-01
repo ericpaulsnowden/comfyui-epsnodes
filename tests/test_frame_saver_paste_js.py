@@ -733,3 +733,98 @@ def test_width_floor_lifts_through_set_size_not_a_dead_is_array_guard(
     body = _function_body(frame_saver_source, "installMinWidth(node, minWidth)")
     assert "if (node.size && node.size[0] < minWidth)" in body
     assert "node.setSize([minWidth, node.size[1]])" in body
+
+
+# --------------------------------------------------------------------------
+# 2026-08-31 bug-class round: tab-switch/rebuild-DOM-teardown audit (FORMAT.md
+# §7.2, same bug class as notebook.js's v0.87.3 draft-restore fix and
+# number_controller.js's per-field `document.activeElement` guard). Root
+# cause: `frameInputEl.value` (the typed frame-number box) was written
+# UNCONDITIONALLY by every repaint path -- `commitFrame`/`refreshFrameUi` --
+# including ones with no idea a live edit is in progress: a probe landing
+# mid-edit, a `loadedmetadata`/gating resync, or (worst case, many times a
+# SECOND) ongoing video playback via `syncFrameFromPlayback`. A user who
+# clicked into the box and started typing a jump-to frame while the video was
+# still playing would see their own keystrokes overwritten within a fraction
+# of a second. `setFrameInputElValue` is the fix: skip the DOM write while
+# `frameInputEl` is `document.activeElement`, mirroring `notebook.js`'s
+# `restoreDraftIntoEditor` guard exactly. `commitFrameInputValue` (the user's
+# OWN commit, which the Enter-key handler calls while still focused, before
+# its own `blur()`) is exempted -- it is not a competing repaint, it IS the
+# edit landing, so it force-writes the clamped result back regardless of
+# focus. Live DOM behavior (an actual keystroke racing playback) is verified
+# on the rig, not here -- source-pinned per this file's own established
+# convention (see `frame_saver_source`'s docstring) since none of this is
+# pure/exported.
+# --------------------------------------------------------------------------
+
+
+def test_set_frame_input_el_value_exists_and_is_guarded(frame_saver_source: str) -> None:
+    body = _function_body(frame_saver_source, "setFrameInputElValue(state, frame)")
+    assert "document.activeElement !== state.frameInputEl" in body
+    assert "state.frameInputEl.value = String(frame)" in body
+
+
+def test_commit_frame_routes_the_dom_write_through_the_guard(frame_saver_source: str) -> None:
+    """The high-frequency playback path (`syncFrameFromPlayback`, called on
+    every 'timeupdate' tick while a video plays) goes through `commitFrame`
+    -- so `commitFrame` itself must never bypass the guard with its own
+    unconditional `frameInputEl.value =` write."""
+    body = _function_body(
+        frame_saver_source, "commitFrame(state, frame, { dirty = true } = {})"
+    )
+    assert "setFrameInputElValue(state, frame)" in body
+    assert "state.frameInputEl.value = String(frame)" not in body
+
+
+def test_refresh_frame_ui_routes_the_dom_write_through_the_guard(frame_saver_source: str) -> None:
+    """`refreshFrameUi` is the read-only resync path (attach, post-configure
+    -- a real node/DOM rebuild -- and post-probe); it must repaint from the
+    `frame` widget without fighting a concurrent live edit either."""
+    body = _function_body(frame_saver_source, "refreshFrameUi(state, { seek = false } = {})")
+    assert "setFrameInputElValue(state, frame)" in body
+    assert "state.frameInputEl.value = String(frame)" not in body
+
+
+def test_commit_frame_input_value_is_exempt_from_its_own_guard(frame_saver_source: str) -> None:
+    """The Enter-key handler calls this WHILE `frameInputEl` is still
+    `document.activeElement` (blur happens after) -- so unlike every other
+    caller, this one must force the clamped/normalized value back onto the
+    field immediately, not defer to `setFrameInputElValue`'s guard, or a
+    typed `9999` clamped down to the last frame would keep showing `9999`
+    until the user clicked elsewhere."""
+    body = _function_body(frame_saver_source, "commitFrameInputValue(state)")
+    assert "state.frameInputEl.value = String(state.frameWidget.value)" in body
+
+
+def test_enter_key_commits_before_blur_through_the_exempt_path(frame_saver_source: str) -> None:
+    """Ordering pin: `commitFrameInputValue(state)` must run BEFORE
+    `state.frameInputEl.blur()` in the Enter handler -- it relies on being
+    called first (see the previous test) to land the clamped display value
+    while still focused, rather than depending on blur's native 'change'
+    semantics."""
+    strip_body = _function_body(frame_saver_source, "buildControlStrip(state)")
+    match = re.search(
+        r"if \(event\.key === 'Enter'\) \{.*?\}",
+        strip_body,
+        re.DOTALL,
+    )
+    assert match, "Enter-key branch not found in buildControlStrip"
+    enter_block = match.group(0)
+    commit_at = enter_block.index("commitFrameInputValue(state)")
+    blur_at = enter_block.index("state.frameInputEl.blur()")
+    assert commit_at < blur_at
+
+
+def test_syncframefromplayback_and_probe_paths_repaint_through_commit_frame_or_refresh(
+    frame_saver_source: str,
+) -> None:
+    """Pins the two highest-risk racing callers directly to the guarded
+    functions, so a future refactor that inlines a fresh unconditional
+    `frameInputEl.value =` write into either one is caught here rather than
+    only by the (unenforced) absence check above."""
+    playback_body = _function_body(frame_saver_source, "syncFrameFromPlayback(state)")
+    assert "commitFrame(state, clampFrame(state, raw), { dirty: false })" in playback_body
+
+    probe_body = _function_body(frame_saver_source, "startProbe(state, params)")
+    assert "refreshFrameUi(state)" in probe_body

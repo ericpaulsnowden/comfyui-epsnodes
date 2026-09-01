@@ -130,6 +130,33 @@ const PROP_COLLAPSED_GROUPS = 'Collapsed groups'
  * `{nodes: {<pathId>: false}, classes: {<class>: false}}` -- `false` is the
  * only value ever written; there is no `true` entry, ever. */
 const PROP_INCLUDED_NODES = 'Included nodes'
+/**
+ * Tab-switch rename-loss fix, ported from controller.js's identical
+ * `PROP_RENAME_DRAFT` (2026-08-28 there; this file cloned the blueprint
+ * BEFORE that fix landed and never picked it up -- owner rule: "Just
+ * switching between workflows shouldn't ever reset anything in our
+ * nodes"). A tab switch tears this node down and rebuilds it from
+ * scratch, and `_categoryRename` (the open inline group-rename `<input>`,
+ * `_beginCategoryRename()`) was pure in-memory/DOM state -- this file's
+ * OWN prior attempt at the problem had `onRemoved()` try to FLUSH it by
+ * calling `_commitCategoryRename()` on teardown, as if the user had
+ * pressed Enter. That has two problems controller.js's fix already ran
+ * into and solved differently (see `onRemoved()`'s own doc comment for
+ * the full writeup): it is a network round trip fired right as the node
+ * is torn down, and it silently renames the group off a value the user
+ * never actually confirmed. This property fixes it the way controller.js
+ * does instead. Value: a 2-element `[category, text]` array (empty `[]` =
+ * no open rename) -- kept in sync on every keystroke
+ * (`_syncRenameDraftProperty()`), cleared ONLY on a real end-of-edit
+ * (commit or Escape-cancel), never as a side effect of a repaint or of an
+ * involuntary teardown. Restore is 2-phase, same shape as controller.js's own:
+ * `onPropertyChanged()` stashes the restored value in
+ * `_pendingRenameDraft` (the category's header may not exist in the DOM
+ * yet); `_restorePendingRenameDraft()` -- called at the tail of every
+ * `_renderStateList()` -- reopens the editor once that header actually
+ * exists, idempotent either order.
+ */
+const PROP_RENAME_DRAFT = 'Group rename draft'
 
 const LABEL_CAPTURE = 'New State'
 const LABEL_UPDATE = 'Save State'
@@ -738,6 +765,34 @@ export function parseCollapsedGroups(raw) {
 export function isGroupNameInput(rawName) {
   return (rawName || '').trim().startsWith('#')
 }
+
+/**
+ * Fail-soft parse for `PROP_RENAME_DRAFT` -- controller.js's identical
+ * `parseRenameDraft` duplicated by hand (file convention: small, stable
+ * cross-file constants/helpers are copied, not imported). Same
+ * lenient-degrade shape as `parseCollapsedGroups` above (a raw array from
+ * `configure()`'s normal restore, OR a JSON string from a hand-edit
+ * through the Properties panel), returning `null` for "no open rename"
+ * instead of throwing on anything malformed.
+ * @param {unknown} raw
+ * @returns {{category: string, text: string} | null}
+ */
+export function parseRenameDraft(raw) {
+  let value = raw
+  if (typeof raw === 'string') {
+    const trimmed = raw.trim()
+    if (!trimmed) return null
+    try {
+      value = JSON.parse(trimmed)
+    } catch {
+      return null
+    }
+  }
+  if (!Array.isArray(value) || value.length !== 2) return null
+  const [category, text] = value
+  if (typeof category !== 'string' || !category || typeof text !== 'string') return null
+  return { category, text }
+}
 export function groupNameFromInput(rawName) {
   return (rawName || '').trim().replace(/^#+\s*/, '').trim()
 }
@@ -1271,6 +1326,12 @@ export function registerControllerNode() {
         this._layoutSaveInFlight = false
         this._layoutSaveQueued = false
         this._categoryRename = null
+        // Tab-switch rename-loss fix (PROP_RENAME_DRAFT above): a rename
+        // draft restored from the property before the layout data it
+        // needs (the category's own header) exists yet -- {category,
+        // text}, or null. Consumed exactly once by
+        // `_restorePendingRenameDraft()`.
+        this._pendingRenameDraft = null
 
         this._statesSignature = ''
         this._nodesPageSignature = ''
@@ -1292,6 +1353,15 @@ export function registerControllerNode() {
         // Task-spec property: EXCLUSIONS ONLY -- default included, so a
         // freshly-added node never needs an entry (see PROP_INCLUDED_NODES).
         this.addProperty(PROP_INCLUDED_NODES, { nodes: {}, classes: {} }, 'object')
+        // Tab-switch rename-loss fix (PROP_RENAME_DRAFT above): same
+        // "addProperty() alone never fires onPropertyChanged" reason as
+        // PROP_COLLAPSED_GROUPS just above -- a fresh node needs this
+        // explicit apply (a no-op: nothing is open yet); a restored node's
+        // configure() re-fires onPropertyChanged with the saved draft, and
+        // _restorePendingRenameDraft() (called from _renderStateList()'s
+        // tail once real data exists) reopens the editor from it.
+        this.addProperty(PROP_RENAME_DRAFT, [], 'array')
+        this._applyRenameDraftFromProperty()
 
         this._guarded('build widgets', () => this._buildWidgets())
       }
@@ -1322,9 +1392,30 @@ export function registerControllerNode() {
 
       onRemoved() {
         this._guarded('onRemoved', () => {
-          this._removed = true
           clearTimeout(this._w.deleteBtn?._armTimer)
+          // Tab-switch rename-loss fix (PROP_RENAME_DRAFT above,
+          // superseding an earlier attempt at this same problem): an open
+          // inline group-rename editor used to be FLUSHED here via
+          // `_commitCategoryRename()` -- a real Enter/blur would commit
+          // it, so teardown tried to act as if the user had pressed
+          // Enter. Two problems controller.js's sibling fix (2026-08-28)
+          // already ran into and solved differently: (1) committing is a
+          // NETWORK round trip (`_withLoadedLayout`/`_saveLayout`) kicked
+          // off right as the node is torn down -- fragile, and easy for
+          // its own `_removed`/`_layoutLoaded` guards to self-abort
+          // partway through; (2) it silently RENAMES the group off a
+          // possibly-half-typed value the user never confirmed, which is
+          // exactly the "involuntary rebuild acts like a real user
+          // action" shape this whole bug class exists to avoid -- an
+          // accidental tab switch should never finalize an edit on the
+          // user's behalf. The property (kept in sync on every keystroke
+          // by `_syncRenameDraftProperty`) already survives the teardown
+          // synchronously with no network involved, and
+          // `_restorePendingRenameDraft()` reopens the SAME in-progress
+          // edit after the rebuild -- so this now just discards the local
+          // DOM/JS handle, same as controller.js's own onRemoved.
           this._categoryRename = null
+          this._removed = true
           this._unsubscribeStatesChanged()
           unregisterUniversalController(this)
         })
@@ -1373,6 +1464,21 @@ export function registerControllerNode() {
             this._nodesPageSignature = ''
             if (this._activePage === 'nodes') this._refreshNodesPage({ force: true })
           })
+          return
+        }
+        if (name === PROP_RENAME_DRAFT) {
+          // Tab-switch fix (PROP_RENAME_DRAFT above): same dual trigger as
+          // PROP_COLLAPSED_GROUPS -- configure()'s restore and a live
+          // Properties-panel hand-edit both land here. The category's
+          // header may not exist in the DOM yet (this can fire before the
+          // async states/layout fetch resolves) -- stash it and let
+          // `_restorePendingRenameDraft()` (called from every
+          // `_renderStateList()`) reopen the editor once it does; calling
+          // it here too covers the case data is already loaded.
+          this._guarded('Group rename draft property changed', () => {
+            this._applyRenameDraftFromProperty()
+            this._restorePendingRenameDraft()
+          })
         }
       }
 
@@ -1385,6 +1491,67 @@ export function registerControllerNode() {
         this.properties = this.properties || {}
         this.properties[PROP_COLLAPSED_GROUPS] = Array.from(this._collapsedCategories)
         this.setDirtyCanvas(true, true)
+      }
+
+      // -------------------------------------- rename draft (PROP_RENAME_DRAFT)
+
+      /** READ half: replaces `_pendingRenameDraft` with whatever the
+       * `Group rename draft` node property currently says -- the restored
+       * `{category, text}` (or `null` for none). Never touches the DOM or
+       * `_categoryRename` itself; see `_restorePendingRenameDraft()` for
+       * the half that actually reopens the editor once it safely can. */
+      _applyRenameDraftFromProperty() {
+        this._pendingRenameDraft = parseRenameDraft(this.properties?.[PROP_RENAME_DRAFT])
+      }
+
+      /** WRITE half: folds the CURRENTLY OPEN rename's live text back into
+       * the property and dirties the canvas, so the workflow's next save
+       * (including an involuntary tab-switch teardown) captures it. Called
+       * on open (covers the gap before the first keystroke) and on every
+       * `input` event of the rename box -- never on a repaint. */
+      _syncRenameDraftProperty() {
+        const rename = this._categoryRename
+        this.properties = this.properties || {}
+        this.properties[PROP_RENAME_DRAFT] = rename ? [rename.category, rename.inputEl.value] : []
+        this.setDirtyCanvas(true, true)
+      }
+
+      /** Ends the persisted draft -- called only from `_cancelCategoryRename()`
+       * (Escape) and `_commitCategoryRename()` (Enter/blur, any outcome):
+       * both are real user actions that close the editor, never a repaint. */
+      _clearRenameDraftProperty() {
+        this.properties = this.properties || {}
+        this.properties[PROP_RENAME_DRAFT] = []
+        this.setDirtyCanvas(true, true)
+      }
+
+      /**
+       * The second half of the tab-switch rename fix: reopen the editor
+       * from `_pendingRenameDraft` the moment it safely can, and is a
+       * no-op every other time (called from `onPropertyChanged()` and
+       * from the tail of every `_renderStateList()`, so whichever notices
+       * the category's header first wins -- idempotent either order).
+       *
+       * Never fights a live edit (`_categoryRename` already set) or a
+       * detached pane. While the category's header doesn't exist yet
+       * (layout not loaded, or this render pass has none) the draft is
+       * left untouched for the next attempt -- consumed
+       * (`_pendingRenameDraft = null`) only once it actually applies, or
+       * once `_layoutLoaded` confirms the category is genuinely gone (an
+       * unreachable draft would otherwise linger in the property forever).
+       */
+      _restorePendingRenameDraft() {
+        const pending = this._pendingRenameDraft
+        if (!pending || this._removed || this._categoryRename) return
+        if (this._layoutCache.categories.includes(pending.category)) {
+          this._pendingRenameDraft = null
+          this._guarded('restore rename draft', () => this._beginCategoryRename(pending.category, pending.text))
+          return
+        }
+        if (this._layoutLoaded) {
+          this._pendingRenameDraft = null
+          this._clearRenameDraftProperty()
+        }
       }
 
       /** Property-only exclusions, defensively re-shaped on every read (a
@@ -1683,6 +1850,11 @@ export function registerControllerNode() {
         }
         this._refreshActionButtonsEnabled()
         this._renderMoveGroupControl()
+        // Tab-switch rename-loss fix: headers just got (re)built above, so
+        // this is exactly where a restored rename draft can safely reopen
+        // -- see `_restorePendingRenameDraft()`. No-op the overwhelming
+        // majority of calls (nothing pending).
+        this._restorePendingRenameDraft()
       }
 
       // `captureBtn` (New State) is deliberately NEVER touched here --
@@ -1753,8 +1925,15 @@ export function registerControllerNode() {
         return headerEl
       }
 
-      _beginCategoryRename(category) {
+      /** *initialText* (tab-switch fix, PROP_RENAME_DRAFT above) defaults
+       * to the category's own name -- the normal user-initiated open --
+       * but `_restorePendingRenameDraft()` passes the persisted draft
+       * text instead, to re-enter a rename a tab switch interrupted
+       * exactly where it was left. */
+      _beginCategoryRename(category, initialText = category) {
         if (this._removed) return
+        // Committing the previous editor (not cancelling it) keeps a
+        // typed rename from being lost by moving on -- the Notebook's rule.
         if (this._categoryRename && this._categoryRename.category !== category) this._commitCategoryRename()
         const header = this._pane?.listEl?.querySelector(`[data-category="${cssEscape(category)}"]`)
         if (!header) return
@@ -1762,11 +1941,13 @@ export function registerControllerNode() {
           className: 'lusc-inline-rename',
           attrs: { type: 'text', spellcheck: 'false', 'aria-label': 'Rename group' }
         })
-        input.value = category
+        input.value = initialText
         const rename = { category, inputEl: input }
         this._categoryRename = rename
+        this._syncRenameDraftProperty() // covers the gap before the first keystroke too
         header.replaceChildren(input)
         header.classList.add('lusc-inline-rename-host')
+        input.addEventListener('input', () => this._syncRenameDraftProperty())
         input.addEventListener('keydown', (event) => {
           event.stopPropagation()
           if (event.key === 'Enter') {
@@ -1791,13 +1972,17 @@ export function registerControllerNode() {
       _cancelCategoryRename() {
         if (!this._categoryRename) return
         this._categoryRename = null
+        this._clearRenameDraftProperty() // Escape is a real user discard -- see PROP_RENAME_DRAFT
         this._renderStateList()
       }
 
       _commitCategoryRename() {
         const rename = this._categoryRename
         if (!rename) return
+        // Close FIRST: the repaints below detach the input, and a blur
+        // from that must not re-enter here.
         this._categoryRename = null
+        this._clearRenameDraftProperty() // editing is over either way -- see PROP_RENAME_DRAFT
         const from = rename.category
         const to = (rename.inputEl.value || '').trim()
         if (!to || to === from) {

@@ -499,6 +499,32 @@ const DRAFTS_WIDGET_NAME = 'drafts'
  * writing a new/changed draft is. */
 const DRAFT_SYNC_DEBOUNCE_MS = 400
 
+/** Reserved keyspace for a CATEGORY description's unsaved draft, stored in
+ * the same `drafts` widget JSON object as entry drafts (v0.87.4, same
+ * owner report as the entry fix, extended to category mode: "an unsaved
+ * category-description edit is destroyed by a tab switch exactly as an
+ * entry edit was"). Nested inside the SAME flat `drafts` object rather
+ * than a second widget -- a `\u0000`-led prefix (a literal NUL byte,
+ * never typeable into a markdown heading line, so no legal category OR
+ * entry name can ever start with it) keeps a category draft's key
+ * disjoint from every entry-draft key. Backward compatible with the
+ * v0.87.0 flat `{name: text}` shape already saved in users' workflows:
+ * an old entry-only `drafts` value has no key starting with this prefix,
+ * so it round-trips unchanged. Forward compatible with the Python side
+ * too, without touching it: `resolve_selection`/`parse_drafts`
+ * (lora_library/nodes_notebook.py) only ever look up keys that appear in
+ * the `entry` widget's SELECTED names, which never contain a NUL byte --
+ * a category-draft key is silently invisible to that lookup, exactly
+ * right, since a category description is never part of a run's prompt
+ * text. */
+const CATEGORY_DRAFT_PREFIX = '\u0000category\u0000'
+
+/** The `drafts` object key a category description's draft is stored under
+ * -- see `CATEGORY_DRAFT_PREFIX`. */
+export function categoryDraftKey(name) {
+  return CATEGORY_DRAFT_PREFIX + name
+}
+
 /** FORMAT.md §7.2: "resizable via getMinHeight (~180)". */
 const MIN_WIDGET_HEIGHT = 180
 
@@ -600,6 +626,30 @@ const CATEGORY_DBLCLICK_WINDOW_MS = 1000
  * save/reload. Value: an array of collapsed category NAMES -- see
  * "Single-tap collapse" below for the registration/read/write helpers. */
 const PROP_COLLAPSED_SECTIONS = 'Collapsed sections'
+
+/**
+ * The open category persists across a REBUILD, not just a data reload
+ * (owner rule, verbatim: "Just switching between workflows shouldn't ever
+ * reset anything in our nodes" — chasing the "editor comes back blank
+ * after a tab switch" report: the unsaved DRAFT under a category
+ * description already survives that via the `drafts` widget, but the VIEW
+ * pointing at it did not). A ComfyUI tab switch tears the panel down and
+ * rebuilds it from scratch — attach() constructs a brand new `state`
+ * object every time, so `state.activeCategory` (a plain field on that
+ * object) cannot survive it on its own, unlike a plain data RELOAD, which
+ * keeps reusing the same `state` (see applyNotebookPayload()'s comment,
+ * where entry selection restores from the `entry` widget the same way).
+ * A node PROPERTY does survive a rebuild: it serializes with the workflow
+ * (`LGraphNode.serialize`), same as `PROP_COLLAPSED_SECTIONS` above, with
+ * none of the §8 positional-`widgets_values` hazard a tail STRING widget
+ * would carry. Value: the open category's NAME, or `''` for "nothing
+ * open" — see registerOpenCategoryProperty()/syncOpenCategoryProperty()
+ * ("Open category persists" section, right after the collapsed-sections
+ * property helpers) for the registration/read/write halves. Note the read
+ * half is deliberately NOT the same "apply on every property change"
+ * idiom PROP_COLLAPSED_SECTIONS uses top to bottom — see
+ * applyOpenCategoryFromProperty()'s own doc for why. */
+const PROP_OPEN_CATEGORY = 'Open category'
 
 /** STANDARD-fs-browse.md's `fs/list` sentinel for "the top level" — this
  * pack's own default library dir (labeled) + Home, then every Windows drive
@@ -1261,6 +1311,9 @@ export function attachNotebookWidget(node) {
     // so the wrapped onPropertyChanged is in place before ComfyUI's next
     // `node.configure()` call for a restored node.
     registerCollapsedSectionsProperty(state)
+    // Open category persists across a REBUILD too (PROP_OPEN_CATEGORY's own
+    // doc) -- same placement/ordering reason as the call just above.
+    registerOpenCategoryProperty(state)
     hideFileWidget(state)
     hidePinnedWidget(state)
     hideDraftsWidget(state)
@@ -2985,13 +3038,30 @@ async function applyNotebookPayload(state, file, data) {
   const survivors = restoreSelectionFromWidget(state)
   state.selection = survivors
   state.activeName = survivors.length ? survivors[0] : null
-  // Category mode survives a reload the same way entry selection does
-  // (above): kept only if the category is still there, dropped silently
+  // Category mode survives a DATA reload the same way entry selection does
+  // (above, from the `entry` widget) — but a tab-switch REBUILD throws
+  // `state` itself away, so unlike entry selection there is nothing left
+  // in memory to fall back on. Adopt the remembered name from the `Open
+  // category` node property FIRST (PROP_OPEN_CATEGORY's own doc) — but
+  // ONLY when nothing is already active, so an in-session navigation (the
+  // user already clicked a DIFFERENT category before this reload ran) is
+  // never clobbered by whatever was last saved. Then the validity check
+  // this always had runs unconditionally on WHICHEVER value `state.
+  // activeCategory` now holds: kept only if the category is still there,
+  // dropped (and the now-stale property written back to `''`, so a
+  // corrupt/deleted-category value doesn't linger forever) silently
   // otherwise (FORMAT.md §7.2 amendment) — independent of the entry
   // selection restore, per the file header's "never touches `selection`"
-  // rule for category mode.
+  // rule for category mode. loadActiveEditor() below already handles
+  // category mode, so restoring the pointer here is sufficient — the
+  // draft (if any) repaints through the existing loadCategoryDescription()
+  // -> populateEditor() -> draftTextFor() path.
+  if (state.activeCategory == null) {
+    state.activeCategory = parseOpenCategoryProperty(state.node.properties?.[PROP_OPEN_CATEGORY])
+  }
   if (state.activeCategory != null && !state.categories.includes(state.activeCategory)) {
     state.activeCategory = null
+    syncOpenCategoryProperty(state)
   }
   renderList(state)
   updateDeleteButtonEnabled(state)
@@ -3221,6 +3291,12 @@ function clearEditor(state) {
   state.selection = []
   state.activeName = null
   state.activeCategory = null
+  // Runs before registerOpenCategoryProperty() (buildUi() -> clearEditor()
+  // happens first in attach()) -- harmless: this defensively seeds
+  // node.properties the same way syncOpenCategoryProperty() always does,
+  // and the value written ('') matches what addProperty()'s own default
+  // will be a moment later.
+  syncOpenCategoryProperty(state)
   resetEditorDom(state)
   renderList(state)
   updateDeleteButtonEnabled(state)
@@ -3484,6 +3560,7 @@ async function chooseSelection(state, names, active) {
 
   const wasInCategoryMode = state.activeCategory != null
   state.activeCategory = null
+  syncOpenCategoryProperty(state)
 
   const previousSelection = state.selection
   const previousActive = state.activeName
@@ -3621,6 +3698,7 @@ async function selectCategory(state, name) {
 
   const previousCategory = state.activeCategory
   state.activeCategory = name
+  syncOpenCategoryProperty(state)
   renderList(state)
   updateDeleteButtonEnabled(state)
   updateModeHint(state)
@@ -3631,6 +3709,7 @@ async function selectCategory(state, name) {
     // the editor's own content was never touched by the failed fetch, so
     // restoring just the pointer is enough to undo the click.
     state.activeCategory = previousCategory
+    syncOpenCategoryProperty(state)
     renderList(state)
     updateDeleteButtonEnabled(state)
     updateModeHint(state)
@@ -3929,6 +4008,7 @@ function buildCategoryDeleteButton(state, category) {
     }
     clearTimeout(deleteBtn._armTimer)
     state.activeCategory = category
+    syncOpenCategoryProperty(state)
     performDeleteCategory(state).catch((error) => api.warn('category delete failed', error))
   })
   return deleteBtn
@@ -4127,6 +4207,133 @@ function syncCollapsedSectionsProperty(state) {
   const node = state.node
   node.properties = node.properties || {}
   node.properties[PROP_COLLAPSED_SECTIONS] = Array.from(state.collapsedCategories)
+  node.graph?.setDirtyCanvas(true, true)
+}
+
+// ---------------------------------------------------------------------------
+// Open category persists across a REBUILD (see PROP_OPEN_CATEGORY's own doc
+// comment for the owner rule and the rebuild-vs-reload distinction). The
+// pure parser, then the property registration/read/write halves. The READ
+// half that actually matters — restoring the pointer after a tab-switch
+// rebuild — is deliberately NOT here: it lives in applyNotebookPayload(),
+// right alongside the entry selection's own restore, because only that
+// reload cycle has a freshly-fetched `state.categories` to validate the
+// remembered name against. What lives here is registration plus the live
+// "hand-edit the Properties panel" counterpart — see
+// registerOpenCategoryProperty()'s doc for exactly where the line falls.
+// ---------------------------------------------------------------------------
+
+/**
+ * Tolerant parse of the `Open category` node property into a category NAME
+ * or `null` ("nothing open") — mirrors parseCollapsedSections()'s
+ * never-throws contract, one value instead of a list: a non-string (a
+ * hand-edit through the node's Properties panel that types a
+ * number/object/etc, or simply `undefined`/`null` on a node whose property
+ * hasn't been registered yet) and the empty string (the property's own
+ * default, and what syncOpenCategoryProperty() writes for "nothing open")
+ * both fold to `null`. Deliberately does NOT check the name against
+ * `state.categories` — neither of this function's callers can, at the
+ * moment they call it, always know what the CURRENT set of categories is;
+ * they each do that validation themselves, against whatever `state.
+ * categories` they actually have in hand (registerOpenCategoryProperty()'s
+ * wrapper vs. applyNotebookPayload()'s own read of this property).
+ * @param {unknown} raw
+ * @returns {string|null}
+ */
+export function parseOpenCategoryProperty(raw) {
+  if (typeof raw !== 'string') return null
+  return raw.length ? raw : null
+}
+
+/**
+ * Registers the `Open category` property and wires it live — called once
+ * from attach(), right after buildUi(), same placement and same reason as
+ * registerCollapsedSectionsProperty() immediately above: `configure()`
+ * runs right after attach() returns, and its properties-merge loop both
+ * overwrites `node.properties[PROP_OPEN_CATEGORY]` with the FILE's saved
+ * name and fires the wrapped `onPropertyChanged` below for it. Same
+ * addProperty()-vs-fallback branch, same "addProperty() never fires
+ * onPropertyChanged, so a FRESH node needs one explicit apply call too"
+ * reasoning as the collapsed-sections property just above.
+ *
+ * Where this ACTUALLY diverges from that property: at the instant either
+ * the fresh-node explicit call below or configure()'s properties-merge
+ * fires the wrapper, `state.categories` is always still empty — attach()
+ * runs before this panel has fetched anything — so
+ * applyOpenCategoryFromProperty() can only ever degrade to "nothing open"
+ * from either of those two call sites, by design, never a bug. The REAL
+ * tab-switch-rebuild restore this property exists for happens moments
+ * later, once reloadNow()'s applyNotebookPayload() has a real `state.
+ * categories` to validate the saved name against (see its own comment,
+ * right where it restores the entry selection the same way) — that path
+ * reads `node.properties[PROP_OPEN_CATEGORY]` directly, independent of
+ * whether this wrapper ever ran or what it did. What THIS wrapper is
+ * actually for: the same nice-to-have registerCollapsedSectionsProperty()'s
+ * own wrapper has — a LIVE hand-edit of "Open category" through the node's
+ * right-click Properties panel, made after the panel already has real
+ * categories loaded, opens (or closes) that category the same way a click
+ * would.
+ */
+function registerOpenCategoryProperty(state) {
+  const node = state.node
+  if (typeof node.addProperty === 'function') {
+    node.addProperty(PROP_OPEN_CATEGORY, '', 'string')
+  } else {
+    node.properties = node.properties || {}
+    if (!(PROP_OPEN_CATEGORY in node.properties)) node.properties[PROP_OPEN_CATEGORY] = ''
+  }
+  const original = node.onPropertyChanged
+  node.onPropertyChanged = function (name, value, prevValue) {
+    const result = original?.call(this, name, value, prevValue)
+    if (name === PROP_OPEN_CATEGORY) {
+      applyOpenCategoryFromProperty(state)
+    }
+    return result
+  }
+  // addProperty() alone never fires onPropertyChanged (see above) -- apply
+  // explicitly now for a FRESH node too. A no-op in practice (state.
+  // activeCategory is already `null` and state.categories is still empty
+  // this early in attach()), same as the wrapper's own no-op moment above
+  // -- kept for the same completeness reason
+  // registerCollapsedSectionsProperty() keeps its own explicit call.
+  applyOpenCategoryFromProperty(state)
+}
+
+/**
+ * Validates the `Open category` property against `state.categories` and
+ * applies it to `state.activeCategory` if it changed — see
+ * registerOpenCategoryProperty()'s doc for why this only ever does
+ * anything real off a LIVE hand-edit (categories already loaded), never
+ * off the configure()-time firing (categories always still empty then).
+ * Guards the same corruption cases parseOpenCategoryProperty() already
+ * tolerates PLUS a name the file doesn't have — both degrade to leaving
+ * `state.activeCategory` exactly as it was, never a throw.
+ */
+function applyOpenCategoryFromProperty(state) {
+  const name = parseOpenCategoryProperty(state.node.properties?.[PROP_OPEN_CATEGORY])
+  if (name != null && !state.categories.includes(name)) return
+  if (state.activeCategory === name) return
+  state.activeCategory = name
+  renderList(state)
+  updateModeHint(state)
+}
+
+/**
+ * WRITE half: folds the CURRENT `state.activeCategory` into the node
+ * property (`''` for "nothing open") and dirties the canvas so the
+ * workflow's next save captures it — called from every place that assigns
+ * `state.activeCategory` (selectCategory() and its rollback branch,
+ * chooseSelection()'s category-mode exit, confirmNewEntry()'s exit /
+ * confirmNewCategory()'s enter, the header ✕'s enter-then-delete,
+ * performDeleteCategory()'s exit, the two rename migrations,
+ * clearEditor()'s initial null, and the reload-path validity check that
+ * prunes a stale name) — same idiom as syncCollapsedSectionsProperty()
+ * above.
+ */
+function syncOpenCategoryProperty(state) {
+  const node = state.node
+  node.properties = node.properties || {}
+  node.properties[PROP_OPEN_CATEGORY] = state.activeCategory ?? ''
   node.graph?.setDirtyCanvas(true, true)
 }
 
@@ -5324,6 +5531,11 @@ function applyRenameResult(state, kind, name, renameTo, data) {
     }
     if (state.activeCategory === name) {
       state.activeCategory = renameTo
+      // The persisted `Open category` property has to move with the
+      // rename too, same reasoning as the collapsed-sections key just
+      // above — otherwise a workflow save right after this rename would
+      // point the property at a name the file no longer has.
+      syncOpenCategoryProperty(state)
       state.nameFieldEl.value = renameTo
       state.lastSavedName = renameTo
     }
@@ -5503,6 +5715,7 @@ async function confirmNewEntry(state, rawName) {
     // multi-selection existed before. Also exits category mode (FORMAT.md
     // §7.2 amendment): the newly created entry is what the editor shows now.
     state.activeCategory = null
+    syncOpenCategoryProperty(state)
     setSelection(state, [name], name)
     state.textarea.value = ''
     state.lastSavedText = ''
@@ -5562,6 +5775,7 @@ async function confirmNewCategory(state, name) {
     // known (no need to re-fetch it) — enters category mode for it,
     // untouched entry selection and all (see the file header).
     state.activeCategory = name
+    syncOpenCategoryProperty(state)
     renderList(state)
     updateDeleteButtonEnabled(state)
     populateEditor(state, '', data.mtime, name)
@@ -5789,11 +6003,18 @@ async function performDeleteCategory(state, { force = false } = {}) {
   state.categories = Array.isArray(data.categories) ? data.categories : state.categories
   forgetCategoryDescription(state, category) // session cache (file header): the heading is gone
   syncNotebookCache(state, data)
+  // The heading is gone -- any unsaved draft for it (v0.87.4) would never
+  // be shown again (nothing can re-enter category mode for a name that no
+  // longer exists), so it would otherwise linger in the `drafts` widget
+  // forever. Same cleanup performSaveCategory() does on success, here for
+  // the "deleted instead of saved" outcome.
+  clearDraft(state, categoryDraftKey(category))
 
   if (state.collapsedCategories.delete(category)) syncCollapsedSectionsProperty(state)
 
   state.activeCategory = null
   renderList(state)
+  syncOpenCategoryProperty(state)
   updateSaveButtonEnabled(state)
   updateDeleteButtonEnabled(state)
   updateSelectionHint(state)
@@ -6025,6 +6246,10 @@ async function performSaveCategory(state, { force = false } = {}) {
     if (renameTo) renameCategoryDescription(state, name, renameTo)
     noteCategoryDescription(state, renameTo || name, storedDescription)
     syncNotebookCache(state, data) // session cache (file header)
+    // Unsaved-edit drafts (v0.87.4): the save landed under `name` (whatever
+    // was active when Save was clicked) -- clear its draft unconditionally,
+    // same rule/placement as performSave()'s entry-mode clearDraft() above.
+    clearDraft(state, categoryDraftKey(name))
     if (renameTo && state.collapsedCategories.delete(name)) {
       // Collapse tracks by NAME -- migrate the key whether or not the user
       // moved on mid-flight, or the renamed category springs open. The
@@ -6044,6 +6269,11 @@ async function performSaveCategory(state, { force = false } = {}) {
     state.lastSavedText = storedDescription
     if (renameTo) {
       state.activeCategory = renameTo
+      // The persisted `Open category` property has to move with the
+      // rename too — same reasoning as applyRenameResult()'s category
+      // branch, this route's sibling for a rename typed straight into the
+      // editor's own name field.
+      syncOpenCategoryProperty(state)
       // Same mid-edit rule as performSave(): never over in-flight typing.
       if (currentNameFieldValue(state) === renameTo || currentNameFieldValue(state) === name) {
         state.nameFieldEl.value = renameTo
@@ -6102,9 +6332,11 @@ function currentNameFieldValue(state) {
  * simply typing back to the original all funnel through here. This never
  * WRITES a new/changed draft -- that stays the debounced path
  * (scheduleDraftSync(), armed only by the textarea's own `input` listener)
- * so a keystroke alone never triggers a widget write. Category mode has no
- * `drafts` concept (a description isn't a run's prompt text), and pinned
- * mode never lets typing reach here in the first place (readOnly). */
+ * so a keystroke alone never triggers a widget write. Category mode gets
+ * the identical clear, in its own branch below, over its own
+ * `categoryDraftKey()` keyspace (v0.87.4) -- a description IS a
+ * draft-worthy edit now, just never a run's prompt text. Pinned mode never
+ * lets typing reach here in the first place (readOnly). */
 function refreshDirty(state) {
   const textChanged = state.textarea.value !== state.lastSavedText
   const nameChanged = currentNameFieldValue(state) !== state.lastSavedName
@@ -6115,6 +6347,13 @@ function refreshDirty(state) {
       state.draftSyncTimer = null
     }
     clearDraft(state, state.activeName)
+  }
+  if (!textChanged && !isPinned(state) && state.activeCategory != null) {
+    if (state.draftSyncTimer) {
+      clearTimeout(state.draftSyncTimer)
+      state.draftSyncTimer = null
+    }
+    clearDraft(state, categoryDraftKey(state.activeCategory))
   }
 }
 
@@ -6182,20 +6421,30 @@ export function parseDraftsWidgetValue(raw) {
 
 /**
  * The unsaved text this panel is holding for *name*, or `null` when there
- * is none (v0.87.3). `null` rather than `''` on purpose: an empty string
- * is a legitimate draft (the user cleared the box and hasn't saved), and
- * collapsing the two would silently discard exactly that edit.
+ * is none (v0.87.3, category descriptions added v0.87.4). `null` rather
+ * than `''` on purpose: an empty string is a legitimate draft (the user
+ * cleared the box and hasn't saved), and collapsing the two would silently
+ * discard exactly that edit.
  *
- * Only ever consulted for a LIVE entry: a pinned panel shows the pin, and
- * category mode has no entry text at all.
+ * *name* is an ENTRY name when `state.activeCategory` is `null` and a
+ * CATEGORY name otherwise — exactly what `populateEditor`'s caller (
+ * `loadEntryText`/`loadCategoryDescription`) already passes, and exactly
+ * what `state.activeCategory` reflects by the time either runs (set
+ * synchronously by `selectCategory`/`confirmNewCategory` before the load
+ * starts). A category lookup goes through `categoryDraftKey()` -- its own
+ * keyspace inside the same `drafts` object, never the entry one -- so it
+ * can never read (or be shadowed by) an entry's draft of the same name.
+ *
+ * Never consulted for a pinned panel: the pin overrides everything shown.
  */
 export function draftTextFor(state, name) {
   if (typeof name !== 'string' || !name) return null
   if (isPinned(state)) return null
-  if (state.activeCategory != null) return null
   const drafts = state.drafts
-  if (!drafts || !Object.prototype.hasOwnProperty.call(drafts, name)) return null
-  const value = drafts[name]
+  if (!drafts) return null
+  const key = state.activeCategory != null ? categoryDraftKey(name) : name
+  if (!Object.prototype.hasOwnProperty.call(drafts, key)) return null
+  const value = drafts[key]
   return typeof value === 'string' ? value : null
 }
 
@@ -6260,7 +6509,12 @@ function pruneDraftsToSelection(state) {
   let changed = false
   const next = {}
   for (const [name, text] of Object.entries(state.drafts)) {
-    if (keep.has(name)) next[name] = text
+    // Category drafts (v0.87.4, CATEGORY_DRAFT_PREFIX) live in a keyspace
+    // this ENTRY-selection prune has no business touching -- an entry
+    // click/ctrl-click/delete/move must never sweep away an unsaved
+    // category description sitting untouched in the same `drafts` object.
+    // They are pruned on their own terms elsewhere (save, delete-category).
+    if (name.startsWith(CATEGORY_DRAFT_PREFIX) || keep.has(name)) next[name] = text
     else changed = true
   }
   if (changed) {
@@ -6269,16 +6523,31 @@ function pruneDraftsToSelection(state) {
   }
 }
 
-/** Writes (or clears) `state.activeName`'s draft to match the textarea's
- * CURRENT value against the CURRENT `lastSavedText` baseline. No-op in
- * category mode (a description has no `drafts` concept), without an
- * active entry, or while pinned (typing can't reach here then -- the
- * textarea is `readOnly` -- but a timer armed just before a pin arrived
- * could otherwise still fire). Called from the debounce timer
- * (scheduleDraftSync) and from flushDraftSync (the immediate, no-wait
- * variant used right before the editor pane shows something else). */
+/** Writes (or clears) the ACTIVE item's draft to match the textarea's
+ * CURRENT value against the CURRENT `lastSavedText` baseline -- the entry
+ * body when `state.activeCategory` is `null`, the category description
+ * otherwise (v0.87.4, same owner report as the entry fix extended to
+ * category mode). No-op without an active entry/category, or while pinned
+ * (typing can't reach here then -- the textarea is `readOnly` -- but a
+ * timer armed just before a pin arrived could otherwise still fire).
+ * Called from the debounce timer (scheduleDraftSync) and from
+ * flushDraftSync (the immediate, no-wait variant used right before the
+ * editor pane shows something else). Name kept as-is (not renamed to
+ * "ActiveItem") -- this is still the ONE function both call sites and
+ * every doc reference already point at; only its body grew a second
+ * branch. */
 function commitDraftForActiveEntry(state) {
-  if (isPinned(state) || state.activeCategory != null || !state.activeName) return
+  if (isPinned(state)) return
+  if (state.activeCategory != null) {
+    const key = categoryDraftKey(state.activeCategory)
+    if (state.textarea.value !== state.lastSavedText) {
+      setDraft(state, key, state.textarea.value)
+    } else {
+      clearDraft(state, key)
+    }
+    return
+  }
+  if (!state.activeName) return
   if (state.textarea.value !== state.lastSavedText) {
     setDraft(state, state.activeName, state.textarea.value)
   } else {
@@ -6351,8 +6620,8 @@ function syncDraftsFromWidget(state) {
 }
 
 /**
- * Put the active entry's draft back into the textarea (v0.87.3, the second
- * half of the tab-switch fix).
+ * Put the active entry's (or, v0.87.4, active category's) draft back into
+ * the textarea (v0.87.3, the second half of the tab-switch fix).
  *
  * `populateEditor` consulting `draftTextFor` is not enough on its own: on
  * a restore, `reloadNow`'s INSTANT CACHED PAINT can reach the editor
@@ -6362,12 +6631,17 @@ function syncDraftsFromWidget(state) {
  * after the sync). Both are idempotent, so whichever runs second is a
  * no-op.
  *
+ * `state.activeCategory` wins when both happen to be set, mirroring
+ * `updateModeHint()`'s own rule (category mode is what the editor is
+ * actually showing) -- `draftTextFor()` needs the same name either way to
+ * pick the right keyspace.
+ *
  * Never fights a live cursor: if the user is typing in the textarea right
  * now, their keystrokes are the truth and the debounced sync will catch
  * up.
  */
 function restoreDraftIntoEditor(state) {
-  const name = state.activeName
+  const name = state.activeCategory != null ? state.activeCategory : state.activeName
   if (!name) return // selection not restored yet -- populateEditor covers it
   const draft = draftTextFor(state, name)
   if (draft === null) return

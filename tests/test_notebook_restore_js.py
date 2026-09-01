@@ -476,7 +476,9 @@ const out = {
     parseCollapsedSections: typeof nb.parseCollapsedSections === 'function',
     toggleCollapsedSection: typeof nb.toggleCollapsedSection === 'function',
     isSectionCollapsed: typeof nb.isSectionCollapsed === 'function',
-    parseDraftsWidgetValue: typeof nb.parseDraftsWidgetValue === 'function'
+    parseDraftsWidgetValue: typeof nb.parseDraftsWidgetValue === 'function',
+    categoryDraftKey: typeof nb.categoryDraftKey === 'function',
+    parseOpenCategoryProperty: typeof nb.parseOpenCategoryProperty === 'function'
   }
 }
 out.missBeforeSet = nb.notebookCacheGet('a.md')
@@ -549,6 +551,19 @@ out.collapsedIsSection = [
   nb.isSectionCollapsed(null, 'A'),
   nb.isSectionCollapsed(undefined, 'A')
 ]
+// `Open category` node property (v0.87.5, tab-switch REBUILD round) --
+// the pure parser behind PROP_OPEN_CATEGORY, same tolerance contract as
+// parseCollapsedSections() above but returning a single name (or `null`
+// for "nothing open") instead of a list.
+out.openCategoryParse = [
+  nb.parseOpenCategoryProperty('Prompts'), // a normal saved name
+  nb.parseOpenCategoryProperty(''), // the property's own "nothing open" default
+  nb.parseOpenCategoryProperty(null),
+  nb.parseOpenCategoryProperty(undefined),
+  nb.parseOpenCategoryProperty(42), // a hand-edit that types a number
+  nb.parseOpenCategoryProperty({ name: 'Prompts' }), // a hand-edit that types an object
+  nb.parseOpenCategoryProperty(['Prompts']) // a hand-edit that types an array
+]
 out.emptyCategoryInsert = (() => {
   const E = (...xs) => xs.map(([n, c]) => ({ name: n, category: c }))
   const cats = ['Empty Top', 'Group Two', 'Group Three']
@@ -619,6 +634,46 @@ out.drafts = {
     noDrafts: nb.draftTextFor(base(null), 'A'),
     nonString: nb.draftTextFor(base({ A: 42 }), 'A'),
     categoryMode: nb.draftTextFor(base({ A: 'x' }, { activeCategory: 'Cat' }), 'A')
+  }
+}
+// v0.87.4: a category description's unsaved edit gets the SAME protection,
+// in its own keyspace (categoryDraftKey()) inside the same `drafts` object
+// -- never the flat entry keyspace v0.87.0 already shipped to disk.
+{
+  const base = (drafts, extra) => ({ drafts, activeCategory: null, pinned: '', ...extra })
+  const catKey = nb.categoryDraftKey('Cat')
+  out.categoryDraftLookup = {
+    // A category draft shows while that category is active...
+    present: nb.draftTextFor(
+      base({ [catKey]: 'edited description' }, { activeCategory: 'Cat' }),
+      'Cat'
+    ),
+    // ...but is invisible under the FLAT entry keyspace even for the exact
+    // same name -- entering category mode never reads an entry's draft.
+    entryModeIgnoresIt: nb.draftTextFor(base({ [catKey]: 'edited description' }), 'Cat'),
+    // An entry draft is equally invisible from inside category mode, even
+    // for a category that happens to share an entry's name.
+    categoryModeIgnoresEntryDraft: nb.draftTextFor(
+      base({ Cat: 'entry text' }, { activeCategory: 'Cat' }),
+      'Cat'
+    ),
+    // Two different categories never collide with each other.
+    otherCategoryAbsent: nb.draftTextFor(
+      base({ [catKey]: 'edited description' }, { activeCategory: 'Other' }),
+      'Other'
+    ),
+    // v0.87.0 backward compatibility: an old workflow's flat entry-only
+    // `drafts` value has no key starting with the category prefix, so it
+    // is simply never matched while a category happens to be active.
+    oldFlatShapeUnaffected: nb.draftTextFor(
+      base({ Cat: 'an entry named Cat' }, { activeCategory: 'Cat' }),
+      'Cat'
+    )
+  }
+  out.categoryDraftKeyShape = {
+    disjointFromTheBareName: catKey !== 'Cat',
+    roundTrips: nb.categoryDraftKey('Cat') === catKey,
+    differentNamesDontCollide: nb.categoryDraftKey('Cat') !== nb.categoryDraftKey('Other')
   }
 }
 process.stdout.write(JSON.stringify(out))
@@ -1160,8 +1215,27 @@ def test_collapsed_sections_export_list_is_additive(source: str) -> None:
     )
     for signature in added_v0_86_0:
         assert signature in source, signature
+    # v0.87.4: category-description drafts extend the same `drafts` widget
+    # into a second keyspace (see CATEGORY_DRAFT_PREFIX) -- exported so the
+    # v0.87.4 test round can build the exact prefixed key a real draft
+    # write would use, instead of duplicating the prefix literal.
+    added_v0_87_4 = ("export function categoryDraftKey(name)",)
+    for signature in added_v0_87_4:
+        assert signature in source, signature
+    # v0.87.5 (tab-switch REBUILD round): `Open category` is a node property
+    # backing `state.activeCategory` the same way `Collapsed sections`
+    # backs `state.collapsedCategories` above -- exported so this round's
+    # own tests can drive its tolerant parser directly under Node, same
+    # convention as `parseCollapsedSections`.
+    added_v0_87_5 = ("export function parseOpenCategoryProperty(raw)",)
+    for signature in added_v0_87_5:
+        assert signature in source, signature
     assert source.count("\nexport function ") == (
-        len(pre_existing) + len(added_this_round) + len(added_v0_86_0)
+        len(pre_existing)
+        + len(added_this_round)
+        + len(added_v0_86_0)
+        + len(added_v0_87_4)
+        + len(added_v0_87_5)
     )
 
 
@@ -1858,3 +1932,383 @@ class TestDraftSurvivesARepaint:
         assert "state.textarea.value = shown" in body
         # the dirty/Save baseline stays the FILE's text, never the draft
         assert "state.lastSavedText = text ?? ''" in body
+
+
+# ---------- v0.87.4: the identical bug, confirmed in category descriptions
+
+
+class TestCategoryDraftSurvivesARepaint:
+    """Lead-confirmed finding: `draftTextFor` returned `null` unconditionally
+    whenever `state.activeCategory != null` (by design -- entry drafts are
+    keyed by ENTRY name), and `loadCategoryDescription` repaints the editor
+    from `state.categoryDescriptionByName[name]`/the fetched description --
+    so an unsaved category-description edit was destroyed by a tab switch
+    exactly like an entry edit was, before v0.87.3 fixed entries only.
+    Category drafts get their own keyspace (`categoryDraftKey()`, a
+    `\\u0000`-led prefix) inside the SAME `drafts` object -- never a second
+    widget -- so a v0.87.0 workflow's already-saved flat `{name: text}`
+    entry drafts round-trip unchanged, and the backend's `resolve_selection`
+    (lora_library/nodes_notebook.py, untouched) never sees a category key at
+    all: it only ever looks up names that appear in the `entry` widget's
+    SELECTED list, which can never contain a NUL byte."""
+
+    def test_category_draft_shows_only_in_category_mode_for_its_own_name(
+        self, cache_api: dict
+    ) -> None:
+        d = cache_api["categoryDraftLookup"]
+        assert d["present"] == "edited description"
+        assert d["entryModeIgnoresIt"] is None
+        assert d["categoryModeIgnoresEntryDraft"] is None
+        assert d["otherCategoryAbsent"] is None
+
+    def test_v0_87_0_flat_entry_drafts_are_unaffected_by_the_new_keyspace(
+        self, cache_api: dict
+    ) -> None:
+        # A category and an entry sharing a name is legal on disk (they are
+        # different namespaces server-side) -- an old flat draft saved
+        # under that name for the ENTRY must never leak into category mode.
+        assert cache_api["categoryDraftLookup"]["oldFlatShapeUnaffected"] is None
+
+    def test_category_draft_key_is_disjoint_and_stable(self, cache_api: dict) -> None:
+        shape = cache_api["categoryDraftKeyShape"]
+        assert shape["disjointFromTheBareName"] is True
+        assert shape["roundTrips"] is True
+        assert shape["differentNamesDontCollide"] is True
+
+    def test_category_draft_key_prefix_is_a_nul_byte_marker(self, source: str) -> None:
+        # The exact byte doesn't matter to callers (they always go through
+        # categoryDraftKey()), but the choice itself is pinned here: a NUL
+        # byte can never appear in a markdown heading line, so it can never
+        # collide with a real category (or entry) name typed through the UI.
+        assert "const CATEGORY_DRAFT_PREFIX = '\\u0000category\\u0000'" in source
+
+    def test_draft_text_for_routes_by_active_category(self, source: str) -> None:
+        body = source.split("export function draftTextFor(state, name) {", 1)[1]
+        body = body.split("\n}\n", 1)[0]
+        assert "state.activeCategory != null ? categoryDraftKey(name) : name" in body
+
+    def test_restore_into_editor_prefers_the_active_category(self, source: str) -> None:
+        body = source.split("function restoreDraftIntoEditor(state) {", 1)[1]
+        body = body.split("\n}\n", 1)[0]
+        assert (
+            "state.activeCategory != null ? state.activeCategory : state.activeName" in body
+        )
+
+    def test_typing_a_category_description_commits_through_the_same_debounce(
+        self, source: str
+    ) -> None:
+        # No new scheduling path: commitDraftForActiveEntry() (still the one
+        # function scheduleDraftSync()/flushDraftSync() call) grew a
+        # category branch instead of a sibling function -- so the "2
+        # occurrences total" pin (test_only_the_textareas_own_input_listener
+        # _schedules_a_write above) still holds with category mode covered.
+        body = source.split("function commitDraftForActiveEntry(state) {", 1)[1]
+        body = body.split("\n}\n", 1)[0]
+        assert "categoryDraftKey(state.activeCategory)" in body
+        assert "setDraft(state, key, state.textarea.value)" in body
+        assert "clearDraft(state, key)" in body
+
+    def test_refresh_dirty_clears_the_category_draft_too(self, source: str) -> None:
+        block = source.split("function refreshDirty(state) {", 1)[1]
+        block = block.split("\n}\n", 1)[0]
+        assert "clearDraft(state, categoryDraftKey(state.activeCategory))" in block
+
+    def test_save_category_clears_its_draft(self, source: str) -> None:
+        save = source.split("async function performSaveCategory(state,", 1)[1]
+        save = save.split("\nasync function ", 1)[0]
+        assert "clearDraft(state, categoryDraftKey(name))" in save
+
+    def test_delete_category_clears_its_draft(self, source: str) -> None:
+        delete_fn = source.split("async function performDeleteCategory(state,", 1)[1]
+        delete_fn = delete_fn.split("\nasync function ", 1)[0]
+        assert "clearDraft(state, categoryDraftKey(category))" in delete_fn
+
+    def test_entry_selection_prune_never_sweeps_up_category_drafts(
+        self, source: str
+    ) -> None:
+        # The dangerous "second half" shape this whole bug class watches
+        # for: a repaint/selection-change silently deleting a PERSISTED
+        # draft as a side effect. pruneDraftsToSelection() runs on every
+        # entry click/ctrl-click/delete/move (setSelection()'s one choke
+        # point) -- it must keep every category-prefixed key regardless of
+        # what is or isn't in the entry selection.
+        prune = source.split("function pruneDraftsToSelection(state) {", 1)[1]
+        prune = prune.split("\n}\n", 1)[0]
+        assert "name.startsWith(CATEGORY_DRAFT_PREFIX)" in prune
+
+    def test_category_draft_key_is_exported_for_this_test_round(
+        self, cache_api: dict
+    ) -> None:
+        assert cache_api["exports"]["categoryDraftKey"] is True
+
+# ---------- v0.87.5: the VIEW half of the same bug -- the pane itself
+
+# The two literal source lines below exceed the 100-col limit inline (they
+# are copied verbatim from notebook.js so a source edit can't silently drift
+# out from under these tests) -- pulled out once here instead of wrapped
+# ad hoc at each of the three call sites that need them.
+_ADOPT_OPEN_CATEGORY_LINE = (
+    "state.activeCategory = "
+    "parseOpenCategoryProperty(state.node.properties?.[PROP_OPEN_CATEGORY])"
+)
+_PRUNE_STALE_OPEN_CATEGORY_CHECK = (
+    "if (state.activeCategory != null && "
+    "!state.categories.includes(state.activeCategory)) {"
+)
+
+
+class TestOpenCategorySurvivesARebuild:
+    """Lead-confirmed, live on the rig: v0.87.4 fixed the DATA loss (an
+    unsaved category-description edit now survives a tab switch, under the
+    `drafts` widget's `categoryDraftKey()` keyspace), but the VIEW still
+    reset -- `state.activeCategory` is a plain field on the `state` object
+    attach() constructs FRESH every time a tab switch tears the panel down
+    and rebuilds it, so after tabbing back the editor pane came up blank
+    with nothing selected until the user re-clicked the category. Owner's
+    rule, verbatim: "Just switching between workflows shouldn't ever reset
+    anything in our nodes." An empty editor reads as lost work even though
+    the draft underneath was safe the whole time.
+
+    `Open category` (`PROP_OPEN_CATEGORY`) is a node PROPERTY backing
+    `state.activeCategory` the same way `Collapsed sections` backs
+    `state.collapsedCategories` (registerOpenCategoryProperty()/
+    syncOpenCategoryProperty() mirror registerCollapsedSectionsProperty()/
+    syncCollapsedSectionsProperty() above), with ONE deliberate divergence:
+    the real RESTORE happens in applyNotebookPayload(), not off
+    onPropertyChanged, because only that reload cycle has a freshly-fetched
+    `state.categories` to validate the remembered name against -- see
+    applyOpenCategoryFromProperty()'s own doc.
+    """
+
+    def test_parse_open_category_property_is_exported_and_tolerant(
+        self, cache_api: dict
+    ) -> None:
+        assert cache_api["exports"]["parseOpenCategoryProperty"] is True
+        parsed = cache_api["openCategoryParse"]
+        assert parsed[0] == "Prompts"  # a normal saved name round-trips
+        assert parsed[1] is None  # '' ("nothing open") folds to null
+        assert parsed[2] is None  # null
+        assert parsed[3] is None  # undefined
+        assert parsed[4] is None  # a hand-edit that types a number
+        assert parsed[5] is None  # a hand-edit that types an object
+        assert parsed[6] is None  # a hand-edit that types an array
+
+    def test_property_constant_and_registration_follow_the_packs_idiom(
+        self, source: str
+    ) -> None:
+        """Same addProperty()-vs-fallback branch, same chained
+        onPropertyChanged, same "explicit initial apply call outside the
+        wrapper" shape as PROP_COLLAPSED_SECTIONS's own registration --
+        see test_collapsed_sections_property_follows_the_packs_property_idiom
+        above, which this mirrors call for call."""
+        assert "const PROP_OPEN_CATEGORY = 'Open category'" in source
+        reg = source.split("function registerOpenCategoryProperty(state)", 1)[1]
+        reg = reg.split("\n}\n", 1)[0]
+        assert "node.addProperty(PROP_OPEN_CATEGORY, '', 'string')" in reg
+        assert "const original = node.onPropertyChanged" in reg
+        assert "node.onPropertyChanged = function (name, value, prevValue) {" in reg
+        assert "original?.call(this, name, value, prevValue)" in reg
+        assert "if (name === PROP_OPEN_CATEGORY) {" in reg
+        assert "applyOpenCategoryFromProperty(state)" in reg
+        after_wrapper = reg.rsplit("}", 1)[1]
+        assert reg.count("applyOpenCategoryFromProperty(state)") == 2
+        assert "applyOpenCategoryFromProperty(state)" in after_wrapper
+
+    def test_registration_is_called_right_after_the_collapsed_sections_one(
+        self, source: str
+    ) -> None:
+        attach = source.split("export function attachNotebookWidget(node)", 1)[1].split(
+            "\n}\n", 1
+        )[0]
+        assert "registerOpenCategoryProperty(state)" in attach
+        assert attach.index("registerCollapsedSectionsProperty(state)") < attach.index(
+            "registerOpenCategoryProperty(state)"
+        )
+        # Must still be inside attach(), before any of the wiring that
+        # follows it -- same ordering requirement (state.listEl must exist,
+        # and the wrapped onPropertyChanged must be in place before
+        # ComfyUI's next node.configure() call) the collapsed-sections
+        # property already has.
+        assert attach.index("registerOpenCategoryProperty(state)") < attach.index(
+            "hideFileWidget(state)"
+        )
+
+    def test_apply_from_property_guards_corrupt_and_stale_values(self, source: str) -> None:
+        apply_fn = _body(source, "applyOpenCategoryFromProperty(state)")
+        assert "parseOpenCategoryProperty(state.node.properties?.[PROP_OPEN_CATEGORY])" in apply_fn
+        # Corrupt (non-string) raw values already fold to null in the
+        # parser (see the tolerant-parse test above); THIS guard covers the
+        # other failure mode -- a syntactically fine string naming a
+        # category that simply doesn't exist (yet, or any more) -- without
+        # ever touching `state.activeCategory` or throwing.
+        assert "if (name != null && !state.categories.includes(name)) return" in apply_fn
+
+    def test_sync_writes_the_active_category_or_empty_string_and_dirties_the_canvas(
+        self, source: str
+    ) -> None:
+        sync = _body(source, "syncOpenCategoryProperty(state)")
+        assert "node.properties[PROP_OPEN_CATEGORY] = state.activeCategory ?? ''" in sync
+        assert "node.graph?.setDirtyCanvas(true, true)" in sync
+
+    def test_property_round_trips_a_selected_category(self, source: str) -> None:
+        """Composed proof, mirroring this file's own DOM-closure-bound
+        convention (no live harness -- see the module docstring): the
+        WRITE half stores exactly `state.activeCategory` (or `''` for
+        none), and the READ half (applyNotebookPayload(), see below) hands
+        that same string straight to parseOpenCategoryProperty() -- which
+        the cache_api probe already proves round-trips a normal name
+        unchanged (test_parse_open_category_property_is_exported_and_tolerant)."""
+        sync = _body(source, "syncOpenCategoryProperty(state)")
+        assert "node.properties[PROP_OPEN_CATEGORY] = state.activeCategory ?? ''" in sync
+        reload = source.split("async function applyNotebookPayload(state, file, data) {", 1)[1]
+        reload = reload.split("\n}\n", 1)[0]
+        assert _ADOPT_OPEN_CATEGORY_LINE in reload
+
+    def test_every_activecategory_assignment_site_writes_through_the_property(
+        self, source: str
+    ) -> None:
+        """Exhaustive, mirroring
+        test_every_collapse_mutation_site_writes_through_the_property
+        above: every place that assigns `state.activeCategory` must also
+        call syncOpenCategoryProperty(), or a rebuild moments later would
+        restore a stale/missing pointer. The ONE deliberate exception is
+        applyOpenCategoryFromProperty()'s own internal assignment -- that
+        function reads the property INTO state, so writing it straight
+        back out would be a pointless round-trip (see its own doc
+        comment)."""
+        single_sites = (
+            ("clearEditor", "function clearEditor(state) {"),
+            ("chooseSelection", "async function chooseSelection(state, names, active) {"),
+            ("selectCategory", "async function selectCategory(state, name) {"),
+            (
+                "buildCategoryDeleteButton",
+                "function buildCategoryDeleteButton(state, category) {",
+            ),
+            ("confirmNewEntry", "async function confirmNewEntry(state, rawName) {"),
+            ("confirmNewCategory", "async function confirmNewCategory(state, name) {"),
+            (
+                "performDeleteCategory",
+                "async function performDeleteCategory(state, { force = false } = {}) {",
+            ),
+        )
+        for label, head in single_sites:
+            block = source.split(head, 1)[1].split("\n}\n", 1)[0]
+            assert "state.activeCategory =" in block, label
+            assert "syncOpenCategoryProperty(state)" in block, label
+
+        # selectCategory()'s rollback branch (a second assignment inside the
+        # SAME function) -- the site above only proves the enter half.
+        select_category = source.split(
+            "async function selectCategory(state, name) {", 1
+        )[1].split("\n}\n", 1)[0]
+        assert "state.activeCategory = name" in select_category
+        assert "state.activeCategory = previousCategory" in select_category
+        assert select_category.count("syncOpenCategoryProperty(state)") == 2
+
+        rename_result = source.split("function applyRenameResult(", 1)[1].split("\n// ---", 1)[0]
+        assert "state.activeCategory = renameTo" in rename_result
+        assert "syncOpenCategoryProperty(state)" in rename_result
+
+        save_category_start = source.index(
+            "async function performSaveCategory(state, { force = false } = {})"
+        )
+        save_category_slice = source[save_category_start : save_category_start + 4000]
+        assert "state.activeCategory = renameTo" in save_category_slice
+        assert "syncOpenCategoryProperty(state)" in save_category_slice
+
+    def test_reload_path_adopts_the_property_before_the_stale_name_prune(
+        self, source: str
+    ) -> None:
+        """Order matters (owner instruction, verified here): adopting the
+        remembered name from the property must run BEFORE the validity
+        check that prunes a category the file no longer has -- otherwise
+        the prune would run against whatever `state.activeCategory` was
+        BEFORE the adopt (always `null` on a fresh rebuild) and the adopted
+        name would never get validated at all. Also proves the adopt is
+        gated on "nothing already active", so an in-session navigation
+        isn't clobbered by a stale saved value on an ordinary (non-rebuild)
+        reload."""
+        reload = source.split("async function applyNotebookPayload(state, file, data) {", 1)[1]
+        reload = reload.split("\n}\n", 1)[0]
+        adopt_head = f"if (state.activeCategory == null) {{\n    {_ADOPT_OPEN_CATEGORY_LINE}"
+        adopt_idx = reload.index(adopt_head)
+        prune_idx = reload.index(_PRUNE_STALE_OPEN_CATEGORY_CHECK)
+        load_idx = reload.index("await loadActiveEditor(state)")
+        assert adopt_idx < prune_idx < load_idx
+
+    def test_property_naming_a_deleted_category_degrades_to_nothing_open(
+        self, source: str
+    ) -> None:
+        """A workflow saved with `Open category` = "Ghost" (a category
+        since renamed or deleted elsewhere, or simply hand-typed into the
+        node's Properties panel) must open to NOTHING on the next rebuild,
+        never point loadActiveEditor() at a category loadCategoryDescription()
+        would 404 on. The stale property is also written back to `''` so
+        it doesn't linger and get re-adopted (and re-pruned) forever."""
+        reload = source.split("async function applyNotebookPayload(state, file, data) {", 1)[1]
+        reload = reload.split("\n}\n", 1)[0]
+        prune = reload.split(_PRUNE_STALE_OPEN_CATEGORY_CHECK, 1)[1]
+        prune = prune.split("\n  }\n", 1)[0]
+        assert "state.activeCategory = null" in prune
+        assert "syncOpenCategoryProperty(state)" in prune
+
+    def test_rebuild_restore_reaches_the_existing_draft_repaint_path(
+        self, source: str
+    ) -> None:
+        """The whole point of restoring the POINTER (rather than teaching
+        this round its own repaint logic): loadActiveEditor()'s existing
+        category-mode branch -- already exercised on every ordinary reload
+        -- takes over unchanged. loadActiveEditor() -> loadCategoryDescription()
+        -> populateEditor() -> draftTextFor() is the exact chain
+        TestCategoryDraftSurvivesARepaint above already proves shows an
+        unsaved draft instead of the saved file text -- so once the pointer
+        is restored here, a rebuild shows the open pane AND the unsaved
+        draft together, with no new code path for the draft half."""
+        load_active = source.split("async function loadActiveEditor(state) {", 1)[1]
+        load_active = load_active.split("\n}\n", 1)[0]
+        assert "if (state.activeCategory != null) {" in load_active
+        assert "await loadCategoryDescription(state, state.activeCategory)" in load_active
+        reload = source.split("async function applyNotebookPayload(state, file, data) {", 1)[1]
+        reload = reload.split("\n}\n", 1)[0]
+        assert "await loadActiveEditor(state)" in reload
+
+    def test_rename_moves_the_property_to_the_new_name(self, source: str) -> None:
+        """Both rename paths -- applyRenameResult()'s category branch
+        (double-click rename on the header) and performSaveCategory()'s
+        rename branch (typed into the editor's own name field, Save
+        clicked) -- must migrate the persisted property the same way they
+        already migrate the collapsed-sections Set key, or a rebuild right
+        after a rename would reopen the OLD name (or nothing, once the old
+        name stops validating)."""
+        rename_result = source.split("function applyRenameResult(", 1)[1].split("\n// ---", 1)[0]
+        assert "state.activeCategory = renameTo" in rename_result
+        assert "syncOpenCategoryProperty(state)" in rename_result
+
+        save_category_start = source.index(
+            "async function performSaveCategory(state, { force = false } = {})"
+        )
+        save_category_slice = source[save_category_start : save_category_start + 4000]
+        assert "state.activeCategory = renameTo" in save_category_slice
+        assert "syncOpenCategoryProperty(state)" in save_category_slice
+
+    def test_collapsed_sections_are_untouched_by_the_new_property(self, source: str) -> None:
+        """This round's insertion point is right after
+        syncCollapsedSectionsProperty() and before the "Single-tap
+        collapse" comment -- confirms the new block didn't get interleaved
+        into the collapsed-sections functions themselves (in either
+        direction), on top of the whole pre-existing collapsed-sections
+        test suite above still passing unchanged."""
+        sync_collapsed = _body(source, "syncCollapsedSectionsProperty(state)")
+        assert (
+            "node.properties[PROP_COLLAPSED_SECTIONS] = Array.from(state.collapsedCategories)"
+            in sync_collapsed
+        )
+        assert "PROP_OPEN_CATEGORY" not in sync_collapsed
+        sync_open = _body(source, "syncOpenCategoryProperty(state)")
+        assert "collapsedCategories" not in sync_open
+
+    def test_collapse_persistence_never_reaches_for_localstorage(self, source: str) -> None:
+        # Same rule as the collapsed-sections property (owner ask: persist
+        # WITH THE WORKFLOW, never a browser-local stash) -- pinned again
+        # here since this round adds a second node property.
+        assert "localStorage" not in source

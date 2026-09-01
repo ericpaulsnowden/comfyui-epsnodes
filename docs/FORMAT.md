@@ -505,6 +505,44 @@ execution — **the file is the truth; the UI is a view.**
 
 ### §6.1 `LoraLibraryNotebook` (display: "EPS Prompt Notebook")
 
+**Category descriptions get the same draft protection, plus the open pane
+now survives a rebuild too (§7.9, same owner report extended to category
+mode).** Two separate gaps, both closed:
+1. **An unsaved CATEGORY description was destroyed exactly like an entry
+   draft used to be** — `draftTextFor`/`commitDraftForActiveEntry`/
+   `refreshDirty` all gained a category-mode branch, storing the draft in
+   the SAME `drafts` widget under `categoryDraftKey(name)`: a
+   NUL-prefixed key (`categoryDraftKey` prefixes the raw name with a
+   literal NUL byte on each side) — no legal markdown heading (or entry
+   name) can ever start with a NUL byte, so it can never collide with —
+   or be shadowed by — an entry draft of the same name.
+   Backward compatible with the v0.87.0 flat `{entryName: text}` shape
+   already saved in workflows (an old value has no key with this prefix, so
+   it round-trips unchanged) and invisible to the Python side without
+   touching it (`resolve_selection` only ever looks up names from the
+   `entry` widget's SELECTED list, which never contains a NUL byte — a
+   category draft is structurally unreachable from there, which is correct:
+   a description is never part of a run's prompt text). `pruneDraftsToSelection`
+   — the ENTRY-selection prune — now exempts every `CATEGORY_DRAFT_PREFIX`
+   key outright: an entry click/ctrl-click/delete/move has no business
+   sweeping away an untouched category draft sitting in the same `drafts`
+   object (§7.9's second-half variant, concretely: this is what it would
+   have been without the exemption).
+2. **The open category PANE itself is now a node PROPERTY** (`Open
+   category`, `PROP_OPEN_CATEGORY`) **— not just the draft text inside it.**
+   Before this, `state.activeCategory` was a plain field on the `state`
+   object `attach()` recreates from scratch on every rebuild (§7.9): the
+   draft text survived a tab switch, but the editor pane came back blank
+   (category mode exited), because nothing pointed the reopened panel back
+   at it. Fixed with the §7.9 two-phase pattern: `applyNotebookPayload`
+   adopts the property's remembered name into `state.activeCategory` ONLY
+   when nothing is already active (never clobbering an in-session
+   navigation), then runs the existing "still exists?" validity check
+   unconditionally on whichever value it now holds — a stale/deleted name
+   is dropped and the property written back to `''`. Verified live: the
+   pane reopens on the SAME category after a tab switch, the unsaved draft
+   text is still in it, and nothing reaches disk until the user saves.
+
 **A repaint must never destroy a draft (v0.87.3, owner report
 2026-08-28: "tabbing to another workflow and tabbing back erases any
 changes ... switching between workflows shouldn't ever reset anything in
@@ -862,6 +900,34 @@ pin sync.
   "(any)").
 
 ### §6.3 `EPS Lora Loader State Controller` (frontend-only virtual node)
+
+**An in-progress group rename survives a tab switch instead of being
+silently destroyed (§7.9, owner report 2026-08-28, same bug class as the
+Notebook's `drafts` widget).** `_categoryRename` (the open inline
+group-rename `<input>`, `_beginCategoryRename()`) was pure in-memory/DOM
+state: `onRemoved()` just nulled it, uncommitted, with no chance to save —
+so a typed-but-not-yet-confirmed rename was destroyed, not merely hidden, by
+a rebuild the user never asked for. `PROP_RENAME_DRAFT` (`'Group rename
+draft'`) fixes it: a `[category, text]` node property (empty `[]` = no open
+rename), kept in sync on every keystroke (`_syncRenameDraftProperty`, called
+from the input's own `input` listener) and cleared ONLY on a real end-of-edit
+— commit (Enter/blur) or cancel (Escape) — never as a side effect of a
+repaint; `onRemoved()` deliberately does NOT clear it, since an involuntary
+teardown is exactly what this property exists to survive. Restore is the
+§7.9 two-phase pattern, because the property (restored synchronously by
+`configure()`) and the layout/sets data the rename needs (an async fetch, the
+category's header) can land in either order: `onPropertyChanged()` stashes
+the restored value in `_pendingRenameDraft`; `_restorePendingRenameDraft()`
+— called at the tail of every `_renderStateList()` — reopens the editor the
+moment that category's header actually exists in the DOM, and is a no-op
+otherwise; both call sites are idempotent, so whichever notices first wins.
+`universal_controller.js` (§6.16) mirrors this exactly, superseding an
+earlier attempt at the same problem that is worth naming as the cautionary
+example: its old `onRemoved()` tried to FLUSH the open rename by calling
+`_commitCategoryRename()` at teardown, as if the user had pressed Enter —
+the §7.9 "second-half" failure mode, silently committing an edit the user
+never confirmed, off a network round trip fired while the node is being torn
+down. Never do that; persist-and-reopen, don't auto-commit-on-teardown.
 
 **Three separate things have to say "EPS Lora Loader State Controller", and
 missing any one of them makes the node look unrenamed.** Reported twice
@@ -1923,6 +1989,32 @@ is the functional core WITHOUT the grid.
 
 ## §6.6 `EPSImageGrid` (display: "EPS Image Grid") — accumulate + fan out
 
+**A tab switch could silently un-focus a frame (§7.9, tab-switch sweep
+2026-08-31, rig-verified with injected LAN latency — does not reproduce on a
+fast local machine).** `writeFocusWidget`'s draw-time poll
+(`syncFocusFromView`, chained onto `onDrawBackground`) reads
+`node.imageIndex`, which is `null` for two different reasons a repaint
+landing right after a rebuild cannot tell apart: a GENUINE unfocus (Clear, a
+bulk add, a tile delete — all of which only ever happen after the buffer has
+settled) versus simply "not restored yet" (`configure()` has already put the
+real persisted value into the `focus` widget, but `node.images`/`imageIndex`
+won't exist until the async `refreshFromBuffer` → `restoreFocusedView` chain
+finishes). A draw landing in that window used to write `''` into `focus`
+FIRST, wiping the persisted value out from under the restore that was still
+coming — the next save then serialized an empty `focus`, permanently losing
+"this frame is focused" even though the user never touched anything, and the
+enlarged view (and Emit's single-frame narrowing, §6.6/§6.10) reverted to the
+whole buffer. Fixed with a per-instance settle flag: `markBufferSettled`/
+`node.__epsGridBufferSettled`, set the first time `setNodeImagesFromRefs`
+(either branch) or `clearNodePreview` actually runs for this node instance. A
+CLEARING write to `focus` (`value === ''`) is now held back until the buffer
+has settled at least once; a non-empty write (a real focus, from the user or
+from a successful restore) is never held back. Rig A/B under ~600ms injected
+latency: without the guard the saved focus is wiped and the enlarged view is
+lost; with it, preserved — the window this races in is sub-millisecond on
+loopback, which is why it was invisible until latency was added on purpose
+(§7.5's LAN-latency lesson, restated for this different race in §7.9).
+
 **Emit cross-prompt-caches now (v0.80.0).** `IS_CHANGED` split by mode:
 Collect keeps the NaN always-changed sentinel (its append is a side effect
 the cache must never skip), but Emit — side-effect-free by design — returns
@@ -2316,6 +2408,24 @@ add; single batch-aware IMAGE input; disk-backed, survive-restart, NO cap.
 
 ## §6.7 `EPSFrameSaver` (display: "EPS Frame Saver") — video frame picker
 
+**Typing a frame number could be overwritten out from under the user (§7.9,
+tab-switch sweep 2026-08-31).** The visible frame `<input>` was written
+unconditionally by every repaint path (`commitFrame`/`refreshFrameUi`) —
+including ones with no idea a live edit is in progress: a probe landing
+mid-edit (`clampFrameToProbeBounds`), a `loadedmetadata`/gating resync, or
+worst of all ongoing playback (`syncFrameFromPlayback`, which calls this many
+times a SECOND while a video plays). A user who clicked into the box and
+started typing a jump-to frame would see their own keystrokes overwritten
+within a fraction of a second. `setFrameInputElValue` is the fix: skip the
+DOM write while `state.frameInputEl` is `document.activeElement`, mirroring
+notebook.js's `restoreDraftIntoEditor` guard (§7.9) exactly. The user's OWN
+commit (`commitFrameInputValue`, reached from the 'change' listener and from
+the Enter-key handler while the field is STILL focused, before its own
+`blur()`) is deliberately exempt from this same guard — it isn't a competing
+repaint, it IS the edit landing, so it force-writes the clamped/normalized
+result (e.g. a typed `9999` clamped down to the last frame) back onto the
+field immediately rather than waiting for a blur that hasn't happened yet.
+
 **v0.68.1 audit round:** `fullResync` is change-guarded — `sourceKeyOf`
 (wire kind/ref, trimmed path, remote verdict) must differ before the
 `<video>` is reloaded and the file re-probed (it used to reload + probe on
@@ -2622,6 +2732,28 @@ deletion:
 
 ### §6.10 `EPSCrossSweep` (display: "EPS Run Multiplier") — sweep × pairs, organized
 
+**The readout grew a little taller on every tab switch, forever (§7.9,
+tab-switch sweep 2026-08-31, reproduced live on the rig).** A Run Multiplier
+showing a WRAPPED (grown) readout got measurably taller on every round-trip
+through another workflow tab, never shrinking back. Root cause:
+`sizeToContent`'s resize math is a DELTA against `state.textHeight`'s
+PREVIOUS value — correct within one node's lifetime, since the only thing
+that changed the readout's own contribution to `node.size` since the last
+pass is the pass itself — but `attach()` builds a brand-new `state` on every
+rebuild (§7.9), reseeded to the plain `READOUT_HEIGHT` default regardless of
+what `node.size` a restore just repainted. The first pass after a rebuild
+therefore diffed the CURRENT (correctly wrapped) message against that fresh
+default instead of against what `node.size` already accounted for, double
+counting the readout's own height on top of a size that already included it
+— exactly the §7.9 "fresh default read as ground truth" shape, just
+compounding a node's LAYOUT instead of destroying prompt data. Fixed with
+`state.heightBaselined` (seeded `false` in `attach()`'s state literal): the
+first size-changing pass for a given `state` only ever GROWS to the
+`computeSize()` floor (`node.size[1]` left unmodified, just maxed against the
+floor) — never subtracts or adds a delta it has no way to know is accurate —
+and only a LATER pass, once `state.textHeight` reflects a change this
+function itself made, resumes the ordinary delta-based grow/shrink.
+
 **`run_info` output (v0.70.0, provenance M2):** a ninth, TAIL-APPENDED
 output (§8) — one JSON per run, index-aligned with every other output:
 `{"format": 1, "token", "node" (this node's execution id), "run", "total",
@@ -2883,6 +3015,23 @@ label, so two chained Cross Products cannot express it.
     and §6.9 documents why `[]` and `None` both crash consumers.
 
 ### §6.11 `EPSDistributor` (display: "EPS Distributor") — one in, N gated out
+
+**A manual resize was discarded on the next tab switch (§7.9, tab-switch
+sweep 2026-08-31, reproduced live on the rig: drag a Distributor taller,
+switch to another open workflow tab and back — the node silently shrinks to
+its natural height).** `applyVisibleOutputCount` is the LAST thing
+`attach()`'s `onConfigure` wrap runs on EVERY restore (tab switch, undo/redo,
+a plain workflow reload) — including the overwhelmingly common case where
+`Outputs` didn't change at all — and it used to call `resyncSize(node)`
+unconditionally every time. `resyncSize`'s height write is ABSOLUTE, not a
+`Math.max` the way its own width write is, so a manually-dragged-taller node
+snapped back to its computed height the instant the SAME graph reloaded,
+discarding a resize that has nothing to do with this node's output count.
+Fixed by gating the call on an actual count change (`if (desired !==
+currentCount) resyncSize(node)`) — keeping the ORIGINAL intent (shrink back
+when outputs are genuinely removed; `resyncSize`'s own docstring: "arrange()
+on its own only grows") while a same-count restore pass now leaves whatever
+height the user last set alone, exactly like the width floor already does.
 
 **v0.68.1 audit round:** draw passes parse `toggles` once (`isSlotEnabled`
 over a parsed map); the at-load width floor goes through `node.setSize`
@@ -3213,6 +3362,47 @@ model/CLIP/VAE from one checkpoint must never drift out of alignment.
   machines.
 
 ## §6.13 `EPSLoraPicker` (display: "EPS LoRA Picker") — folder-scoped browse, favorites, recents → stack
+
+**Two tab-switch fixes (§7.9, sweep 2026-08-31/09-01): the drill-down folder
+now survives a rebuild, and a mid-typed strength value is flushed instead of
+lost.**
+1. **The drilled-down folder position is now a node PROPERTY.**
+   `drillPathAfterReload` already kept the drill-down sticky within an
+   already-live panel's OWN session (a background feed refresh, the
+   controller's apply) — but `state.path` itself starts at `[]` on every
+   fresh `createState()`, and a tab switch/undo/redo recreates the node
+   (§7.9), so that stickiness had nothing to compare against after a
+   rebuild: the panel silently reset to the scope root. `PROP_BROWSE_PATH`
+   (`'Browse folder'`) carries `[scope, ...path]`, written back
+   (`syncBrowsePathProperty`) from every site that changes `state.path`
+   (`setScope`, both breadcrumb click handlers, a folder-row click,
+   `reloadFromWidget`'s own reconcile). Restore is the §7.9 two-phase
+   pattern, because the property (best-effort read in `createState`, or a
+   later `onPropertyChanged`) and the CONFIRMED scope
+   (`state.selection.scope`, the widget's own independent restore race) can
+   land in either order: `resolvePendingPathSeed(pending, currentScope)` is
+   the pure decision core — `'keep'` while the scope hasn't been confirmed
+   yet (never discarded on a mismatch alone, since "not yet" and "genuinely
+   a different workflow" look identical from here), `'discard'` for nothing
+   pending, or the path to adopt once the scope agrees — and
+   `tryApplyPendingPathSeed` applies the verdict from BOTH
+   `reloadFromWidget` (covers the property landing first) and the
+   `PROP_BROWSE_PATH` `onPropertyChanged` handler (covers the widget landing
+   first), idempotent either order.
+2. **A strength edit in progress at teardown is now flushed, not
+   discarded.** `commitActiveStrengthEdit`'s existing guard (review
+   2026-08-09: `replaceChildren()` destroys a focused input without firing
+   change OR blur) only runs from this module's own `render()` — but a tab
+   switch/undo-redo/workflow reload tears the DOM widget down WITHOUT ever
+   calling back into `render()` (§7.9), so that guard never got a chance to
+   fire for the involuntary-teardown case, and a strength value the user was
+   mid-typing (never yet blurred/changed) vanished along with the input that
+   held it — the notebook.js textarea bug (§7.9) again, for a number field.
+   `wireNodeCleanup` closes the gap: chained onto `node.onRemoved` (never
+   replaced, `wireConfigureReload`'s own posture), it calls
+   `commitActiveStrengthEdit(state)` on teardown — the same
+   `document.activeElement`-scoped flush §7.9 requires, just triggered from
+   the one path this module previously had no hook into.
 
 **Split divider + Send at the bottom (v0.78.0, owner asks 2026-08-23).**
 `.eps-lp-split-divider` sits between the Selected list (top) and the
@@ -3723,6 +3913,97 @@ state was saved with — the Included-nodes property is about this canvas.
 Also: double-clicking a state row applies it (owner ask, same round), the
 click having already selected it.
 
+**An open group rename now survives a tab switch here too (§7.9, tab-switch
+sweep 2026-08-31/09-01) — `PROP_RENAME_DRAFT`, ported from §6.3's
+`controller.js` fix verbatim** (same property name, same `[category, text]`
+shape, same fail-soft `parseRenameDraft`, same 2-phase
+`onPropertyChanged`/`_pendingRenameDraft`/`_restorePendingRenameDraft`
+restore — see §6.3 for the full write-up). This file had cloned the §6.2/§6.3
+blueprint BEFORE that fix landed there and never picked it up, so it carried
+its own, worse, attempt at the same problem: `onRemoved()` used to FLUSH the
+open rename by calling `_commitCategoryRename()` at teardown, as if a tab
+switch were the user pressing Enter — the §7.9 "second-half" failure mode
+(silently committing an edit the user never confirmed, off a network round
+trip fired mid-teardown), not merely losing one. `onRemoved()` now just
+discards the local DOM/JS handle, exactly like `controller.js`'s own.
+
+## §6.17 `EPSNumberController` (display: "EPS Number Controller") — every number in one place
+
+New in v0.88.0. Owner ask, verbatim: *"It could have any number of outputs.
+Each output would have a field attached to it where a user could type in a
+number. This would allow all numerical values for a workflow to be saved in
+one place, and for those values to all be controlled at the same time with
+our universal state controller."* Backend `eps_image/nodes_number_controller.py`,
+frontend `web/eps_image/number_controller.js`. Class id `EPSNumberController`
+(FROZEN, §8), category `EPSNodes`.
+
+Shape decisions the owner made when asked, so nobody re-litigates them: rows
+are untyped until wired and then ADOPT INT or FLOAT from the socket; every row
+carries a NAME; a row is otherwise a plain number box — he explicitly declined
+min/max, seed-style randomize, and step/scrub.
+
+- **Contract.** `RETURN_TYPES = ("*",) * 16`, `RETURN_NAMES = num_1..num_16`.
+  Sixteen is a CEILING, not a preference: outputs restore POSITIONALLY (§8), so
+  the count is frozen at registration. Raising it later is safe (new slots
+  append); LOWERING it would orphan wires in every saved workflow. One hidden
+  required STRING widget `values` holds everything as a JSON object keyed
+  `num_N` → `{name, value, type, enabled?, links?}`. `RETURN_NAMES` is
+  class-level and therefore generic — the FRONTEND sets each socket's `.label`
+  from the row's own name.
+- **Per-slot type adoption**, unlike §6.11 Distributor's one-type-for-the-whole-node
+  (it tees a single input; this node has no input, so each row is independent).
+  Wire row 1 to `steps` and row 2 to `cfg` and they become INT and FLOAT
+  separately; unwiring reverts that row alone to `*`.
+- **The allowlist must ACTIVELY REFUSE.** Rig-verified 2026-09-01: litegraph
+  lets a `"*"` output connect to ANY input — `*`→MODEL, IMAGE, STRING and COMBO
+  all succeeded with no error, each link silently adopting the target's type. A
+  passive allowlist used only for labelling would therefore let a user wire a
+  number into a MODEL socket and meet a baffling failure at run time. The
+  frontend vetoes the connection outright.
+- **No "convert widget to input" step exists.** Also rig-verified: KSampler's
+  `seed`/`steps`/`cfg`/`denoise` are already real entries in `node.inputs` with
+  `isWidget: true` and concrete INT/FLOAT types. The target input's `.type` (==
+  the created link's `.type`) is the adoption source.
+- **Coercion — the node's whole reason to exist on the backend.** ComfyUI's INT
+  sockets genuinely misbehave when fed a float. Per slot: `"INT"` rounds HALF
+  AWAY FROM ZERO (2.5→3, −2.5→−3) — deliberately NOT Python's `round()`, whose
+  banker's rounding answers 2 for 2.5 and reads as a plain bug to an artist.
+  This path is reachable in ordinary use: a row holds whatever was typed while
+  it was still unwired, so wiring it to an INT socket afterwards genuinely
+  arrives with a fraction. `"FLOAT"` → `float()`. `"*"`/absent → whichever
+  Python type round-trips exactly. JS's `Math.round` differs on negatives, so
+  the frontend mirrors this as `Math.sign(v) * Math.round(Math.abs(v))` for
+  DISPLAY only — the stored value stays exactly as typed.
+- **Per-row enable checkbox** (owner ask, 2026-09-01: *"a checkbox that can be
+  turned off to allow the thing it is connected to to use it's original
+  value"*). Rig-verified mechanism: ComfyUI has NO execution pass-through and an
+  `ExecutionBlocker` would kill the branch, so the only lever is the WIRE.
+  Unchecking remembers each target as `{node id, input name}` (by NAME —
+  inputs restore by name, §8) and calls `disconnectInput`; the target's own
+  widget value was never overwritten by the link, so removing it is what
+  restores it. Proof from `graphToPrompt`: row off → `steps: 99` (the
+  KSampler's own literal); row on → `steps: ["1", 0]` (a link). Rechecking
+  replays the remembered list through the same veto-checked `connect()` a
+  manual drag uses, failing soft per item and forgetting the memory after one
+  attempt so a later manual unplug can't self-reconnect. A wire dragged onto a
+  disabled row re-enables it.
+- **Universal State reaches the wiring, not just the checkbox.** `enabled`/`links`
+  live in the same `values` JSON, so §6.16 captures the on/off pattern for free —
+  and an applied state is reconciled against the live graph on every sync pass,
+  so `enabled:false` actually DETACHES a still-wired socket rather than only
+  repainting a tick.
+- **Growth.** Visible rows = `max(highest wired slot, highest slot carrying a
+  name/value/explicit-off) + 1`, clamped 1..16 — a fresh node shows one blank
+  row, there is always one spare to type into, and the count never shrinks below
+  a wired or disabled slot.
+- **Deliberately NOT declared:** `IS_CHANGED` (an ordinary widget, already in
+  core's prompt-hash cache key), `INPUT_IS_LIST`/`OUTPUT_IS_LIST` (16 independent
+  scalars, no fan-out), `ExecutionBlocker` (nothing is gated — every slot always
+  carries a number). Degrades, never raises: malformed `values` → logged once,
+  every slot 0; an absent `num_N` → silent 0 (the steady state for unused rows,
+  mirroring §6.11's absent-key default); a broken entry → that slot warns and
+  reads 0 without touching its neighbours.
+- **§6.16 registry:** `values` declared `json_object`, `key_pattern "^num_\d+$"`.
 
 ## §7 Frontend surfaces
 
@@ -4259,6 +4540,142 @@ errors) but must never mount-DEPEND at import.
 nodes refuse at queue time with a named error; routes fail → nodes load
 and run, panels are inert; a feature module fails → only that feature is
 missing. Nothing can take the whole pack down but a syntax error.
+
+## §7.9 Rebuild-survives-teardown state (2026-08-31/09-01 sweep)
+
+Owner report 2026-08-28, first fixed in the Notebook (§6.1, v0.87.3): "tabbing
+to another workflow and tabbing back erases any changes you've made. That
+shouldn't happen. You should have to take an action like selecting another
+prompt, or refreshing etc in order to reset back to the saved prompt. Just
+switching between workflows shouldn't ever reset anything in our nodes." He
+then asked whether other panels had the same problem, which is what this round
+answered: every DOM-widget node in the pack, audited for the same bug class.
+This section states the LAW the sweep found broken six different ways — the
+per-node fixes live at §6.1/§6.3/§6.6/§6.7/§6.10/§6.11/§6.13/§6.16 — so the
+next panel written against this pack starts from the rule instead of
+rediscovering it panel by panel.
+
+**The mechanism.** A tab switch — and, identically, undo/redo and a plain
+workflow reload — TEARS DOWN every node's DOM widget and REBUILDS it from
+scratch: `attach()`/`createState()` runs again, constructing a brand-new
+`state` object seeded with fresh defaults. Anything that lives ONLY in that JS
+closure or in the torn-down DOM — an unconfirmed textarea edit, an open
+inline-rename `<input>`, a drilled-down folder path, whatever `document.
+activeElement` was about to receive a keystroke — is not merely hidden by the
+rebuild, it is DESTROYED: gone the instant the old `state` is garbage, with no
+teardown hook that fires early enough to save it as a real commit (`onRemoved`
+runs, but the DOM is already gone by then — see the `document.activeElement`
+rule below for what that leaves as the only fix).
+
+**The law: anything the user did that they'd expect to survive a tab switch
+must live somewhere the rebuild does not touch.**
+- If the BACKEND needs the value (`execute()` reads it, or a route does), it
+  lives in a WIDGET.
+- If it is pure VIEW state (an open pane, a drilled-down path, a mid-rename
+  buffer, a manually-set height) it lives in a node PROPERTY — never a widget
+  appended after the frozen tail: a property carries no §8 positional
+  `widgets_values` hazard, where a widget would (a shorter old save's array
+  doesn't reach it; a widget's INDEX is its identity).
+- A plain JS field on `state` (or a `node.__eps*` flag) is for state a rebuild
+  is ALLOWED to reset — a cache, a per-instance settle flag, a debounce timer.
+  Nothing the user would call "my edit" belongs there alone.
+
+**Every repaint must be idempotent and must read FROM that store — never write
+to it as a side effect of drawing.** Two consequences fell out of this round:
+- **Both orders of the restore race must be handled.** The property/widget
+  restore (`configure()`, synchronous, litegraph's own) and the data this
+  state needs to be VALID against (an async fetch — the Notebook's
+  categories, the controller's layout, the Picker's folder tree) are two
+  INDEPENDENT races; either can land first. The pattern this round settled on
+  everywhere it applied (notebook.js's `populateEditor`/
+  `restoreDraftIntoEditor` pair, controller.js's/universal_controller.js's
+  `onPropertyChanged` → `_pendingRenameDraft` → `_restorePendingRenameDraft()`
+  called again from every `_renderStateList()`, picker.js's
+  `tryApplyPendingPathSeed`): stash the restored value as PENDING the moment
+  it's known, and apply it — idempotently, from whichever side notices
+  second — only once both halves agree it's safe.
+- **Never overwrite a field where `document.activeElement` is that field.** A
+  repaint racing a live edit (a probe result, a playback tick, a poll, a
+  cached-then-fresh paint) must skip the DOM write while the user is
+  mid-keystroke in it, and instead let the user's own commit (blur/Enter/
+  change) land it. `frame_saver.js`'s `setFrameInputElValue` guard and
+  `picker.js`'s `wireNodeCleanup` teardown flush (`commitActiveStrengthEdit`
+  run from `onRemoved`, since a tab switch never reaches this module's own
+  `render()`) both apply this rule; both mirror notebook.js's original
+  `restoreDraftIntoEditor` guard.
+
+**State may be cleared ONLY by a real user action — never as a side effect of
+rendering.** The dangerous violation of this rule is not "a repaint shows
+stale text" — it's the variant this round actually found, more than once, and
+it's worth stating on its own because it is not hypothetical:
+
+**The second-half variant: a dirty-check, a prune, or a size-recompute that
+treats a freshly-REBUILT DEFAULT as ground truth, and destroys real,
+ALREADY-PERSISTED state as collateral — not view state, but the thing that
+was already safely saved.** The damage doesn't require overwriting the user's
+typing; it only requires comparing something fresh against something old and
+trusting the comparison. Three shapes this took:
+- **notebook.js, v0.87.3 (the report that started this whole sweep).**
+  `refreshDirty()`'s `textarea === lastSavedText` check, run right after a
+  rebuild repainted the editor from the FILE (not yet from the draft), read
+  as "nothing to save" and CLEARED the draft that was sitting, untouched, in
+  the persisted `drafts` widget. Fixed on both sides of the restore race (see
+  above); this round extended the same `drafts` widget to category
+  descriptions (`categoryDraftKey`, a NUL-prefixed keyspace kept disjoint
+  from entry names) and, separately, exempted category drafts from
+  `pruneDraftsToSelection` — an unrelated ENTRY selection change has no
+  business sweeping away an untouched CATEGORY draft sitting in the same
+  object.
+- **image_grid.js (this round).** A draw landing in the window between a
+  rebuild and the async buffer refresh that restores it reads
+  `node.imageIndex` as `null` for two different reasons a draw-time poll
+  can't tell apart — "genuinely unfocused" and "not restored yet" — and the
+  unguarded clearing write clobbered the PERSISTED `focus` widget with `''`
+  before `restoreFocusedView` ever got to read it back. `markBufferSettled`/
+  `__epsGridBufferSettled` is the fix (§6.6): a CLEARING write to `focus` is
+  held back until the buffer has settled at least once; a non-empty write
+  (a real focus) is never held back.
+- **universal_controller.js, before this round.** `onRemoved()` used to FLUSH
+  an open, unconfirmed group rename by calling `_commitCategoryRename()` — as
+  if a tab switch were the user pressing Enter. This is the variant taken to
+  its worst: not merely destroying an edit, but SILENTLY COMMITTING one the
+  user never confirmed, off a network round trip fired while the node is
+  mid-teardown. controller.js's sibling fix (`PROP_RENAME_DRAFT`, §6.3) —
+  persist the draft, reopen it after the rebuild, and NEVER auto-commit it on
+  an involuntary teardown — is what universal_controller.js was brought onto
+  here, superseding its own `onRemoved` flush.
+
+Also non-destructive to user DATA, but the same "fresh default read as
+ground truth" root cause, and worth pinning alongside the above: cross_sweep.js's
+readout grew a little TALLER on every tab-switch round-trip, forever, because
+its delta-based resize math diffed the current message against a
+freshly-reseeded `state.textHeight` instead of whatever height a restore had
+just painted (`state.heightBaselined`, §6.10 — the first pass for a new
+`state` floors instead of trusting a delta it cannot know); distributor.js's
+unconditional `resyncSize()` snapped a manually-dragged-taller node back to
+its computed height on every restore, because it used to run unconditionally
+instead of only on a genuine output-count change (§6.11).
+
+**Latency is a first-class test condition for this bug class too (§7.5
+already states this for the Notebook's editor races; this round confirms it
+generalizes to a different race entirely).** The image_grid.js focus-clobber
+above does not reproduce on a fast local machine — the window between the
+rebuild and the async buffer refresh landing is sub-millisecond on loopback
+and wide open across a NAS/LAN round trip. Reproduced live only after
+injecting ~600ms into the refresh path, A/B'd with and without the fix: the
+saved focus survives with it, is wiped without it. When a tab-switch race
+won't reproduce, add latency before concluding it doesn't exist.
+
+**Audited and confirmed ALREADY correct** (no source change needed;
+pinned with new tests so a future edit can't regress it silently):
+switcher.js — every per-row piece of durable state (the `toggles` widget, the
+`High/low pairs` property, a renamed input's `.label`) already restores
+through litegraph's own `configure()`, and this round pinned that the
+post-restore reconverge (`convergeImageInputs`, via `pruneToggles`/
+`convergePairInputs`/`convergePairOutput`) always runs AFTER that restore
+lands — never against a mid-rebuild snapshot, which is the shape that would
+let it silently disagree with (and overwrite) the real thing configure() just
+restored.
 
 ## §8 Versioning & stability
 

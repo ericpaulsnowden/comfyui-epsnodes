@@ -90,6 +90,7 @@ out.exports = {
   summarizeApply: typeof m.summarizeApply,
   compareStateEntries: typeof m.compareStateEntries,
   parseCollapsedGroups: typeof m.parseCollapsedGroups,
+  parseRenameDraft: typeof m.parseRenameDraft,
   isGroupNameInput: typeof m.isGroupNameInput,
   groupNameFromInput: typeof m.groupNameFromInput,
   normalizeExclusions: typeof m.normalizeExclusions,
@@ -268,6 +269,19 @@ out.parseCollapsedGroups = {
   notArrayJson: m.parseCollapsedGroups('{"a":1}'),
   nullish: m.parseCollapsedGroups(null),
   number: m.parseCollapsedGroups(42)
+}
+
+out.parseRenameDraft = {
+  valid: m.parseRenameDraft(['Portraits', 'Portra']),
+  emptyArray: m.parseRenameDraft([]),
+  nullish: m.parseRenameDraft(null),
+  notArray: m.parseRenameDraft('not an array'),
+  jsonString: m.parseRenameDraft('["Portraits","Portra"]'),
+  malformedString: m.parseRenameDraft('not json'),
+  emptyCategory: m.parseRenameDraft(['', 'text']),
+  wrongCategoryType: m.parseRenameDraft([1, 'text']),
+  wrongTextType: m.parseRenameDraft(['Portraits', 2]),
+  wrongLength: m.parseRenameDraft(['a', 'b', 'c'])
 }
 
 out.groupNameInput = {
@@ -982,12 +996,15 @@ def test_apply_writes_value_then_callback_then_one_dirty_at_the_end(source: str)
 def test_two_page_toggle_is_a_property_free_instance_field(source: str) -> None:
     ctor = _method_body(source, "constructor(title = NODE_TITLE)")
     assert "this._activePage = 'states'" in ctor
-    # Only TWO addProperty calls exist in the whole file, and neither is
-    # about the page toggle -- it is a plain instance field, never a
-    # right-click-Properties-panel entry.
-    assert source.count("this.addProperty(") == 2
+    # Three addProperty calls exist in the whole file (was two -- the
+    # tab-switch rename-loss fix, PROP_RENAME_DRAFT, added a third; see
+    # test_prop_rename_draft_* below), and NONE is about the page toggle --
+    # it stays a plain instance field, never a right-click-Properties-panel
+    # entry.
+    assert source.count("this.addProperty(") == 3
     assert "addProperty(PROP_COLLAPSED_GROUPS" in source
     assert "addProperty(PROP_INCLUDED_NODES" in source
+    assert "addProperty(PROP_RENAME_DRAFT" in source
     set_page = _method_body(source, "_setActivePage(page)")
     assert "this._activePage = page" in set_page
     assert "setDirtyCanvas" not in set_page  # a page switch is DOM-only, never persisted/dirtied
@@ -1035,6 +1052,177 @@ def test_shared_poller_registers_and_unregisters_module_scope_state(source: str)
     assert "if (uscSharedFetch) {" in refresh
     assert "uscRefetchQueued = true" in refresh
     assert "_applyStatesResponse(data)" in refresh
+
+
+def test_teardown_discards_the_local_rename_handle_now_that_the_property_survives_it(
+    source: str,
+) -> None:
+    """Supersedes an earlier attempt at this exact bug (tab-switch drops an
+    in-progress group rename): onRemoved() used to FLUSH the open editor
+    through `_commitCategoryRename()`, as if the user had pressed Enter.
+    That has two problems controller.js's sibling fix (`PROP_RENAME_DRAFT`)
+    already ran into and solved differently: (1) it is a network round
+    trip (`_withLoadedLayout`/`_saveLayout`) fired right as the node is
+    torn down -- fragile, and easy for its own `_removed`/`_layoutLoaded`
+    guards to self-abort partway through; (2) it silently RENAMES the
+    group off a value the user never actually confirmed -- an involuntary
+    tab switch must never finalize an edit on the user's behalf, the same
+    "not a real user action" rule notebook.js's draft fix and this file's
+    own `PROP_RENAME_DRAFT` both follow. The `Group rename draft` node
+    property (kept in sync on every keystroke by `_syncRenameDraftProperty`)
+    now survives the teardown synchronously with no network involved, and
+    `_restorePendingRenameDraft()` reopens the SAME in-progress edit after
+    the rebuild -- so onRemoved() only needs to discard the local DOM/JS
+    handle, exactly like controller.js's own onRemoved does."""
+    removed = _method_body(source, "onRemoved()")
+    assert "this._categoryRename = null" in removed
+    assert "this._commitCategoryRename()" not in removed
+    # discarding the handle must not itself touch the persisted draft --
+    # the property is what a rebuild reads back, so clearing it here would
+    # defeat the whole fix
+    assert "_clearRenameDraftProperty" not in removed
+    # Must run before `_removed` flips true, same ordering discipline the
+    # rest of the method already follows for its other cleanup.
+    assert removed.index("this._categoryRename = null") < removed.index("this._removed = true")
+
+
+def test_prop_rename_draft_registered_and_wired(source: str) -> None:
+    """Source pins for the tab-switch rename-loss fix's wiring: the
+    property is registered at attach (a saved value wins later via
+    configure's property loop, PROP_COLLAPSED_GROUPS's own precedent),
+    chained onto the shared onPropertyChanged hook, kept in sync on every
+    keystroke, cleared only on a real end-of-edit, and reopened from the
+    tail of every _renderStateList() once the data it needs exists."""
+    assert "const PROP_RENAME_DRAFT = 'Group rename draft'" in source
+    ctor = _method_body(source, "constructor(title = NODE_TITLE)")
+    assert "this._pendingRenameDraft = null" in ctor
+    assert "this.addProperty(PROP_RENAME_DRAFT, [], 'array')" in ctor
+    assert "this._applyRenameDraftFromProperty()" in ctor
+    changed = _method_body(source, "onPropertyChanged(name, value)")
+    assert "if (name === PROP_RENAME_DRAFT) {" in changed
+    assert "this._applyRenameDraftFromProperty()" in changed
+    assert "this._restorePendingRenameDraft()" in changed
+    begin = _method_body(source, "_beginCategoryRename(category, initialText = category)")
+    assert "this._syncRenameDraftProperty()" in begin
+    assert "input.addEventListener('input', () => this._syncRenameDraftProperty())" in begin
+    cancel = _method_body(source, "_cancelCategoryRename()")
+    assert "this._clearRenameDraftProperty()" in cancel
+    commit = _method_body(source, "_commitCategoryRename()")
+    assert "this._clearRenameDraftProperty()" in commit
+    render = _method_body(source, "_renderStateList()")
+    assert "this._restorePendingRenameDraft()" in render
+    restore = _method_body(source, "_restorePendingRenameDraft()")
+    assert "if (!pending || this._removed || this._categoryRename) return" in restore
+    assert "this._beginCategoryRename(pending.category, pending.text)" in restore
+
+
+def test_rename_draft_read_write_clear_halves_touch_only_the_one_property(source: str) -> None:
+    """The draft round-trips through `PROP_RENAME_DRAFT` and nothing else:
+    the READ half re-derives `_pendingRenameDraft` through the same
+    tolerant `parseRenameDraft()` a corrupt/hand-edited property is proven
+    safe against (`TestParseRenameDraft` below); the WRITE half mirrors
+    the CURRENTLY OPEN rename's live text back on every keystroke; the
+    CLEAR half wipes it back to `[]`. controller.js's identical trio,
+    ported by hand."""
+    read = _method_body(source, "_applyRenameDraftFromProperty()")
+    assert "parseRenameDraft(this.properties?.[PROP_RENAME_DRAFT])" in read
+    assert "this._pendingRenameDraft = " in read
+
+    write = _method_body(source, "_syncRenameDraftProperty()")
+    assert (
+        "this.properties[PROP_RENAME_DRAFT] = rename ? "
+        "[rename.category, rename.inputEl.value] : []"
+    ) in write
+    assert "this.setDirtyCanvas(true, true)" in write
+
+    clear = _method_body(source, "_clearRenameDraftProperty()")
+    assert "this.properties[PROP_RENAME_DRAFT] = []" in clear
+    assert "this.setDirtyCanvas(true, true)" in clear
+
+
+def test_restore_pending_rename_draft_drops_a_stale_category_instead_of_leaking_it(
+    source: str,
+) -> None:
+    """Guard behaviour for a property naming a group that no longer
+    exists (renamed/deleted while the tab was away, or a hand-edit
+    through the Properties panel pointing at nothing): `_pendingRenameDraft`
+    already degraded to `null` for anything structurally malformed (not an
+    array, wrong arity, non-string members -- `TestParseRenameDraft`
+    below), so this method's OWN job is only the "well-formed but the
+    named group is gone" case. It must never throw, and must not leak the
+    draft forever if the category never reappears -- it waits for
+    `_layoutLoaded` to actually confirm that before dropping it, exactly
+    like controller.js's own restore."""
+    restore = _method_body(source, "_restorePendingRenameDraft()")
+    # never fights a live edit or a detached pane
+    assert "if (!pending || this._removed || this._categoryRename) return" in restore
+    # matched by NAME against the loaded layout -- not blindly reopened
+    assert "this._layoutCache.categories.includes(pending.category)" in restore
+    # consumed exactly once, on EITHER branch (found -> reopen; confirmed
+    # gone -> drop) -- never left to be retried forever
+    assert restore.count("this._pendingRenameDraft = null") == 2
+    assert "if (this._layoutLoaded) {" in restore
+    layout_loaded_branch = restore.split("if (this._layoutLoaded) {", 1)[1]
+    assert "this._pendingRenameDraft = null" in layout_loaded_branch
+    assert "this._clearRenameDraftProperty()" in layout_loaded_branch
+
+
+def test_escape_enter_and_blur_all_route_through_a_real_end_of_edit(source: str) -> None:
+    """Only a genuine end-of-edit may clear the persisted draft -- Escape
+    (cancel), Enter (commit), and a blur (commit, same as Enter) all do;
+    a repaint/teardown must not (covered by
+    `test_teardown_discards_the_local_rename_handle_now_that_the_property_survives_it`
+    above)."""
+    begin = _method_body(source, "_beginCategoryRename(category, initialText = category)")
+    assert "if (event.key === 'Enter') {" in begin
+    enter_branch = begin.split("if (event.key === 'Enter') {", 1)[1].split("} else if", 1)[0]
+    assert "this._commitCategoryRename()" in enter_branch
+    assert "} else if (event.key === 'Escape') {" in begin
+    escape_branch = begin.split("} else if (event.key === 'Escape') {", 1)[1]
+    assert "this._cancelCategoryRename()" in escape_branch
+    assert "input.addEventListener('blur', () => {" in begin
+    blur_branch = begin.split("input.addEventListener('blur', () => {", 1)[1]
+    assert "this._commitCategoryRename()" in blur_branch
+
+    cancel = _method_body(source, "_cancelCategoryRename()")
+    assert "this._categoryRename = null" in cancel
+    assert "this._clearRenameDraftProperty()" in cancel
+    assert cancel.index("this._categoryRename = null") < cancel.index(
+        "this._clearRenameDraftProperty()"
+    )
+
+    commit = _method_body(source, "_commitCategoryRename()")
+    assert "this._categoryRename = null" in commit
+    assert "this._clearRenameDraftProperty()" in commit
+    # cleared unconditionally, before any of the empty/no-op/gone/duplicate
+    # refusal branches below it -- editing is over the instant this line
+    # runs, regardless of whether the rename itself goes on to succeed.
+    assert commit.index("this._categoryRename = null") < commit.index(
+        "this._clearRenameDraftProperty()"
+    )
+    assert commit.index("this._clearRenameDraftProperty()") < commit.index(
+        "const from = rename.category"
+    )
+
+
+class TestParseRenameDraft:
+    """Fail-soft parse for the restored `Group rename draft` property --
+    controller.js's identical `parseRenameDraft`, duplicated by hand (file
+    convention: small, stable cross-file helpers are copied, not
+    imported)."""
+
+    def test_tolerant_of_every_shape(self, controller_api: dict) -> None:
+        p = controller_api["parseRenameDraft"]
+        assert p["valid"] == {"category": "Portraits", "text": "Portra"}
+        assert p["emptyArray"] is None
+        assert p["nullish"] is None
+        assert p["notArray"] is None
+        assert p["jsonString"] == {"category": "Portraits", "text": "Portra"}
+        assert p["malformedString"] is None
+        assert p["emptyCategory"] is None  # empty category never counts as a draft
+        assert p["wrongCategoryType"] is None
+        assert p["wrongTextType"] is None
+        assert p["wrongLength"] is None
 
 
 def test_registering_a_controller_kicks_an_immediate_refresh(source: str) -> None:

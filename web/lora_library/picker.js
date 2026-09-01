@@ -155,6 +155,29 @@ export const PROP_AUTO_GROW = 'Auto-grow with selection'
  * via configure. */
 export const PROP_SELECTED_SPLIT = 'Selected split'
 
+/**
+ * Tab-switch drill-down fix (owner rule: "Just switching between workflows
+ * shouldn't ever reset anything in our nodes" -- notebook.js's `drafts`
+ * widget v0.87.3/v0.87.4 fixed the same bug class for unsaved text; this is
+ * the picker's own instance for VIEW state, not text). `drillPathAfterReload`
+ * (below) only keeps the drill-down sticky within an already-live panel's
+ * OWN session (a background feed refresh, the controller's apply) --
+ * `state.path` itself starts at `[]` on every fresh `createState()`, and a
+ * tab switch/undo/redo/paste RECREATES the node (file header's
+ * "Restore-correctness" paragraph), so the comparison it relies on
+ * (`state.selection.scope` before the reload) is comparing against a blank
+ * slate, not the position the user actually left. This node property
+ * carries `[scope, ...path]` (the scope the path was recorded under, same
+ * tuple-of-strings shape as controller.js's `PROP_RENAME_DRAFT`) so
+ * `createState()` can seed `state.path` before the very first paint.
+ * Registered at attach like `PROP_SELECTED_SPLIT` -- a saved value wins
+ * later via configure's property loop. No `onPropertyChanged` reaction:
+ * the only reader is the one-shot seed in `createState()`, so a live
+ * Properties-panel hand-edit while the node is already open has nothing to
+ * react to (an obscure enough edit to leave for the next rebuild).
+ */
+export const PROP_BROWSE_PATH = 'Browse folder'
+
 /** clampSplitFraction()'s usable range -- generous enough that either
  * section can dominate, never so extreme that the other collapses to a
  * sliver no wider than its own chrome. */
@@ -647,6 +670,16 @@ export function splitFractionFromNode(node) {
 // --- State ---
 
 function createState(node, widget) {
+  // Tab-switch drill-down fix (PROP_BROWSE_PATH above): a best-effort
+  // initial read -- `node.properties` may or may not be the restored
+  // value yet at this exact point (a completely separate race from the
+  // widget's own, file header's "Restore-correctness" paragraph); stashed
+  // as a PENDING seed rather than applied to `path` directly, resolved by
+  // `tryApplyPendingPathSeed()` once `state.selection.scope` is known to
+  // agree with it (from `reloadFromWidget`) -- or re-derived from scratch
+  // by the `PROP_BROWSE_PATH` `onPropertyChanged` handler if the property
+  // itself hadn't restored yet at THIS point either.
+  const seeded = browsePathFromProperty(node?.properties?.[PROP_BROWSE_PATH])
   return {
     node,
     widget,
@@ -658,8 +691,9 @@ function createState(node, widget) {
     recents: [], // newest first (§6.13)
     loaded: false,
     error: null,
-    view: 'browse', // 'browse' | 'favorites' | 'recent' -- transient, never serialized
-    path: [], // drill-down segments below the scope root -- transient (§6.13)
+    view: 'browse', // 'browse' | 'favorites' | 'recent' -- transient, never serialized (§6.13 M3: view mode itself, unlike the path below, is cheap to re-derive by clicking and stays out of PROP_BROWSE_PATH on purpose)
+    path: [], // drill-down segments below the scope root -- see `pendingPathSeed` for how a tab switch repopulates this before the first meaningful paint
+    pendingPathSeed: seeded.path.length ? seeded : null, // {scope, path} restored from PROP_BROWSE_PATH, or null -- consumed by tryApplyPendingPathSeed()
     pllTargetId: null, // Send-to-loader target node id -- transient, M2 adds no widget (§6.13)
     searchQuery: '', // §6.13 M3 view-only filter -- transient, never serialized
     searchTimer: null, // v0.68.1: pending debounced search repaint (scheduleSearchRender)
@@ -834,6 +868,88 @@ export function drillPathAfterReload(prevScope, nextScope, path, loras) {
   return kept
 }
 
+/**
+ * Parses `PROP_BROWSE_PATH`'s raw property value into the seed
+ * `createState()` starts from -- `{scope, path}`, defaulting to the empty
+ * root on anything malformed (missing property, a hand-edited non-array,
+ * non-string entries) rather than throwing. Pure so tests can drive it
+ * directly, same posture as `drillPathAfterReload`/`parseDraftsWidgetValue`
+ * (notebook.js) and `parseRenameDraft` (controller.js).
+ * @param {unknown} raw
+ * @returns {{scope: string, path: string[]}}
+ */
+export function browsePathFromProperty(raw) {
+  if (!Array.isArray(raw) || raw.length === 0 || typeof raw[0] !== 'string') {
+    return { scope: '', path: [] }
+  }
+  return { scope: raw[0], path: raw.slice(1).filter((seg) => typeof seg === 'string' && seg) }
+}
+
+/** Writes `state.path` (plus the scope it belongs to) into `PROP_BROWSE_PATH`
+ * -- the WRITE half of the tab-switch drill-down fix, called from every
+ * site that changes `state.path` (setScope, breadcrumb navigation, a
+ * folder click, `reloadFromWidget`'s own reconcile) so the property never
+ * drifts from what is actually on screen. Change-gated (JSON compare) to
+ * match `syncDraftsWidget`'s/`syncCollapsedGroupsProperty`'s no-op-on-equal
+ * convention -- a no-op write still costs a canvas dirty otherwise. */
+function syncBrowsePathProperty(state) {
+  const node = state.node
+  if (!node) return
+  const next = JSON.stringify([state.selection.scope || '', ...state.path])
+  node.properties = node.properties || {}
+  if (node.properties[PROP_BROWSE_PATH] !== undefined && JSON.stringify(node.properties[PROP_BROWSE_PATH]) === next) {
+    return
+  }
+  node.properties[PROP_BROWSE_PATH] = [state.selection.scope || '', ...state.path]
+  node.graph?.setDirtyCanvas(true, true)
+}
+
+/**
+ * Pure decision core of the tab-switch drill-down fix's READ half: given a
+ * pending seed (`{scope, path}` restored from `PROP_BROWSE_PATH`, or
+ * `null`) and the CURRENTLY known scope (`state.selection.scope`, the
+ * widget's own restore -- a completely separate race, file header's
+ * "Restore-correctness" paragraph), decides what `tryApplyPendingPathSeed`
+ * should do: `'keep'` (the scope hasn't caught up yet -- try again once it
+ * has, never discarded on a mismatch alone, since there's no way to tell
+ * "not yet" from "genuinely a different workflow" from here), `'discard'`
+ * (nothing to apply, or applying it would be a no-op), or the path array
+ * to adopt outright. Exported so the reconcile can be probed directly
+ * (drillPathAfterReload's own posture) instead of only through source pins.
+ * Deliberately never runs `drillPathAfterReload`'s loras-staleness trim --
+ * `state.loras` can still be `[]` when this fires (the feed fetch is a
+ * THIRD race); trusting the seed outright is safe because the very next
+ * ordinary reload (the feed landing) trims it for real against trustworthy
+ * data, same as any other sticky path.
+ * @param {{scope: string, path: string[]} | null} pending
+ * @param {string} currentScope
+ * @returns {'keep' | 'discard' | string[]}
+ */
+export function resolvePendingPathSeed(pending, currentScope) {
+  if (!pending) return 'discard'
+  if (pending.scope !== (currentScope || '')) return 'keep'
+  if (!Array.isArray(pending.path) || pending.path.length === 0) return 'discard'
+  return pending.path
+}
+
+/**
+ * Applies `resolvePendingPathSeed`'s verdict to `state` -- idempotent and
+ * order-agnostic by construction, same 2-phase shape as controller.js's
+ * `_restorePendingRenameDraft()`/notebook.js's `restoreDraftIntoEditor()`.
+ * Called from BOTH `reloadFromWidget` (covers the property landing first)
+ * and the `PROP_BROWSE_PATH` `onPropertyChanged` handler (covers the
+ * widget landing first).
+ * @returns {boolean} whether the seed was just applied (caller's cue to repaint)
+ */
+function tryApplyPendingPathSeed(state) {
+  const verdict = resolvePendingPathSeed(state.pendingPathSeed, state.selection.scope || '')
+  if (verdict === 'keep') return false
+  state.pendingPathSeed = null
+  if (verdict === 'discard') return false
+  state.path = verdict
+  return true
+}
+
 /** Re-derives `state.selection` from the widget's CURRENT value and
  * repaints -- the shared reconciliation step both the fetch-completion path
  * and wireConfigureReload call. */
@@ -853,16 +969,24 @@ function reloadFromWidget(state) {
   // TOP of the size configure had just restored, compounding per switch).
   // The getMinHeight floor still guarantees the full list stays visible.
   state.lastSelectedCount = null
+  const nextScope = state.selection.scope || ''
   // v0.67.2: the drill-down is sticky across anything that keeps the scope
   // (the feed refresh landing after the cached paint, the controller's
   // apply); only a scope CHANGE resets the browse position and the search
   // typed against the old scope (§6.13 M3) -- see drillPathAfterReload.
-  const nextPath = drillPathAfterReload(prevScope, state.selection.scope, state.path, state.loras)
-  if ((state.selection.scope || '') !== prevScope) {
+  const nextPath = drillPathAfterReload(prevScope, nextScope, state.path, state.loras)
+  if (nextScope !== prevScope) {
     state.view = 'browse'
     clearSearch(state)
   }
   state.path = nextPath
+  // PROP_BROWSE_PATH tab-switch fix: NOW that `state.selection.scope` is
+  // freshly known, see whether a seed restored from the property (by
+  // createState's best-effort read, or by a later onPropertyChanged) can
+  // finally be trusted -- 2-phase restore, same idiom as controller.js's
+  // `_restorePendingRenameDraft()`/notebook.js's `restoreDraftIntoEditor()`.
+  tryApplyPendingPathSeed(state)
+  syncBrowsePathProperty(state)
   render(state)
 }
 
@@ -1118,6 +1242,43 @@ function wireConfigureReload(state) {
   }
 }
 
+/**
+ * Wraps `node.onRemoved` -- chained, never replaced, same posture as
+ * `wireConfigureReload`/notebook.js's own `wireNodeCleanup`. The node's DOM
+ * widget is torn down for a tab switch, undo/redo, or a workflow reload
+ * exactly as much as it is for an actual node deletion (file header's
+ * "Restore-correctness" paragraph): none of those paths run this module's
+ * own `render()`, so `commitActiveStrengthEdit`'s repaint-time guard never
+ * gets a chance to fire and a strength value the user is mid-typing (never
+ * yet blurred/changed) would otherwise be silently discarded along with the
+ * input that held it -- the exact "in-memory JS state destroyed by a
+ * repaint the user never asked for" shape notebook.js's v0.87.3 fix
+ * addressed for its textarea. Scoped to exactly that one flush -- picker.js
+ * has no timers/listeners of its own that outlive the node the way
+ * notebook.js's/prompt_builder.js's fuller `teardown()` guards against, so
+ * there is nothing else for this hook to do.
+ */
+function wireNodeCleanup(state) {
+  const node = state.node
+  const originalOnRemoved = node.onRemoved
+  node.onRemoved = function (...args) {
+    let result
+    if (typeof originalOnRemoved === 'function') {
+      try {
+        result = originalOnRemoved.apply(this, args)
+      } catch (error) {
+        api.warn('original onRemoved threw', error)
+      }
+    }
+    try {
+      commitActiveStrengthEdit(state)
+    } catch (error) {
+      api.warn('picker strength flush on remove failed', error)
+    }
+    return result
+  }
+}
+
 // --- Mutations ---
 
 /** The trimmed live M3 query -- `''` means "search inactive". */
@@ -1154,6 +1315,7 @@ function setScope(state, scopePath) {
   state.path = []
   state.view = 'browse'
   clearSearch(state)
+  syncBrowsePathProperty(state) // PROP_BROWSE_PATH: keep the property in step with the reset
   writeSelectionWidget(state)
   render(state)
 }
@@ -1359,7 +1521,13 @@ function patchCountBadges(state) {
 /** A strength edit in progress when a repaint lands (slow fetch completing,
  * a configure-driven reload) must be committed FIRST: `replaceChildren()`
  * destroys the focused input without firing change OR blur, so the typed
- * value would silently revert (review 2026-08-09). */
+ * value would silently revert (review 2026-08-09). Also the flush
+ * `wireNodeCleanup` runs from `node.onRemoved` -- a tab switch/undo-redo/
+ * workflow reload tears the DOM widget down WITHOUT ever calling back into
+ * this module's own `render()`, so that repaint-time guard alone never
+ * fires for it; an in-progress strength edit would otherwise vanish
+ * exactly like the notebook.js textarea bug this pack already fixed
+ * (v0.87.3), just for a number field instead of a paragraph. */
 function commitActiveStrengthEdit(state) {
   const active = document.activeElement
   if (!active || !state.selectedListEl || !state.selectedListEl.contains(active)) return
@@ -1567,6 +1735,34 @@ function wireSplitProperty(state) {
         applySplit(state)
       } catch (error) {
         api.warn('split property change failed', error)
+      }
+    }
+    return result
+  }
+}
+
+/**
+ * Registers `PROP_BROWSE_PATH` the same way `wireSplitProperty` registers
+ * `PROP_SELECTED_SPLIT` -- `addProperty` every attach, `onPropertyChanged`
+ * CHAINED (third on the hook now). Covers the order `createState()`'s own
+ * best-effort read can't: the property landing AFTER `state.selection.scope`
+ * is already known (re-derive `pendingPathSeed` from the fresh value, then
+ * try to apply it right away -- `tryApplyPendingPathSeed()` is a no-op if
+ * the scope still doesn't match, same as it is from `reloadFromWidget`).
+ */
+function wireBrowsePathProperty(state) {
+  const node = state.node
+  if (typeof node.addProperty === 'function') node.addProperty(PROP_BROWSE_PATH, [], 'array')
+  const original = node.onPropertyChanged
+  node.onPropertyChanged = function (name, value, prevValue) {
+    const result = original?.call(this, name, value, prevValue)
+    if (name === PROP_BROWSE_PATH) {
+      try {
+        const seeded = browsePathFromProperty(value)
+        state.pendingPathSeed = seeded.path.length ? seeded : null
+        if (tryApplyPendingPathSeed(state)) renderBrowser(state)
+      } catch (error) {
+        api.warn('browse path property change failed', error)
       }
     }
     return result
@@ -1862,6 +2058,7 @@ function renderCrumbs(state) {
     clearSearch(state)
     state.path = []
     state.view = 'browse'
+    syncBrowsePathProperty(state) // PROP_BROWSE_PATH
     renderBrowser(state)
   })
   state.crumbsEl.append(rootBtn)
@@ -1873,7 +2070,10 @@ function renderCrumbs(state) {
     const crumbBtn = el('button', { className: 'eps-lp-crumb', text: segment })
     crumbBtn.addEventListener('click', () => {
       clearSearch(state) // same pinned navigate-clears-search choice as rootBtn
-      if (state.view === 'browse') state.path = state.path.slice(0, index + 1)
+      if (state.view === 'browse') {
+        state.path = state.path.slice(0, index + 1)
+        syncBrowsePathProperty(state) // PROP_BROWSE_PATH
+      }
       renderBrowser(state)
     })
     state.crumbsEl.append(crumbBtn)
@@ -2061,6 +2261,7 @@ function buildFolderRowEl(state, folder) {
   const rowEl = el('div', { className: 'eps-lp-row eps-lp-folder-row' }, [label, count, pinBtn])
   rowEl.addEventListener('click', () => {
     state.path = [...state.path, folder.name]
+    syncBrowsePathProperty(state) // PROP_BROWSE_PATH
     renderBrowser(state)
   })
   return rowEl
@@ -2906,9 +3107,13 @@ export function attachPickerPanel(node) {
     // §6.13 M5: `Selected split` -- the divider's persisted fraction,
     // chained onto the SAME onPropertyChanged hook (see wireSplitProperty).
     wireSplitProperty(state)
+    // Tab-switch drill-down fix: `Browse folder` -- chained onto the same
+    // hook again (see wireBrowsePathProperty).
+    wireBrowsePathProperty(state)
     hideSelectionWidget(state)
     buildUi(state)
     wireConfigureReload(state)
+    wireNodeCleanup(state)
 
     loadPicker(state).catch((error) => api.warn('initial picker load failed', error))
   } catch (error) {

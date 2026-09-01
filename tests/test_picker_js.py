@@ -155,6 +155,38 @@ DRILL_PATH_CASES = [
     (["", "", ["a"], None], []),
 ]
 
+#: (raw PROP_BROWSE_PATH value, expected browsePathFromProperty()) --
+#: tab-switch drill-down fix. Round-trips syncBrowsePathProperty()'s own
+#: write shape: `[scope, ...path]`.
+BROWSE_PATH_FROM_PROPERTY_CASES = [
+    (["characters", "anime"], {"scope": "characters", "path": ["anime"]}),
+    ([""], {"scope": "", "path": []}),
+    ([], {"scope": "", "path": []}),
+    (None, {"scope": "", "path": []}),
+    ("not an array", {"scope": "", "path": []}),
+    # a hand-edited/malformed property degrades instead of throwing
+    ([1, 2, 3], {"scope": "", "path": []}),
+    (["styles", "vintage", 7, None, "sepia"], {"scope": "styles", "path": ["vintage", "sepia"]}),
+]
+
+#: (pending seed, currentScope, expected resolvePendingPathSeed() verdict) --
+#: the reconcile's pure decision core. `"keep"`/`"discard"` are sentinels;
+#: anything else is the path array to adopt.
+RESOLVE_PENDING_PATH_SEED_CASES = [
+    # no seed at all -> nothing to do
+    (None, "", "discard"),
+    (None, "characters", "discard"),
+    # scope matches -> adopt the seeded path outright (rebuild survives)
+    ({"scope": "", "path": ["characters", "anime"]}, "", ["characters", "anime"]),
+    ({"scope": "styles", "path": ["vintage"]}, "styles", ["vintage"]),
+    # scope not yet confirmed (the widget restore hasn't landed) -> keep
+    # trying, never discard on a mismatch alone
+    ({"scope": "styles", "path": ["vintage"]}, "", "keep"),
+    ({"scope": "", "path": ["characters"]}, "styles", "keep"),
+    # an empty seeded path would be a no-op either way -> discard
+    ({"scope": "", "path": []}, "", "discard"),
+]
+
 LIST_FOLDER_CASES = [
     (
         (TREE_LORAS, ""),
@@ -329,6 +361,9 @@ const out = {
     hasClampStrength: typeof m.clampStrength === 'function',
     hasNormalizeLoraName: typeof m.normalizeLoraName === 'function',
     hasDrillPathAfterReload: typeof m.drillPathAfterReload === 'function',
+    // tab-switch drill-down fix (PROP_BROWSE_PATH)
+    hasBrowsePathFromProperty: typeof m.browsePathFromProperty === 'function',
+    hasResolvePendingPathSeed: typeof m.resolvePendingPathSeed === 'function',
     hasAutoGrowFromValue: typeof m.autoGrowFromValue === 'function',
     hasShouldAutoGrow: typeof m.shouldAutoGrow === 'function',
     hasSelectedListFloorRows: typeof m.selectedListFloorRows === 'function',
@@ -349,6 +384,7 @@ const out = {
     propAutoGrow: m.PROP_AUTO_GROW,
     fixedSelectedRows: m.FIXED_SELECTED_ROWS,
     propSelectedSplit: m.PROP_SELECTED_SPLIT,
+    propBrowsePath: m.PROP_BROWSE_PATH,
     splitFractionMin: m.SPLIT_FRACTION_MIN,
     splitFractionMax: m.SPLIT_FRACTION_MAX,
     defaultSplitFraction: m.DEFAULT_SPLIT_FRACTION
@@ -384,6 +420,22 @@ const out = {
   drillPathAfterReload: %(drill_inputs)s.map(
     ([prev, next, path, loras]) => m.drillPathAfterReload(prev, next, path, loras)
   ),
+  browsePathFromProperty: %(browse_path_inputs)s.map((raw) => m.browsePathFromProperty(raw)),
+  resolvePendingPathSeed: %(resolve_pending_inputs)s.map(
+    ([pending, currentScope]) => m.resolvePendingPathSeed(pending, currentScope)
+  ),
+  // Tab-switch drill-down "rebuild survives" narrative, chaining only the
+  // REAL exported functions -- see test_rebuild_then_repaint_preserves_
+  // the_drilled_down_folder()'s own doc comment for the full story.
+  rebuildThenRepaint: (() => {
+    const seed = m.browsePathFromProperty(['styles', 'vintage', 'sepia'])
+    return {
+      seed,
+      sameScopeConfirmed: m.resolvePendingPathSeed(seed, 'styles'),
+      differentWorkflowScope: m.resolvePendingPathSeed(seed, 'characters'),
+      scopeNotYetRestored: m.resolvePendingPathSeed(seed, '')
+    }
+  })(),
   feedContentEqual: %(feed_content_equal_inputs)s.map(([a, b]) => m.feedContentEqual(a, b)),
   feedContentEqualSameRef: (() => {
     const obj = { loras: [], previews: [], favorites: [], recents: [] }
@@ -430,6 +482,10 @@ def picker_api(tmp_path_factory: pytest.TempPathFactory) -> dict:
             "list_folder_inputs": json.dumps([list(args) for args, _ in LIST_FOLDER_CASES]),
             "clamp_inputs": json.dumps([value for value, _ in CLAMP_CASES]),
             "drill_inputs": json.dumps([args for args, _ in DRILL_PATH_CASES]),
+            "browse_path_inputs": json.dumps([raw for raw, _ in BROWSE_PATH_FROM_PROPERTY_CASES]),
+            "resolve_pending_inputs": json.dumps(
+                [[pending, scope] for pending, scope, _ in RESOLVE_PENDING_PATH_SEED_CASES]
+            ),
             "auto_grow_values": ", ".join(js for js, _ in AUTO_GROW_VALUE_CASES),
             "floor_rows_inputs": json.dumps([list(args) for args, _ in FLOOR_ROWS_CASES]),
             "split_fraction_values": ", ".join(js for js, _ in SPLIT_FRACTION_CASES),
@@ -492,6 +548,10 @@ def test_module_exports_the_entry_point_and_pure_helpers(picker_api: dict) -> No
         "hasClampStrength": True,
         "hasNormalizeLoraName": True,
         "hasDrillPathAfterReload": True,
+        # tab-switch drill-down fix (PROP_BROWSE_PATH): the seed parse +
+        # the reconcile's pure decision core
+        "hasBrowsePathFromProperty": True,
+        "hasResolvePendingPathSeed": True,
         # §6.13 height round (2026-08-22): the auto-grow decision helpers
         "hasAutoGrowFromValue": True,
         "hasShouldAutoGrow": True,
@@ -525,14 +585,114 @@ def test_drill_path_after_reload_cases(picker_api: dict) -> None:
         assert got == expected, f"drillPathAfterReload({args!r}) -> {got!r}, wanted {expected!r}"
 
 
+def test_browse_path_from_property_cases(picker_api: dict) -> None:
+    """Tab-switch drill-down fix: parses PROP_BROWSE_PATH's `[scope,
+    ...path]` shape back into the `{scope, path}` seed createState() reads
+    at attach -- degrading anything malformed to the empty root instead of
+    throwing (a hand-edited Properties-panel value must never crash the
+    panel)."""
+    pairs = zip(BROWSE_PATH_FROM_PROPERTY_CASES, picker_api["browsePathFromProperty"], strict=True)
+    for (raw, expected), got in pairs:
+        assert got == expected, f"browsePathFromProperty({raw!r}) -> {got!r}, wanted {expected!r}"
+
+
+def test_resolve_pending_path_seed_cases(picker_api: dict) -> None:
+    """The reconcile's pure decision core, and -- because its inputs are
+    exactly {what a rebuild's createState reads from the property} x {what
+    reloadFromWidget knows once the widget restore lands} -- this doubles
+    as the "rebuild-then-repaint survives" proof for the drill-down fix:
+    a folder drilled into under scope "" and persisted (`{scope: "",
+    path: [...]}`) is adopted outright the moment a post-rebuild reload
+    confirms the SAME scope, exactly modeling a tab switch that tore the
+    node down and rebuilt it with the same saved `selection.scope`. A
+    scope that hasn't been confirmed yet is kept pending, never guessed
+    away -- the widget restore and the property restore are two
+    independent races (file header)."""
+    pairs = zip(RESOLVE_PENDING_PATH_SEED_CASES, picker_api["resolvePendingPathSeed"], strict=True)
+    for (pending, current_scope, expected), got in pairs:
+        args = f"{pending!r}, {current_scope!r}"
+        assert got == expected, f"resolvePendingPathSeed({args}) -> {got!r}, wanted {expected!r}"
+
+
+def test_rebuild_then_repaint_preserves_the_drilled_down_folder(picker_api: dict) -> None:
+    """Chaining only the REAL exported pure functions (no reimplementation
+    of the reconcile in Python) -- this is the round's actual "survives a
+    rebuild" proof for the picker's drill-down.
+
+    Models the exact sequence a tab switch runs: (1) a live session drilled
+    into scope "styles" -> ["vintage", "sepia"]; syncBrowsePathProperty's
+    own write shape (`[scope, ...path]`) means that got persisted as
+    `["styles", "vintage", "sepia"]`. (2) A tab switch tears the node down
+    and rebuilds it from scratch -- the fresh node's createState() reads
+    that same raw property value back through browsePathFromProperty().
+    (3) The widget's own, independent restore race lands and confirms the
+    SAME scope ("styles"), so reloadFromWidget's tryApplyPendingPathSeed
+    calls resolvePendingPathSeed(seed, currentScope). The folder the user
+    was standing in must come back -- not the scope root -- for the fix to
+    be real; a mismatched scope (a genuinely different workflow) must
+    still fall back to "keep" rather than being guessed one way or the
+    other, and so must a scope that simply hasn't restored yet.
+    """
+    out = picker_api["rebuildThenRepaint"]
+    assert out["seed"] == {"scope": "styles", "path": ["vintage", "sepia"]}
+    # the rebuild's widget restore confirms the SAME scope -> the drilled-
+    # into folder is adopted outright, exactly as if the tab switch never
+    # happened
+    assert out["sameScopeConfirmed"] == ["vintage", "sepia"]
+    # a DIFFERENT workflow's scope must never inherit someone else's
+    # drill-down -- resolvePendingPathSeed leaves it pending, not applied
+    assert out["differentWorkflowScope"] == "keep"
+    # createState's blank-slate default (`state.selection.scope` is still
+    # `''` because the widget hasn't restored yet) must NOT be read as "a
+    # different workflow" and discard the seed -- it is simply not
+    # resolved YET, so this stays pending too, exactly like a genuine
+    # mismatch, until the widget's own restore race catches up
+    assert out["scopeNotYetRestored"] == "keep"
+
+
+def test_prop_browse_path_registered_and_wired(source: str) -> None:
+    """Source pins for the wiring `resolvePendingPathSeed`'s unit tests
+    can't see: the property is registered at attach (a saved value wins
+    later via configure's property loop, PROP_AUTO_GROW's own precedent),
+    chained onto the shared onPropertyChanged hook, and every site that
+    mutates `state.path` writes it back through so the property never
+    drifts from what is on screen."""
+    assert "export const PROP_BROWSE_PATH = 'Browse folder'" in source
+    wire = _function_body(source, "wireBrowsePathProperty(state)")
+    assert "node.addProperty(PROP_BROWSE_PATH, [], 'array')" in wire
+    assert "if (name === PROP_BROWSE_PATH) {" in wire
+    assert "tryApplyPendingPathSeed(state)" in wire
+    attach = _function_body(source, "attachPickerPanel(node)")
+    assert "wireBrowsePathProperty(state)" in attach
+    create_state = _function_body(source, "createState(node, widget)")
+    assert "browsePathFromProperty(node?.properties?.[PROP_BROWSE_PATH])" in create_state
+    assert "pendingPathSeed: seeded.path.length ? seeded : null" in create_state
+    # every site that changes state.path syncs the property right after
+    set_scope = _function_body(source, "setScope(state, scopePath)")
+    assert "syncBrowsePathProperty(state)" in set_scope
+    # the function's own declaration line + 5 call sites (setScope, the
+    # root/tail breadcrumb clicks, the folder-drill click, reloadFromWidget)
+    assert source.count("syncBrowsePathProperty(state)") == 6
+
+
 def test_reload_from_widget_keeps_the_path_unless_the_scope_changed(source: str) -> None:
     """The wholesale reset (path/view/search) now sits behind a scope-change
-    check; the path itself always goes through drillPathAfterReload."""
+    check; the path itself always goes through drillPathAfterReload.
+
+    Pinned literal moved (tab-switch drill-down fix, PROP_BROWSE_PATH): the
+    inline `state.selection.scope` reads were factored into a `nextScope`
+    local, reused a few lines down by `tryApplyPendingPathSeed()` -- same
+    value, just named once instead of re-read three times.
+    """
     body = _function_body(source, "reloadFromWidget(state)")
     assert "const prevScope = state.selection?.scope || ''" in body
-    assert "drillPathAfterReload(prevScope, state.selection.scope, state.path, state.loras)" in body
-    assert "if ((state.selection.scope || '') !== prevScope) {" in body
+    assert "const nextScope = state.selection.scope || ''" in body
+    assert "drillPathAfterReload(prevScope, nextScope, state.path, state.loras)" in body
+    assert "if (nextScope !== prevScope) {" in body
     assert "state.path = nextPath" in body
+    # the tab-switch drill-down fix's 2-phase reconcile runs right after
+    assert "tryApplyPendingPathSeed(state)" in body
+    assert "syncBrowsePathProperty(state)" in body
     # the old unconditional reset is gone
     assert "state.path = [] // a restored scope" not in body
 
@@ -2340,3 +2500,51 @@ class TestSplitDividerRoundM5:
         assert "new ResizeObserver(() => applySplit(state))" in body
         assert "observer.observe(state.root)" in body
         assert "installSplitResizeObserver(state)" in _function_body(source, "buildUi(state)")
+
+
+class TestStrengthEditSurvivesTeardown20260901:
+    """Owner report (the general shape, first fixed in notebook.js v0.87.3):
+    "tabbing to another workflow and tabbing back erases any changes you've
+    made ... switching between workflows shouldn't ever reset anything in
+    our nodes." A tab switch/undo-redo/workflow reload tears this node's DOM
+    widget down WITHOUT ever calling back into picker.js's own render() --
+    so commitActiveStrengthEdit()'s existing repaint-time guard (wired only
+    from render()'s own callers) never runs for it, and a strength value the
+    user is mid-typing (never yet blurred/changed -- the ONLY commit path
+    the number input has) is destroyed along with the input that held it.
+    wireNodeCleanup() closes that gap the same way notebook.js's/
+    prompt_builder.js's own `node.onRemoved`-chained teardown does."""
+
+    @pytest.fixture(scope="class")
+    def source(self) -> str:
+        return PICKER_JS.read_text(encoding="utf-8")
+
+    def test_wire_node_cleanup_installed_at_attach_after_configure_reload(
+        self, source: str
+    ) -> None:
+        attach = _function_body(source, "attachPickerPanel(node)")
+        assert "wireNodeCleanup(state)" in attach
+        configure_at = attach.index("wireConfigureReload(state)")
+        cleanup_at = attach.index("wireNodeCleanup(state)")
+        assert configure_at < cleanup_at
+
+    def test_on_removed_is_chained_never_replaced(self, source: str) -> None:
+        """Same posture as wireConfigureReload's onConfigure wrap -- core or
+        another extension may already own node.onRemoved."""
+        body = _function_body(source, "wireNodeCleanup(state)")
+        assert "const originalOnRemoved = node.onRemoved" in body
+        assert "node.onRemoved = function (...args) {" in body
+        assert "originalOnRemoved.apply(this, args)" in body
+        assert "return result" in body
+
+    def test_on_removed_flushes_the_active_strength_edit(self, source: str) -> None:
+        body = _function_body(source, "wireNodeCleanup(state)")
+        assert "commitActiveStrengthEdit(state)" in body
+        # wrapped in its own try/catch -- a throw here must never break the
+        # original onRemoved's own return value or the node's real teardown.
+        assert "api.warn('picker strength flush on remove failed', error)" in body
+
+    def test_never_throws_out_of_the_wrapped_hook(self, source: str) -> None:
+        body = _function_body(source, "wireNodeCleanup(state)")
+        assert "} catch (error) {" in body
+        assert "api.warn('original onRemoved threw', error)" in body

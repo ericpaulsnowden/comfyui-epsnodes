@@ -614,6 +614,41 @@ out.basenames = [
 
     out.focusRestore = { resolved, staleLeftAsGrid, untouched, emptyFocusNoop }
   }
+
+  // Tab-switch/undo/reload race (rig-caught, the second-half focus bug): a
+  // freshly rebuilt node's `imageIndex`/`images` read null/undefined --
+  // not because focus was ever cleared, but because the async
+  // `refreshFromBuffer` hasn't landed yet -- while the FOCUS WIDGET already
+  // holds the real persisted value (`configure()` restores widgets
+  // synchronously, well before that fetch resolves). A draw firing in that
+  // window must not let the draw-time poll (`syncFocusFromView`) wipe the
+  // widget out from under the restore that's still coming.
+  {
+    const { node, focusWidget } = makeGridNode(109, { focusValue: 'b.png' })
+    // Simulates a draw landing BEFORE refreshFromBuffer's fetch resolves:
+    // node.images/imageIndex are still their just-created defaults.
+    grid.syncFocusFromView(node)
+    const survivedPreSettleDraw = focusWidget.value
+
+    // The async refresh finally lands: setNodeImagesFromRefs settles the
+    // node, then restoreFocusedView (its one caller) re-resolves the
+    // still-intact persisted value.
+    grid.setNodeImagesFromRefs(node, [R3('a.png'), R3('b.png'), R3('c.png')])
+    grid.restoreFocusedView(node)
+    const resolvedAfterSettle = node.imageIndex
+
+    // A draw AFTER the settle is the ordinary, already-covered case: a
+    // real unfocus still legitimately clears the widget.
+    node.imageIndex = null
+    grid.syncFocusFromView(node)
+    const clearsAfterRealUnfocus = focusWidget.value
+
+    out.focusSurvivesRebuild = {
+      survivedPreSettleDraw,
+      resolvedAfterSettle,
+      clearsAfterRealUnfocus
+    }
+  }
 }
 
 process.stdout.write(JSON.stringify(out))
@@ -1430,3 +1465,27 @@ def test_refresh_from_buffer_restores_the_focused_view_after_a_load() -> None:
     set_index = body.index("setNodeImagesFromRefs(node, data.refs)")
     restore_index = body.index("restoreFocusedView(node)")
     assert set_index < restore_index
+
+
+def test_focus_widget_survives_a_draw_that_lands_before_the_buffer_settles(
+    grid_api: dict,
+) -> None:
+    """The second-half tab-switch/undo/reload bug: a draw firing before
+    `refreshFromBuffer` lands must not let the draw-time poll
+    (`syncFocusFromView`) wipe the `focus` widget's already-restored,
+    persisted value out from under `restoreFocusedView`, which is still
+    coming. Once the buffer actually settles, the persisted value resolves
+    normally, and a REAL subsequent unfocus still clears the widget."""
+    survives = grid_api["focusSurvivesRebuild"]
+    assert survives["survivedPreSettleDraw"] == "b.png"
+    assert survives["resolvedAfterSettle"] == 1
+    assert survives["clearsAfterRealUnfocus"] == ""
+
+
+def test_clear_node_preview_marks_the_buffer_settled() -> None:
+    """`clearNodePreview` sets `node.images = undefined`, the same shape as
+    a not-yet-refreshed node -- without its own settle marker, the Clear
+    button's own legitimate widget-clear would be held back by the same
+    guard that protects a not-yet-restored one."""
+    body = _function_body("function clearNodePreview")
+    assert "markBufferSettled(node)" in body

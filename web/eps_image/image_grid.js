@@ -1101,6 +1101,7 @@ function clearNodePreview(node) {
   node.imgs = []
   node.images = undefined
   node.imageIndex = null
+  markBufferSettled(node) // Clear is a real user action -- see writeFocusWidget's docstring.
   // M2 cache-token reset (see `imageUrlForRef`'s docstring): Clear can
   // reuse `NNNN.png` names on the next append, so a stale cached epoch
   // must not survive it -- back to the "unknown" default (`0`) until the
@@ -1818,6 +1819,7 @@ export function syncCoreOutputStore(node, refs) {
 }
 
 export function setNodeImagesFromRefs(node, refs) {
+  markBufferSettled(node) // see writeFocusWidget's docstring -- both branches count as a settle.
   if (!refs || !refs.length) {
     node.imgs = []
     node.images = undefined
@@ -2084,6 +2086,24 @@ export function currentFocusedFrameId(node) {
 }
 
 /**
+ * Whether *node*'s buffer view has settled at least once since this JS
+ * instance was (re)created -- `true` once `setNodeImagesFromRefs` (any
+ * branch, including the empty one) or `clearNodePreview` has actually run
+ * for it. `node.images` being a real array already implies this, but an
+ * emptied buffer sets `node.images = undefined` right back (both call
+ * sites), so a plain `Array.isArray` check alone can't tell "genuinely
+ * empty, settled" apart from "not loaded yet" -- see `writeFocusWidget`'s
+ * docstring for why that distinction is load-bearing. A per-instance flag
+ * (not a WeakSet) matches this file's own `node.__eps*` idiom, and needs no
+ * cleanup: a tab switch/undo/reload always hands every node a FRESH object
+ * (file header, "Identity is STABLE"), so the flag naturally starts unset
+ * again for it.
+ */
+function markBufferSettled(node) {
+  node.__epsGridBufferSettled = true
+}
+
+/**
  * Writes *value* into the hidden `focus` widget's real `.value`, then fires
  * its `.callback`, if any -- the exact `writeUuid` idiom already established
  * above for `grid_uuid` (a widget's `.callback` is a NOTIFICATION hook, not
@@ -2092,10 +2112,30 @@ export function currentFocusedFrameId(node) {
  * the widget's current one, so calling this every draw from
  * `syncFocusFromView` costs nothing once settled and never spams the
  * callback/dirty machinery for an unchanged view.
+ *
+ * A CLEARING write (*value* `''`) is additionally held back until *node*'s
+ * buffer has settled at least once (`markBufferSettled`/`Array.isArray(
+ * node.images)`) -- the second half of the tab-switch/undo/reload focus
+ * bug (rig-caught): a freshly rebuilt node's `imageIndex` reads `null` for
+ * TWO different reasons that this draw-time poll can't otherwise tell
+ * apart -- a genuine unfocus (Clear, a bulk add, deleting a tile, all of
+ * which only ever happen AFTER a settle) versus simply "not restored yet"
+ * (the widget's `.value` already holds the persisted `focus` from
+ * `configure()`, but `node.images`/`imageIndex` won't exist until the
+ * async `refreshFromBuffer` -> `restoreFocusedView` finishes). A draw
+ * landing in that window -- routine; `installFocusWidgetSync` polls every
+ * frame while the refresh is a real network round trip -- would otherwise
+ * write `''` here FIRST, wiping the persisted value out from under
+ * `restoreFocusedView` before it ever runs; the very next save would then
+ * serialize an empty `focus`, permanently losing "this frame is focused"
+ * even though the user never touched anything. A non-empty write (the user
+ * -- or a successful restore -- just focused a tile) is never held back;
+ * that's always a real, intentional value.
  */
 function writeFocusWidget(node, value) {
   const widget = getFocusWidget(node)
   if (!widget || widget.value === value) return
+  if (!value && !Array.isArray(node.images) && !node.__epsGridBufferSettled) return
   widget.value = value
   if (typeof widget.callback === 'function') {
     widget.callback(value, app.canvas, node)

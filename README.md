@@ -27,6 +27,7 @@ section further down; this is the map.
 | [**EPS Image Switcher**](#eps-image-switcher-shipped) | Any number of image inputs, each independently on/off; the enabled ones fan out (N enabled → N runs). Disabled branches never execute. | Nothing — drag-and-drop with core nodes. |
 | [**EPS Model / CLIP / VAE Switcher**](#eps-model--clip--vae-switcher-shipped) | The image Switcher's exact mechanism for models, CLIPs, and VAEs: any number of inputs, each on/off, enabled ones fan out (N enabled → N runs), disabled branches — including their checkpoint loads — never execute. | Nothing — drag-and-drop with core nodes. |
 | [**EPS Distributor**](#eps-distributor-shipped) | The mirror of the Switcher: one image — or one text — in, up to sixteen branches out, each independently on/off. New outputs appear as you wire them up. Toggle a branch off and only that branch is skipped — everything happens in one run. | Nothing — drag-and-drop with core nodes. |
+| [**EPS Number Controller**](#eps-number-controller-shipped) | Every number a workflow uses, kept in one place: named rows, each a plain number box. Wire one into a socket and it quietly becomes the right kind of number for it — whole or decimal. Untick a row and whatever it was plugged into goes back to its own value. The Universal State Controller can save and recall the whole set, including which rows are switched on. | Nothing — drag-and-drop with core nodes. |
 | [**EPS Checkpoint Switcher**](#eps-checkpoint-switcher-shipped) | Tick several checkpoint files in a list; one queue runs the workflow once per ticked checkpoint, with each run's model, CLIP, and VAE kept together and a label for save paths. | Your checkpoint files — drag-and-drop with core nodes. |
 | [**EPS Resolution**](#eps-resolution-shipped) | Image-first resize + size in one node: target size (with a drag pad), four resize modes, and the original image + both sets of dimensions passed through. Named size presets are shared across your machines — tick several and one Run resizes once per preset. Wire in extra images and they all come out at the same target size in one Run. | Nothing — drag-and-drop with core nodes. |
 | [**EPS Image Grid**](#eps-image-grid-shipped) | Collects images across separate Runs into a buffer that survives restarts, shows them as a thumbnail grid, and fans the whole set out on demand. Add whole batches at once — a multiselect picker, a folder importer, or one big drag. | Nothing — drag-and-drop with core nodes. |
@@ -226,7 +227,11 @@ captions).
   the saved text) returns to normal. Images saved during an audition record
   the text they actually used. Switching workflow tabs never disturbs it —
   only saving, undoing back to the saved text, or selecting a different
-  prompt resets an audition.
+  prompt resets an audition. **The same protection now covers a category's
+  description text too**, and clicking away to another category and back —
+  including via a tab switch — reopens the same category you had open, with
+  your unsaved edit still sitting in the box. Nothing reaches disk until you
+  save.
 - **Selected prompts run in list order (v0.85.0).** The order prompts run
   in — and the `t1`, `t2`, `t3` parts of your filenames — follows the order
   they appear in the notebook, not the order you happened to click them.
@@ -686,6 +691,43 @@ several models/VAEs in one queue".
 - Loading several checkpoints in one queue is heavy on disk and RAM/VRAM;
   ComfyUI offloads between runs, but start with two or three, not ten.
 
+## EPS Number Controller (shipped)
+
+`EPSNodes → EPS Number Controller`: **every number your workflow uses, kept in
+one place.** Instead of hunting across a big graph for the steps here, the CFG
+there and the denoise somewhere else, you keep them as named rows on one node
+and wire each one to where it belongs. The Universal State Controller can then
+save and recall the whole set at once — which is the point of it.
+
+- **A row is a name and a number.** Type a name (`steps`, `cfg`, `upscale`) so
+  the wires are readable and so saved states match up across your PC, Mac and
+  the Linux box by name rather than by position. There is always one blank row
+  waiting at the bottom, and the node grows as you fill it, up to sixteen.
+
+- **A socket becomes the right kind of number by itself.** Rows start untyped.
+  Plug one into `steps` and it sends a whole number; plug another into `cfg`
+  and that one sends a decimal — each row decides for itself. If you typed
+  `2.5` into a row and then wire it somewhere that only takes whole numbers, it
+  rounds to `3` the way school arithmetic says it should, and the box updates
+  so it shows you what it is actually sending. Wires to things that aren't
+  numbers — a model, an image — are simply refused.
+
+- **Untick a row to hand control back.** The checkbox switches a row off, which
+  unplugs its wire, and **whatever it was connected to goes back to using its
+  own value** — the value that was sitting there all along, untouched. Tick it
+  again and the wire goes back exactly where it was. It's the quickest way to
+  A/B a number against whatever the node had before, without rewiring anything
+  or losing your figure.
+
+- **Saved states include the switches.** Because a row's on/off state lives with
+  its number, a Universal State can turn numbers on and off as well as change
+  them — and applying that state really does unplug and re-plug the wires, not
+  just repaint the ticks.
+
+- **Nothing resets when you switch workflows.** Names, numbers, which rows are
+  off, and where the off rows were plugged in all survive tabbing away and back
+  — and a field you are actively typing in is never overwritten underneath you.
+
 ## EPS Distributor (shipped)
 
 `EPSNodes → EPS Distributor`: the **mirror of EPS Image Switcher**. Where the
@@ -750,6 +792,9 @@ rewiring, no dragging bypass boxes around groups.
   or off, it changes nothing.
 - Toggle states and the visible-output count save with the workflow and
   survive reload.
+- **A resized node now stays the size you dragged it to.** Drag a
+  Distributor taller, switch to another open workflow tab and back — it used
+  to silently snap back to its default height. It doesn't anymore.
 
 ## EPS Checkpoint Switcher (shipped)
 
@@ -944,6 +989,10 @@ times to gather images, then send the whole set through a workflow at once.
   again to unfocus and Emit goes back to the whole buffer. A focused frame
   that no longer exists (deleted elsewhere, another machine) falls back to
   the full buffer with a logged warning — never a failed queue.
+- **The enlarged frame now stays enlarged across a tab switch.** Focus a
+  frame, switch to another open workflow tab and back, and it's still that
+  one frame — not the whole buffer — so Emit keeps sending just the image
+  you focused instead of quietly reverting.
 
 ## EPS Run Multiplier (shipped)
 
@@ -989,7 +1038,9 @@ Notebook) paints red with the reason, and a wiring that will silently run
 moment a queue starts, the node announces the **definitive** count as a
 toast ("EPS Run Multiplier: 8 runs") — the multiplier executes in the
 first seconds, long before samplers, so a wrong number is cancellable
-while it's still free.
+while it's still free. That readout used to creep a little taller every
+time you switched to another workflow tab and back and never shrank down
+again — fixed; it now only grows when the message actually needs the room.
 
 **Every file names its exact run — and can be re-run alone (v0.67.0).**
 Each save path now ends with a short **run token** built from the run's
@@ -1138,6 +1189,10 @@ as an image.
   included). **Hold** any of the step buttons and it keeps moving through the
   timeline instead of making you click repeatedly; it stops the moment you
   release, slide off the button, or switch away from the window.
+- **Typing a frame number while the video plays no longer gets overwritten.**
+  Click into the frame box and start typing a jump-to frame — playback used
+  to stomp your keystrokes several times a second; now it waits until you're
+  done.
 - **Outputs** `image`, `width`, `height` for the selected frame. The on-screen
   preview is best-effort (browser video seeking isn't always frame-perfect);
   the frame extracted on Run is exact (decoded server-side with PyAV).

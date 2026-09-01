@@ -534,6 +534,75 @@ def test_pair_moves_fix_link_slots_and_off_refuses_wired_lows(switcher_source: s
     assert "node.removeOutput(idx)" in pair_out
 
 
+# ---------------------------------------- tab-switch restore-race audit
+#
+# Owner report (notebook.js v0.87.3, same bug class this session audited
+# switcher.js against): "tabbing to another workflow and tabbing back
+# erases any changes." A tab switch tears this node down and rebuilds it;
+# every piece of per-row state here (the `toggles` widget, the
+# `High/low pairs` property, a renamed input's `.label`) is durable --
+# restored by litegraph's OWN `configure()`, never held only in a JS
+# closure -- so surviving the rebuild is not in question. What IS worth
+# pinning is the ORDER: the post-configure reconverge
+# (convergeImageInputs, via pruneToggles/convergePairInputs/
+# convergePairOutput) must run AFTER that real restore lands, never
+# before it -- reading a mid-rebuild snapshot instead of the finished
+# restore is exactly the shape that let notebook.js's dirty-check
+# overwrite/clear a real edit.
+
+
+def test_configure_wrap_reconverges_only_after_the_real_restore_completes(
+    switcher_source: str,
+) -> None:
+    """The wrap must call the ORIGINAL configure() (litegraph's own restore
+    of widgets_values/properties/inputs/outputs) before its own
+    convergeImageInputs() reconcile runs, and that reconcile must live in
+    the `finally` -- not a parallel branch a throwing original configure()
+    could skip -- so it always sees the restore's actual result, never a
+    stale pre-restore construction default."""
+    body = _function_body(switcher_source, "wireImageInputGrowth(node)")
+    assert "} finally {" in body
+    restore = body.index("return originalConfigure.apply(this, args)")
+    finally_kw = body.index("} finally {")
+    reconverge = body.index("convergeImageInputs(this)")
+    assert restore < finally_kw < reconverge
+
+
+def test_converge_reaches_toggles_and_pairing_every_pass(switcher_source: str) -> None:
+    """convergeImageInputs() is the one post-restore choke point pinned
+    above -- it must reach ALL of this node's durable per-row state each
+    time it runs (pruneToggles for the toggle overrides, plus both pair
+    convergers for WAN high/low), not just the trailing-spare-slot math,
+    or a tab switch could silently reconcile against only part of the
+    restored node."""
+    body = _function_body(switcher_source, "convergeImageInputs(node)")
+    assert "pruneToggles(node)" in body
+    assert "convergePairInputs(node)" in body
+    assert "convergePairOutput(node)" in body
+
+
+def test_prune_toggles_reads_current_connections_not_a_stale_snapshot(
+    switcher_source: str,
+) -> None:
+    """The dangerous shape this bug class hunts for is a stale-vs-fresh
+    comparison that wipes real data (notebook.js: a repaint's `textarea ===
+    lastSavedText` check cleared a draft it hadn't actually repainted yet).
+    pruneToggles() has no equivalent stale snapshot to disagree with: the
+    connected-names set it prunes against comes from imageInputEntries()
+    (live node.inputs, `.link` restored directly by configure()) read in
+    the SAME call as the toggles map it prunes -- both sides are always
+    the current post-restore truth, and a key is only ever dropped when it
+    is genuinely absent from that live set."""
+    body = _function_body(switcher_source, "pruneToggles(node)")
+    assert "const map = readToggles(node)" in body
+    assert "imageInputEntries(node)" in body
+    assert ".filter((entry) => entry.connected)" in body
+    assert "if (!connectedNames.has(key)) {" in body
+    assert "delete map[key]" in body
+    # a no-op write when nothing is actually stale -- never a blind rewrite.
+    assert "if (changed) writeToggles(node, map)" in body
+
+
 # ------------------------------------------------------------ v0.68.1 pins
 
 

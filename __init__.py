@@ -150,6 +150,7 @@ _NODE_SPECS = [
     ("eps_image.nodes_save_image", "EPSSaveImage", "EPS Save Image"),
     ("eps_image.nodes_distributor", "EPSDistributor", "EPS Distributor"),
     ("eps_image.nodes_checkpoint_switcher", "EPSCheckpointSwitcher", "EPS Checkpoint Switcher"),
+    ("eps_image.nodes_number_controller", "EPSNumberController", "EPS Number Controller"),
     ("eps_audit.nodes_audit", "EPSNodeAudit", "EPS Node Audit"),
 ]
 

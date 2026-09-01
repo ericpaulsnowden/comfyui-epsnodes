@@ -559,6 +559,31 @@ def test_apply_visible_output_count_persists_the_result(distributor_source: str)
     assert "if (stored !== desired) node.properties[PROP_OUTPUTS] = desired" in body
 
 
+def test_resync_size_only_runs_on_a_genuine_count_change(distributor_source: str) -> None:
+    """Tab-switch audit (2026-08-31, owner report: "switching between
+    workflows shouldn't ever reset anything in our nodes"), reproduced live
+    on the rig: drag a Distributor node taller, switch to another open
+    workflow tab and back -- the node silently snapped back to its natural
+    height. Root cause: `attach()`'s `onConfigure` wrap calls
+    `applyVisibleOutputCount` unconditionally at the end of EVERY restore
+    (tab switch, undo/redo, a plain workflow reload), and `resyncSize()`'s
+    height write is ABSOLUTE, not a `Math.max` like its own width write --
+    so even the overwhelmingly common case (Outputs didn't change at all)
+    clobbered a manual resize that has nothing to do with this node's
+    outputs. `wireOutputGrowth`'s deferred pass already guards its OWN
+    `applyVisibleOutputCount` call for exactly this reason
+    (test_deferred_growth_skips_no_op_passes above); this pins the same
+    "did the visible row count actually move" gate applied to
+    `resyncSize()` itself, so every caller (including the onConfigure path,
+    which had no gate at all) is protected uniformly."""
+    body = _function_body(distributor_source, APPLY_SIGNATURE)
+    assert "if (desired !== currentCount) resyncSize(node)" in body
+    assert re.search(r"\n {2}resyncSize\(node\)\n", body) is None, (
+        "resyncSize(node) must never run unconditionally here -- it discards "
+        "a manual node resize on every restore, not just a genuine count change"
+    )
+
+
 def test_deferred_growth_skips_no_op_passes(distributor_source: str) -> None:
     """The live hook fires on every connect AND disconnect, but
     `applyVisibleOutputCount` re-derives the node height (`resyncSize`), so an

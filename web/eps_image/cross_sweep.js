@@ -1399,6 +1399,26 @@ function recompute(state) {
  * needed height CHANGES, and never on a 0 measurement -- a hidden or
  * between-frames element measures 0 and must not collapse the box (the
  * §7.5 frozen-RAF probe artifact).
+ *
+ * Tab-switch audit (2026-08-31, rig-verified live: reproduced a node that
+ * grows a little TALLER on every round-trip through another workflow tab
+ * while showing a wrapped warning). The shrink/grow math below is a DELTA
+ * against `state.textHeight`'s PREVIOUS value -- correct within one node's
+ * lifetime (the only thing that changed the readout's own contribution to
+ * `node.size` since the last pass is the pass itself), but `attach()`
+ * builds a brand-new `state` for every rebuild (tab switch, undo/redo, a
+ * plain workflow reload), reseeded to READOUT_HEIGHT regardless of what
+ * `node.size` a restore just repainted. The first pass after a rebuild
+ * therefore has no trustworthy `previousOuter` to diff against: computing
+ * one from the fresh default double-counts the readout's height on top of
+ * whatever restore already accounted for (compounding a little taller on
+ * every tab-switch round-trip for as long as the message stays wrapped),
+ * exactly the "comparison runs before restore has caught up" shape. Gated
+ * on `state.heightBaselined` below: the first adjustment for a given
+ * `state` only ever GROWS to the floor (never subtracts a delta it cannot
+ * know), and every later one -- once `state.textHeight` reflects a change
+ * this function itself made -- resumes the ordinary delta-based grow/
+ * shrink.
  */
 function sizeToContent(state) {
   const { lineEl, node, domWidget } = state
@@ -1419,13 +1439,21 @@ function sizeToContent(state) {
   if (needed === state.textHeight) return
   const margin = typeof domWidget.margin === 'number' ? domWidget.margin : DOM_WIDGET_MARGIN_FALLBACK
   const previousOuter = state.textHeight + 2 * margin
+  const wasBaselined = state.heightBaselined
+  state.heightBaselined = true
   state.textHeight = needed
   state.outerHeight = needed + 2 * margin
   state.rootEl.style.height = `${needed}px`
   domWidget.computedHeight = state.outerHeight
   if (node?.size && typeof node.setSize === 'function') {
     const floor = typeof node.computeSize === 'function' ? node.computeSize()[1] : 0
-    node.setSize([node.size[0], Math.max(node.size[1] + (state.outerHeight - previousOuter), floor)])
+    // First pass for this `state`: floor only (see the docstring above) --
+    // `node.size[1]` may just have been repainted by a restore this state
+    // knows nothing about, so a delta against the fresh-default
+    // `previousOuter` would double-count. Every later pass trusts the delta,
+    // exactly as before.
+    const target = wasBaselined ? node.size[1] + (state.outerHeight - previousOuter) : node.size[1]
+    node.setSize([node.size[0], Math.max(target, floor)])
     node.graph?.setDirtyCanvas(true, true)
   }
 }
@@ -1637,6 +1665,13 @@ export function attach(node) {
       domWidget: null,
       textHeight: READOUT_HEIGHT,
       outerHeight: READOUT_HEIGHT + 2 * DOM_WIDGET_MARGIN_FALLBACK,
+      // Tab-switch audit, 2026-08-31 -- see sizeToContent()'s own comment:
+      // false until this state's FIRST height adjustment actually lands,
+      // so that first pass (which may be running against a node whose
+      // `size` a restore/rebuild just repainted, not the fresh-node default
+      // this object was just seeded with) never does delta math against a
+      // baseline it cannot possibly know.
+      heightBaselined: false,
       lastStamp: 0,
       lastText: null,
       lastCls: null

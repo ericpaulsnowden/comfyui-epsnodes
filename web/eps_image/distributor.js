@@ -1201,7 +1201,23 @@ function applyVisibleOutputCount(node, { grow = false } = {}) {
   // instead of inheriting the `false` it carried while hidden.
   pruneToggles(node)
   clearTogglesFor(node, revealed)
-  resyncSize(node)
+  // ONLY when the visible row count actually just changed (tab-switch
+  // audit, 2026-08-31, rig-verified live): this function is also the LAST
+  // thing `attach()`'s `onConfigure` wrap does on EVERY restore (tab
+  // switch, undo/redo, a plain workflow reload), including the overwhelming
+  // common case where `Outputs` didn't change at all and nothing here needs
+  // to move. `resyncSize()` used to run unconditionally every time, and its
+  // height write is ABSOLUTE, not a `Math.max` like its own width write --
+  // so a manually-dragged-taller node snapped back to its computed height
+  // the instant the SAME graph reloaded, discarding a resize that has
+  // nothing to do with this node's outputs. Reproduced live: drag a
+  // Distributor taller, switch to another open workflow tab and back --
+  // the node silently shrinks to its natural height. Gating on an actual
+  // count change keeps the ORIGINAL intent (shrink back when outputs are
+  // genuinely removed -- "arrange() on its own only grows", resyncSize's
+  // own docstring) while a same-count restore pass now leaves whatever
+  // height the user last set alone, exactly like width already does.
+  if (desired !== currentCount) resyncSize(node)
   // Mechanism 4: a socket that just changed shape (revealed/removed) or a
   // node whose wiring changed underneath this pass must end up with every
   // slot's type/label/link-colour in sync, not just its visible COUNT.

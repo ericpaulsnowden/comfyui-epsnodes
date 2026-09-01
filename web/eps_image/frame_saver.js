@@ -1164,14 +1164,36 @@ function seekVideoToFrame(state, frame) {
 }
 
 /**
+ * Writes *frame* into the visible number input's DOM value -- skipped while
+ * `frameInputEl` is `document.activeElement` (the user is mid-typing a
+ * DIFFERENT frame number into it RIGHT NOW). Without this guard, a repaint
+ * with no idea a live edit is in progress -- a probe landing mid-edit
+ * (`clampFrameToProbeBounds`), a `loadedmetadata`/gating resync
+ * (`refreshFrameUi`), or worst of all ongoing playback
+ * (`syncFrameFromPlayback`, which calls this many times a SECOND) -- would
+ * silently overwrite whatever the user just typed before they ever get to
+ * commit it. Mirrors `notebook.js`'s `restoreDraftIntoEditor` guard and
+ * `number_controller.js`'s per-field `document.activeElement` check -- the
+ * same rule applied to this node's one typed field. The user's OWN commit
+ * (`commitFrameInputValue`, via 'change' or Enter) always reaches this with
+ * the field already blurred -- see the Enter-key handler below -- so a real
+ * commit is never itself skipped by this guard.
+ */
+function setFrameInputElValue(state, frame) {
+  if (state.frameInputEl && document.activeElement !== state.frameInputEl) {
+    state.frameInputEl.value = String(frame)
+  }
+}
+
+/**
  * Writes *frame* to the (hidden) `frame` widget -- unconditionally refreshes
- * the visible number input + counter, but only touches the widget's own
- * `.value`/`.callback`/canvas-dirty when the value actually changed.
- * `dirty: false` (used by the high-frequency playback path,
- * `syncFrameFromPlayback`) skips `setDirtyCanvas` -- nothing CANVAS-visible
- * depends on this hidden widget's value in real time, and redrawing the
- * whole LiteGraph canvas on every `timeupdate` tick while a video plays
- * would be needless overhead.
+ * the visible number input (guarded, see `setFrameInputElValue`) + counter,
+ * but only touches the widget's own `.value`/`.callback`/canvas-dirty when
+ * the value actually changed. `dirty: false` (used by the high-frequency
+ * playback path, `syncFrameFromPlayback`) skips `setDirtyCanvas` -- nothing
+ * CANVAS-visible depends on this hidden widget's value in real time, and
+ * redrawing the whole LiteGraph canvas on every `timeupdate` tick while a
+ * video plays would be needless overhead.
  */
 function commitFrame(state, frame, { dirty = true } = {}) {
   if (state.frameWidget.value !== frame) {
@@ -1183,7 +1205,7 @@ function commitFrame(state, frame, { dirty = true } = {}) {
     }
     if (dirty) state.node.graph?.setDirtyCanvas(true, true)
   }
-  if (state.frameInputEl) state.frameInputEl.value = String(frame)
+  setFrameInputElValue(state, frame)
   updateCounterLabel(state, frame)
 }
 
@@ -1231,7 +1253,7 @@ function syncFrameFromPlayback(state) {
 function refreshFrameUi(state, { seek = false } = {}) {
   const raw = Number(state.frameWidget.value)
   const frame = clampFrame(state, Number.isFinite(raw) ? Math.round(raw) : 0)
-  if (state.frameInputEl) state.frameInputEl.value = String(frame)
+  setFrameInputElValue(state, frame)
   updateCounterLabel(state, frame)
   if (seek) seekVideoToFrame(state, frame)
 }
@@ -1254,9 +1276,23 @@ function clampFrameToProbeBounds(state) {
   }
 }
 
+/**
+ * The user's OWN commit of what they just typed (the 'change' listener, and
+ * the Enter-key handler below -- the latter fires this WHILE the field is
+ * still focused, before its own `blur()` call). `setFrame`'s normal write
+ * path (`commitFrame` -> `setFrameInputElValue`) skips the DOM write while
+ * `frameInputEl` is still `document.activeElement` -- correct for a
+ * REPAINT racing a live edit, but this call is not a competing repaint, it
+ * IS the edit landing, so the clamped/normalized result (e.g. a typed
+ * `9999` clamped to the last frame) must echo back immediately regardless
+ * of focus. Reads the now-authoritative value straight off the `frame`
+ * widget `setFrame` just wrote, rather than recomputing the clamp here, so
+ * this can never disagree with what actually got committed.
+ */
 function commitFrameInputValue(state) {
   const parsed = Number.parseInt(state.frameInputEl.value, 10)
   setFrame(state, Number.isFinite(parsed) ? parsed : 0)
+  if (state.frameInputEl) state.frameInputEl.value = String(state.frameWidget.value)
 }
 
 // ---------------------------------------------------------------------------

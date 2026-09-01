@@ -31,6 +31,7 @@ from eps_image.nodes_cross_sweep import EPSCrossSweep
 from eps_image.nodes_distributor import EPSDistributor
 from eps_image.nodes_frame_saver import EPSFrameSaver
 from eps_image.nodes_image_grid import EPSImageGrid
+from eps_image.nodes_number_controller import EPSNumberController
 from eps_image.nodes_resolution import EPSResolution
 from eps_image.nodes_save_image import EPSSaveImage
 from eps_image.nodes_switcher import (
@@ -80,6 +81,7 @@ _STATE_BEARING_SPECS: list[tuple[str, type, str]] = [
     ("EPSSaveImage", EPSSaveImage, "EPS Save Image"),
     ("EPSDistributor", EPSDistributor, "EPS Distributor"),
     ("EPSCheckpointSwitcher", EPSCheckpointSwitcher, "EPS Checkpoint Switcher"),
+    ("EPSNumberController", EPSNumberController, "EPS Number Controller"),
 ]
 
 #: The COMPLETE closed set of widget kinds (module docstring / §6.16) -- the

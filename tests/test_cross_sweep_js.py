@@ -2048,8 +2048,53 @@ def test_readout_wraps_and_grows_to_fit_long_messages(source: str) -> None:
     assert "state.lastMeasuredWidth = lineEl.clientWidth" in body
     assert "Math.min(scrollH + 6, READOUT_MAX_HEIGHT)" in body
     assert "if (needed === state.textHeight) return" in body
-    assert "Math.max(node.size[1] + (state.outerHeight - previousOuter), floor)" in body
+    # v0.87.5 tab-switch audit: the delta write is now gated on
+    # `wasBaselined` (test_readout_size_never_double_counts_across_a_rebuild
+    # below covers WHY) -- the growth math itself is otherwise unchanged.
+    assert (
+        "const target = wasBaselined ? node.size[1] + (state.outerHeight - previousOuter)"
+        " : node.size[1]" in body
+    )
+    assert "Math.max(target, floor)" in body
     assert "sizeToContent(state)" in _function_body(source, "recompute(state)")
+
+
+def test_readout_size_never_double_counts_across_a_rebuild(source: str) -> None:
+    """Tab-switch audit (2026-08-31), reproduced live on the rig: a Run
+    Multiplier showing a wrapped (grown) readout got a LITTLE TALLER on
+    every round-trip through another workflow tab, never shrinking back.
+
+    Root cause: `attach()` builds a brand-new `state` on every rebuild (tab
+    switch, undo/redo, a plain reload), reseeded to READOUT_HEIGHT --
+    `sizeToContent`'s delta math (`node.size[1] + (state.outerHeight -
+    previousOuter)`) then diffed the CURRENT (correctly wrapped) message
+    against that fresh default instead of against what `node.size` already
+    accounted for post-restore, adding the readout's own height on TOP of a
+    size that already included it. `state.heightBaselined` (seeded `false`
+    in attach()'s state literal) closes this: the first size-changing pass
+    for a given `state` only ever floors (`node.size[1]` unmodified, just
+    maxed against `computeSize()`), never subtracts/adds a delta it has no
+    way to know is accurate; only a LATER pass -- once `state.textHeight`
+    reflects a change this function itself made -- resumes the ordinary
+    grow/shrink-back delta."""
+    attach_body = _function_body(source, "attach(node)")
+    assert "heightBaselined: false" in attach_body, (
+        "state must start un-baselined so the first post-rebuild pass floors "
+        "instead of trusting a stale delta"
+    )
+    body = _function_body(source, "sizeToContent(state)")
+    assert "const wasBaselined = state.heightBaselined" in body
+    assert "state.heightBaselined = true" in body
+    # The un-baselined branch must floor via node.size[1] alone -- no delta.
+    assert re.search(r"wasBaselined\s*\?\s*node\.size\[1\]\s*\+.*?:\s*node\.size\[1\]", body), (
+        "the un-baselined branch must fall back to node.size[1] with no delta"
+    )
+    # Establishing the baseline must happen strictly BEFORE state.textHeight
+    # is overwritten -- reading `wasBaselined` after that line would always
+    # see the value this same pass just set.
+    read_at = body.index("const wasBaselined = state.heightBaselined")
+    overwrite_at = body.index("state.textHeight = needed")
+    assert read_at < overwrite_at, "wasBaselined must be captured before textHeight moves"
 
 
 def test_run_count_refreshes_on_graph_changes_not_only_draws(source: str) -> None:
