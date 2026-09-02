@@ -128,6 +128,44 @@ class TestScannerRules:
         text = "files = [f for f in os.listdir(input_dir) if os.path.isfile(os.path.join(input_dir, f))]\n"
         assert [f for f in scanner.scan_text(text) if f.rule_id == "path.unclamped_join"] == []
 
+    def test_body_url_needs_a_request_shaped_receiver(self) -> None:
+        """`fields.get("server")` on a local dict is not a caller-supplied URL.
+
+        This pack's own `_mount_label()` parses a GVFS mount name
+        (`smb-share:server=HOST,share=NAME`) into something readable and
+        never touches the network, but it lives in `routes.py`, which does
+        register routes and import aiohttp -- so the rule's file-level
+        `needs` gate passes and only the receiver's NAME can tell the two
+        apart. This was a confirmed false positive that alone painted this
+        pack red in the plain-language summary.
+        """
+        rule = next(r for r in scanner.RULES if r.id == "route.body_url")
+        assert not rule.pattern.search('        server = fields.get("server")')
+        assert not rule.pattern.search('    share = fields.get("share")')
+
+    def test_body_url_still_catches_a_real_forwarded_url(self) -> None:
+        rule = next(r for r in scanner.RULES if r.id == "route.body_url")
+        for real in (
+            'url = body.get("url")',
+            'target = payload.get("endpoint")',
+            'host = data.get("host")',
+            'u = request_body.get("base_url")',
+        ):
+            assert rule.pattern.search(real), real
+
+    def test_joining_an_all_caps_constant_is_not_a_traversal(self) -> None:
+        # `os.path.join(models_dir, _MODEL_FOLDER)` is how a pack registers
+        # its own model directory; the second argument is a literal fixed at
+        # import, not request data (found against
+        # Comfyui_Minimax_h3_latent_Upscaler, 2026-09-02).
+        text = 'os.path.join(folder_paths.models_dir, _LATENT_UPSCALE_FOLDER)\n'
+        assert [f for f in scanner.scan_text(text) if f.rule_id == "path.unclamped_join"] == []
+
+    def test_a_lowercase_variable_join_is_still_a_finding(self) -> None:
+        # The guard above must not swallow the real bug it sits next to.
+        text = "p = os.path.join(input_dir, rel)\n"
+        assert [f for f in scanner.scan_text(text) if f.rule_id == "path.unclamped_join"]
+
     def test_a_commented_out_idiom_is_not_a_finding(self) -> None:
         text = "# p = os.path.join(input_dir, rel)  <- the bug we fixed\n"
         assert scanner.scan_text(text) == []

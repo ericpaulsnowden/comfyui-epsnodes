@@ -844,6 +844,89 @@ class TestSoloRunV0670:
         assert "m1_p1" in msg           # a real token to copy from
 
 
+class TestSoloRunStaleTokenAgainstANarrowedSet:
+    """Owner report (2026-09-02): a PNG saved by our own nodes bakes a
+    ``solo_run`` token (M1) that names a coordinate from the run that made
+    it -- but M3 (EPS Save Image) also narrows a multi-select Notebook down
+    to just the one entry that matched, so dropping the image back in
+    recomputes an axis set of exactly ONE run. The baked token then matches
+    nothing in that one-run set, and the pre-fix behavior raised -- "loads
+    properly but the first run fails... you have to delete the solo run
+    value first". With nothing left to disambiguate, a solo_run that
+    matches nothing should run the lone candidate instead of refusing it;
+    a set of 2+ candidates must still raise, unchanged."""
+
+    def _one_run_kwargs(self, **overrides):
+        kwargs = {
+            "pair_mode": "paired",
+            "sweep_mode": "aligned",
+            "model": ["m0"],
+            "clip": ["c0"],
+            "label": ["lora_0.0"],
+            "image": ["iA"],
+            "text": ["tA"],
+        }
+        kwargs.update(overrides)
+        return EPSCrossSweep().run(**kwargs)
+
+    def test_stale_token_with_exactly_one_run_executes_it_not_raises(self) -> None:
+        # "m3_p2-i1-t5" is exactly the shape of a baked M1 token from a
+        # larger original set -- it must not match this narrowed one-run
+        # set, which is the whole point of the test.
+        out = self._one_run_kwargs(solo_run="m3_p2-i1-t5")
+        models, _clips, images, texts, prefixes = out[0], out[1], out[2], out[3], out[4]
+        assert models == ["m0"]
+        assert images == ["iA"]
+        assert texts == ["tA"]
+        assert len(prefixes) == 1
+        info = json.loads(out[8][0])
+        assert info["total"] == 1
+
+    def test_stale_token_with_two_or_more_runs_still_raises(self) -> None:
+        # Same shape, but the un-soloed set has 2 runs (steps=2, pairs=1) --
+        # the guard against a typo burning a whole queue must survive.
+        with pytest.raises(ValueError) as exc:
+            self._one_run_kwargs(
+                model=["m0", "m1"], clip=["c0", "c1"], label=["lora_0.0", "lora_0.5"],
+                solo_run="bogus_token",
+            )
+        msg = str(exc.value)
+        assert "bogus_token" in msg
+        assert "2 runs" in msg
+        assert "m1_p1" in msg
+
+    def test_matching_token_still_soloes_the_one_run_set(self) -> None:
+        # A token that DOES match in a one-run set must keep working exactly
+        # as before -- this fix only changes the no-match path.
+        out = self._one_run_kwargs(solo_run="m1_p1")
+        assert out[0] == ["m0"] and out[2] == ["iA"] and out[3] == ["tA"]
+        assert len(out[4]) == 1
+
+    def test_matching_token_still_soloes_the_n_run_set(self) -> None:
+        # Same guarantee at N runs (steps=2, pairs=2, from the module-level
+        # `run` helper) -- unaffected by this fix, still exactly one run out.
+        out = run(solo_run="m2_p1")
+        assert out[0] == ["m1"] and out[2] == ["iA"] and out[3] == ["tA"]
+        assert len(out[4]) == 1
+
+    def test_empty_and_whitespace_solo_run_unaffected_in_a_one_run_set(self) -> None:
+        for blank in ("", "   "):
+            out = self._one_run_kwargs(solo_run=blank)
+            assert out[0] == ["m0"] and out[2] == ["iA"] and out[3] == ["tA"]
+            assert len(out[4]) == 1
+
+    def test_fallback_run_carries_the_same_provenance_as_an_unsoloed_run(self) -> None:
+        # The fix must not shift a single fragment of naming: the run this
+        # path emits is IDENTICAL (save_prefix, run token, run_info) to the
+        # one produced with solo_run empty or correctly matching.
+        unsoloed = self._one_run_kwargs(solo_run="")
+        stale = self._one_run_kwargs(solo_run="a-token-from-a-bigger-original-set")
+        matching = self._one_run_kwargs(solo_run="m1_p1")
+        assert unsoloed[4] == stale[4] == matching[4]  # save_prefix
+        assert unsoloed[8] == stale[8] == matching[8]  # run_info JSON
+        assert json.loads(stale[8][0])["token"] == "m1_p1"
+
+
 class TestRunInfoV0700:
     """v0.70.0 provenance M2: `run_info` is a ninth, tail-appended output --
     one JSON per run, index-aligned with save_prefix -- for EPS Save Image

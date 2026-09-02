@@ -111,6 +111,21 @@ const NOTEBOOK_CLASS_ID = 'LoraLibraryNotebook'
 const WIDGET_NAME = 'prompt_builder'
 const WIDGET_TYPE = 'eps_prompt_builder'
 
+/** FORMAT.md §6.15/§8 (unsaved-edit drafts, owner report 2026-09-02: "if you
+ * have a prompt that is edited but not saved, but have it loaded via the
+ * prompt builder instead of directly via the node itself, the saved version
+ * fires and not the edited version"). The backend's TAIL STRING widget
+ * (hidden, default `"{}"`) that this panel keeps mirroring from whichever
+ * Notebook candidate's `file` matches ours (`syncMirroredDrafts` below) --
+ * looked up by NAME, same as `file`/`blocks`, so a backend that predates it
+ * simply leaves every draft path a no-op. notebook.js's own
+ * `DRAFTS_WIDGET_NAME` constant, duplicated rather than imported -- same
+ * posture as `NOTEBOOK_CLASS_ID` above (a small, stable, cross-file
+ * constant is cheaper to keep byte-identical by inspection). */
+const DRAFTS_WIDGET_NAME = 'drafts'
+/** `nodes_prompt_builder.py`'s own `DEFAULT_DRAFTS` -- "no unsaved edits". */
+const DEFAULT_DRAFTS_VALUE = '{}'
+
 /** §7.2-style floor: no `getMaxHeight` set below, so the widget still takes
  * whatever vertical space litegraph's arrange pass leaves it. */
 const MIN_WIDGET_HEIGHT = 180
@@ -678,9 +693,14 @@ export function attachPromptBuilderPanel(node) {
       api.warn('EPSPromptBuilder node is missing its file/blocks widgets; panel not attached')
       return
     }
+    // Unsaved-edit drafts (owner report 2026-09-02) -- null on a backend
+    // that predates it, same no-op-below convention as notebook.js's own
+    // pinned/drafts widget lookups: every draft path degrades to nothing
+    // rather than refusing to attach.
+    const draftsWidget = findWidget(node, DRAFTS_WIDGET_NAME) || null
     attachedNodes.add(node)
 
-    const state = createState(node, fileWidget, blocksWidget)
+    const state = createState(node, fileWidget, blocksWidget, draftsWidget)
     buildUi(state)
     // Collapsed groups persist WITH THE WORKFLOW (§7.9) — must run after
     // buildUi() (state.leftListEl has to exist for the wrapped
@@ -691,6 +711,7 @@ export function attachPromptBuilderPanel(node) {
     registerCollapsedSectionsProperty(state)
     hideWidgetBothWays(fileWidget, node)
     hideWidgetBothWays(blocksWidget, node)
+    hideWidgetBothWays(draftsWidget, node)
     wireNodeCleanup(state)
     wireConfigureReload(state)
     // Universal State Controller Apply fix (see resyncAfterExternalWrite's
@@ -717,11 +738,15 @@ export function attachPromptBuilderPanel(node) {
 // State
 // ---------------------------------------------------------------------------
 
-function createState(node, fileWidget, blocksWidget) {
+function createState(node, fileWidget, blocksWidget, draftsWidget = null) {
   return {
     node,
     fileWidget,
     blocksWidget,
+    // Unsaved-edit drafts (owner report 2026-09-02) -- null on a backend
+    // that predates the widget, in which case syncMirroredDrafts() is
+    // always a no-op (mirrors notebook.js's own draftsWidget field).
+    draftsWidget,
     // The file currently PAINTED (left pane) — distinct from
     // `fileWidget.value`, which reloadEntries() always re-reads fresh.
     file: null,
@@ -1049,12 +1074,94 @@ function discoverNotebookCandidates() {
   for (const { node } of walkLiveNodes(app.graph)) {
     if (!isNotebookCanvasNode(node)) continue
     const fw = findWidget(node, 'file')
+    // Unsaved-edit drafts (owner report 2026-09-02): riding the SAME
+    // discovery walk that already builds the selector's option list --
+    // `null` on a Notebook whose own backend predates the widget, which
+    // mirroredDraftsRaw() below treats as "nothing to mirror" rather than
+    // a crash.
+    const dw = findWidget(node, DRAFTS_WIDGET_NAME)
     out.push({
       title: node.title || node.type || 'Notebook',
-      file: typeof fw?.value === 'string' ? fw.value : ''
+      file: typeof fw?.value === 'string' ? fw.value : '',
+      draftsRaw: typeof dw?.value === 'string' ? dw.value : null
     })
   }
   return out
+}
+
+/**
+ * The raw `drafts` widget value belonging to whichever discovered
+ * candidate mirrors *file* -- first match wins, the SAME tie-break
+ * notebookOptionsOf()'s own file-based dedupe already uses when two
+ * Notebook nodes happen to point at the same file (a known, pre-existing
+ * ambiguity of the file-based mirroring scheme this panel already has;
+ * unsaved-edit drafts inherit it rather than solving it). An empty *file*,
+ * no matching candidate, or a matching candidate with no drafts widget of
+ * its own (`draftsRaw` is `null`) all fall back to `DEFAULT_DRAFTS_VALUE`
+ * ("no unsaved edits"). Pure -- no DOM/graph access -- so this is driven
+ * directly by tests/test_prompt_builder_js.py.
+ * @param {{file?: string, draftsRaw?: string|null}[]} candidates
+ * @param {string} file
+ * @returns {string}
+ */
+export function mirroredDraftsRaw(candidates, file) {
+  if (!file) return DEFAULT_DRAFTS_VALUE
+  for (const candidate of Array.isArray(candidates) ? candidates : []) {
+    if (candidate && candidate.file === file) {
+      return typeof candidate.draftsRaw === 'string' ? candidate.draftsRaw : DEFAULT_DRAFTS_VALUE
+    }
+  }
+  return DEFAULT_DRAFTS_VALUE
+}
+
+/**
+ * Copies the mirrored Notebook's raw `drafts` value onto our OWN hidden
+ * `drafts` widget (owner report 2026-09-02 -- see the file header/
+ * DRAFTS_WIDGET_NAME's own doc for the bug this fixes: a block resolved
+ * from an entry with an unsaved edit used to always run the SAVED text,
+ * because this panel re-resolves each block straight from the FILE and
+ * never saw the Notebook's `drafts` widget at all). The backend
+ * (`_resolve_blocks`) applies it over the file text per named block,
+ * exactly like `resolve_selection` already does for the Notebook's own
+ * output.
+ *
+ * No-op on a backend that predates the widget (`state.draftsWidget` is
+ * null) or when the mirrored value already matches what we're holding --
+ * same write-if-different + callback + dirty-canvas idiom as
+ * writeFileWidget()/writeBlocksWidget() above, so a call that finds
+ * nothing changed never dirties the canvas.
+ *
+ * Deliberately NOT driven by its own timer (owner instruction: reuse the
+ * panel's existing cadence). Called from rescanNotebooks() -- attach,
+ * configure, selector focus, and every ~5s poll tick (POLL_MS) already run
+ * that function -- but UNCONDITIONALLY, before rescanNotebooks()'s own
+ * change-gate on the built selector OPTIONS signature: a draft can change
+ * on the mirrored Notebook while the SET of notebooks on canvas (and thus
+ * that signature) stays exactly the same, so this must not be skipped by
+ * that early return. Also called from writeFileWidget() so switching which
+ * Notebook this panel mirrors adopts its drafts immediately rather than
+ * waiting for the next tick.
+ *
+ * A NUL-prefixed key in the mirrored JSON object (notebook.js's
+ * `categoryDraftKey()` keyspace for an unsaved CATEGORY-description edit)
+ * is copied along untouched -- this function only ever moves the raw
+ * STRING value, never parses it. That is safe: `_resolve_blocks` (the
+ * backend consumer) only ever looks up a block by its plain entry NAME,
+ * which can never start with a NUL byte, so a category draft riding along
+ * in the same object is inert cargo, never mistaken for a block's text.
+ */
+function syncMirroredDrafts(state, candidates) {
+  const widget = state.draftsWidget
+  if (!widget) return
+  const raw = mirroredDraftsRaw(candidates, state.fileWidget.value ?? '')
+  if (widget.value === raw) return
+  widget.value = raw
+  try {
+    widget.callback?.(raw)
+  } catch (error) {
+    api.warn('drafts widget callback threw', error)
+  }
+  state.node.graph?.setDirtyCanvas(true, true)
 }
 
 /**
@@ -1064,6 +1171,11 @@ function discoverNotebookCandidates() {
  */
 function rescanNotebooks(state, { force = false } = {}) {
   const candidates = discoverNotebookCandidates()
+  // Unsaved-edit drafts: deliberately BEFORE the options-signature early
+  // return below -- a draft can change while the discovered notebook SET
+  // stays identical, so this must run on every rescan, not only the ones
+  // that go on to rebuild the selector (syncMirroredDrafts's own doc).
+  syncMirroredDrafts(state, candidates)
   const options = notebookOptionsOf(candidates)
   const signature = JSON.stringify(options)
   if (!force && signature === state.notebookOptionsSignature) return false
@@ -1123,6 +1235,9 @@ function writeFileWidget(state, value) {
   }
   state.node.graph?.setDirtyCanvas(true, true)
   state.paintedMtime = null
+  // Adopt the newly-mirrored Notebook's drafts immediately rather than
+  // waiting for the next poll tick -- cheap (in-memory graph walk only).
+  syncMirroredDrafts(state, discoverNotebookCandidates())
   reloadEntries(state).catch((error) => api.warn('reload after file change failed', error))
 }
 

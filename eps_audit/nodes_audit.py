@@ -13,7 +13,7 @@ import logging
 
 from .audit import SCOPE_EVERYTHING, SCOPES, run_audit
 from .observers import EGRESS
-from .report import render_text
+from .report import render
 
 logger = logging.getLogger("eps_audit")
 
@@ -38,6 +38,13 @@ class EPSNodeAudit:
                                "else's, and a self-audit that skipped itself would be "
                                "worth less.",
                 }),
+                "verbose": ("BOOLEAN", {
+                    "default": False,
+                    "tooltip": "Off: a short plain-language summary with a green / "
+                               "yellow / red read per pack — no rule ids, file paths "
+                               "or line numbers. On: the full technical report, for "
+                               "reading with the source open.",
+                }),
             },
         }
 
@@ -53,15 +60,18 @@ class EPSNodeAudit:
         "startup, and a scan of their source for a few recurring risky idioms (paths "
         "joined without clamping, routes forwarding a caller-supplied URL, secrets sent "
         "to a variable host). Observe-only — it never blocks or changes another pack's "
-        "behaviour, and its findings are leads to review, not verdicts."
+        "behaviour, and its findings are leads to review, not verdicts. Defaults to a "
+        "plain-language green/yellow/red summary; turn on 'verbose' for the full "
+        "technical report."
     )
 
     @classmethod
-    def IS_CHANGED(cls, scope, include_this_pack, **kwargs):
+    def IS_CHANGED(cls, scope, include_this_pack, verbose=False, **kwargs):
         # Content-derived, not a timestamp (this pack's 2026-08-24 rule): the
         # answer only moves when the route table grows or another outbound
         # call happens, and both are counters already in memory. Cheap enough
-        # to evaluate on every queue.
+        # to evaluate on every queue. `verbose` is folded in too, so flipping
+        # the checkbox alone still counts as a change and repaints the node.
         from .audit import live_router
 
         router = live_router()
@@ -69,12 +79,12 @@ class EPSNodeAudit:
             route_count = len(list(router.routes())) if router is not None else 0
         except Exception:
             route_count = -1
-        return f"{scope}:{include_this_pack}:{route_count}:{EGRESS.total_calls}"
+        return f"{scope}:{include_this_pack}:{verbose}:{route_count}:{EGRESS.total_calls}"
 
-    def execute(self, scope=SCOPE_EVERYTHING, include_this_pack=True):
+    def execute(self, scope=SCOPE_EVERYTHING, include_this_pack=True, verbose=False):
         try:
             report = run_audit(scope, bool(include_this_pack))
-            text = render_text(report)
+            text = render(report, verbose=bool(verbose))
         except Exception as error:  # a failed audit must not fail the queue
             logger.exception("EPSNodes: audit failed")
             text = f"EPS NODE AUDIT FAILED: {type(error).__name__}: {error}"

@@ -101,9 +101,17 @@ RULES: tuple[Rule, ...] = (
             r"os\.path\.join\(\s*[A-Za-z_][\w.]*(?:dir|dir_|root|base|folder)\w*\s*,"
             r"\s*(?!os\.path\.basename)[A-Za-z_][\w.]*\s*\)"
         ),
-        # Joining each name from a listing back onto the directory it was
-        # listed from cannot escape it — the names came from that directory.
-        exclude=re.compile(r"os\.listdir\(|os\.scandir\(|glob\.|\.iterdir\("),
+        # Two shapes that look identical to a regex but cannot escape:
+        #   - joining each name from a LISTING back onto the directory it was
+        #     listed from (the names came from that directory);
+        #   - joining an ALL-CAPS CONSTANT, Python's convention for a literal
+        #     fixed at import — `os.path.join(models_dir, _MODEL_FOLDER)` is
+        #     how a pack registers its own model directory, and flagging it
+        #     was this rule's last false-positive class (2026-09-02).
+        exclude=re.compile(
+            r"os\.listdir\(|os\.scandir\(|glob\.|\.iterdir\(|"
+            r"os\.path\.join\([^,]+,\s*_?[A-Z][A-Z0-9_]*\s*\)"
+        ),
     ),
     Rule(
         id="path.startswith_check",
@@ -131,7 +139,19 @@ RULES: tuple[Rule, ...] = (
             "server-side request proxy: anyone who can reach this server can use it to "
             "probe hosts it can reach and read the replies. Restrict to an allowlist."
         ),
+        # The RECEIVER must look like request data, not just any dict with a
+        # `server`/`host`/`url` key. Without this the rule fired on
+        # `fields.get("server")` in this pack's own `_mount_label()` -- a pure
+        # string formatter that parses a GVFS mount name
+        # (`smb-share:server=HOST,share=NAME`) and never touches the network.
+        # `needs` gates on the FILE registering a route and importing aiohttp,
+        # which routes.py legitimately does, so the file-level gate can't tell
+        # a local dict apart from a parsed body; only the receiver's name can.
+        # Verified false positive, 2026-09-02 -- it was the single finding
+        # painting this pack red in the §9 summary, which is exactly the kind
+        # of miscalibration that makes a red mark stop meaning anything.
         pattern=re.compile(
+            r"(?:body|payload|data|params|json|req|request|args|form|kwargs)\w*"
             r"\.get\(\s*[\"'](?:base_url|url|endpoint|host|server|target)[\"']"
         ),
         needs=("routes.post", "aiohttp"),

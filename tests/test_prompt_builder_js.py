@@ -111,7 +111,8 @@ const out = {
     hasNotebookOptionsOf: typeof m.notebookOptionsOf === 'function',
     hasFilterEntries: typeof m.filterEntries === 'function',
     hasMissingBlockNames: typeof m.missingBlockNames === 'function',
-    hasGroupEntriesByCategory: typeof m.groupEntriesByCategory === 'function'
+    hasGroupEntriesByCategory: typeof m.groupEntriesByCategory === 'function',
+    hasMirroredDraftsRaw: typeof m.mirroredDraftsRaw === 'function'
   }
 }
 
@@ -252,6 +253,33 @@ out.groupEntriesByCategory = {
   ]),
   nonArrayInput: m.groupEntriesByCategory(null),
   empty: m.groupEntriesByCategory([])
+}
+
+// ------------------------------------------------------------ mirroredDraftsRaw
+out.mirroredDraftsRaw = {
+  matchingCandidate: m.mirroredDraftsRaw(
+    [
+      { file: 'a.md', draftsRaw: '{"A":"edited"}' },
+      { file: 'b.md', draftsRaw: '{"B":"other"}' }
+    ],
+    'a.md'
+  ),
+  firstMatchWins: m.mirroredDraftsRaw(
+    [
+      { file: 'a.md', draftsRaw: '{"first":true}' },
+      { file: 'a.md', draftsRaw: '{"second":true}' }
+    ],
+    'a.md'
+  ),
+  noMatch: m.mirroredDraftsRaw([{ file: 'a.md', draftsRaw: '{"A":"x"}' }], 'z.md'),
+  emptyFile: m.mirroredDraftsRaw([{ file: 'a.md', draftsRaw: '{"A":"x"}' }], ''),
+  emptyCandidates: m.mirroredDraftsRaw([], 'a.md'),
+  nonArrayCandidates: m.mirroredDraftsRaw(null, 'a.md'),
+  candidateWithNullDraftsRaw: m.mirroredDraftsRaw(
+    [{ file: 'a.md', draftsRaw: null }],
+    'a.md'
+  ),
+  candidateMissingDraftsRaw: m.mirroredDraftsRaw([{ file: 'a.md' }], 'a.md')
 }
 
 process.stdout.write(JSON.stringify(out))
@@ -461,6 +489,33 @@ def test_group_entries_by_category_treats_bad_or_missing_category_as_ungrouped(
     ]
 
 
+# ------------------------------------------------------------ mirroredDraftsRaw
+#
+# Owner report 2026-09-02: routed through this panel, an edited-but-unsaved
+# Notebook prompt used to always run the SAVED text. mirroredDraftsRaw()
+# is the pure half of the fix -- picking which discovered Notebook
+# candidate's raw `drafts` value this panel should copy onto its own.
+
+
+def test_mirrored_drafts_raw_matches_by_file_first_match_wins(probe_api: dict) -> None:
+    got = probe_api["mirroredDraftsRaw"]
+    assert got["matchingCandidate"] == '{"A":"edited"}'
+    # Two candidates sharing a `file` (two Notebook nodes on the same
+    # library) -- first discovered wins, same tie-break notebookOptionsOf()
+    # already uses for the selector's own dedupe.
+    assert got["firstMatchWins"] == '{"first":true}'
+
+
+def test_mirrored_drafts_raw_falls_back_to_the_default_value(probe_api: dict) -> None:
+    got = probe_api["mirroredDraftsRaw"]
+    assert got["noMatch"] == "{}"
+    assert got["emptyFile"] == "{}"
+    assert got["emptyCandidates"] == "{}"
+    assert got["nonArrayCandidates"] == "{}"
+    assert got["candidateWithNullDraftsRaw"] == "{}"
+    assert got["candidateMissingDraftsRaw"] == "{}"
+
+
 # ---------------------------------------------------------------------------
 # Source-text pins — the closure-bound attach/render/event-wiring code.
 # ---------------------------------------------------------------------------
@@ -495,6 +550,41 @@ def test_file_and_blocks_widgets_are_hidden_both_ways(source: str) -> None:
     hide = _body(source, "hideWidgetBothWays(widget, node)")
     assert "widget.hidden = true" in hide
     assert "widget.options = { ...(widget.options || {}), hidden: true }" in hide
+
+
+def test_drafts_widget_is_looked_up_hidden_and_null_safe(source: str) -> None:
+    """Unsaved-edit drafts (owner report 2026-09-02) -- `drafts` is looked
+    up by NAME every attach, exactly like `file`/`blocks`, and degrades to
+    `null` (never a refusal to attach) on a backend that predates it, same
+    convention notebook.js already uses for ITS OWN pinned/drafts
+    widgets."""
+    entry = source.split("export function attachPromptBuilderPanel(node) {", 1)[1]
+    entry = entry.split("\n}\n", 1)[0]
+    assert "const draftsWidget = findWidget(node, DRAFTS_WIDGET_NAME) || null" in entry
+    assert "hideWidgetBothWays(draftsWidget, node)" in entry
+    assert "createState(node, fileWidget, blocksWidget, draftsWidget)" in entry
+    assert "const DRAFTS_WIDGET_NAME = 'drafts'" in source
+    assert "const DEFAULT_DRAFTS_VALUE = '{}'" in source
+
+
+def test_drafts_mirror_survives_a_rebuild(source: str) -> None:
+    """§7.9: a tab switch/rebuild throws away the old node object and DOM
+    widget and reruns attachPromptBuilderPanel() from scratch on the fresh
+    one. There is no module-scope cache tying `draftsWidget` to a
+    particular node instance -- it is looked up by NAME (findWidget) every
+    single attach and threaded straight into a brand-new state object, so a
+    rebuilt node re-discovers (and, via the attach-time rescanNotebooks()
+    call, re-syncs) its mirrored drafts exactly like a fresh one would,
+    never carrying forward a stale reference from before the rebuild."""
+    assert (
+        "function createState(node, fileWidget, blocksWidget, draftsWidget = null) {" in source
+    )
+    create_state = _body(source, "createState(node, fileWidget, blocksWidget, draftsWidget = null)")
+    assert "draftsWidget," in create_state
+    entry = source.split("export function attachPromptBuilderPanel(node) {", 1)[1]
+    entry = entry.split("\n}\n", 1)[0]
+    assert "const draftsWidget = findWidget(node, DRAFTS_WIDGET_NAME) || null" in entry
+    assert "rescanNotebooks(state, { force: true })" in entry
 
 
 def test_double_click_handler_appends_via_append_block(source: str) -> None:
@@ -831,6 +921,55 @@ def test_discovery_walks_the_whole_workflow_rooted_at_app_graph(source: str) -> 
     discover = _body(source, "discoverNotebookCandidates()")
     assert "walkLiveNodes(app.graph)" in discover
     assert "state.node.graph" not in discover
+
+
+def test_discovery_captures_each_candidates_raw_drafts_value_too(source: str) -> None:
+    """Unsaved-edit drafts (owner report 2026-09-02): the SAME discovery
+    walk that already builds the selector's file list also grabs each
+    candidate's raw `drafts` widget value, so mirroredDraftsRaw() has
+    something to pick from without a second graph walk."""
+    discover = _body(source, "discoverNotebookCandidates()")
+    assert "findWidget(node, DRAFTS_WIDGET_NAME)" in discover
+    assert "draftsRaw: typeof dw?.value === 'string' ? dw.value : null" in discover
+
+
+def test_sync_mirrored_drafts_is_write_if_different(source: str) -> None:
+    """Same idiom as writeFileWidget()/writeBlocksWidget(): a no-op widget
+    (backend predates it) or an unchanged value never dirties the canvas."""
+    sync = _body(source, "syncMirroredDrafts(state, candidates)")
+    assert sync.strip().startswith("const widget = state.draftsWidget")
+    assert "if (!widget) return" in sync
+    assert "mirroredDraftsRaw(candidates, state.fileWidget.value ?? '')" in sync
+    assert "if (widget.value === raw) return" in sync
+    assert "widget.value = raw" in sync
+    assert "widget.callback?.(raw)" in sync
+    assert "state.node.graph?.setDirtyCanvas(true, true)" in sync
+
+
+def test_rescan_syncs_mirrored_drafts_before_the_options_change_gate(source: str) -> None:
+    """A draft can change on the mirrored Notebook while the discovered
+    notebook SET (and thus rescanNotebooks()'s own options-signature
+    early-return) stays identical -- syncMirroredDrafts() must run
+    unconditionally, on every rescan, not only the ones that go on to
+    rebuild the selector. rescanNotebooks() already runs from attach,
+    configure, selector focus, and every ~5s poll tick (see POLL_MS in
+    test_poll_is_change_gated_with_no_unconditional_dirty_canvas) -- no new
+    timer is introduced for this."""
+    rescan = _body(source, "rescanNotebooks(state, { force = false } = {})")
+    assert "syncMirroredDrafts(state, candidates)" in rescan
+    sync_index = rescan.index("syncMirroredDrafts(state, candidates)")
+    gate_index = rescan.index(
+        "if (!force && signature === state.notebookOptionsSignature) return false"
+    )
+    assert sync_index < gate_index
+
+
+def test_write_file_widget_adopts_the_newly_mirrored_notebooks_drafts(source: str) -> None:
+    """Switching which Notebook this panel mirrors (the selector) adopts
+    that Notebook's drafts immediately rather than waiting for the next
+    poll tick."""
+    write_file = _body(source, "writeFileWidget(state, value)")
+    assert "syncMirroredDrafts(state, discoverNotebookCandidates())" in write_file
 
 
 def test_no_notebook_option_disables_the_selector(source: str) -> None:

@@ -4658,7 +4658,96 @@ export function registerControllerNode() {
         this._runAction('Apply State', () => this._doApply())
       }
 
+      /**
+       * Owner report 2026-09-02 ("creating a group by adding a '# name' ...
+       * doesn't seem to work, or at least not reliably"). Three previous
+       * "fixes" are still in this file -- v0.67.2/v0.72.1/v0.80.1, cited by
+       * name below and at `_clearNameField()`/`_doNewCategory()`/
+       * `_saveLayout()` -- and every one of them was a REAL bug. None of
+       * them questioned whether `isCategoryNameInput(this._w.name.value)`'s
+       * READ was ever wrong. It can be, and reliably-*sometimes* so, which
+       * is exactly what "doesn't seem to work, or at least not reliably"
+       * describes and none of the three touch.
+       *
+       * VERIFY(live) FINDING, from the installed frontend's OWN source
+       * (not guessed from behavior): comfyui_frontend_package 1.48.7's
+       * bundled sourcemaps, recovered from `sourcesContent` under
+       * `~/Library/Application Support/comfy_ps/rig/venv/lib/python3.14/
+       * site-packages/comfyui_frontend_package/static/assets/*.js.map` on
+       * Eric's rig.
+       *
+       *  - VUE RENDERING is fine, and the fix this replaces (v0.67.2's own
+       *    framing, "the Vue renderer's input keeps its own copy until the
+       *    widget's callback announces the change") had the mechanism
+       *    backwards. `name`'s type ('text', aliased to 'string' in
+       *    `widgetRegistry.ts`) draws as `WidgetInputText.vue`, a thin
+       *    wrapper around PrimeVue's own InputText, whose `onInput` fires
+       *    on every native `input` event (`primevue/inputtext/index.mjs`:
+       *    `onInput() { this.writeValue(event.target.value, event) }` --
+       *    keystroke-driven, not change/blur-driven). That flows straight
+       *    through `useProcessedWidgets.ts`'s `createWidgetUpdateHandler`:
+       *    `widgetState.value = newValue; widget.callback?.(newValue)`, on
+       *    EVERY keystroke, no debounce, no commit step. `BaseWidget`'s
+       *    `get value()` (`litegraph/src/widgets/BaseWidget.ts`) always
+       *    reads that same store-backed `_state.value`. So under Vue,
+       *    `this._w.name.value` is already exactly what's on screen the
+       *    instant a character lands -- there was never anything to flush.
+       *  - LEGACY CANVAS RENDERING is where the real bug lives.
+       *    `TextWidget.onClick()` (`litegraph/src/widgets/TextWidget.ts`)
+       *    does not accept typed input into the widget at all -- it opens
+       *    `LGraphCanvas.prototype.prompt()`, a free-floating
+       *    `<input class="value">` dialog appended to `canvas.parentNode`,
+       *    wired to nothing but its own closures. Per `LGraphCanvas.ts`'s
+       *    `prompt()`, the typed text reaches `widget.value` ONLY via the
+       *    dialog's own Enter-key handler or its "OK" button (both call
+       *    `callback(input.value)` -> `TextWidget`'s callback ->
+       *    `BaseWidget.setValue()`). Anything else -- Escape, or a click
+       *    anywhere that isn't the dialog -- runs the dialog's
+       *    `handleOutsideClick()`, which ONLY calls `dialog.close()`: no
+       *    callback, ever. The typed text is simply DROPPED and
+       *    `widget.value` is left exactly as it was before the user
+       *    touched the field -- worse than "stale", it never lands at all.
+       *  - `New State`/`New Group` (`_w.captureBtn`, built by
+       *    `_createActionButton()`) is a genuine DOM `<button>` inside this
+       *    file's own DOM widget pane -- NOT the `<canvas>` element the
+       *    outside-click check tests for (`e.target === canvas`). So
+       *    clicking it right after typing "# Portraits", without pressing
+       *    Enter first, satisfies NEITHER commit path: `_onCaptureClick()`
+       *    fires immediately against the OLD `widget.value`, and the
+       *    floating dialog is left open afterward, still showing the typed
+       *    text nobody read -- which reads exactly as "created a state
+       *    instead, and doesn't even look like anything went wrong".
+       *    Whether the user's next action after typing happens to be Enter
+       *    (habit, and what commits fine) or a direct click on the button
+       *    (what silently loses the edit) decides whether this fires --
+       *    hence "not reliably".
+       *
+       * This also nails down the Notebook/Controller asymmetry Eric has
+       * separately reported (both panels "should" behave the same and
+       * don't): notebook.js's name field (`state.nameFieldEl`, ~line 1595)
+       * is a plain DOM `<input>` THIS PACK builds and owns, committing on
+       * the native `input` event (`state.nameFieldEl.addEventListener(
+       * 'input', ...)`, ~line 1645) -- it behaves like Vue mode
+       * UNCONDITIONALLY, on both renderers, because it was never a
+       * litegraph widget to begin with. `name` HERE is a real litegraph
+       * widget on purpose (FORMAT.md §6.3: the hidden `set` widget's
+       * serialization trick next to it needs a real widget slot in this
+       * node's own widget list). The two fields differ by WIDGET KIND
+       * (pack-owned DOM input vs. native litegraph widget), not by an
+       * oversight -- do NOT "fix" the asymmetry by turning `name` into a
+       * DOM input to match the Notebook; that would trade this file's
+       * working serialization contract for a problem the Notebook side
+       * never had. Fix it here instead, around litegraph's canvas-legacy
+       * commit gap, which is what `_flushPendingNameEdit()` below does.
+       */
       _onCaptureClick() {
+        // Force any not-yet-committed edit into `this._w.name.value`
+        // BEFORE branching on it below -- see `_flushPendingNameEdit()`'s
+        // own doc comment for the full why. A no-op under Vue (already
+        // live) and whenever canvas-legacy editing already committed
+        // (Enter/OK pressed) -- only changes anything in exactly the
+        // window this fix targets.
+        this._flushPendingNameEdit()
         // A pending delete-confirm is about whatever was selected when it was
         // armed; capturing a new state is a big enough context switch that
         // it should never be silently confirmed by the next click instead.
@@ -4671,6 +4760,70 @@ export function registerControllerNode() {
           return
         }
         this._runAction(LABEL_CAPTURE, () => this._doCapture())
+      }
+
+      /**
+       * Best-effort commit of an in-progress LEGACY CANVAS edit of the
+       * `name` widget into `widget.value`, run before any read of it used
+       * for branching/naming -- see `_onCaptureClick()`'s doc comment
+       * above for the full investigation this closes. `app.canvas` is this
+       * pack's existing handle onto the active LGraphCanvas (already used
+       * a few hundred lines up, `widget.setValue(slug, { node, canvas:
+       * app.canvas })`); `.prompt_box` is the SAME internal field
+       * `LGraphCanvas.prototype.prompt()`/its dialog's own `close()` read
+       * and write. NOT public API -- every step below is individually
+       * guarded, so if a future frontend renames or removes this shape,
+       * this silently does nothing and callers fall back to reading
+       * `widget.value` exactly as they do today: no worse than before this
+       * method existed, never a throw (FORMAT.md §7 fail-soft law).
+       *
+       * Known, accepted gap: litegraph allows only ONE prompt dialog
+       * globally, and nothing in its DOM identifies which widget opened it
+       * (the title is a hardcoded "Value" for every plain text widget --
+       * `TextWidget.onClick()` always passes that literal string). So if
+       * the user left some OTHER node's text-widget dialog open and then
+       * immediately clicked THIS node's New State/Save State button
+       * without ever touching this field, this would (rarely) harvest
+       * that unrelated text instead of leaving `name` alone. Judged
+       * acceptable: that needs two different in-progress, uncommitted
+       * edits open at once, is trivially fixed by renaming/deleting the
+       * result afterward, and is far rarer than the bug this closes.
+       */
+      _flushPendingNameEdit() {
+        const widget = this._w.name
+        if (!widget) return
+        try {
+          const dialog = app.canvas?.prompt_box
+          if (!dialog?.isConnected) return // nothing open -- widget.value is authoritative
+          const input = dialog.querySelector?.('.value') // prompt()'s own input/textarea class
+          if (!input) return
+          const live = input.value
+          if (live === widget.value) return // already in sync, nothing pending
+          // Same idiom as `_clearNameField()`: value + callback + dirty, so
+          // this reads as a real committed edit to BOTH renderers and to
+          // every other method that reads `this._w.name.value` afterward
+          // (`_doNewCategory()`, `_doCapture()`, `_saveAsNewName()`).
+          widget.value = live
+          try {
+            widget.callback?.(live)
+          } catch (error) {
+            api.warn(`${NODE_TITLE}: name widget callback threw`, error)
+          }
+          this.setDirtyCanvas(true, true)
+          // Courtesy close: we just applied the SAME value Enter/OK would
+          // have, through the SAME widget.value+callback path -- `close()`
+          // only tears down the dialog's own DOM/state (it never re-invokes
+          // `callback`), so this cannot double-fire anything. Leaving the
+          // dialog open after we already acted on its contents would just
+          // strand a second, now-meaningless copy of what we read on screen.
+          dialog.close?.()
+        } catch (error) {
+          // Best-effort internals probe -- never let it be the reason a
+          // click "does nothing" (FORMAT.md §7 fail-soft law). Worst case:
+          // fall back to whatever widget.value already holds, same as
+          // every click before this method existed.
+          api.warn(`${NODE_TITLE}: could not flush pending name edit`, error)
+        }
       }
 
       /** Create an empty group from the name field ("# Portraits" ->
@@ -4746,6 +4899,12 @@ export function registerControllerNode() {
       }
 
       _onUpdateClick() {
+        // Same stale-read hazard `_onCaptureClick()` has (see
+        // `_flushPendingNameEdit()`'s doc comment) applies here too --
+        // `_doUpdate()` -> `_saveAsNewName()` reads this same
+        // `this._w.name.value` to decide whether Save State carries a
+        // rename. Flush before that read for the identical reason.
+        this._flushPendingNameEdit()
         this._disarmDeleteButton()
         this._runAction(LABEL_UPDATE, () => this._doUpdate())
       }

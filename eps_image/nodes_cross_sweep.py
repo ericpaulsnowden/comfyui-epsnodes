@@ -868,14 +868,55 @@ class EPSCrossSweep:
                     continue
                 emission.append((s, a1_idx, v_idx, p, row, token))
         if solo and not emission:
-            # A typo must never burn a queue as a silent 0-run success.
-            raise ValueError(
-                f"EPS Run Multiplier: solo_run {solo!r} matches none of the "
-                f"{steps * len(pair_rows)} runs in this set (sweep steps "
-                f"1..{steps}, pairs 1..{len(pair_rows)} -- e.g. "
-                f"{_run_token(0, 0, pair_rows[0][3])!r}). Fix the token or "
-                "clear solo_run to run the whole set."
-            )
+            # unsoloed_total is the size of the set solo_run is being matched
+            # AGAINST -- steps * pairs with solo ignored -- never the length
+            # of `emission` above, which is 0 in this branch by definition.
+            unsoloed_total = steps * len(pair_rows)
+            if unsoloed_total == 1:
+                # Owner report (2026-09-02): "drop in an image that was
+                # created using the eps nodes, and has a 'solo run' in the
+                # run multiplier... loads properly but the first run
+                # fails. You have to delete the solo run value... first
+                # before running." Root cause is two of our own provenance
+                # features colliding in the baked PNG: M1 bakes the
+                # ORIGINAL run's coordinate into solo_run (e.g.
+                # "m3_p2-i1-t5"), but M3 (eps_image/nodes_save_image.py)
+                # narrows a multi-select Notebook down to the single entry
+                # that produced this image when it's dropped back in. On
+                # reload this node recomputes its axes from that narrowed
+                # Notebook -- the set collapses to exactly ONE run, whose
+                # own fresh token (e.g. "m1_p1-i1-t1") looks nothing like
+                # the baked one. The token isn't wrong, it's just stale:
+                # it names a coordinate from a set that no longer exists.
+                # There is nothing left to disambiguate -- one candidate,
+                # take it -- so run it instead of raising. Do NOT collapse
+                # this into the raise below: a 2+-run set with a token
+                # that matches nothing is still a typo (or a genuinely
+                # stale token pointing at a real, larger set) and MUST
+                # keep failing loudly, or a bad token could silently burn
+                # a whole queue for zero runs.
+                s = a1_idx = v_idx = p = 0
+                row = pair_rows[0]
+                token = _run_token(0, 0, row[3])
+                logger.info(
+                    "EPS Run Multiplier: solo_run %r names a coordinate from "
+                    "a larger set that this workflow has since been "
+                    "narrowed to a single run (e.g. a dropped image whose "
+                    "Notebook was pinned to one matching entry) -- running "
+                    "that one run instead of treating the stale token as an "
+                    "error.",
+                    solo,
+                )
+                emission.append((s, a1_idx, v_idx, p, row, token))
+            else:
+                # A typo must never burn a queue as a silent 0-run success.
+                raise ValueError(
+                    f"EPS Run Multiplier: solo_run {solo!r} matches none of "
+                    f"the {unsoloed_total} runs in this set (sweep steps "
+                    f"1..{steps}, pairs 1..{len(pair_rows)} -- e.g. "
+                    f"{_run_token(0, 0, pair_rows[0][3])!r}). Fix the token "
+                    "or clear solo_run to run the whole set."
+                )
 
         total = len(emission)
         logger.info(

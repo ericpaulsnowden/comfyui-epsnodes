@@ -278,6 +278,54 @@ class TestCaptureNotebook:
         pins = m.capture_pins({"7": _notebook_prompt(entry="A\nB")}, run)
         assert [e["name"] for e in json.loads(pins["7"].value)["entries"]] == ["A", "B"]
 
+    # ------------------------------------------- v0.86.0 unsaved-edit drafts
+
+    def test_pin_captures_the_draft_text_the_run_actually_used(self, notebook: Path) -> None:
+        # A pin's whole promise is "exactly what this run used". When the
+        # panel queues an unsaved edit the run used the DRAFT, so the pin
+        # must too -- not the stale text still sitting on disk.
+        drafts = json.dumps({"Portrait": "DRAFTED portrait"})
+        run = {**RUN, "text": "DRAFTED portrait"}
+        pins = m.capture_pins({"7": _notebook_prompt(drafts=drafts)}, run)
+        assert json.loads(pins["7"].value)["entries"] == [
+            {"name": "Portrait", "text": "DRAFTED portrait"}
+        ]
+        # and the baked pin reads back as the drafted text even once the
+        # draft buffer is gone -- which is the point of baking it
+        assert LoraLibraryNotebook().read_entry(
+            file="gone.md", entry="whatever", pinned=pins["7"].value
+        ) == (["DRAFTED portrait"], ["Portrait"])
+
+    def test_drafted_text_is_what_entry_narrowing_matches_on(self, notebook: Path) -> None:
+        # `name` unwired -> narrowing falls back to text. The run's text is
+        # the DRAFT, so without drafts applied nothing would match and the
+        # pin would widen to the whole selection.
+        drafts = json.dumps({"Landscape": "DRAFTED wide"})
+        run = {**RUN, "name": None, "text": "DRAFTED wide"}
+        pins = m.capture_pins({"7": _notebook_prompt(entry="Neg\nLandscape", drafts=drafts)}, run)
+        assert json.loads(pins["7"].value)["entries"] == [
+            {"name": "Landscape", "text": "DRAFTED wide"}
+        ]
+
+    def test_a_draft_for_an_unselected_entry_does_not_reach_the_pin(self, notebook: Path) -> None:
+        # entry is "Neg\nPortrait"; the draft names neither.
+        drafts = json.dumps({"Landscape": "DRAFTED wide"})
+        pins = m.capture_pins({"7": _notebook_prompt(drafts=drafts)}, RUN)
+        assert json.loads(pins["7"].value)["entries"] == [
+            {"name": "Portrait", "text": "portrait text"}
+        ]
+
+    def test_wired_or_malformed_drafts_degrade_to_the_on_disk_text(self, notebook: Path) -> None:
+        # `drafts` is a scratch buffer the panel maintains, not a contract
+        # the queue can enforce -- a link, a non-string, or junk JSON must
+        # cost the user a draft, never the pin itself (same degrade-not-raise
+        # posture as parse_drafts / the file+entry guard above).
+        for bad in (["3", 0], None, 17, "not json", "[1, 2]", ""):
+            pins = m.capture_pins({"7": _notebook_prompt(drafts=bad)}, RUN)
+            assert json.loads(pins["7"].value)["entries"] == [
+                {"name": "Portrait", "text": "portrait text"}
+            ], bad
+
     def test_already_pinned_node_keeps_its_pin(self, notebook: Path) -> None:
         original = json.dumps({"format": 1, "entries": [{"name": "Portrait", "text": "OLD"}]})
         pins = m.capture_pins({"7": _notebook_prompt(pinned=original)}, RUN)

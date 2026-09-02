@@ -64,9 +64,12 @@ CATEGORY_NAME = "EPSNodes"
 EPS_RUN_CHUNK = "eps_run"
 
 #: The class ids (FROZEN, FORMAT.md §8) of the two pinnable nodes and the
-#: TAIL widgets that carry their pins (FORMAT.md §6.1 / §6.2).
+#: TAIL widgets that carry their pins (FORMAT.md §6.1 / §6.2), plus the
+#: notebook's `drafts` audition buffer -- read (never written) here so a
+#: pin captures the text the run actually used.
 NOTEBOOK_CLASS = "LoraLibraryNotebook"
 NOTEBOOK_PIN_WIDGET = "pinned"
+NOTEBOOK_DRAFTS_WIDGET = "drafts"
 APPLY_SET_CLASS = "LoraLibraryApplySet"
 APPLY_SET_PIN_WIDGET = "pinned_state"
 MULTIPLIER_CLASS = "EPSCrossSweep"
@@ -265,7 +268,7 @@ def _capture_notebook(
     # which is precisely the case the drafts feature exists to support.
     # Tolerant: a wired/absent/non-string value degrades to "no drafts",
     # matching resolve_selection's own posture.
-    drafts = inputs.get("drafts", "{}")
+    drafts = inputs.get(NOTEBOOK_DRAFTS_WIDGET, "{}")
     if not isinstance(drafts, str):
         drafts = "{}"
     try:

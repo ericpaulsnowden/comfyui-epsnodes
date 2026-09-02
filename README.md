@@ -27,6 +27,7 @@ section further down; this is the map.
 | [**EPS Image Switcher**](#eps-image-switcher-shipped) | Any number of image inputs, each independently on/off; the enabled ones fan out (N enabled → N runs). Disabled branches never execute. | Nothing — drag-and-drop with core nodes. |
 | [**EPS Model / CLIP / VAE Switcher**](#eps-model--clip--vae-switcher-shipped) | The image Switcher's exact mechanism for models, CLIPs, and VAEs: any number of inputs, each on/off, enabled ones fan out (N enabled → N runs), disabled branches — including their checkpoint loads — never execute. | Nothing — drag-and-drop with core nodes. |
 | [**EPS Distributor**](#eps-distributor-shipped) | The mirror of the Switcher: one image — or one text — in, up to sixteen branches out, each independently on/off. New outputs appear as you wire them up. Toggle a branch off and only that branch is skipped — everything happens in one run. | Nothing — drag-and-drop with core nodes. |
+| [**EPS Node Audit**](#eps-node-audit-shipped) | A plain-language look at what your other installed node packs can reach: their web routes, where they've called out to, and a scan of their code for a few patterns worth knowing about — green/yellow/red per pack, with a verbose toggle for the technical detail. | Nothing — reads whatever else is installed. |
 | [**EPS Number Controller**](#eps-number-controller-shipped) | Every number a workflow uses, kept in one place: named rows, each a plain number box. Wire one into a socket and it quietly becomes the right kind of number for it — whole or decimal. Untick a row and whatever it was plugged into goes back to its own value. The Universal State Controller can save and recall the whole set, including which rows are switched on. | Nothing — drag-and-drop with core nodes. |
 | [**EPS Checkpoint Switcher**](#eps-checkpoint-switcher-shipped) | Tick several checkpoint files in a list; one queue runs the workflow once per ticked checkpoint, with each run's model, CLIP, and VAE kept together and a label for save paths. | Your checkpoint files — drag-and-drop with core nodes. |
 | [**EPS Resolution**](#eps-resolution-shipped) | Image-first resize + size in one node: target size (with a drag pad), four resize modes, and the original image + both sets of dimensions passed through. Named size presets are shared across your machines — tick several and one Run resizes once per preset. Wire in extra images and they all come out at the same target size in one Run. | Nothing — drag-and-drop with core nodes. |
@@ -274,6 +275,10 @@ happen there — and the Builder assembles prompts *out of* it:
 - **Each prompt only once.** A prompt already in the block list shows dimmed
   with an *added* tag and won't respond to a second double-click. Remove it
   from the right first if you want it somewhere else in the order.
+- **Unsaved edits run here too.** If you're auditioning a change to a prompt
+  without saving it, the Builder now uses your edited text, the same as
+  running the Notebook directly. It used to quietly fall back to the saved
+  version while the Notebook's hint promised otherwise.
 - **Blocks are live references, not copies.** A block stores the entry's
   *name*; its text is read from the file at run time, so polishing a prompt
   in the Notebook flows straight into every Builder that uses it. A block
@@ -335,6 +340,14 @@ modes, save prefixes — and applies it back later, or in another session.
   formats.
 
 ## EPS Lora Loader State Controller (shipped; requires rgthree-comfy)
+
+- **`# name` reliably makes a group now.** Typing `# Portraits` in the name
+  field and clicking **New State** creates a group. It used to depend on
+  whether you pressed Enter first: on the classic canvas renderer the typing
+  happens in a little pop-up that only hands its text over on Enter or OK,
+  so clicking the button straight after typing left the old text in place
+  and quietly made a state instead. The button now reads what you actually
+  typed either way, and every outcome says what happened.
 
 **v0.81.0 consistency round (your reports):** creating a group with `# name`
 now paints the new group instantly (it used to wait out the NAS save — up to
@@ -698,6 +711,35 @@ several models/VAEs in one queue".
 - Loading several checkpoints in one queue is heavy on disk and RAM/VRAM;
   ComfyUI offloads between runs, but start with two or three, not ten.
 
+## EPS Node Audit (shipped)
+
+`EPSNodes → EPS Node Audit`: a plain-language look at what your *other*
+installed node packs can reach — their web routes, where they've called out
+to since ComfyUI started, and a scan of their source for a few recurring
+patterns worth knowing about.
+
+- **Green, yellow or red per pack,** plus one overall verdict. Green means
+  the scan didn't flag anything about that pack — not that it has been
+  checked and found safe. Yellow and red mean something is worth a look, and
+  the report always says what was noticed, what it would mean if it turned
+  out to matter, and what to do, in plain words.
+- **These are patterns worth checking, not proof of anything.** It's a text
+  search, not an understanding of what the code does, so ordinary harmless
+  code trips it — on a normal install a red mark often turns out to be
+  exactly that. Red means "look at this one first", nothing stronger.
+  Nothing here ever suggests removing or distrusting a pack; the suggested
+  action is always to look, or to ask the author.
+- **Things most packs simply do** — starting another program, accepting a
+  filename over the network — are listed for each pack as *what it can do*,
+  and deliberately don't move the colour. Otherwise everything would be red
+  and the colour would tell you nothing.
+- **`verbose`** (off by default) swaps the summary for the full technical
+  report: every route, every outbound destination, and every match with its
+  exact file and line.
+- **`include_this_pack`** (on by default) scans EPSNodes' own code too — it
+  gets the same scrutiny as anyone else's.
+- Observe-only: it never blocks, patches or changes any pack.
+
 ## EPS Number Controller (shipped)
 
 `EPSNodes → EPS Number Controller`: **every number your workflow uses, kept in
@@ -1014,6 +1056,15 @@ times to gather images, then send the whole set through a workflow at once.
   you focused instead of quietly reverting.
 
 ## EPS Run Multiplier (shipped)
+
+- **Dropping a saved image runs first time.** An image saved by EPS Save
+  Image carries the exact run that made it, and the workflow inside it is
+  trimmed down to just that one run. Its `solo_run` box still names the
+  original coordinate from the bigger set, which no longer matches anything
+  — so it used to fail on the first queue until you cleared the box by hand.
+  Now, when the workflow only has one run in it anyway, that run just goes.
+  A genuine multi-run set with a mistyped token still refuses, so a typo
+  can't quietly produce nothing.
 
 *Renamed from "EPS Cross Sweep" in v0.48.4 (display name only — saved
 workflows keep working unchanged, and nodes already placed in an old

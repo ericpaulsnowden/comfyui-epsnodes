@@ -579,9 +579,17 @@ forwards `drafts` too, so a baked pin records the text the run actually
 used rather than the stale file. The panel keeps `drafts` in sync with the
 active entry (400 ms debounce; cleared immediately on save or on typing
 back to the saved text; pruned when selection changes) and the muted hint
-gains "N unsaved edit(s) — runs as edited". The §6.15 Prompt Builder is
-unaffected BY DESIGN — it reads the file directly, never through
-`resolve_selection`; its contract is "a live reference to what's saved".
+gains "N unsaved edit(s) — runs as edited". The §6.15 Prompt Builder HONORS DRAFTS TOO
+since v0.90.0 (owner report 2026-09-02: routing a prompt through a Builder
+silently ran the saved text while this very hint promised otherwise). It
+still never goes through `resolve_selection` — it resolves blocks by NAME,
+not a selection — so it carries its own tail `drafts` widget, mirrored from
+whichever Notebook it shows, and applies it in `_resolve_blocks`/
+`_blocks_token` reusing `nodes_notebook.parse_drafts` rather than
+reimplementing it. The pre-v0.90.0 sentence here claimed the Builder was
+"unaffected BY DESIGN"; that WAS the deliberate v0.87.0 call, and it was
+wrong — a hint that says "runs as edited" must be true wherever the text
+goes.
 The §6.16 state registry EXCLUDES `drafts` ("unsaved mid-edit scratch
 text, not user-chosen state") so a Universal State can never capture or
 replay someone's half-finished sentence.
@@ -1321,6 +1329,35 @@ queue. It drives a **genuine, untouched `Power Lora Loader (rgthree)`**:
   at `LoraLibraryApplySet` as the no-dependency alternative (ethos: the
   ComfyUI-only floor is §6.2; the controller is the upgrade for rgthree
   users).
+
+
+**`# name` group creation was reading a stale field (v0.90.0, owner report
+2026-09-02: "doesn't seem to work, or at least not reliably").** Three
+earlier fixes (v0.67.2 field-clearing, v0.72.1 announcement, v0.80.1 loud
+save failure) all addressed what happened AFTER
+`isCategoryNameInput(this._w.name.value)` read the field; none questioned
+the read itself. Verified against comfyui_frontend_package 1.48.7's own
+sourcemaps: **the Vue renderer was never at fault** -- PrimeVue's
+`InputText` writes `widget.value` on every keystroke via the native `input`
+event, no debounce. The gap is LEGACY CANVAS rendering, where
+`TextWidget.onClick()` opens `LGraphCanvas.prototype.prompt()`: a floating
+`<input>` dialog disconnected from the widget that commits ONLY on Enter or
+its own OK button. Clicking this file's own `New State` DOM button is
+neither -- the dialog's outside-click check tests `e.target === canvas`, so
+a click on a real `<button>` neither commits nor discards; it just leaves
+the dialog open with the typed text unread and `widget.value` stale. Enter
+first and it worked; click straight through and it silently made a STATE
+instead of a group. `_flushPendingNameEdit()` now reads that dialog's live
+DOM value and commits it (value + callback + dirty, this file's established
+idiom) before both `_onCaptureClick()`'s branch and `_onUpdateClick()`'s
+rename read, fail-soft if the frontend's internals ever change shape.
+
+**This is also the root of the long-reported Notebook/Controller group
+asymmetry.** The Notebook's name field is a pack-OWNED DOM `<input>`, live
+on both renderers; the Controller's is a real litegraph widget because
+§6.3's hidden `set` widget needs the slot beside it. They differ by widget
+KIND, not by oversight -- fix the renderer gap, never "unify" them by
+changing the widget kind.
 
 ## §6.4 `EPSSwitcher` (display: "EPS Image Switcher") — image toggle + fan-out
 
@@ -3013,6 +3050,26 @@ label, so two chained Cross Products cannot express it.
   - Per-run blockers (not one blocker list, not None, not `[]`) keep every
     output the same length — index alignment is this node's whole contract,
     and §6.9 documents why `[]` and `None` both crash consumers.
+
+
+**A stale `solo_run` against a narrowed set (v0.90.0, owner report
+2026-09-02: "drop in an image that was created using the eps nodes, and has
+a 'solo run' in the run multiplier ... loads properly but the first run
+fails. You have to delete the solo run value ... first before running").**
+Two of this pack's OWN provenance features collided. M1 bakes the original
+run's token into `solo_run`; §6.14 EPS Save Image's M3 pinning ALSO narrows
+a multi-select Notebook down to the single entry that produced the image.
+The dropped workflow therefore recomputes its axes from that narrowed
+Notebook and can collapse to exactly ONE run, whose fresh token (`t1`)
+looks nothing like the baked one (`m3_p2-i1-t5`) -- so the match failed
+every time, not intermittently. A token matching nothing no longer
+unconditionally raises: when the UN-SOLOED set (steps x pairs, solo
+ignored) is exactly one run, that run executes, logged at INFO because this
+is the expected, benign shape for a dropped pre-soloed image. A set of two
+or more runs matching nothing still raises exactly as before -- that guard
+exists so a typo can never burn a queue as a silent 0-run success, and it
+is untouched. Fixed on the MATCHING side rather than the baking side
+deliberately: only that repairs images already saved.
 
 ### §6.11 `EPSDistributor` (display: "EPS Distributor") — one in, N gated out
 
@@ -4803,6 +4860,38 @@ isolation is an OS-level concern (separate user, container, namespace).
 - **Source scan** — regex over installed `.py` for the recurring idioms
   (`scanner.RULES`). Test trees and hidden directories are skipped: ComfyUI
   does not import them, so they are not attack surface.
+
+### Two readers, one report (v0.90.0)
+
+Most people who install a node pack are not programmers, and the original
+report -- rule ids, file paths, line numbers -- was close to unreadable to
+them (owner, 2026-09-02: "right now most people will not be able to parse
+this info ... Green/yellow/red"). `verbose` (default OFF) now chooses
+between two renderers over the SAME `build_report()` dict: OFF is
+`report.render_summary()`, a plain-language read with a colour per pack and
+one short paragraph per distinct idiom, translated out of jargon; ON is the
+original `render_text()`, byte-for-byte unchanged (pinned by a test).
+`report.RULE_COPY` is the translation table, keyed by rule id so it cannot
+silently drift from `scanner.RULES`; an id the table does not recognise
+falls through to a generic, honest phrase rather than printing the raw id.
+
+**The colour is CURATED, not the raw severity** (`report.ATTENTION_OVERRIDE`).
+Passing severity straight through produced ZERO green across the owner's
+five installed packs -- three red, two yellow, including all three of this
+project's own -- because the findings that dominate a normal install are
+near-universal capabilities: starting another program (which is literally
+what the Photoshop and Premiere bridges are FOR) and accepting a filename
+over a route (any pack with HTTP routes). A scale that is never green
+carries no information, and painting a real community pack red on first
+run is precisely the false alarm the honesty rules exist to prevent. Red is
+therefore reserved for the few shapes that are both uncommon and would
+matter if real; the universal ones are still LISTED per pack, under "Also,
+ordinary for a pack like this", where they inform without moving the
+colour. A red verdict additionally prints a calibration note saying red
+means "look at this one first", not "something is wrong" -- because on a
+normal install red matches often turn out to be ordinary code that merely
+resembles the pattern. Green means the scan flagged nothing, never that a
+pack was checked and cleared.
 
 ### Findings are leads, not verdicts
 

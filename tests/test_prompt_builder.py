@@ -47,7 +47,11 @@ class TestClassShape:
     def test_input_types_order_and_defaults(self) -> None:
         spec = EPSPromptBuilder.INPUT_TYPES()
         assert list(spec["required"]) == ["file", "blocks", "separator"]
-        assert list(spec["optional"]) == ["text", "name"]
+        # `drafts` sits last in this dict (§8), but `text`/`name` are
+        # forceInput-only and create no widgets_values slot at all, so
+        # `drafts` is still the tail-most REAL widget added since ship --
+        # see nodes_prompt_builder.py's own INPUT_TYPES comment.
+        assert list(spec["optional"]) == ["text", "name", "drafts"]
 
         file_kind, file_opts = spec["required"]["file"]
         assert file_kind == "STRING"
@@ -72,6 +76,20 @@ class TestClassShape:
         name_kind, name_opts = spec["optional"]["name"]
         assert name_kind == "STRING"
         assert name_opts["forceInput"] is True
+
+        drafts_kind, drafts_opts = spec["optional"]["drafts"]
+        assert drafts_kind == "STRING"
+        assert drafts_opts["default"] == "{}"
+        assert drafts_opts["hidden"] is True
+
+    def test_drafts_is_excluded_from_the_state_registry(self) -> None:
+        # Mirrors nodes_notebook.LoraLibraryNotebook's own DRAFTS_WIDGET
+        # exclusion (tests/test_nodes_notebook.py) -- scratch text the
+        # frontend mirrors from elsewhere, never user-chosen state.
+        descriptor = EPSPromptBuilder.EPS_STATE_WIDGETS
+        assert "drafts" not in descriptor["widgets"]
+        assert "drafts" in descriptor["excluded"]
+        assert descriptor["excluded"]["drafts"].strip()
 
 
 # -------------------------------------------------------------------- combine
@@ -289,6 +307,102 @@ class TestSeparator:
         assert result == (["xy"], ["A+B"])
 
 
+# ------------------------------------------------------------------- drafts
+#
+# Owner report 2026-09-02: "if you have a prompt that is edited but not
+# saved, but have it loaded via the prompt builder instead of directly via
+# the node itself, the saved version fires and not the edited version."
+# `drafts` is the frontend's mirror of the Notebook's own unsaved-edit
+# widget (nodes_notebook.py's `parse_drafts`, imported and reused here).
+
+
+class TestDrafts:
+    def test_draft_overrides_file_text_for_a_named_block(
+        self, library_dir: Path
+    ) -> None:
+        _write_notebook(library_dir, "loras.md", "## Portrait\nsaved text\n")
+        node = EPSPromptBuilder()
+        drafts = json.dumps({"Portrait": "EDITED unsaved text"})
+        result = node.build(
+            file="loras.md", blocks=_blocks("Portrait"), separator=", ", drafts=drafts
+        )
+        assert result == (["EDITED unsaved text"], ["Portrait"])
+
+    def test_block_without_a_draft_still_resolves_from_the_file(
+        self, library_dir: Path
+    ) -> None:
+        _write_notebook(library_dir, "loras.md", "## A\nfile A\n## B\nfile B\n")
+        node = EPSPromptBuilder()
+        drafts = json.dumps({"A": "edited A"})
+        result = node.build(
+            file="loras.md", blocks=_blocks("A", "B"), separator=", ", drafts=drafts
+        )
+        assert result == (["edited A, file B"], ["A+B"])
+
+    def test_default_drafts_value_behaves_exactly_as_before(
+        self, library_dir: Path
+    ) -> None:
+        _write_notebook(library_dir, "loras.md", "## A\nfile A\n")
+        node = EPSPromptBuilder()
+        result = node.build(file="loras.md", blocks=_blocks("A"), separator=", ")
+        assert result == (["file A"], ["A"])
+
+    @pytest.mark.parametrize(
+        "bad", ["not json", "[]", "42", '"just a string"', "null", ""]
+    )
+    def test_malformed_or_empty_drafts_degrades_to_no_drafts(
+        self, bad: str, library_dir: Path
+    ) -> None:
+        _write_notebook(library_dir, "loras.md", "## A\nfile A\n")
+        node = EPSPromptBuilder()
+        result = node.build(
+            file="loras.md", blocks=_blocks("A"), separator=", ", drafts=bad
+        )
+        assert result == (["file A"], ["A"])
+
+    def test_nul_prefixed_category_draft_key_is_never_treated_as_an_entry(
+        self, library_dir: Path
+    ) -> None:
+        # notebook.js's categoryDraftKey() stores a CATEGORY description's
+        # unsaved edit under "\x00category\x00<name>" in the SAME `drafts`
+        # object -- a block is always looked up by its plain resolved
+        # entry NAME, so this key can never surface here even when its
+        # embedded name collides with a real block name.
+        _write_notebook(library_dir, "loras.md", "## A\nfile A\n")
+        node = EPSPromptBuilder()
+        category_key = "\x00category\x00A"
+        drafts = json.dumps({category_key: "category description draft, not A's text"})
+        result = node.build(
+            file="loras.md", blocks=_blocks("A"), separator=", ", drafts=drafts
+        )
+        assert result == (["file A"], ["A"])
+
+    def test_draft_naming_an_entry_not_in_blocks_is_ignored(
+        self, library_dir: Path
+    ) -> None:
+        _write_notebook(library_dir, "loras.md", "## A\nfile A\n## B\nfile B\n")
+        node = EPSPromptBuilder()
+        drafts = json.dumps({"B": "edited B, never used"})
+        result = node.build(
+            file="loras.md", blocks=_blocks("A"), separator=", ", drafts=drafts
+        )
+        assert result == (["file A"], ["A"])
+
+    def test_accepts_the_input_is_list_wrapped_drafts_shape(
+        self, library_dir: Path
+    ) -> None:
+        _write_notebook(library_dir, "loras.md", "## A\nfile A\n")
+        node = EPSPromptBuilder()
+        drafts = json.dumps({"A": "edited A"})
+        result = node.build(
+            file=["loras.md"],
+            blocks=[_blocks("A")],
+            separator=[", "],
+            drafts=[drafts],
+        )
+        assert result == (["edited A"], ["A"])
+
+
 # --------------------------------------------------------------- malformed JSON
 
 
@@ -460,6 +574,63 @@ class TestIsChanged:
         )
         assert isinstance(token, str)
         assert "missing" not in token
+
+    # ----------------------------------------------------------- drafts
+
+    def test_changes_when_a_blocked_entrys_draft_changes(
+        self, library_dir: Path
+    ) -> None:
+        _write_notebook(library_dir, "loras.md", "## A\nsaved\n")
+        token1 = EPSPromptBuilder.IS_CHANGED(
+            file="loras.md", blocks='["A"]', separator=", ", drafts="{}"
+        )
+        token2 = EPSPromptBuilder.IS_CHANGED(
+            file="loras.md",
+            blocks='["A"]',
+            separator=", ",
+            drafts=json.dumps({"A": "edited"}),
+        )
+        assert token1 != token2
+
+    def test_stable_across_calls_when_the_draft_does_not_change(
+        self, library_dir: Path
+    ) -> None:
+        _write_notebook(library_dir, "loras.md", "## A\nsaved\n")
+        drafts = json.dumps({"A": "edited"})
+        token1 = EPSPromptBuilder.IS_CHANGED(
+            file="loras.md", blocks='["A"]', separator=", ", drafts=drafts
+        )
+        token2 = EPSPromptBuilder.IS_CHANGED(
+            file="loras.md", blocks='["A"]', separator=", ", drafts=drafts
+        )
+        assert token1 == token2
+
+    def test_malformed_drafts_does_not_raise_and_matches_no_drafts_token(
+        self, library_dir: Path
+    ) -> None:
+        _write_notebook(library_dir, "loras.md", "## A\nsaved\n")
+        token_default = EPSPromptBuilder.IS_CHANGED(
+            file="loras.md", blocks='["A"]', separator=", ", drafts="{}"
+        )
+        token_malformed = EPSPromptBuilder.IS_CHANGED(
+            file="loras.md", blocks='["A"]', separator=", ", drafts="not json"
+        )
+        assert token_default == token_malformed
+
+    def test_a_draft_for_an_unblocked_entry_never_changes_the_token(
+        self, library_dir: Path
+    ) -> None:
+        _write_notebook(library_dir, "loras.md", "## A\nsaved\n## B\nother\n")
+        token1 = EPSPromptBuilder.IS_CHANGED(
+            file="loras.md", blocks='["A"]', separator=", ", drafts="{}"
+        )
+        token2 = EPSPromptBuilder.IS_CHANGED(
+            file="loras.md",
+            blocks='["A"]',
+            separator=", ",
+            drafts=json.dumps({"B": "edited B, not a block"}),
+        )
+        assert token1 == token2
 
 
 # ------------------------------------------------------- INPUT_IS_LIST wrapping

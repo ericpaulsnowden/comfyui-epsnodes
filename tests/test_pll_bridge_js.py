@@ -2017,3 +2017,442 @@ class TestOptimisticSaveAndPushV20260826:
         assert body.count("return false") == 3
         assert "slotWidget.value = index" in body
         assert body.rstrip().endswith("return true")
+
+
+# --------------------------------------- name-field stale-read fix (2026-09-02)
+
+
+def _const_line(source_text: str, name: str) -> str:
+    """The single ``const NAME = ...`` declaration line, verbatim -- used to
+    splice the REAL literal into the probe below instead of retyping it
+    (and silently drifting from the source if it ever changes)."""
+    match = re.search(rf"^const {name} = .*$", source_text, flags=re.MULTILINE)
+    assert match, f"const {name} not found"
+    return match.group(0)
+
+
+#: Reassembles a probe-runnable copy of the exact READ path
+#: `_onCaptureClick()`/`_onUpdateClick()` take, spliced together from real,
+#: freshly-extracted controller.js source (never retyped by hand) plus a
+#: minimal fake LiteGraph/DOM harness -- `_runAction` is stubbed as a spy
+#: (which label a click chose) rather than executed, since `_doNewCategory`/
+#: `_doCapture`/`_doUpdate`'s OWN network/layout behavior is already covered
+#: by the pins above (test_new_group_is_announced_with_toasts,
+#: TestFlakyGroupCreationFixV20260825, etc.) -- this probe exists to prove
+#: the READ those methods depend on is correct, under conditions
+#: (an open, uncommitted canvas-legacy prompt dialog) no existing test can
+#: express as a source pin alone.
+_FLUSH_PROBE_TEMPLATE = """
+__NODE_TITLE_LINE__
+__LABEL_CAPTURE_LINE__
+__LABEL_UPDATE_LINE__
+
+__IS_CATEGORY_FN__
+
+__CATEGORY_FROM_FN__
+
+const WARNINGS = []
+const api = { warn: (...args) => { WARNINGS.push(args) } }
+const app = { canvas: { prompt_box: null } }
+
+function makeWidget(initialValue) {
+  return {
+    value: initialValue,
+    callbackCalls: [],
+    callback(v) {
+      this.callbackCalls.push(v)
+    }
+  }
+}
+
+function makeDialog({ isConnected = true, value = null, hasValueInput = true } = {}) {
+  const dialog = {
+    isConnected,
+    closed: false,
+    querySelector(_sel) {
+      return hasValueInput ? { value } : null
+    },
+    close() {
+      dialog.closed = true
+    }
+  }
+  return dialog
+}
+
+function makeThrowingDialog() {
+  return {
+    isConnected: true,
+    closed: false,
+    querySelector() {
+      throw new Error('boom: dialog internals changed')
+    },
+    close() {
+      this.closed = true
+    }
+  }
+}
+
+class FakeControllerNode {
+  constructor(nameWidget) {
+    this._w = { name: nameWidget }
+    this.actions = []
+    this.dirtyCalls = 0
+  }
+  _disarmDeleteButton() {}
+  _runAction(label, _fn) {
+    // Deliberately NOT invoking _fn(): _doNewCategory()/_doCapture()/
+    // _doUpdate()'s own bodies are covered elsewhere -- this probe only
+    // needs to know which branch a click took.
+    this.actions.push(label)
+  }
+  _doNewCategory() {}
+  _doCapture() {}
+  _doUpdate() {}
+  setDirtyCanvas() {
+    this.dirtyCalls++
+  }
+
+__FLUSH_METHOD__
+
+__CAPTURE_CLICK_METHOD__
+
+__UPDATE_CLICK_METHOD__
+}
+
+function runScenario(build) {
+  WARNINGS.length = 0
+  app.canvas.prompt_box = null
+  const ctx = build()
+  ctx.run()
+  return {
+    actions: ctx.node.actions,
+    value: ctx.node._w.name.value,
+    callbackCalls: ctx.node._w.name.callbackCalls,
+    dirtyCalls: ctx.node.dirtyCalls,
+    dialogClosed: ctx.dialog ? ctx.dialog.closed : null,
+    warnings: WARNINGS.length
+  }
+}
+
+const out = {}
+
+// Vue mode (always) and canvas-legacy mode once Enter/OK already committed
+// (no dialog open): widget.value is already what's on screen.
+out.alreadyCommittedNoDialog = runScenario(() => {
+  const node = new FakeControllerNode(makeWidget('# Portraits'))
+  return { node, dialog: null, run: () => node._onCaptureClick() }
+})
+
+// Canvas-legacy mode, typed but never committed (no Enter/OK) -- the bug
+// this fix closes.
+out.uncommittedHashValueFlushed = runScenario(() => {
+  const dialog = makeDialog({ value: '# Portraits' })
+  app.canvas.prompt_box = dialog
+  const node = new FakeControllerNode(makeWidget(''))
+  return { node, dialog, run: () => node._onCaptureClick() }
+})
+
+out.uncommittedPlainValueFlushed = runScenario(() => {
+  const dialog = makeDialog({ value: 'My New State' })
+  app.canvas.prompt_box = dialog
+  const node = new FakeControllerNode(makeWidget(''))
+  return { node, dialog, run: () => node._onCaptureClick() }
+})
+
+// The dialog is open but its live value already MATCHES widget.value
+// (nothing pending) -- must be a strict no-op, not a re-fired callback.
+out.alreadyInSyncDialogLeftAlone = runScenario(() => {
+  const dialog = makeDialog({ value: 'Same' })
+  app.canvas.prompt_box = dialog
+  const node = new FakeControllerNode(makeWidget('Same'))
+  return { node, dialog, run: () => node._onCaptureClick() }
+})
+
+// "#" alone, uncommitted -- must still reach the group branch so
+// _doNewCategory()'s own "Enter a group name after the #" message (pinned
+// above) is what the owner sees, not a silently-created mis-named state.
+out.hashOnlyStillTakesGroupBranch = runScenario(() => {
+  const dialog = makeDialog({ value: '#' })
+  app.canvas.prompt_box = dialog
+  const node = new FakeControllerNode(makeWidget(''))
+  return { node, dialog, run: () => node._onCaptureClick() }
+})
+
+// A stale/detached dialog reference (already closed some other way) must
+// never be read -- falls back to whatever widget.value already holds.
+out.disconnectedDialogIgnored = runScenario(() => {
+  const dialog = makeDialog({ isConnected: false, value: '# Portraits' })
+  app.canvas.prompt_box = dialog
+  const node = new FakeControllerNode(makeWidget('OldValue'))
+  return { node, dialog, run: () => node._onCaptureClick() }
+})
+
+// A future frontend whose dialog shape no longer has ".value" -- degrades
+// to widget.value, no throw, no warning (this is not an error condition).
+out.missingValueElementDegradesSafely = runScenario(() => {
+  const dialog = makeDialog({ hasValueInput: false })
+  app.canvas.prompt_box = dialog
+  const node = new FakeControllerNode(makeWidget('# Fallback'))
+  return { node, dialog, run: () => node._onCaptureClick() }
+})
+
+// The internals probe itself throws -- must warn, never break the click.
+out.throwingDialogNeverBreaksTheClick = runScenario(() => {
+  const dialog = makeThrowingDialog()
+  app.canvas.prompt_box = dialog
+  const node = new FakeControllerNode(makeWidget('# Resilient'))
+  return { node, dialog, run: () => node._onCaptureClick() }
+})
+
+// Save State's rename-in-place read (_saveAsNewName()) has the identical
+// hazard -- _onUpdateClick() must flush too.
+out.updateClickAlsoFlushesBeforeRename = runScenario(() => {
+  const dialog = makeDialog({ value: 'Renamed' })
+  app.canvas.prompt_box = dialog
+  const node = new FakeControllerNode(makeWidget(''))
+  return { node, dialog, run: () => node._onUpdateClick() }
+})
+
+process.stdout.write(JSON.stringify(out))
+"""
+
+
+@pytest.fixture(scope="module")
+def name_field_flush_probe(
+    controller_source: str, tmp_path_factory: pytest.TempPathFactory
+) -> dict:
+    """Runs `_FLUSH_PROBE_TEMPLATE` (real, freshly-extracted `controller.js`
+    source spliced into a minimal fake-LiteGraph harness -- see that
+    constant's own doc comment) under Node and returns the parsed per-
+    scenario results."""
+    replacements = {
+        "__NODE_TITLE_LINE__": _const_line(controller_source, "NODE_TITLE"),
+        "__LABEL_CAPTURE_LINE__": _const_line(controller_source, "LABEL_CAPTURE"),
+        "__LABEL_UPDATE_LINE__": _const_line(controller_source, "LABEL_UPDATE"),
+        "__IS_CATEGORY_FN__": (
+            "function isCategoryNameInput(rawName) {\n"
+            + _function_body(controller_source, "isCategoryNameInput(rawName)")
+            + "\n}"
+        ),
+        "__CATEGORY_FROM_FN__": (
+            "function categoryNameFromInput(rawName) {\n"
+            + _function_body(controller_source, "categoryNameFromInput(rawName)")
+            + "\n}"
+        ),
+        "__FLUSH_METHOD__": (
+            "  _flushPendingNameEdit() {\n"
+            + _method_body(controller_source, "_flushPendingNameEdit()")
+            + "\n  }"
+        ),
+        "__CAPTURE_CLICK_METHOD__": (
+            "  _onCaptureClick() {\n"
+            + _method_body(controller_source, "_onCaptureClick()")
+            + "\n  }"
+        ),
+        "__UPDATE_CLICK_METHOD__": (
+            "  _onUpdateClick() {\n"
+            + _method_body(controller_source, "_onUpdateClick()")
+            + "\n  }"
+        ),
+    }
+    script = _FLUSH_PROBE_TEMPLATE
+    for token, value in replacements.items():
+        assert token in script, f"probe template missing {token}"
+        script = script.replace(token, value)
+
+    layout = tmp_path_factory.mktemp("flush_probe")
+    probe = layout / "probe.mjs"
+    probe.write_text(script, encoding="utf-8")
+    result = subprocess.run(
+        [NODE, str(probe)], capture_output=True, text=True, timeout=60, cwd=layout
+    )
+    assert result.returncode == 0, f"probe failed:\n{result.stderr}"
+    return json.loads(result.stdout)
+
+
+class TestNameFieldStaleReadFixV20260902:
+    """Owner report 2026-09-02 (verbatim: "Also creating a group by adding
+    a '# name' in the lora load state controller doesn't seem to work, or
+    at least not reliably"). Three previous "fixes" are still in this file
+    (v0.67.2/v0.72.1/v0.80.1, pinned above by
+    test_name_field_clears_through_the_widget_callback,
+    test_new_group_is_announced_with_toasts and
+    test_save_layout_toasts_loudly_on_failure) -- every one of them was a
+    real bug in what happens AFTER `isCategoryNameInput(this._w.name.value)`
+    reads the field. None of them questioned whether that READ itself could
+    be wrong. It can, reliably-*sometimes*, which is exactly what "doesn't
+    seem to work, or at least not reliably" describes.
+
+    VERIFY(live) FINDING, from the installed frontend's OWN source (not
+    guessed from behavior): comfyui_frontend_package 1.48.7's bundled
+    sourcemaps, `sourcesContent` recovered from
+    `~/Library/Application Support/comfy_ps/rig/venv/lib/python3.14/
+    site-packages/comfyui_frontend_package/static/assets/*.js.map` on
+    Eric's rig. The ORIGINAL hypothesis behind this fix -- that the Vue
+    renderer's DOM input only commits `widget.value` on blur/change -- is
+    WRONG: PrimeVue's InputText (`primevue/inputtext/index.mjs`) writes on
+    the native `input` event (`onInput() { this.writeValue(
+    event.target.value, event) }`), and `useProcessedWidgets.ts`'s
+    `createWidgetUpdateHandler` sets `widgetState.value` AND fires
+    `widget.callback` on every keystroke -- Vue-rendered `widget.value` is
+    always exactly what's on screen. The REAL bug is LEGACY CANVAS
+    rendering: `TextWidget.onClick()` (`litegraph/src/widgets/
+    TextWidget.ts`) opens `LGraphCanvas.prototype.prompt()`, a free-
+    floating dialog with its OWN, disconnected `<input class="value">`.
+    Per `LGraphCanvas.ts`, that dialog writes `widget.value` ONLY via
+    Enter or its own "OK" button; a click anywhere else -- including this
+    file's own `New State`/`New Group` DOM button (`_createActionButton()`
+    builds a real `<button>`, not the `<canvas>` element the dialog's
+    outside-click check tests for) -- just closes the dialog with no
+    callback at all, dropping the typed text.
+
+    This also nails down the Notebook/Controller asymmetry Eric has
+    separately reported: notebook.js's name field (`state.nameFieldEl`) is
+    a plain DOM `<input>` this pack owns and commits on the native `input`
+    event -- it behaves like Vue mode UNCONDITIONALLY, on both renderers,
+    because it was never a litegraph widget. `name` here is a REAL
+    litegraph widget on purpose (FORMAT.md §6.3's hidden `set` widget needs
+    a real widget slot next to it) -- the two differ by WIDGET KIND
+    (pack-owned DOM input vs. native litegraph widget), not by an
+    oversight. Do not "fix" the asymmetry by turning `name` into a DOM
+    input to match the Notebook.
+    """
+
+    def test_flush_runs_before_the_group_vs_state_branch(self, controller_source: str) -> None:
+        click = _method_body(controller_source, "_onCaptureClick()")
+        flush_at = click.index("this._flushPendingNameEdit()")
+        branch_at = click.index("if (isCategoryNameInput(this._w.name?.value))")
+        assert flush_at < branch_at
+        update_click = _method_body(controller_source, "_onUpdateClick()")
+        update_flush_at = update_click.index("this._flushPendingNameEdit()")
+        run_at = update_click.index("this._runAction(LABEL_UPDATE, () => this._doUpdate())")
+        assert update_flush_at < run_at
+
+    def test_flush_is_a_no_op_without_a_connected_dialog(self, controller_source: str) -> None:
+        """No open canvas-legacy prompt (Vue mode always; canvas mode once
+        Enter/OK already committed) -- widget.value is already
+        authoritative, so this must do nothing rather than invent state."""
+        flush = _method_body(controller_source, "_flushPendingNameEdit()")
+        assert "const dialog = app.canvas?.prompt_box" in flush
+        assert "if (!dialog?.isConnected) return" in flush
+        assert "const input = dialog.querySelector?.('.value')" in flush
+        assert "if (!input) return" in flush
+        assert "if (live === widget.value) return" in flush
+
+    def test_flush_commits_through_the_value_callback_dirty_idiom(
+        self, controller_source: str
+    ) -> None:
+        """Same idiom `_clearNameField()` established for v0.67.2 -- value,
+        then a guarded callback, then setDirtyCanvas -- so a flushed edit
+        reads as a real commit to BOTH renderers, not just to `.value`."""
+        flush = _method_body(controller_source, "_flushPendingNameEdit()")
+        value_at = flush.index("widget.value = live")
+        callback_at = flush.index("widget.callback?.(live)")
+        dirty_at = flush.index("this.setDirtyCanvas(true, true)")
+        close_at = flush.index("dialog.close?.()")
+        assert value_at < callback_at < dirty_at < close_at
+        assert "api.warn(`${NODE_TITLE}: name widget callback threw`, error)" in flush
+
+    def test_flush_never_throws_out_of_the_click(self, controller_source: str) -> None:
+        flush = _method_body(controller_source, "_flushPendingNameEdit()")
+        assert flush.strip().startswith("const widget = this._w.name")
+        assert "} catch (error) {" in flush
+        assert "api.warn(`${NODE_TITLE}: could not flush pending name edit`, error)" in flush
+
+    def test_prior_three_fixes_remain_wired(self, controller_source: str) -> None:
+        """This fix changes only the READ that feeds the branch decision --
+        confirms none of the three earlier fixes it must not regress were
+        touched (full pins: test_name_field_clears_through_the_widget_
+        callback, test_new_group_is_announced_with_toasts and
+        test_save_layout_toasts_loudly_on_failure, above)."""
+        clear = _method_body(controller_source, "_clearNameField()")
+        assert "widget.value = ''" in clear
+        assert "widget.callback?.('')" in clear
+        new_cat = _method_body(controller_source, "async _doNewCategory()")
+        assert 'this._toast(\'info\', NODE_TITLE, `Group "${name}" created' in new_cat
+        save = _method_body(controller_source, "async _saveLayout()")
+        assert "this._toast('error', NODE_TITLE, failMessage)" in save
+
+    def test_uncommitted_hash_value_still_takes_the_group_branch(
+        self, name_field_flush_probe: dict
+    ) -> None:
+        """The exact owner report: typed "# Portraits", never pressed
+        Enter, clicked New State -- must still create a GROUP."""
+        result = name_field_flush_probe["uncommittedHashValueFlushed"]
+        assert result["actions"] == ["New Group"]
+        assert result["value"] == "# Portraits"
+        assert result["callbackCalls"] == ["# Portraits"]
+        assert result["dialogClosed"] is True
+
+    def test_committed_hash_value_still_takes_the_group_branch(
+        self, name_field_flush_probe: dict
+    ) -> None:
+        """No dialog open at all (Vue mode; or canvas mode with Enter/OK
+        already pressed) -- unaffected, still correct, no flush needed."""
+        result = name_field_flush_probe["alreadyCommittedNoDialog"]
+        assert result["actions"] == ["New Group"]
+        assert result["value"] == "# Portraits"
+        assert result["callbackCalls"] == []
+        assert result["warnings"] == 0
+
+    def test_non_hash_value_still_creates_a_state(self, name_field_flush_probe: dict) -> None:
+        result = name_field_flush_probe["uncommittedPlainValueFlushed"]
+        assert result["actions"] == ["New State"]
+        assert result["value"] == "My New State"
+
+    def test_already_in_sync_value_is_left_strictly_alone(
+        self, name_field_flush_probe: dict
+    ) -> None:
+        """Nothing pending -- must not rewrite `.value`, re-fire the
+        callback, or close a dialog it didn't act on."""
+        result = name_field_flush_probe["alreadyInSyncDialogLeftAlone"]
+        assert result["actions"] == ["New State"]
+        assert result["callbackCalls"] == []
+        assert result["dialogClosed"] is False
+
+    def test_hash_only_value_reaches_the_group_branch_not_silence(
+        self, name_field_flush_probe: dict
+    ) -> None:
+        """An empty/`#`-only value must still take the New Group branch, so
+        `_doNewCategory()`'s own "Enter a group name after the #" toast
+        (test_new_group_is_announced_with_toasts) is what the owner sees --
+        a visible message, never silence."""
+        result = name_field_flush_probe["hashOnlyStillTakesGroupBranch"]
+        assert result["actions"] == ["New Group"]
+
+    def test_disconnected_dialog_falls_back_to_the_widgets_own_value(
+        self, name_field_flush_probe: dict
+    ) -> None:
+        result = name_field_flush_probe["disconnectedDialogIgnored"]
+        assert result["actions"] == ["New State"]
+        assert result["value"] == "OldValue"
+        assert result["dialogClosed"] is False
+
+    def test_missing_value_element_degrades_to_the_widgets_own_value(
+        self, name_field_flush_probe: dict
+    ) -> None:
+        """A future frontend that renames/removes the `.value` class must
+        not break the click -- just fall back to widget.value, silently."""
+        result = name_field_flush_probe["missingValueElementDegradesSafely"]
+        assert result["actions"] == ["New Group"]
+        assert result["warnings"] == 0
+
+    def test_a_throwing_internals_probe_never_breaks_the_click(
+        self, name_field_flush_probe: dict
+    ) -> None:
+        """FORMAT.md §7 fail-soft law: internals that don't match what this
+        fix verified must warn, not throw -- the click still completes
+        using whatever `widget.value` already held."""
+        result = name_field_flush_probe["throwingDialogNeverBreaksTheClick"]
+        assert result["actions"] == ["New Group"]
+        assert result["warnings"] == 1
+        assert result["dialogClosed"] is False
+
+    def test_update_click_also_flushes_before_the_rename_read(
+        self, name_field_flush_probe: dict
+    ) -> None:
+        """Save State's rename-in-place read (`_saveAsNewName()`) has the
+        identical stale-read hazard -- `_onUpdateClick()` flushes too."""
+        result = name_field_flush_probe["updateClickAlsoFlushesBeforeRename"]
+        assert result["actions"] == ["Save State"]
+        assert result["value"] == "Renamed"

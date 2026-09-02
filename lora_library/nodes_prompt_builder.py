@@ -41,10 +41,49 @@ size, or a "missing" token) into the cache key for exactly this reason: if
 the file changes underneath an unchanged set of widget/link values, this
 node must still re-execute, or the "live" promise above would be a lie the
 very first time nothing else about the node changed. Every other declared
-input (``blocks``/``separator``/``text``/``name``) is already part of
-ComfyUI's own default input-hash cache key, so ``IS_CHANGED`` here folds in
-ONLY the extra thing that key can't see on its own: the file's bytes on
-disk.
+input (``blocks``/``separator``/``text``/``name``/``drafts``) is already
+part of ComfyUI's own default input-hash cache key, so ``IS_CHANGED`` here
+folds in ONLY the extra thing that key can't see on its own: the file's
+bytes on disk.
+
+**Unsaved-edit drafts (owner report 2026-09-02: "if you have a prompt that
+is edited but not saved, but have it loaded via the prompt builder instead
+of directly via the node itself, the saved version fires and not the
+edited version. Even though it says the edited version will run").** A
+TAIL-appended, hidden ``drafts`` STRING widget (default ``"{}"``, same
+shape and same ``nodes_notebook.parse_drafts`` parser as the Notebook's own
+v0.86.0 widget of the same name -- imported rather than re-implemented, so
+this module never carries a second interpretation of that JSON) holds the
+Notebook this panel mirrors' unsaved edits, mirrored onto this node by the
+frontend (``prompt_builder.js``'s ``syncMirroredDrafts``) every time it
+rescans the canvas. ``_resolve_blocks`` applies a draft on top of the
+file's text for any block whose resolved NAME the drafts object names,
+text only -- exactly ``resolve_selection``'s own "apply last, position
+never affected" rule, adapted to a block LIST instead of a selection.
+Before this, a block was resolved straight from the file via
+``markdown_store.get_entry`` with no notion of an unsaved edit at all, so
+routing a prompt through this node silently reverted an audition back to
+the saved text even while the Notebook's own hint claimed otherwise -- the
+root cause of the owner report above. A draft naming something that isn't
+one of this call's blocks (a different entry, a stale/removed one) is
+silently ignored, same non-enforcing "scratch buffer" philosophy as
+``pinned``/``drafts`` on the Notebook itself. ``IS_CHANGED`` folds the
+effective (draft-overridden) text into ``_blocks_token`` for the same
+reason ``_selection_token`` does on the Notebook: a changed draft alone
+must still re-execute this node.
+
+**The NUL-prefixed category keyspace is inert here.** The Notebook's
+``drafts`` object can also hold a CATEGORY description's unsaved edit
+under a key ``notebook.js``'s ``categoryDraftKey()`` builds by prefixing
+the category name with a literal NUL byte -- never something a markdown
+heading (and therefore never something an entry NAME) can contain. Because
+every draft lookup below is keyed by a specific resolved block NAME (never
+an iteration over every key in the parsed object), a category draft riding
+along in the same JSON object can never be mistaken for a block's text; no
+separate filtering is needed to keep it out, but it is called out here
+because reproducing that mistake (e.g. rewriting this to enumerate
+``draft_map`` instead of looking blocks up by name) would silently start
+leaking category text into a run.
 
 **Loud missing-name posture, same as the Notebook's own (FORMAT.md §6.1).**
 ``blocks`` records entry NAMES, not positions -- renaming or deleting an
@@ -72,7 +111,15 @@ name that fails to RESOLVE, later, is the loud error above), then
 ``\\\\`` are decoded to a real newline/tab/backslash before use; an empty
 separator is a valid plain concatenation). ``text``/``name`` are optional,
 ``forceInput``-only STRING inputs (no widget) for the piped-in prompt(s)/
-name(s).
+name(s). ``drafts`` (STRING, default ``"{}"``, hidden, TAIL-appended after
+``text``/``name`` in ``optional`` -- §8: those two are ``forceInput``-only
+and create no widget/``widgets_values`` slot at all, so this is still the
+FIRST new real widget added since ship and lands at the true tail,
+positionally right after ``separator``) is a JSON object mapping entry
+name -> unsaved text, same shape ``nodes_notebook.py``'s widget of the same
+name already uses; the frontend mirrors it from whichever Notebook this
+panel is currently mirroring (see the module docstring's "Unsaved-edit
+drafts" paragraph).
 
 No torch/ComfyUI import at module scope, same importable-without-ComfyUI
 seam as ``nodes_notebook.py`` and ``markdown_store.py`` -- this node never
@@ -95,6 +142,7 @@ from .context import (
     heal_foreign_absolute,
     is_foreign_absolute,
 )
+from .nodes_notebook import DRAFTS_WIDGET, parse_drafts
 
 logger = logging.getLogger("lora_library")
 
@@ -105,6 +153,9 @@ _context: LibraryContext | None = None
 DEFAULT_FILE = "loras.md"
 DEFAULT_BLOCKS = "[]"
 DEFAULT_SEPARATOR = ", "
+#: Same default as `nodes_notebook.py`'s own `drafts` widget -- "no unsaved
+#: edits", so every workflow saved before this widget existed parses to it.
+DEFAULT_DRAFTS = "{}"
 
 #: The literal escapes `separator` decodes -- a small, fixed vocabulary
 #: (module docstring), not general Python string-escape decoding.
@@ -252,7 +303,10 @@ def _peek_resolved_path(context: LibraryContext, file_value: str) -> Path:
 
 
 def _resolve_blocks(
-    context: LibraryContext | None, file: str, block_names: list[str]
+    context: LibraryContext | None,
+    file: str,
+    block_names: list[str],
+    drafts: str = DEFAULT_DRAFTS,
 ) -> list[tuple[str, str]]:
     """Resolve *block_names* (in order, duplicates allowed) against
     notebook *file*'s LIVE addressable entries -- the module's
@@ -273,6 +327,15 @@ def _resolve_blocks(
     doesn't exist (an empty parse leaves every lookup missing, which folds
     "file not found" into this very same loud error rather than a second,
     separate one).
+
+    *drafts* (owner report 2026-09-02, :func:`nodes_notebook.parse_drafts`)
+    overrides a resolved block's TEXT with the panel's mirrored unsaved
+    edit when one names that block's RESOLVED entry name -- module
+    docstring's "Unsaved-edit drafts" paragraph. Malformed/empty *drafts*
+    degrades to "no drafts" (``parse_drafts`` itself never raises), so a
+    workflow saved before this parameter existed, or a backend-predating
+    frontend that never mirrors anything into it, resolves exactly as
+    before.
     """
     if not block_names:
         return []
@@ -289,6 +352,7 @@ def _resolve_blocks(
         path = _peek_resolved_path(context, file)
 
     parsed, _mtime, _line_ending = markdown_store.load_notebook(path)
+    draft_map = parse_drafts(drafts)
 
     resolved: list[tuple[str, str]] = []
     missing: list[str] = []
@@ -297,7 +361,15 @@ def _resolve_blocks(
         if found is None:
             missing.append(wanted)
         else:
-            resolved.append((found["name"], found["text"]))
+            # Looked up by the RESOLVED name (`found["name"]`), not the raw
+            # `wanted` string -- mirrors resolve_selection's own choice
+            # (`get_entry` already matches on a stripped name, so the two
+            # can differ by surrounding whitespace). A category-description
+            # draft can never surface here: its key carries a NUL byte
+            # (module docstring's own paragraph on this), which no
+            # `found["name"]` can ever equal.
+            text = draft_map.get(found["name"], found["text"])
+            resolved.append((found["name"], text))
 
     if missing:
         # 2026-08-28: name what was TRIED for a foreign-absolute `file` that
@@ -353,17 +425,26 @@ def _load_notebook_cached(path: Path) -> tuple[Any, float | None, str]:
     return parsed, mtime, line_ending
 
 
-def _blocks_token(context: LibraryContext | None, file: str, blocks_raw: str) -> str:
+def _blocks_token(
+    context: LibraryContext | None,
+    file: str,
+    blocks_raw: str,
+    drafts_raw: str = DEFAULT_DRAFTS,
+) -> str:
     """Content-derived ``IS_CHANGED`` token (v0.80.0 sweep-performance
     round; the notebook's ``_selection_token`` rationale applies verbatim).
     Through v0.79.0 this was the whole file's mtime+size, so editing ANY
     entry -- even one no block references -- invalidated every sweep built
     on this node. The token now hashes only what ``build()`` emits: the
-    resolved path plus each BLOCK's name and current text (``<missing>``
-    for an absent name). Zero blocks needs no file and no context at all
-    (mirrors ``_resolve_blocks``'s zero-blocks shortcut), so it returns a
-    constant. Every widget/link input is already inside core's own
-    input-hash key -- this only tracks the file CONTENT's contribution."""
+    resolved path plus each BLOCK's name and current EFFECTIVE text
+    (owner report 2026-09-02: a *drafts_raw* override when one names that
+    block's resolved entry, else the file's text; ``<missing>`` for an
+    absent name -- a draft never rescues one, matching ``_resolve_blocks``).
+    Zero blocks needs no file and no context at all (mirrors
+    ``_resolve_blocks``'s zero-blocks shortcut), so it returns a constant.
+    Every widget/link input is already inside core's own input-hash key --
+    this only tracks the file/draft CONTENT's contribution, so a changed
+    draft alone still re-executes this node."""
     names = _parse_blocks(blocks_raw)
     if not names:
         return "no-blocks"
@@ -376,10 +457,14 @@ def _blocks_token(context: LibraryContext | None, file: str, blocks_raw: str) ->
     parsed, mtime, _line_ending = _load_notebook_cached(path)
     if mtime is None:
         return f"missing:{path}"
+    draft_map = parse_drafts(drafts_raw)
     digest = hashlib.sha1(str(path).encode("utf-8", "replace"))
     for name in names:
         found = markdown_store.get_entry(parsed, name)
-        text = (found or {}).get("text", "\x00<missing>")
+        if found is None:
+            text: Any = "\x00<missing>"
+        else:
+            text = draft_map.get(found["name"], found["text"])
         digest.update(b"\x1f")
         digest.update(str(name).encode("utf-8", "replace"))
         digest.update(b"\x1e")
@@ -434,13 +519,21 @@ class EPSPromptBuilder:
     #: §6.16 state registry (v0.83.0): the widgets a Universal State
     #: Controller may capture/apply, declared next to the parser that owns
     #: their shape. ``text``/``name`` are wire-only (forceInput, no widget)
-    #: and never appear here.
+    #: and never appear here. ``drafts`` is excluded for the same reason as
+    #: ``nodes_notebook.LoraLibraryNotebook``'s own: it's mid-edit scratch
+    #: text the frontend maintains by mirroring another node, never
+    #: something a state save/apply should carry.
     EPS_STATE_WIDGETS: ClassVar[dict[str, Any]] = {
         "format": 1,
         "widgets": {
             "file": {"kind": "string", "max_len": 10000},
             "blocks": {"kind": "json_array", "items": "string"},
             "separator": {"kind": "string", "max_len": 10000},
+        },
+        "excluded": {
+            DRAFTS_WIDGET: (
+                "unsaved mid-edit scratch text mirrored from a Notebook, not user-chosen state"
+            ),
         },
     }
 
@@ -514,6 +607,27 @@ class EPSPromptBuilder:
                         ),
                     },
                 ),
+                # `text`/`name` above are forceInput-only and create no
+                # widget/widgets_values slot at all, so this is still the
+                # tail-most REAL widget added since ship (§8) even though
+                # it sits after them in this dict -- same Vue-nodes hide
+                # flag as every other internal widget on this node.
+                DRAFTS_WIDGET: (
+                    "STRING",
+                    {
+                        "default": DEFAULT_DRAFTS,
+                        "multiline": False,
+                        "hidden": True,
+                        "tooltip": (
+                            "Unsaved edits mirrored from the Notebook this "
+                            "panel is showing -- lets a block resolve to "
+                            "an edited-but-unsaved prompt the same way the "
+                            "Notebook's own output already does. "
+                            "Maintained automatically by the panel; you "
+                            "don't need to touch this directly."
+                        ),
+                    },
+                ),
             },
         }
 
@@ -525,14 +639,17 @@ class EPSPromptBuilder:
         separator: Any,
         text: Any = None,
         name: Any = None,
+        drafts: Any = DEFAULT_DRAFTS,
     ) -> str:
         # v0.80.0: content-derived, not whole-file mtime -- see
-        # _blocks_token. blocks/separator/text/name are already part of
-        # ComfyUI's own input-hash cache key; this only has to track what
-        # the file's CONTENT contributes through the named blocks.
+        # _blocks_token. blocks/separator/text/name/drafts are already part
+        # of ComfyUI's own input-hash cache key; this only has to track
+        # what the file's (and, owner report 2026-09-02, a draft's) CONTENT
+        # contributes through the named blocks.
         file_value = _unwrap_scalar(file, DEFAULT_FILE)
         blocks_value = _unwrap_scalar(blocks, DEFAULT_BLOCKS)
-        return _blocks_token(_context, file_value, blocks_value)
+        drafts_value = _unwrap_scalar(drafts, DEFAULT_DRAFTS)
+        return _blocks_token(_context, file_value, blocks_value, drafts_value)
 
     def build(
         self,
@@ -541,14 +658,16 @@ class EPSPromptBuilder:
         separator: Any,
         text: Any = None,
         name: Any = None,
+        drafts: Any = DEFAULT_DRAFTS,
     ) -> tuple[list[str], list[str]]:
         file_value = _unwrap_scalar(file, DEFAULT_FILE)
         blocks_value = _unwrap_scalar(blocks, DEFAULT_BLOCKS)
         separator_value = _unwrap_scalar(separator, DEFAULT_SEPARATOR)
+        drafts_value = _unwrap_scalar(drafts, DEFAULT_DRAFTS)
         sep = _decode_separator(separator_value)
 
         block_names = _parse_blocks(blocks_value)
-        block_pairs = _resolve_blocks(_context, file_value, block_names)
+        block_pairs = _resolve_blocks(_context, file_value, block_names, drafts_value)
         block_texts = [block_text for _block_name, block_text in block_pairs]
         block_names_resolved = [block_name for block_name, _block_text in block_pairs]
 
