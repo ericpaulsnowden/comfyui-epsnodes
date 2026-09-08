@@ -401,7 +401,7 @@ class TestValidateAndInputTypes:
 
     def test_class_shape_matches_format_md_section_6_1(self) -> None:
         cls = nodes_notebook.LoraLibraryNotebook
-        assert cls.CATEGORY == "EPSNodes"
+        assert cls.CATEGORY == "EPSNodes/Prompts"
         assert cls.RETURN_TYPES == ("STRING", "STRING")
         assert cls.RETURN_NAMES == ("text", "name")
         assert cls.OUTPUT_IS_LIST == (True, True)

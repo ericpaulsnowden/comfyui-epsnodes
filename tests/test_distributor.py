@@ -267,7 +267,7 @@ class TestTypeAgnostic:
 
 class TestClassShape:
     def test_category(self) -> None:
-        assert EPSDistributor.CATEGORY == "EPSNodes"
+        assert EPSDistributor.CATEGORY == "EPSNodes/Utilities"
 
     def test_return_types_length_and_values(self) -> None:
         # "*" (v0.75.0): type-agnostic server side -- see module docstring's

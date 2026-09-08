@@ -37,7 +37,7 @@ def _blocks(*names: str) -> str:
 
 class TestClassShape:
     def test_class_shape(self) -> None:
-        assert EPSPromptBuilder.CATEGORY == "EPSNodes"
+        assert EPSPromptBuilder.CATEGORY == "EPSNodes/Prompts"
         assert EPSPromptBuilder.RETURN_TYPES == ("STRING", "STRING")
         assert EPSPromptBuilder.RETURN_NAMES == ("text", "name")
         assert EPSPromptBuilder.OUTPUT_IS_LIST == (True, True)

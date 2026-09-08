@@ -285,7 +285,7 @@ class EPSNumberController:
     `ExecutionBlocker`.
     """
 
-    CATEGORY = "EPSNodes"
+    CATEGORY = "EPSNodes/Controllers"
     # "*" (matches EPSDistributor's own contract): the socket is
     # type-agnostic server side -- ComfyUI's own `validate_node_input`
     # accepts `*` on either side of a link, so an INT- or FLOAT-typed

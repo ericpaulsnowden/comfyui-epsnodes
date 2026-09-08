@@ -302,7 +302,7 @@ class TestReturnedTupleIsAlwaysMaxOutputsLong:
 
 class TestClassShape:
     def test_category(self) -> None:
-        assert EPSNumberController.CATEGORY == "EPSNodes"
+        assert EPSNumberController.CATEGORY == "EPSNodes/Controllers"
 
     def test_return_types_length_and_values(self) -> None:
         assert len(EPSNumberController.RETURN_TYPES) == MAX_OUTPUTS == 16

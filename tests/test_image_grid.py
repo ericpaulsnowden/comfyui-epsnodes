@@ -96,7 +96,7 @@ def _node() -> EPSImageGrid:
 
 class TestClassShapeMatchesFormatMdSection6_6:
     def test_category(self) -> None:
-        assert EPSImageGrid.CATEGORY == "EPSNodes"
+        assert EPSImageGrid.CATEGORY == "EPSNodes/Images"
 
     def test_return_types_and_names(self) -> None:
         assert EPSImageGrid.RETURN_TYPES == ("IMAGE", "INT", "INT")

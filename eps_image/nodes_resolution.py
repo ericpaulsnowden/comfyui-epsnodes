@@ -36,7 +36,7 @@ from . import resolution_presets_store as presets_store
 
 logger = logging.getLogger("eps_image")
 
-CATEGORY_NAME = "EPSNodes"
+CATEGORY_NAME = "EPSNodes/Images"
 
 #: FORMAT.md §6.5 combo options — user-facing, stable identifiers (widget
 #: values persist in saved workflows, so don't rename these once shipped).

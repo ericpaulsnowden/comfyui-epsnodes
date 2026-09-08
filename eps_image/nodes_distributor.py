@@ -236,7 +236,7 @@ class EPSDistributor:
     no other state that could go stale.
     """
 
-    CATEGORY = "EPSNodes"
+    CATEGORY = "EPSNodes/Utilities"
     # "*" (v0.75.0): the tee is type-agnostic server side -- see module
     # docstring's "any value, one type per node" paragraph. RETURN_NAMES,
     # the positional out_1..out_MAX_OUTPUTS contract, and the fixed length

@@ -104,7 +104,7 @@ from .nodes_cross_sweep import _consumed_output_slots, _unwrap_hidden
 
 logger = logging.getLogger("eps_image")
 
-CATEGORY_NAME = "EPSNodes"
+CATEGORY_NAME = "EPSNodes/Images"
 
 #: FORMAT.md §6.6 — user-facing, stable identifiers (widget values persist
 #: in saved workflows; don't rename these once shipped).

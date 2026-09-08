@@ -60,7 +60,7 @@ from .nodes_cross_sweep import EPSCrossSweep
 
 logger = logging.getLogger("eps_image")
 
-CATEGORY_NAME = "EPSNodes"
+CATEGORY_NAME = "EPSNodes/Images"
 EPS_RUN_CHUNK = "eps_run"
 
 #: The class ids (FROZEN, FORMAT.md §8) of the two pinnable nodes and the

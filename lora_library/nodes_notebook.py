@@ -492,7 +492,7 @@ class LoraLibraryNotebook:
     selection wiring still executes exactly once downstream too.
     """
 
-    CATEGORY = "EPSNodes"
+    CATEGORY = "EPSNodes/Prompts"
     RETURN_TYPES = ("STRING", "STRING")
     RETURN_NAMES = ("text", "name")
     OUTPUT_IS_LIST = (True, True)

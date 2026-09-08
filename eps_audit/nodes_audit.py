@@ -51,7 +51,7 @@ class EPSNodeAudit:
     RETURN_TYPES = ("STRING",)
     RETURN_NAMES = ("report",)
     FUNCTION = "execute"
-    CATEGORY = "EPSNodes/audit"
+    CATEGORY = "EPSNodes/Utilities"
     OUTPUT_NODE = True
 
     DESCRIPTION = (

@@ -115,7 +115,7 @@ import * as api from './api.js'
 
 const NODE_TYPE = 'EPSUniversalStateController'
 const NODE_TITLE = 'EPS Universal State Controller'
-const NODE_CATEGORY = 'EPSNodes'
+const NODE_CATEGORY = 'EPSNodes/Controllers'
 
 const STATE_REGISTRY_ROUTE = '/eps/state_registry'
 const STATES_ROUTE = '/lora_library/universal_states'
@@ -176,6 +176,19 @@ const USC_CHANGED_EVENT = 'lora_library:universal-states-changed'
 const UNCATEGORIZED = ''
 
 const MSG_LAYOUT_NOT_LOADED = 'Group layout not loaded yet — try again.'
+
+/**
+ * Sentinel value for the Group dropdown's persistent "create a group"
+ * entry (owner report 2026-09-07, verbatim: "there is a group drop down,
+ * but it's unclear to me how to create one" -- see
+ * `_onMoveToGroupChange()`'s doc comment for the full fix). A `\u0000`-led
+ * prefix -- same convention as notebook.js's `CATEGORY_DRAFT_PREFIX`: a
+ * literal NUL byte can never be typed into a text `<input>`, so no real
+ * group name (from `_beginNewGroupPrompt()`'s inline editor OR the `#
+ * name` route) can ever collide with it.
+ */
+const NEW_GROUP_OPTION_VALUE = '\u0000new-group\u0000'
+const NEW_GROUP_OPTION_LABEL = '＋ New group…'
 
 // ============================================================================
 // Pure helpers -- no DOM, no network, no litegraph globals. These are the
@@ -1157,6 +1170,11 @@ const PANE_CSS_TEXT = `
   font-size: 10px;
   font-family: inherit;
 }
+/* Sits in the same .lusc-move-row as .lusc-move-select above, toggled with
+ * it via .style.display (never both visible at once) -- owner report
+ * 2026-09-07's inline "create a group" editor, reusing .lusc-inline-rename
+ * for the identical look the category-rename editor already has. */
+.lusc-new-group-input { flex: 1 1 auto; min-width: 0; }
 .lusc-list { flex: 1 1 auto; min-height: 0; overflow-y: auto; overflow-x: hidden; padding: 3px; }
 .lusc-row {
   padding: 4px 7px;
@@ -1621,9 +1639,56 @@ export function registerControllerNode() {
         this._pane.moveGroupSelect.addEventListener('change', () => {
           this._guarded('move to group', () => this._onMoveToGroupChange())
         })
+        // Owner report 2026-09-07 ("there is a group drop down, but it's
+        // unclear to me how to create one"): the select above only ever
+        // MOVED a state into a group that already existed -- this inline
+        // editor is the discoverable create path (`_onMoveToGroupChange()`'s
+        // doc comment has the full design). Same shape as
+        // `_beginCategoryRename()`'s own inline editor -- task brief: "an
+        // inline editor consistent with the rename experience is better
+        // than a browser prompt()" -- just anchored in this row instead of
+        // a group header. Built ONCE here and toggled by `.style.display`,
+        // exactly like `nodesPage`/`statesPage` below: never torn down or
+        // rebuilt by a repaint, so an in-progress typed name survives a
+        // background poll's `_renderStateList()` mid-edit the same way the
+        // category-rename input already does (FORMAT.md §7.9).
+        this._pane.newGroupInput = el('input', {
+          className: 'lusc-inline-rename lusc-new-group-input',
+          attrs: {
+            type: 'text',
+            spellcheck: 'false',
+            placeholder: 'New group name…',
+            'aria-label': 'New group name'
+          }
+        })
+        this._pane.newGroupInput.style.display = 'none'
+        this._pane.newGroupInput.addEventListener('keydown', (event) => {
+          event.stopPropagation() // canvas hotkeys must not eat this typing either
+          if (event.key === 'Enter') {
+            event.preventDefault()
+            this._guarded('new group commit', () => this._commitNewGroupPrompt())
+          } else if (event.key === 'Escape') {
+            event.preventDefault()
+            this._guarded('new group cancel', () => this._cancelNewGroupPrompt())
+          }
+        })
+        // Same "commit on blur" rule `_beginCategoryRename()` uses, so
+        // clicking straight from this editor onto another control (a
+        // state row, a button) never strands an open prompt behind it --
+        // deliberately UNLIKE that method's blur, though: a rename can
+        // fall back to "leave the existing name alone" and stay silent on
+        // empty/unchanged, but a CREATE has no prior state to fall back to,
+        // and "no silent no-ops" (owner report 2026-09-07, task brief)
+        // means blur must say so out loud exactly like Enter does --
+        // `_commitNewGroupPrompt()` itself is the one place that decides,
+        // regardless of which gesture reached it.
+        this._pane.newGroupInput.addEventListener('blur', () => {
+          this._guarded('new group commit', () => this._commitNewGroupPrompt())
+        })
         const moveRow = el('div', { className: 'lusc-move-row' }, [
           el('span', { className: 'lusc-move-label', text: 'Group:' }),
-          this._pane.moveGroupSelect
+          this._pane.moveGroupSelect,
+          this._pane.newGroupInput
         ])
 
         this._pane.listEl = el('div', { className: 'lusc-list' })
@@ -2036,7 +2101,21 @@ export function registerControllerNode() {
 
       /** The drag-reorder replacement (file header, scope trim #1): a
        * compact `<select>` next to search that moves the SELECTED state
-       * into a group, or back to ungrouped. */
+       * into a group, or back to ungrouped. Extended 2026-09-07 (owner
+       * report: "unclear ... how to create one") with a persistent
+       * `＋ New group…` entry -- ALWAYS present and always choosable, with
+       * or without a selected state, matching the `# name` route's own
+       * "must work with nothing selected" contract
+       * (`_refreshActionButtonsEnabled()`'s comment). The real category
+       * options are individually disabled without a selection instead --
+       * there's nothing for THEM to move, but that must never gate the
+       * create option. Rebuilt on every call (poll ticks, selection
+       * changes, layout saves) -- cheap, and the only way this control can
+       * ever show the TRUE current group instead of getting stuck wherever
+       * a previous click left it, including, now, never stuck on the ＋
+       * entry itself (see `_closeNewGroupPrompt()`, which also resets the
+       * value directly for the one exit path -- Escape -- that doesn't run
+       * back through here). */
       _renderMoveGroupControl() {
         const select = this._pane?.moveGroupSelect
         if (!select) return
@@ -2045,14 +2124,41 @@ export function registerControllerNode() {
         for (const category of this._layoutCache.categories) {
           select.append(el('option', { attrs: { value: category }, text: category }))
         }
-        select.disabled = !entry
-        if (entry) select.value = categoryOfSlug(this._layoutCache, entry.slug)
+        select.append(el('option', { attrs: { value: NEW_GROUP_OPTION_VALUE }, text: NEW_GROUP_OPTION_LABEL }))
+        select.disabled = false
+        for (const option of select.options) {
+          if (option.value !== NEW_GROUP_OPTION_VALUE) option.disabled = !entry
+        }
+        select.value = entry ? categoryOfSlug(this._layoutCache, entry.slug) : UNCATEGORIZED
       }
 
+      /**
+       * Group dropdown's `change` handler -- `_renderMoveGroupControl()`'s
+       * doc comment covers the "why a persistent option" half; this is the
+       * branch that acts on it.
+       *
+       * Owner report 2026-09-07 (verbatim: "there is a group drop down,
+       * but it's unclear to me how to create one"): he found this exact
+       * `<select>` and correctly read it as group-related, but it only
+       * ever MOVED a state into a group that already existed -- there was
+       * no create path on screen at all (the only OTHER route, `# name` in
+       * the `name` field + New State, has no visible affordance beyond a
+       * tooltip). Choosing `NEW_GROUP_OPTION_VALUE` opens
+       * `_beginNewGroupPrompt()`'s inline editor instead of treating it as
+       * a move target; everything below this check is the pre-existing
+       * move behavior, untouched. The `# name` route is untouched too --
+       * this is a second, discoverable door into the exact same group
+       * system, not a replacement for it.
+       */
       async _onMoveToGroupChange() {
-        const entry = this._selectedStateEntry()
         const select = this._pane?.moveGroupSelect
-        if (!entry || !select) return
+        if (!select) return
+        if (select.value === NEW_GROUP_OPTION_VALUE) {
+          this._beginNewGroupPrompt()
+          return
+        }
+        const entry = this._selectedStateEntry()
+        if (!entry) return
         const target = select.value || UNCATEGORIZED
         if (!(await this._ensureLayoutLoaded())) {
           this._renderMoveGroupControl()
@@ -2064,6 +2170,103 @@ export function registerControllerNode() {
         layout.order[target].push(entry.slug)
         if (target !== UNCATEGORIZED && !layout.categories.includes(target)) layout.categories.push(target)
         this._renderStateList()
+        await this._saveLayout()
+      }
+
+      /** Opens the inline `＋ New group…` editor in place of the Group
+       * `<select>` -- the discoverable half of the 2026-09-07 group-
+       * creation fix. Must work with NOTHING selected: this is the
+       * dropdown's own entry point, not a modification of an existing
+       * state, exactly like the `# name` -> New State route it sits
+       * alongside (nothing here checks `_selectedStateEntry()` before
+       * opening). */
+      _beginNewGroupPrompt() {
+        const select = this._pane?.moveGroupSelect
+        const input = this._pane?.newGroupInput
+        if (!select || !input) return
+        this._newGroupPromptOpen = true
+        select.style.display = 'none'
+        input.value = ''
+        input.style.display = ''
+        input.focus()
+        input.select()
+      }
+
+      /** Escape's silent exit -- the one outcome of this editor that is
+       * deliberately NOT a toast (mirrors `_cancelCategoryRename()`: an
+       * explicit "never mind" is not a failure). Everything else routes
+       * through `_commitNewGroupPrompt()`, which always says something. */
+      _cancelNewGroupPrompt() {
+        if (!this._newGroupPromptOpen) return
+        this._closeNewGroupPrompt()
+      }
+
+      /** Shared teardown for every exit of the inline editor (Escape,
+       * and the "close first" step at the top of `_commitNewGroupPrompt()`
+       * below) -- hides the input, restores the select, and resets its
+       * value directly from `_layoutCache`/`_selectedStateEntry()` rather
+       * than waiting for the next `_renderStateList()`. Escape never
+       * triggers one on its own, and without this the select would
+       * reappear still reading `NEW_GROUP_OPTION_VALUE` -- exactly the
+       * "stuck on the ＋ entry" the owner's report is about. (A successful
+       * commit repaints the whole list right after this anyway, which
+       * rebuilds the options for real -- this assignment is simply
+       * superseded there, never wrong in the meantime.) */
+      _closeNewGroupPrompt() {
+        this._newGroupPromptOpen = false
+        const select = this._pane?.moveGroupSelect
+        const input = this._pane?.newGroupInput
+        if (input) input.style.display = 'none'
+        if (!select) return
+        select.style.display = ''
+        const entry = this._selectedStateEntry()
+        select.value = entry ? categoryOfSlug(this._layoutCache, entry.slug) : UNCATEGORIZED
+      }
+
+      /**
+       * Commits the inline `＋ New group…` editor -- Enter and blur both
+       * land here (see the `blur` listener's own comment in `_buildPanel()`
+       * for why this, deliberately, is NOT `_commitCategoryRename()`'s
+       * silent-on-empty shape). Reuses `_doNewCategory()`'s own creation
+       * core (`_addGroupToLayout()`) rather than forking it, and folds in
+       * a move of the CURRENTLY selected state (if any) into the freshly
+       * created group -- one `_saveLayout()` for both mutations, not two.
+       * Every exit is visible: empty name, duplicate name, and success all
+       * toast; only Escape (`_cancelNewGroupPrompt()`) is silent, and that
+       * never reaches this method at all.
+       */
+      async _commitNewGroupPrompt() {
+        if (!this._newGroupPromptOpen) return
+        const input = this._pane?.newGroupInput
+        const typed = input ? input.value : ''
+        // Close FIRST -- same rule `_commitCategoryRename()` follows: the
+        // repaint this triggers detaches/hides this editor, and any blur
+        // that repaint causes must not re-enter here a second time.
+        this._closeNewGroupPrompt()
+        const name = (typed || '').trim()
+        if (!name) {
+          this._toast('warn', NODE_TITLE, 'Enter a group name.')
+          return
+        }
+        if (!(await this._ensureLayoutLoaded())) return
+        if (this._layoutCache.categories.includes(name)) {
+          this._toast('warn', NODE_TITLE, `A group named "${name}" already exists.`)
+          return
+        }
+        const entry = this._selectedStateEntry()
+        this._addGroupToLayout(name)
+        if (entry) {
+          pullSlugFromLayout(this._layoutCache, entry.slug)
+          this._layoutCache.order[name].push(entry.slug)
+        }
+        this._renderStateList()
+        this._toast(
+          'info',
+          NODE_TITLE,
+          entry
+            ? `Group "${name}" created — "${entry.name || entry.slug}" moved into it.`
+            : `Group "${name}" created.`
+        )
         await this._saveLayout()
       }
 
@@ -2146,13 +2349,100 @@ export function registerControllerNode() {
 
       // ------------------------------------------------------ button actions
 
+      /**
+       * HAND-PORT of controller.js's `_flushPendingNameEdit()` fix
+       * (v0.90.0 there; this file cloned the blueprint before that round
+       * and the fix was never carried over -- this pack's "duplicated by
+       * hand, not imported" convention, same note as
+       * `parseCollapsedGroups`/`isGroupNameInput`/`groupNameFromInput`
+       * above, cuts both ways: nothing here re-syncs automatically when
+       * the original gets a bugfix). Owner report 2026-09-07 ("unclear to
+       * me how to create one") led to reading `_onCaptureClick()` here,
+       * which turned up this SEPARATE, already-fixed-once-elsewhere bug on
+       * the exact same `#`-group entry point.
+       *
+       * The mechanism (VERIFY(live), not re-investigated -- see
+       * controller.js's `_onCaptureClick()` doc comment for the full
+       * sourcemap writeup this closes): under LEGACY CANVAS rendering,
+       * `name`'s `TextWidget.onClick()` opens `LGraphCanvas.prototype.
+       * prompt()`, a free-floating `<input>` dialog disconnected from the
+       * widget, that only ever writes `widget.value` via its OWN Enter/OK
+       * handler. `New State`/`Save State` are real DOM `<button>`s in this
+       * file's own panel -- not the `<canvas>` element the dialog's
+       * outside-click check tests for -- so clicking one right after
+       * typing "# Portraits", without pressing Enter first, satisfies
+       * NEITHER commit path: the dialog just closes with the typed text
+       * silently dropped, and `isGroupNameInput(this._w.name.value)` below
+       * reads the OLD value, creating a STATE instead of a group. Vue
+       * rendering never has this gap (PrimeVue's InputText writes
+       * `widget.value` on every keystroke) -- this only matters in canvas-
+       * legacy mode, and only in the window between typing and Enter/OK.
+       *
+       * Every internals probe below is individually guarded -- a future
+       * frontend that renames/removes `prompt_box`/`.value` degrades to
+       * whatever `widget.value` already holds, never a throw (FORMAT.md
+       * §7 fail-soft law).
+       */
+      _flushPendingNameEdit() {
+        const widget = this._w.name
+        if (!widget) return
+        try {
+          const dialog = app.canvas?.prompt_box
+          if (!dialog?.isConnected) return // nothing open -- widget.value is authoritative
+          const input = dialog.querySelector?.('.value') // prompt()'s own input/textarea class
+          if (!input) return
+          const live = input.value
+          if (live === widget.value) return // already in sync, nothing pending
+          // Same idiom as `_clearNameField()`: value + callback + dirty, so
+          // this reads as a real committed edit to BOTH renderers and to
+          // every other method that reads `this._w.name.value` afterward
+          // (`_doNewCategory()`, `_doCapture()`, `_saveAsNewName()`).
+          widget.value = live
+          try {
+            widget.callback?.(live)
+          } catch (error) {
+            api.warn(`${NODE_TITLE}: name widget callback threw`, error)
+          }
+          this.setDirtyCanvas(true, true)
+          // Courtesy close: we just applied the SAME value Enter/OK would
+          // have, through the SAME widget.value+callback path -- close()
+          // only tears down the dialog's own DOM/state, never re-invokes
+          // callback, so this cannot double-fire anything.
+          dialog.close?.()
+        } catch (error) {
+          // Best-effort internals probe -- never let it be the reason a
+          // click "does nothing" (FORMAT.md §7 fail-soft law).
+          api.warn(`${NODE_TITLE}: could not flush pending name edit`, error)
+        }
+      }
+
       _onCaptureClick() {
+        // Force any not-yet-committed canvas-legacy edit into
+        // `this._w.name.value` BEFORE branching on it below -- see
+        // `_flushPendingNameEdit()`'s doc comment. A no-op under Vue and
+        // whenever canvas-legacy editing already committed (Enter/OK).
+        this._flushPendingNameEdit()
         this._disarmDeleteButton()
         if (isGroupNameInput(this._w.name?.value)) {
           this._runAction('New Group', () => this._doNewCategory())
           return
         }
         this._runAction(LABEL_CAPTURE, () => this._doCapture())
+      }
+
+      /** Shared mutation core of BOTH group-creation entry points -- the
+       * `# name` route just below (`_doNewCategory()`) and the Group
+       * dropdown's `＋ New group…` entry (`_commitNewGroupPrompt()`, owner
+       * report 2026-09-07). Caller has ALREADY loaded the layout and
+       * confirmed *name* is non-empty and not a duplicate; this only does
+       * the mutation + collapsed-set bookkeeping both entry points need
+       * identically. Callers own their own toast wording, any additional
+       * mutation (the dropdown also moves the selected state), the
+       * repaint, and `_saveLayout()` timing. */
+      _addGroupToLayout(name) {
+        this._layoutCache.categories.push(name)
+        this._layoutCache.order[name] = []
+        if (this._collapsedCategories.delete(name)) this._syncCollapsedGroupsProperty()
       }
 
       async _doNewCategory() {
@@ -2166,9 +2456,7 @@ export function registerControllerNode() {
           this._toast('warn', NODE_TITLE, `A group named "${name}" already exists.`)
           return
         }
-        this._layoutCache.categories.push(name)
-        this._layoutCache.order[name] = []
-        if (this._collapsedCategories.delete(name)) this._syncCollapsedGroupsProperty()
+        this._addGroupToLayout(name)
         this._renderStateList()
         this._clearNameField()
         this._toast(
@@ -2192,6 +2480,12 @@ export function registerControllerNode() {
       }
 
       _onUpdateClick() {
+        // Same stale-read hazard as `_onCaptureClick()` -- `_doUpdate()`
+        // -> `_saveAsNewName()` reads this same `this._w.name.value` to
+        // decide whether Save State carries a rename. Flush before that
+        // read for the identical reason (`_flushPendingNameEdit()`'s doc
+        // comment above).
+        this._flushPendingNameEdit()
         this._disarmDeleteButton()
         this._runAction(LABEL_UPDATE, () => this._doUpdate())
       }

@@ -217,7 +217,7 @@ def test_routes_frame_saver_never_imports_torch_or_comfy_at_module_scope() -> No
 
 class TestClassShapeMatchesFormatMdSection6_7:
     def test_category(self) -> None:
-        assert EPSFrameSaver.CATEGORY == "EPSNodes"
+        assert EPSFrameSaver.CATEGORY == "EPSNodes/Images"
 
     def test_return_types_and_names(self) -> None:
         assert EPSFrameSaver.RETURN_TYPES == ("IMAGE", "INT", "INT")

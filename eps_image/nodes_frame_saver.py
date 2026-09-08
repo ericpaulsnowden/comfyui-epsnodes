@@ -40,7 +40,7 @@ from . import frame_saver_video
 
 logger = logging.getLogger("eps_image")
 
-CATEGORY_NAME = "EPSNodes"
+CATEGORY_NAME = "EPSNodes/Images"
 
 #: A generous static ceiling for the `frame` widget's declared INT range.
 #: `INPUT_TYPES` is evaluated once at class-registration time, long before

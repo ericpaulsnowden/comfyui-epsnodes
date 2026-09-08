@@ -488,17 +488,29 @@ Route paths are FROZEN once shipped (§8).
 
 ## §6 Nodes
 
-**Node-browser grouping (v0.50.1, owner's picks 2026-08-03):** a node's
-`CATEGORY` is a browse-menu path and NOTHING else — saved workflows,
-search, and class ids are untouched by it, so category moves are always
-display-safe. Current layout: `EPSNodes/LoRA` (Apply LoRA Set, the
-Lora Loader State Controller via `controller.js`'s `NODE_CATEGORY`, LoRA
-Iterator), `EPSNodes/Switchers` (Image/Model/CLIP/VAE via the
-`nodes_switcher.py` factory, plus Checkpoint), everything else flat at
-`EPSNodes` (Prompt Notebook, Distributor, Resolution, Image Grid, Run
-Multiplier, Frame Saver — the owner explicitly kept the Distributor out
-of Switchers). Per-section "category" mentions below are the pre-split
-wording; this note is authoritative.
+**Node-browser grouping (v0.91.0, owner's picks 2026-09-07; supersedes the
+v0.50.1 layout):** a node's `CATEGORY` is a browse-menu path and NOTHING
+else — saved workflows, search, and class ids are untouched by it, so
+category moves are always display-safe and need no migration. Every one of
+the pack's 20 registered nodes now sits in exactly one folder; `EPSNodes`
+itself holds no loose nodes:
+
+| Folder | Nodes |
+| --- | --- |
+| `EPSNodes/Images` | Image Grid, Save Image, Resolution, Frame Saver |
+| `EPSNodes/Prompts` | Prompt Notebook, Prompt Builder |
+| `EPSNodes/Controllers` | Number Controller, Universal State Controller (via `universal_controller.js`'s `NODE_CATEGORY`) |
+| `EPSNodes/Utilities` | Node Audit, Distributor, Run Multiplier |
+| `EPSNodes/LoRA` | LoRA Picker, Apply LoRA Set, LoRA Iterator, Lora Loader State Controller (via `controller.js`'s `NODE_CATEGORY`) |
+| `EPSNodes/Switchers` | Image/Model/CLIP/VAE (the `nodes_switcher.py` factory's `"CATEGORY"` key), Checkpoint Switcher |
+
+`EPSNodes/audit` is retired — its one node moved to `Utilities`. Note the
+two frontend-only virtual nodes (both State Controllers) carry their
+category in a JS `NODE_CATEGORY` constant, not a Python `CATEGORY`, so a
+sweep of `.py` files alone will miss them. The Lora Loader State Controller
+stays under `LoRA` rather than `Controllers` (owner's explicit list) —
+it belongs to the LoRA family it drives. Per-section "category" mentions
+below are the pre-split wording; this note is authoritative.
 
 Class ids are FROZEN once shipped. Both nodes re-read their files at every
 execution — **the file is the truth; the UI is a view.**
@@ -4131,6 +4143,38 @@ restore or a Universal State apply), guarding picker.js's 2026-08-14
 compounding-growth bug. Separately fixed: the reported height now accounts for
 the pack's documented `computedHeight - 2*margin` DOM-widget gotcha, which it
 had been undercounting by `2*margin`.
+
+
+**Group creation was undiscoverable, and the `# name` shortcut carried
+controller.js's own stale-read bug (v0.91.0, owner report 2026-09-07:
+"there is a group drop down, but it's unclear to me how to create a group
+or generally how that works").** He had found the only visible group
+control -- a `Group:` `<select>` that was DISABLED until a state was
+selected and, with no groups yet, held the single entry `(ungrouped)`. A
+dead one-item menu, and the one route that did create groups was broken on
+his renderer, so the feature was effectively unreachable. Two fixes:
+
+1. `_flushPendingNameEdit()`, a hand-port of §6.3 `controller.js`'s v0.90.0
+   fix (duplicated by hand, not cross-imported -- this file's standing
+   convention for `parseCollapsedGroups`/`isGroupNameInput`/
+   `groupNameFromInput`). Same cause, verified there against the frontend's
+   own sourcemaps: the classic canvas renderer's floating prompt dialog
+   commits to `widget.value` only on Enter or its OK button, so typing
+   `# Portraits` and clicking New State straight after silently made a
+   STATE. Called before `_onCaptureClick()`'s branch AND before
+   `_onUpdateClick()`'s rename read.
+2. The `Group:` select gains a persistent `＋ New group…` entry, always
+   choosable -- with or without a selected state -- which opens an inline
+   editor shaped like the group-rename one. On a valid unique name it
+   creates the group and, if a state is selected, moves it in, in ONE save.
+   Both entry points share `_addGroupToLayout()`; the creation logic is not
+   forked. Every exit restores the select to its real value, so it can
+   never sit stuck on the `＋` row.
+
+The `# name` route is unchanged -- this ADDS a discoverable door to the
+same system rather than replacing the sibling node's convention. Every
+outcome toasts (created, created-and-moved, duplicate, empty, layout not
+loaded, save failed); Escape is the one deliberate silent exit.
 
 ## §7 Frontend surfaces
 

@@ -486,7 +486,7 @@ class EPSPromptBuilder:
     the blocks alone, nothing piped in.
     """
 
-    CATEGORY = "EPSNodes"
+    CATEGORY = "EPSNodes/Prompts"
     RETURN_TYPES = ("STRING", "STRING")
     RETURN_NAMES = ("text", "name")
     OUTPUT_IS_LIST = (True, True)

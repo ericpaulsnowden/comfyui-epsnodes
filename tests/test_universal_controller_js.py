@@ -576,6 +576,32 @@ def _method_body(source_text: str, signature: str) -> str:
     return source_text[start : start + end.start()]
 
 
+def _function_body(source_text: str, signature: str) -> str:
+    """Body of a top-level ``function <signature> {`` declaration (an
+    ``export``/``async`` prefix, if any, is not part of *signature* and
+    does not need to match), up to its closing brace at column 0 --
+    test_pll_bridge_js.py's identical helper, needed here for the same
+    reason: a handful of small, NON-exported module functions
+    (``pullSlugFromLayout``, ``categoryOfSlug``) back the new-group-dropdown
+    fix below and have no other way to reach a Node probe."""
+    start_match = re.search(re.escape(f"function {signature} {{") + r"\n", source_text)
+    assert start_match, f"function {signature} {{ not found"
+    start = start_match.end()
+    end_match = re.search(r"\n\}\n", source_text[start:])
+    assert end_match, f"function {signature}'s closing brace not found"
+    return source_text[start : start + end_match.start()]
+
+
+def _const_line(source_text: str, name: str) -> str:
+    """The single ``const NAME = ...`` declaration line, verbatim -- used to
+    splice the REAL literal into a probe below instead of retyping it (and
+    silently drifting from the source if it ever changes) --
+    test_pll_bridge_js.py's identical helper."""
+    match = re.search(rf"^const {name} = .*$", source_text, flags=re.MULTILINE)
+    assert match, f"const {name} not found"
+    return match.group(0)
+
+
 def test_syntax_is_valid() -> None:
     result = subprocess.run(
         [NODE, "--check", "--input-type=module"],
@@ -900,7 +926,7 @@ def test_module_import_never_throws_and_exports_every_helper(controller_api: dic
 def test_node_type_and_title_and_category(source: str) -> None:
     assert "const NODE_TYPE = 'EPSUniversalStateController'" in source
     assert "const NODE_TITLE = 'EPS Universal State Controller'" in source
-    assert "const NODE_CATEGORY = 'EPSNodes'" in source
+    assert "const NODE_CATEGORY = 'EPSNodes/Controllers'" in source
 
 
 def test_registry_is_fetched_once_via_a_module_scope_shared_promise(source: str) -> None:
@@ -1572,3 +1598,815 @@ class TestCrossMachineMatching:
     def test_double_click_a_row_applies_it(self, source: str) -> None:
         assert "row.addEventListener('dblclick'" in source
         assert "this._onApplyClick()" in source
+
+
+# --------------------------------- name-field stale-read hand-port (2026-09-07)
+#
+# Owner report 2026-09-07 (verbatim: "there is a group drop down, but it's
+# unclear to me how to create one"). Chasing that report through
+# `_onCaptureClick()` (the `#`-name group-creation entry point the owner
+# has muscle memory for) turned up a SEPARATE, already-fixed-once bug:
+# controller.js's v0.90.0 `_flushPendingNameEdit()` fix for the identical
+# stale-read hazard was never ported here. Both files clone the same
+# blueprint but deliberately duplicate small helpers BY HAND (file header
+# note next to `parseCollapsedGroups`/`isGroupNameInput`/
+# `groupNameFromInput`) -- nothing keeps the two in sync automatically, and
+# this is exactly the gap that left. See controller.js's own
+# `_onCaptureClick()` doc comment for the full VERIFY(live) sourcemap
+# investigation (comfyui_frontend_package 1.48.7) this closes -- it is
+# ported and re-pinned here, not re-investigated.
+
+_FLUSH_PROBE_TEMPLATE = """
+__NODE_TITLE_LINE__
+__LABEL_CAPTURE_LINE__
+__LABEL_UPDATE_LINE__
+
+__IS_GROUP_FN__
+
+__GROUP_FROM_FN__
+
+const WARNINGS = []
+const api = { warn: (...args) => { WARNINGS.push(args) } }
+const app = { canvas: { prompt_box: null } }
+
+function makeWidget(initialValue) {
+  return {
+    value: initialValue,
+    callbackCalls: [],
+    callback(v) {
+      this.callbackCalls.push(v)
+    }
+  }
+}
+
+function makeDialog({ isConnected = true, value = null, hasValueInput = true } = {}) {
+  const dialog = {
+    isConnected,
+    closed: false,
+    querySelector(_sel) {
+      return hasValueInput ? { value } : null
+    },
+    close() {
+      dialog.closed = true
+    }
+  }
+  return dialog
+}
+
+function makeThrowingDialog() {
+  return {
+    isConnected: true,
+    closed: false,
+    querySelector() {
+      throw new Error('boom: dialog internals changed')
+    },
+    close() {
+      this.closed = true
+    }
+  }
+}
+
+class FakeControllerNode {
+  constructor(nameWidget) {
+    this._w = { name: nameWidget }
+    this.actions = []
+    this.dirtyCalls = 0
+  }
+  _disarmDeleteButton() {}
+  _runAction(label, _fn) {
+    // Deliberately NOT invoking _fn(): _doNewCategory()/_doCapture()/
+    // _doUpdate()'s own bodies are covered elsewhere -- this probe only
+    // needs to know which branch a click took.
+    this.actions.push(label)
+  }
+  _doNewCategory() {}
+  _doCapture() {}
+  _doUpdate() {}
+  setDirtyCanvas() {
+    this.dirtyCalls++
+  }
+
+__FLUSH_METHOD__
+
+__CAPTURE_CLICK_METHOD__
+
+__UPDATE_CLICK_METHOD__
+}
+
+function runScenario(build) {
+  WARNINGS.length = 0
+  app.canvas.prompt_box = null
+  const ctx = build()
+  ctx.run()
+  return {
+    actions: ctx.node.actions,
+    value: ctx.node._w.name.value,
+    callbackCalls: ctx.node._w.name.callbackCalls,
+    dirtyCalls: ctx.node.dirtyCalls,
+    dialogClosed: ctx.dialog ? ctx.dialog.closed : null,
+    warnings: WARNINGS.length
+  }
+}
+
+const out = {}
+
+// Vue mode (always) and canvas-legacy mode once Enter/OK already committed
+// (no dialog open): widget.value is already what's on screen.
+out.alreadyCommittedNoDialog = runScenario(() => {
+  const node = new FakeControllerNode(makeWidget('# Portraits'))
+  return { node, dialog: null, run: () => node._onCaptureClick() }
+})
+
+// Canvas-legacy mode, typed but never committed (no Enter/OK) -- the bug
+// this fix closes.
+out.uncommittedHashValueFlushed = runScenario(() => {
+  const dialog = makeDialog({ value: '# Portraits' })
+  app.canvas.prompt_box = dialog
+  const node = new FakeControllerNode(makeWidget(''))
+  return { node, dialog, run: () => node._onCaptureClick() }
+})
+
+out.uncommittedPlainValueFlushed = runScenario(() => {
+  const dialog = makeDialog({ value: 'My New State' })
+  app.canvas.prompt_box = dialog
+  const node = new FakeControllerNode(makeWidget(''))
+  return { node, dialog, run: () => node._onCaptureClick() }
+})
+
+// The dialog is open but its live value already MATCHES widget.value
+// (nothing pending) -- must be a strict no-op, not a re-fired callback.
+out.alreadyInSyncDialogLeftAlone = runScenario(() => {
+  const dialog = makeDialog({ value: 'Same' })
+  app.canvas.prompt_box = dialog
+  const node = new FakeControllerNode(makeWidget('Same'))
+  return { node, dialog, run: () => node._onCaptureClick() }
+})
+
+// "#" alone, uncommitted -- must still reach the group branch so
+// _doNewCategory()'s own "Enter a group name after the #" message is what
+// the owner sees, not a silently-created mis-named state.
+out.hashOnlyStillTakesGroupBranch = runScenario(() => {
+  const dialog = makeDialog({ value: '#' })
+  app.canvas.prompt_box = dialog
+  const node = new FakeControllerNode(makeWidget(''))
+  return { node, dialog, run: () => node._onCaptureClick() }
+})
+
+// A stale/detached dialog reference (already closed some other way) must
+// never be read -- falls back to whatever widget.value already holds.
+out.disconnectedDialogIgnored = runScenario(() => {
+  const dialog = makeDialog({ isConnected: false, value: '# Portraits' })
+  app.canvas.prompt_box = dialog
+  const node = new FakeControllerNode(makeWidget('OldValue'))
+  return { node, dialog, run: () => node._onCaptureClick() }
+})
+
+// A future frontend whose dialog shape no longer has ".value" -- degrades
+// to widget.value, no throw, no warning (this is not an error condition).
+out.missingValueElementDegradesSafely = runScenario(() => {
+  const dialog = makeDialog({ hasValueInput: false })
+  app.canvas.prompt_box = dialog
+  const node = new FakeControllerNode(makeWidget('# Fallback'))
+  return { node, dialog, run: () => node._onCaptureClick() }
+})
+
+// The internals probe itself throws -- must warn, never break the click.
+out.throwingDialogNeverBreaksTheClick = runScenario(() => {
+  const dialog = makeThrowingDialog()
+  app.canvas.prompt_box = dialog
+  const node = new FakeControllerNode(makeWidget('# Resilient'))
+  return { node, dialog, run: () => node._onCaptureClick() }
+})
+
+// Save State's rename-in-place read (_saveAsNewName()) has the identical
+// hazard -- _onUpdateClick() must flush too.
+out.updateClickAlsoFlushesBeforeRename = runScenario(() => {
+  const dialog = makeDialog({ value: 'Renamed' })
+  app.canvas.prompt_box = dialog
+  const node = new FakeControllerNode(makeWidget(''))
+  return { node, dialog, run: () => node._onUpdateClick() }
+})
+
+process.stdout.write(JSON.stringify(out))
+"""
+
+
+@pytest.fixture(scope="module")
+def name_field_flush_probe(source: str, tmp_path_factory: pytest.TempPathFactory) -> dict:
+    """Runs `_FLUSH_PROBE_TEMPLATE` (real, freshly-extracted
+    universal_controller.js source spliced into a minimal fake-LiteGraph
+    harness -- see that constant's own doc comment) under Node and returns
+    the parsed per-scenario results -- test_pll_bridge_js.py's identical
+    fixture, ported: same technique, this file's own
+    `isGroupNameInput`/`groupNameFromInput` names."""
+    replacements = {
+        "__NODE_TITLE_LINE__": _const_line(source, "NODE_TITLE"),
+        "__LABEL_CAPTURE_LINE__": _const_line(source, "LABEL_CAPTURE"),
+        "__LABEL_UPDATE_LINE__": _const_line(source, "LABEL_UPDATE"),
+        "__IS_GROUP_FN__": (
+            "function isGroupNameInput(rawName) {\n"
+            + _function_body(source, "isGroupNameInput(rawName)")
+            + "\n}"
+        ),
+        "__GROUP_FROM_FN__": (
+            "function groupNameFromInput(rawName) {\n"
+            + _function_body(source, "groupNameFromInput(rawName)")
+            + "\n}"
+        ),
+        "__FLUSH_METHOD__": (
+            "  _flushPendingNameEdit() {\n"
+            + _method_body(source, "_flushPendingNameEdit()")
+            + "\n  }"
+        ),
+        "__CAPTURE_CLICK_METHOD__": (
+            "  _onCaptureClick() {\n" + _method_body(source, "_onCaptureClick()") + "\n  }"
+        ),
+        "__UPDATE_CLICK_METHOD__": (
+            "  _onUpdateClick() {\n" + _method_body(source, "_onUpdateClick()") + "\n  }"
+        ),
+    }
+    script = _FLUSH_PROBE_TEMPLATE
+    for token, value in replacements.items():
+        assert token in script, f"probe template missing {token}"
+        script = script.replace(token, value)
+
+    layout = tmp_path_factory.mktemp("universal_flush_probe")
+    probe = layout / "probe.mjs"
+    probe.write_text(script, encoding="utf-8")
+    result = subprocess.run(
+        [NODE, str(probe)], capture_output=True, text=True, timeout=60, cwd=layout
+    )
+    assert result.returncode == 0, f"probe failed:\n{result.stderr}"
+    return json.loads(result.stdout)
+
+
+class TestNameFieldStaleReadHandPortV20260907:
+    """See the module-comment block just above this class for the owner
+    report and the fix's full provenance (a hand-port, not a
+    re-investigation)."""
+
+    def test_flush_runs_before_the_group_vs_state_branch(self, source: str) -> None:
+        click = _method_body(source, "_onCaptureClick()")
+        flush_at = click.index("this._flushPendingNameEdit()")
+        branch_at = click.index("if (isGroupNameInput(this._w.name?.value))")
+        assert flush_at < branch_at
+        update_click = _method_body(source, "_onUpdateClick()")
+        update_flush_at = update_click.index("this._flushPendingNameEdit()")
+        run_at = update_click.index("this._runAction(LABEL_UPDATE, () => this._doUpdate())")
+        assert update_flush_at < run_at
+
+    def test_flush_is_a_no_op_without_a_connected_dialog(self, source: str) -> None:
+        """No open canvas-legacy prompt (Vue mode always; canvas mode once
+        Enter/OK already committed) -- widget.value is already
+        authoritative, so this must do nothing rather than invent state."""
+        flush = _method_body(source, "_flushPendingNameEdit()")
+        assert "const dialog = app.canvas?.prompt_box" in flush
+        assert "if (!dialog?.isConnected) return" in flush
+        assert "const input = dialog.querySelector?.('.value')" in flush
+        assert "if (!input) return" in flush
+        assert "if (live === widget.value) return" in flush
+
+    def test_flush_commits_through_the_value_callback_dirty_idiom(
+        self, source: str
+    ) -> None:
+        """Same idiom `_clearNameField()` established -- value, then a
+        guarded callback, then setDirtyCanvas -- so a flushed edit reads as
+        a real commit to BOTH renderers, not just to `.value`."""
+        flush = _method_body(source, "_flushPendingNameEdit()")
+        value_at = flush.index("widget.value = live")
+        callback_at = flush.index("widget.callback?.(live)")
+        dirty_at = flush.index("this.setDirtyCanvas(true, true)")
+        close_at = flush.index("dialog.close?.()")
+        assert value_at < callback_at < dirty_at < close_at
+        assert "api.warn(`${NODE_TITLE}: name widget callback threw`, error)" in flush
+
+    def test_flush_never_throws_out_of_the_click(self, source: str) -> None:
+        flush = _method_body(source, "_flushPendingNameEdit()")
+        assert flush.strip().startswith("const widget = this._w.name")
+        assert "} catch (error) {" in flush
+        assert "api.warn(`${NODE_TITLE}: could not flush pending name edit`, error)" in flush
+
+    def test_uncommitted_hash_value_still_takes_the_group_branch(
+        self, name_field_flush_probe: dict
+    ) -> None:
+        """The exact owner-adjacent bug: typed "# Portraits", never pressed
+        Enter, clicked New State -- must still create a GROUP."""
+        result = name_field_flush_probe["uncommittedHashValueFlushed"]
+        assert result["actions"] == ["New Group"]
+        assert result["value"] == "# Portraits"
+        assert result["callbackCalls"] == ["# Portraits"]
+        assert result["dialogClosed"] is True
+
+    def test_committed_hash_value_still_takes_the_group_branch(
+        self, name_field_flush_probe: dict
+    ) -> None:
+        """No dialog open at all (Vue mode; or canvas mode with Enter/OK
+        already pressed) -- unaffected, still correct, no flush needed."""
+        result = name_field_flush_probe["alreadyCommittedNoDialog"]
+        assert result["actions"] == ["New Group"]
+        assert result["value"] == "# Portraits"
+        assert result["callbackCalls"] == []
+        assert result["warnings"] == 0
+
+    def test_non_hash_value_still_creates_a_state(self, name_field_flush_probe: dict) -> None:
+        result = name_field_flush_probe["uncommittedPlainValueFlushed"]
+        assert result["actions"] == ["New State"]
+        assert result["value"] == "My New State"
+
+    def test_already_in_sync_value_is_left_strictly_alone(
+        self, name_field_flush_probe: dict
+    ) -> None:
+        """Nothing pending -- must not rewrite `.value`, re-fire the
+        callback, or close a dialog it didn't act on."""
+        result = name_field_flush_probe["alreadyInSyncDialogLeftAlone"]
+        assert result["actions"] == ["New State"]
+        assert result["callbackCalls"] == []
+        assert result["dialogClosed"] is False
+
+    def test_hash_only_value_reaches_the_group_branch_not_silence(
+        self, name_field_flush_probe: dict
+    ) -> None:
+        result = name_field_flush_probe["hashOnlyStillTakesGroupBranch"]
+        assert result["actions"] == ["New Group"]
+
+    def test_disconnected_dialog_falls_back_to_the_widgets_own_value(
+        self, name_field_flush_probe: dict
+    ) -> None:
+        result = name_field_flush_probe["disconnectedDialogIgnored"]
+        assert result["actions"] == ["New State"]
+        assert result["value"] == "OldValue"
+        assert result["dialogClosed"] is False
+
+    def test_missing_value_element_degrades_to_the_widgets_own_value(
+        self, name_field_flush_probe: dict
+    ) -> None:
+        """A future frontend that renames/removes the `.value` class must
+        not break the click -- just fall back to widget.value, silently."""
+        result = name_field_flush_probe["missingValueElementDegradesSafely"]
+        assert result["actions"] == ["New Group"]
+        assert result["warnings"] == 0
+
+    def test_a_throwing_internals_probe_never_breaks_the_click(
+        self, name_field_flush_probe: dict
+    ) -> None:
+        """FORMAT.md §7 fail-soft law: internals that don't match what this
+        fix verified must warn, not throw -- the click still completes
+        using whatever `widget.value` already held."""
+        result = name_field_flush_probe["throwingDialogNeverBreaksTheClick"]
+        assert result["actions"] == ["New Group"]
+        assert result["warnings"] == 1
+        assert result["dialogClosed"] is False
+
+    def test_update_click_also_flushes_before_the_rename_read(
+        self, name_field_flush_probe: dict
+    ) -> None:
+        """Save State's rename-in-place read (`_saveAsNewName()`) has the
+        identical stale-read hazard -- `_onUpdateClick()` flushes too."""
+        result = name_field_flush_probe["updateClickAlsoFlushesBeforeRename"]
+        assert result["actions"] == ["Save State"]
+        assert result["value"] == "Renamed"
+
+
+# ------------------------------------ Group dropdown "create" entry (2026-09-07)
+#
+# Owner report 2026-09-07 (verbatim: "there is a group drop down, but it's
+# unclear to me how to create one"). He found the exact `<select>` this
+# file already had (`_pane.moveGroupSelect`, `_renderMoveGroupControl()`)
+# and correctly read it as group-related, but it only ever MOVED a state
+# into a group that already existed -- there was no create path on screen
+# at all. `_onMoveToGroupChange()`'s own doc comment (web/lora_library/
+# universal_controller.js) has the full design; these tests cover the
+# decision logic (create with/without a selection, duplicate, empty,
+# cancelled) the way `TestNameFieldStaleReadHandPortV20260907` above covers
+# the flush fix -- real, freshly-extracted source spliced into a minimal
+# fake-select/-input harness (no real DOM: `_renderMoveGroupControl()`
+# itself, which DOES touch real DOM via `el()`, stays source-pinned only,
+# same convention as every other DOM-building method in this file).
+
+
+def test_group_dropdown_persistent_create_option(source: str) -> None:
+    render = _method_body(source, "_renderMoveGroupControl()")
+    assert "select.append(el('option', { attrs: { value: NEW_GROUP_OPTION_VALUE }" in render
+    assert "select.disabled = false" in render
+    assert "option.disabled = !entry" in render
+    change = _method_body(source, "async _onMoveToGroupChange()")
+    assert change.lstrip().startswith("const select = this._pane?.moveGroupSelect")
+    assert "if (select.value === NEW_GROUP_OPTION_VALUE) {" in change
+    assert change.index("NEW_GROUP_OPTION_VALUE") < change.index("this._selectedStateEntry()")
+
+
+def test_new_group_input_wired_next_to_the_select(source: str) -> None:
+    panel = _method_body(source, "_buildPanel()")
+    assert "this._pane.newGroupInput = el('input'" in panel
+    assert "this._pane.newGroupInput.style.display = 'none'" in panel
+    assert "this._commitNewGroupPrompt()" in panel
+    assert "this._cancelNewGroupPrompt()" in panel
+    move_row = panel.split("const moveRow = el('div'", 1)[1].split("])", 1)[0]
+    assert "this._pane.moveGroupSelect" in move_row
+    assert "this._pane.newGroupInput" in move_row
+    assert move_row.index("this._pane.moveGroupSelect") < move_row.index("this._pane.newGroupInput")
+
+
+def test_create_group_mutation_is_shared_not_duplicated(source: str) -> None:
+    """Task brief: reuse `_doNewCategory()`'s create-a-group logic rather
+    than forking it -- both entry points call the SAME extracted method."""
+    new_cat = _method_body(source, "async _doNewCategory()")
+    assert "this._addGroupToLayout(name)" in new_cat
+    commit = _method_body(source, "async _commitNewGroupPrompt()")
+    assert "this._addGroupToLayout(name)" in commit
+    add_to_layout = _method_body(source, "_addGroupToLayout(name)")
+    assert "this._layoutCache.categories.push(name)" in add_to_layout
+    assert "this._layoutCache.order[name] = []" in add_to_layout
+
+
+def test_commit_closes_the_editor_before_any_await(source: str) -> None:
+    """Re-entrancy guard: `_commitCategoryRename()`'s own "close first"
+    rule, ported -- a blur the repaint below triggers must not re-enter
+    this method a second time while an earlier call is still awaiting."""
+    commit = _method_body(source, "async _commitNewGroupPrompt()")
+    close_at = commit.index("this._closeNewGroupPrompt()")
+    first_await_at = commit.index("await")
+    assert close_at < first_await_at
+
+
+def test_escape_is_the_one_silent_exit(source: str) -> None:
+    cancel = _method_body(source, "_cancelNewGroupPrompt()")
+    assert "this._closeNewGroupPrompt()" in cancel
+    assert "_toast" not in cancel
+    close = _method_body(source, "_closeNewGroupPrompt()")
+    assert "this._newGroupPromptOpen = false" in close
+    assert "categoryOfSlug(this._layoutCache, entry.slug)" in close
+    assert "UNCATEGORIZED" in close
+
+
+_NEW_GROUP_PROBE_TEMPLATE = """
+__NODE_TITLE_LINE__
+__NEW_GROUP_VALUE_LINE__
+__UNCATEGORIZED_LINE__
+
+__PULL_SLUG_FN__
+
+__CATEGORY_OF_SLUG_FN__
+
+const TOASTS = []
+
+function makeSelect() {
+  return { value: '', style: {} }
+}
+
+function makeInput(initialValue) {
+  return {
+    value: initialValue,
+    style: {},
+    focusCalls: 0,
+    selectCalls: 0,
+    focus() {
+      this.focusCalls++
+    },
+    select() {
+      this.selectCalls++
+    }
+  }
+}
+
+class FakeControllerNode {
+  constructor({ categories = [], order = {}, entry = null, ensureLayoutLoaded = true } = {}) {
+    this._pane = { moveGroupSelect: makeSelect(), newGroupInput: makeInput('') }
+    this._layoutCache = { categories: [...categories], order: JSON.parse(JSON.stringify(order)) }
+    this._collapsedCategories = new Set()
+    this._entry = entry
+    this._ensureLayoutLoadedResult = ensureLayoutLoaded
+    this.ensureCalls = 0
+    this.saveCalls = 0
+    this.renderCalls = 0
+  }
+  _selectedStateEntry() {
+    return this._entry
+  }
+  async _ensureLayoutLoaded() {
+    this.ensureCalls++
+    return this._ensureLayoutLoadedResult
+  }
+  async _saveLayout() {
+    this.saveCalls++
+  }
+  _renderStateList() {
+    // Faithful-enough stand-in for the real _renderMoveGroupControl() this
+    // triggers in production -- proves the select ends up on the TRUE
+    // post-mutation group, not just "some non-sentinel value"
+    // (_closeNewGroupPrompt()'s OWN direct reset, exercised separately by
+    // the escape-cancel scenario below, runs BEFORE the mutation, so it
+    // alone could not prove this).
+    this.renderCalls++
+    const entry = this._selectedStateEntry()
+    this._pane.moveGroupSelect.value = entry
+      ? categoryOfSlug(this._layoutCache, entry.slug)
+      : UNCATEGORIZED
+  }
+  _syncCollapsedGroupsProperty() {}
+  _toast(severity, summary, detail) {
+    TOASTS.push({ severity, summary, detail })
+  }
+
+__ADD_GROUP_TO_LAYOUT_METHOD__
+
+__BEGIN_NEW_GROUP_PROMPT_METHOD__
+
+__CANCEL_NEW_GROUP_PROMPT_METHOD__
+
+__CLOSE_NEW_GROUP_PROMPT_METHOD__
+
+__COMMIT_NEW_GROUP_PROMPT_METHOD__
+
+__ON_MOVE_TO_GROUP_CHANGE_METHOD__
+}
+
+function snapshot(node) {
+  return {
+    promptOpen: node._newGroupPromptOpen === true,
+    selectDisplay: node._pane.moveGroupSelect.style.display,
+    selectValue: node._pane.moveGroupSelect.value,
+    inputDisplay: node._pane.newGroupInput.style.display,
+    inputValue: node._pane.newGroupInput.value,
+    focusCalls: node._pane.newGroupInput.focusCalls,
+    selectCalls: node._pane.newGroupInput.selectCalls,
+    ensureCalls: node.ensureCalls,
+    saveCalls: node.saveCalls,
+    renderCalls: node.renderCalls,
+    categories: node._layoutCache.categories,
+    order: node._layoutCache.order,
+    toasts: TOASTS.slice()
+  }
+}
+
+const out = {}
+
+// Choosing the persistent option opens the prompt -- must work identically
+// with and without a selected state (owner's "must work with nothing
+// selected" contract, same as the "#"-name route).
+out.sentinelOpensPromptNoSelection = await (async () => {
+  TOASTS.length = 0
+  const node = new FakeControllerNode({ entry: null })
+  node._pane.moveGroupSelect.value = NEW_GROUP_OPTION_VALUE
+  await node._onMoveToGroupChange()
+  return snapshot(node)
+})()
+
+out.sentinelOpensPromptWithSelection = await (async () => {
+  TOASTS.length = 0
+  const node = new FakeControllerNode({ entry: { slug: 'a', name: 'Alpha' } })
+  node._pane.moveGroupSelect.value = NEW_GROUP_OPTION_VALUE
+  await node._onMoveToGroupChange()
+  return snapshot(node)
+})()
+
+// The exact owner-facing outcome: a state IS selected -- the new group is
+// created AND that state moves into it, in one save.
+out.createsGroupAndMovesSelectedState = await (async () => {
+  TOASTS.length = 0
+  const node = new FakeControllerNode({
+    categories: [],
+    order: { '': ['a'] },
+    entry: { slug: 'a', name: 'Alpha' }
+  })
+  node._pane.moveGroupSelect.value = NEW_GROUP_OPTION_VALUE
+  await node._onMoveToGroupChange()
+  node._pane.newGroupInput.value = 'Portraits'
+  await node._commitNewGroupPrompt()
+  return snapshot(node)
+})()
+
+// No state selected -- the group is still created, just nothing to move.
+out.createsGroupWithNoSelection = await (async () => {
+  TOASTS.length = 0
+  const node = new FakeControllerNode({ categories: [], order: { '': [] }, entry: null })
+  node._pane.moveGroupSelect.value = NEW_GROUP_OPTION_VALUE
+  await node._onMoveToGroupChange()
+  node._pane.newGroupInput.value = 'Landscapes'
+  await node._commitNewGroupPrompt()
+  return snapshot(node)
+})()
+
+out.duplicateNameWarnsWithoutMutating = await (async () => {
+  TOASTS.length = 0
+  const node = new FakeControllerNode({
+    categories: ['Portraits'],
+    order: { '': [], Portraits: [] },
+    entry: null
+  })
+  node._pane.moveGroupSelect.value = NEW_GROUP_OPTION_VALUE
+  await node._onMoveToGroupChange()
+  node._pane.newGroupInput.value = 'Portraits'
+  await node._commitNewGroupPrompt()
+  return snapshot(node)
+})()
+
+out.emptyNameWarnsWithoutTouchingNetwork = await (async () => {
+  TOASTS.length = 0
+  const node = new FakeControllerNode({ entry: null })
+  node._pane.moveGroupSelect.value = NEW_GROUP_OPTION_VALUE
+  await node._onMoveToGroupChange()
+  node._pane.newGroupInput.value = '   '
+  await node._commitNewGroupPrompt()
+  return snapshot(node)
+})()
+
+out.layoutNotLoadedKeepsLayoutUntouched = await (async () => {
+  TOASTS.length = 0
+  const node = new FakeControllerNode({ entry: null, ensureLayoutLoaded: false })
+  node._pane.moveGroupSelect.value = NEW_GROUP_OPTION_VALUE
+  await node._onMoveToGroupChange()
+  node._pane.newGroupInput.value = 'Whatever'
+  await node._commitNewGroupPrompt()
+  return snapshot(node)
+})()
+
+// Escape: the one silent exit. Nothing mutated, nothing toasted, and the
+// select is restored WITHOUT a full _renderStateList() -- this is
+// _closeNewGroupPrompt()'s own direct value-reset being proven, not the
+// snapshot-time render stand-in the other scenarios lean on.
+out.escapeCancelsSilently = await (async () => {
+  TOASTS.length = 0
+  const node = new FakeControllerNode({
+    categories: [],
+    order: { '': ['a'] },
+    entry: { slug: 'a', name: 'Alpha' }
+  })
+  node._pane.moveGroupSelect.value = NEW_GROUP_OPTION_VALUE
+  await node._onMoveToGroupChange()
+  node._pane.newGroupInput.value = 'Never mind'
+  node._cancelNewGroupPrompt()
+  return snapshot(node)
+})()
+
+process.stdout.write(JSON.stringify(out))
+"""
+
+
+@pytest.fixture(scope="module")
+def new_group_prompt_probe(source: str, tmp_path_factory: pytest.TempPathFactory) -> dict:
+    """Runs `_NEW_GROUP_PROBE_TEMPLATE` (real, freshly-extracted
+    universal_controller.js source spliced into a minimal fake-select/-input
+    harness -- see that constant's own doc comment) under Node and returns
+    the parsed per-scenario results."""
+    replacements = {
+        "__NODE_TITLE_LINE__": _const_line(source, "NODE_TITLE"),
+        "__NEW_GROUP_VALUE_LINE__": _const_line(source, "NEW_GROUP_OPTION_VALUE"),
+        "__UNCATEGORIZED_LINE__": _const_line(source, "UNCATEGORIZED"),
+        "__PULL_SLUG_FN__": (
+            "function pullSlugFromLayout(layout, slug) {\n"
+            + _function_body(source, "pullSlugFromLayout(layout, slug)")
+            + "\n}"
+        ),
+        "__CATEGORY_OF_SLUG_FN__": (
+            "function categoryOfSlug(layout, slug) {\n"
+            + _function_body(source, "categoryOfSlug(layout, slug)")
+            + "\n}"
+        ),
+        "__ADD_GROUP_TO_LAYOUT_METHOD__": (
+            "  _addGroupToLayout(name) {\n"
+            + _method_body(source, "_addGroupToLayout(name)")
+            + "\n  }"
+        ),
+        "__BEGIN_NEW_GROUP_PROMPT_METHOD__": (
+            "  _beginNewGroupPrompt() {\n"
+            + _method_body(source, "_beginNewGroupPrompt()")
+            + "\n  }"
+        ),
+        "__CANCEL_NEW_GROUP_PROMPT_METHOD__": (
+            "  _cancelNewGroupPrompt() {\n"
+            + _method_body(source, "_cancelNewGroupPrompt()")
+            + "\n  }"
+        ),
+        "__CLOSE_NEW_GROUP_PROMPT_METHOD__": (
+            "  _closeNewGroupPrompt() {\n"
+            + _method_body(source, "_closeNewGroupPrompt()")
+            + "\n  }"
+        ),
+        "__COMMIT_NEW_GROUP_PROMPT_METHOD__": (
+            "  async _commitNewGroupPrompt() {\n"
+            + _method_body(source, "async _commitNewGroupPrompt()")
+            + "\n  }"
+        ),
+        "__ON_MOVE_TO_GROUP_CHANGE_METHOD__": (
+            "  async _onMoveToGroupChange() {\n"
+            + _method_body(source, "async _onMoveToGroupChange()")
+            + "\n  }"
+        )
+    }
+    script = _NEW_GROUP_PROBE_TEMPLATE
+    for token, value in replacements.items():
+        assert token in script, f"probe template missing {token}"
+        script = script.replace(token, value)
+
+    layout = tmp_path_factory.mktemp("new_group_prompt_probe")
+    probe = layout / "probe.mjs"
+    probe.write_text(script, encoding="utf-8")
+    result = subprocess.run(
+        [NODE, str(probe)], capture_output=True, text=True, timeout=60, cwd=layout
+    )
+    assert result.returncode == 0, f"probe failed:\n{result.stderr}"
+    return json.loads(result.stdout)
+
+
+class TestGroupDropdownCreateEntryV20260907:
+    """See the module-comment block above `test_group_dropdown_persistent_
+    create_option` for the owner report and full design pointer."""
+
+    def test_opening_the_prompt_never_touches_network_or_layout(
+        self, new_group_prompt_probe: dict
+    ) -> None:
+        for key in ("sentinelOpensPromptNoSelection", "sentinelOpensPromptWithSelection"):
+            result = new_group_prompt_probe[key]
+            assert result["promptOpen"] is True
+            assert result["selectDisplay"] == "none"
+            assert result["inputDisplay"] == ""
+            assert result["inputValue"] == ""
+            assert result["focusCalls"] == 1
+            assert result["selectCalls"] == 1
+            assert result["ensureCalls"] == 0
+            assert result["saveCalls"] == 0
+            assert result["renderCalls"] == 0
+            assert result["toasts"] == [], key
+
+    def test_creates_and_moves_the_selected_state_in_one_save(
+        self, new_group_prompt_probe: dict
+    ) -> None:
+        result = new_group_prompt_probe["createsGroupAndMovesSelectedState"]
+        assert result["categories"] == ["Portraits"]
+        assert result["order"]["Portraits"] == ["a"]
+        assert result["order"][""] == []
+        assert result["saveCalls"] == 1
+        assert result["renderCalls"] == 1
+        assert result["promptOpen"] is False
+        assert result["selectDisplay"] == ""
+        assert result["inputDisplay"] == "none"
+        # Never stuck on the "New group" entry -- the exact owner-visible
+        # symptom a regression here would reproduce.
+        assert result["selectValue"] == "Portraits"
+        toast = result["toasts"][-1]
+        assert toast["severity"] == "info"
+        assert toast["detail"] == 'Group "Portraits" created — "Alpha" moved into it.'
+
+    def test_creates_with_nothing_selected_and_nothing_to_move(
+        self, new_group_prompt_probe: dict
+    ) -> None:
+        result = new_group_prompt_probe["createsGroupWithNoSelection"]
+        assert result["categories"] == ["Landscapes"]
+        assert result["order"]["Landscapes"] == []
+        assert result["saveCalls"] == 1
+        assert result["promptOpen"] is False
+        assert result["selectValue"] == ""  # UNCATEGORIZED, never the create entry
+        toast = result["toasts"][-1]
+        assert toast["severity"] == "info"
+        assert toast["detail"] == 'Group "Landscapes" created.'
+        assert "moved" not in toast["detail"]
+
+    def test_duplicate_name_warns_and_never_mutates_or_saves(
+        self, new_group_prompt_probe: dict
+    ) -> None:
+        result = new_group_prompt_probe["duplicateNameWarnsWithoutMutating"]
+        assert result["categories"] == ["Portraits"]  # unchanged, no dup appended
+        assert result["saveCalls"] == 0
+        assert result["ensureCalls"] == 1
+        assert result["renderCalls"] == 0
+        assert result["promptOpen"] is False
+        toast = result["toasts"][-1]
+        assert toast["severity"] == "warn"
+        assert toast["detail"] == 'A group named "Portraits" already exists.'
+
+    def test_empty_name_warns_before_touching_the_network(
+        self, new_group_prompt_probe: dict
+    ) -> None:
+        result = new_group_prompt_probe["emptyNameWarnsWithoutTouchingNetwork"]
+        assert result["categories"] == []
+        assert result["ensureCalls"] == 0
+        assert result["saveCalls"] == 0
+        assert result["promptOpen"] is False
+        toast = result["toasts"][-1]
+        assert toast["severity"] == "warn"
+        assert toast["detail"] == "Enter a group name."
+
+    def test_layout_not_loaded_leaves_everything_untouched(
+        self, new_group_prompt_probe: dict
+    ) -> None:
+        result = new_group_prompt_probe["layoutNotLoadedKeepsLayoutUntouched"]
+        assert result["categories"] == []
+        assert result["saveCalls"] == 0
+        assert result["ensureCalls"] == 1
+        assert result["promptOpen"] is False
+
+    def test_escape_cancels_silently_and_restores_the_select(
+        self, new_group_prompt_probe: dict
+    ) -> None:
+        result = new_group_prompt_probe["escapeCancelsSilently"]
+        assert result["toasts"] == []
+        assert result["categories"] == []
+        assert result["order"][""] == ["a"]  # untouched -- no move happened
+        assert result["saveCalls"] == 0
+        # proves _closeNewGroupPrompt()'s OWN reset ran, not a full repaint
+        assert result["renderCalls"] == 0
+        assert result["promptOpen"] is False
+        assert result["selectDisplay"] == ""
+        assert result["inputDisplay"] == "none"
+        assert result["selectValue"] == ""  # categoryOfSlug() found 'a' under UNCATEGORIZED

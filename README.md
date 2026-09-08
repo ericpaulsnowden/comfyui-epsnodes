@@ -5,7 +5,22 @@ live in **plain files you own**. Everything appears under **EPSNodes** in
 the node browser and Settings. It started as a LoRA family and has grown
 beyond it — image-flow utilities now live here too.
 
-## The eighteen nodes
+**Where to find them.** Right-click the canvas → **Add Node → EPSNodes**,
+then pick a folder:
+
+| Folder | What's in it |
+| --- | --- |
+| **Images** | Image Grid, Save Image, Resolution, Frame Saver |
+| **Prompts** | Prompt Notebook, Prompt Builder |
+| **Controllers** | Number Controller, Universal State Controller |
+| **Utilities** | Node Audit, Distributor, Run Multiplier |
+| **LoRA** | LoRA Picker, Apply LoRA Set, LoRA Iterator, Lora Loader State Controller |
+| **Switchers** | Image, Model, CLIP, VAE, and Checkpoint Switchers |
+
+Moving a node between folders only changes where it sits in that menu —
+workflows you've already saved are unaffected, and nothing needs updating.
+
+## The twenty nodes
 
 No third-party packs required — every node here runs on ComfyUI alone;
 the Lora Loader State Controller is built to extend rgthree-comfy, but only
@@ -298,6 +313,17 @@ happen there — and the Builder assembles prompts *out of* it:
   Run Multiplier demo uses).
 
 ## EPS Universal State Controller (shipped)
+
+- **Making a group is easy to find now.** The `Group:` dropdown beside the
+  search box has a `＋ New group…` option — pick it, type a name, press
+  Enter. With a state selected it moves that state straight into the new
+  group; with nothing selected it just creates the group. Previously that
+  dropdown was greyed out until you selected a state and only ever offered
+  "(ungrouped)", so there was no visible way in at all.
+- **`# name` works reliably too.** Typing `# Portraits` into the name field
+  and clicking **New State** creates a group. It used to depend on whether
+  you pressed Enter first — the same bug fixed in the Lora Loader State
+  Controller in v0.90.0, which had never been ported here.
 
 `EPSNodes → EPS Universal State Controller`: the Lora State Controller's
 big sibling. One node that captures a named snapshot of **every EPS node's

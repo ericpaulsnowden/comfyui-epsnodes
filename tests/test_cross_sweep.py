@@ -173,7 +173,7 @@ class TestCrossSweep:
 
 class TestClassShape:
     def test_category_and_flags(self) -> None:
-        assert EPSCrossSweep.CATEGORY == "EPSNodes"
+        assert EPSCrossSweep.CATEGORY == "EPSNodes/Utilities"
         assert EPSCrossSweep.INPUT_IS_LIST is True
         assert EPSCrossSweep.OUTPUT_IS_LIST == (True,) * 9
 

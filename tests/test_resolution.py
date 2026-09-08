@@ -392,7 +392,7 @@ def test_original_size_outputs_report_the_input_images_actual_shape() -> None:
 
 def test_class_shape_matches_format_md_section_6_5() -> None:
     cls = nodes_resolution.EPSResolution
-    assert cls.CATEGORY == "EPSNodes"
+    assert cls.CATEGORY == "EPSNodes/Images"
     assert cls.RETURN_TYPES == ("IMAGE", "IMAGE", "INT", "INT", "INT", "INT") + ("IMAGE",) * 7
     assert cls.RETURN_NAMES == (
         "image",

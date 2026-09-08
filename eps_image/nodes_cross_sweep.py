@@ -226,7 +226,7 @@ def _input_origin(prompt: Any, unique_id: Any, input_name: str) -> str | None:
 class EPSCrossSweep:
     """Sweep group x pair group, strength-major, with per-run save paths."""
 
-    CATEGORY = "EPSNodes"
+    CATEGORY = "EPSNodes/Utilities"
     # `vae` is TAIL-APPENDED (v0.46.0): outputs resolve positionally against
     # this tuple (a saved link records [origin_id, origin_slot]), so appending
     # is the only §8-safe way to add one -- inserting next to `clip` would
