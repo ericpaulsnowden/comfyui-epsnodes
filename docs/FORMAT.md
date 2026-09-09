@@ -4176,6 +4176,25 @@ same system rather than replacing the sibling node's convention. Every
 outcome toasts (created, created-and-moved, duplicate, empty, layout not
 loaded, save failed); Escape is the one deliberate silent exit.
 
+
+**Unchecking the blank spare row grew the list, one row per click (v0.91.1,
+owner report 2026-09-08).** `slotCarriesContent()` was answering TWO
+different questions with one predicate: "keep this entry in `values`" (which
+must fold in a disabled row, so an off-state survives a reload) and "does a
+spare row need to exist below this one" (which must not). Its very first
+line, `if (entry.enabled === false) return true`, meant the blank spare at
+the bottom became content the instant it was unchecked -- the grow rule
+appended a FRESH blank spare beneath it, unchecking THAT appended another,
+and `values` filled with junk `{name:'', value:0, enabled:false}` entries.
+Reproduced on the rig: one row became five in four clicks. Split into
+`slotIsOccupied()` (a non-empty name or a non-zero value -- deliberately
+BLIND to the off-flag) which drives `computeVisibleRowCount()`, leaving
+`slotCarriesContent()` unchanged for persistence. A blank row IS the spare,
+ticked or not, so it never earns another one; a row the user actually filled
+in still holds its slot when switched off, and a wired one still detaches
+and reconnects. A test pins that the two predicates disagree about a
+disabled blank entry -- if they ever agree again, this bug is back.
+
 ## §7 Frontend surfaces
 
 **§7.2 amendment — load-failure is an explicit, value-preserving ERROR

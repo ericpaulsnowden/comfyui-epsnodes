@@ -161,6 +161,32 @@ ROW_COUNT_CASES = [
     ({"num_16": {"value": 1}}, 0, 16),  # content at the ceiling can't overflow it
     ({"num_9": {"value": 1}}, 12, 13),  # wired floor wins over a lower content floor
     ({"num_1": {"name": "a"}, "num_3": {"value": 2}}, 0, 4),  # highest of several wins
+    # Owner report 2026-09-08 -- unchecking the blank spare row used to make
+    # it "content", which grew the panel and handed over a fresh blank spare
+    # to uncheck again: one new row per click. A blank row IS the spare,
+    # ticked or not, so it must never earn another one.
+    ({"num_1": {"name": "", "value": 0, "enabled": False}}, 0, 1),
+    ({"num_1": {"name": "s"}, "num_2": {"name": "", "value": 0, "enabled": False}}, 0, 2),
+    # ...but a row the user actually filled in still holds its slot when off.
+    ({"num_1": {"name": "steps", "enabled": False}}, 0, 2),
+    ({"num_1": {"value": 7, "enabled": False}}, 0, 2),
+]
+
+#: (entry, expected slotIsOccupied()). Occupancy drives the ROW COUNT and is
+#: deliberately narrower than slotCarriesContent(): the off-flag is absent
+#: here, which is the whole point of the split.
+SLOT_IS_OCCUPIED_CASES = [
+    (None, False),
+    ({}, False),
+    ({"name": "steps"}, True),
+    ({"name": "   "}, False),
+    ({"value": 5}, True),
+    ({"value": 0}, False),
+    ({"enabled": False}, False),
+    ({"name": "", "value": 0, "enabled": False}, False),
+    ({"name": "steps", "enabled": False}, True),
+    ({"value": 3, "enabled": False}, True),
+    ({"enabled": False, "links": [{"node": "2", "input": "steps"}]}, False),
 ]
 
 #: (name, n, expected labelForSlot()). Falls back to num_N when unnamed.
@@ -350,6 +376,7 @@ out.pure.parseValues = %(parse_values_inputs)s.map((v) => nc.parseValues(v))
 out.pure.serializeRoundTrip = %(round_trip_maps)s.map((m) => nc.parseValues(nc.serializeValues(m)))
 
 out.pure.slotCarriesContent = %(slot_content_inputs)s.map((v) => nc.slotCarriesContent(v))
+out.pure.slotIsOccupied = %(slot_occupied_inputs)s.map((v) => nc.slotIsOccupied(v))
 out.pure.isRowEnabled = %(is_row_enabled_inputs)s.map((v) => nc.isRowEnabled(v))
 out.pure.normalizeRememberedLinks = %(normalize_links_inputs)s
   .map((v) => nc.normalizeRememberedLinks(v))
@@ -1016,6 +1043,7 @@ def number_controller_api(tmp_path_factory: pytest.TempPathFactory) -> dict:
             "is_row_enabled_inputs": json.dumps([v for v, _ in IS_ROW_ENABLED_CASES]),
             "normalize_links_inputs": json.dumps([v for v, _ in NORMALIZE_REMEMBERED_LINKS_CASES]),
             "row_count_inputs": json.dumps([[m, w] for m, w, _ in ROW_COUNT_CASES]),
+            "slot_occupied_inputs": json.dumps([e for e, _ in SLOT_IS_OCCUPIED_CASES]),
             "label_inputs": json.dumps([[n, i] for n, i, _ in LABEL_FOR_SLOT_CASES]),
             "parse_numeric_inputs": json.dumps([v for v, _ in PARSE_NUMERIC_INPUT_CASES]),
             "round_half_inputs": json.dumps([v for v, _ in ROUND_HALF_AWAY_CASES]),
@@ -1132,6 +1160,36 @@ def test_serialize_values_round_trips(number_controller_api: dict) -> None:
 
 
 # ------------------------------------------------------- content / row count
+
+
+def test_slot_is_occupied(number_controller_api: dict) -> None:
+    """Occupancy is what earns a spare row below you, and it is NARROWER than
+    slotCarriesContent(): the off-flag alone never counts.
+
+    Keeping these two questions in one predicate is what produced the
+    owner's 2026-09-08 runaway-rows bug, so the split is pinned here.
+    """
+    for (given, expected), got in zip(
+        SLOT_IS_OCCUPIED_CASES, number_controller_api["pure"]["slotIsOccupied"], strict=True
+    ):
+        assert got is expected, f"slotIsOccupied({given!r}) -> {got!r}, wanted {expected!r}"
+
+
+def test_the_two_predicates_are_deliberately_different(source: str) -> None:
+    """A disabled blank row is KEPT (its off-state must survive a reload) but
+    is NOT occupied (it must not earn another spare row). If these two ever
+    agree on that entry again, the runaway-rows bug is back."""
+    assert "export function slotIsOccupied(entry)" in source
+    occupied = _function_body(source, "slotIsOccupied(entry)")
+    assert "enabled" not in occupied, (
+        "slotIsOccupied must not look at the off-flag -- that is exactly the "
+        "conflation that grew a new row on every click"
+    )
+    carries = _function_body(source, "slotCarriesContent(entry)")
+    assert "if (entry.enabled === false) return true" in carries, (
+        "slotCarriesContent must still fold in the off-flag so a disabled "
+        "row's state survives a reload"
+    )
 
 
 def test_slot_carries_content(number_controller_api: dict) -> None:

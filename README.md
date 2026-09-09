@@ -799,6 +799,10 @@ save and recall the whole set at once — which is the point of it.
   them — and applying that state really does unplug and re-plug the wires, not
   just repaint the ticks.
 
+- **Switching a row off doesn't spawn new ones.** Unticking the empty row at
+  the bottom used to add another empty row each time you did it. It now stays
+  put — and a row you've actually named or given a number to still keeps its
+  place when switched off.
 - **Drag it taller to see more rows.** The list of rows fills whatever height you
   give the node, so a tall node shows more numbers at once and a short one
   scrolls. Your chosen height sticks — adding a row or switching workflows

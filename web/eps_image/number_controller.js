@@ -383,6 +383,28 @@ export function slotCarriesContent(entry) {
 }
 
 /**
+ * Whether a row is OCCUPIED -- the user has actually put something in it (a
+ * name or a non-zero number). Deliberately NOT `slotCarriesContent()`: that
+ * one answers "keep this entry in `values`" and folds in a disabled row, so
+ * an off-state survives a reload. THIS one answers "does a spare row need to
+ * exist below it", and the two must not be the same question.
+ *
+ * Conflating them was owner-visible (report 2026-09-08, reproduced on the
+ * rig): the blank spare row at the bottom became "content" the instant it
+ * was unchecked, the grow rule appended a FRESH spare below it, unchecking
+ * that appended another -- one new row per click, filling `values` with junk
+ * `{name:'', value:0, enabled:false}` entries. A blank row IS the spare
+ * whether it is ticked or not, so it must never earn another one.
+ */
+export function slotIsOccupied(entry) {
+  if (!entry || typeof entry !== 'object') return false
+  const name = typeof entry.name === 'string' ? entry.name.trim() : ''
+  if (name !== '') return true
+  const value = entry.value
+  return typeof value === 'number' && Number.isFinite(value) && value !== 0
+}
+
+/**
  * Whether a row reads as enabled: enabled unless *entry* explicitly records
  * the literal boolean `false` -- distributor.js's `isSlotEnabled`
  * (`!== false`, not `!== false && 'enabled' in entry`) applied to this
@@ -438,7 +460,7 @@ export function computeVisibleRowCount(valuesMap, highestWiredIndex) {
     for (const key of Object.keys(valuesMap)) {
       const n = parseSlotNumber(key)
       if (n == null) continue
-      if (slotCarriesContent(valuesMap[key])) highestContent = Math.max(highestContent, n)
+      if (slotIsOccupied(valuesMap[key])) highestContent = Math.max(highestContent, n)
     }
   }
   const wiredRaw = Number(highestWiredIndex)
