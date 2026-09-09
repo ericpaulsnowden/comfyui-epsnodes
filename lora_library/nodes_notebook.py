@@ -34,6 +34,66 @@ outright: while ``pinned`` holds a valid pin, drafts are never consulted
 (the pin already IS the frozen text a run used). ``IS_CHANGED`` folds the
 effective (draft-overridden) text into its content digest, so a changed
 draft alone re-executes the node.
+
+**Chaining inputs (owner ask 2026-09-09): "The prompt notebook node should
+also be able to accept text and name as inputs. That way they can be
+chained together with other nodes or a builder node could come before the
+notebook node."** Two new optional, ``forceInput``-only STRING inputs --
+``text``/``name`` -- let another Notebook, an ``EPSPromptBuilder``, or any
+STRING source feed straight into this one. Chosen semantics (owner:
+combine/cross-product, incoming text first): for each incoming ``text``
+element, for each of THIS node's own selected/pinned entries, one combined
+output is emitted -- ``separator.join([incoming_text, entry_text])`` for
+text, ``"+".join([incoming_name, entry_name])`` for name (names ALWAYS
+join with ``+``, never ``separator`` -- not configurable, matching
+``EPSPromptBuilder``) -- in INCOMING-MAJOR order: every one of this node's
+entries for incoming #1, then every entry for incoming #2, and so on. Two
+incoming values times three selected entries is six outputs, not three --
+this makes the Notebook a MULTIPLYING node, the same posture as
+``EPSCrossSweep``/``EPSPromptBuilder``.
+
+``text is not None`` distinguishes UNWIRED (a single pass with no incoming
+part at all -- today's exact behavior, byte-identical, since
+``separator.join([entry_text])`` is just ``entry_text`` regardless of
+``separator``'s value) from wired-but-empty (a real upstream emitted
+nothing -> zero outputs, the cross product of an empty incoming axis with
+any number of entries is empty). This is the SAME distinction, for the
+SAME reason, as ``EPSPromptBuilder``'s own module docstring's identical
+paragraph on ``text``.
+
+Declaring this multiplying behavior needs ``INPUT_IS_LIST = True`` (the
+new ``text``/``name`` links must arrive as whole lists, not one
+mapped-over call per element -- the same reasoning as
+``EPSCrossSweep``/``EPSPromptBuilder``), which has a consequence for
+EVERY existing widget on this node, not only the two new inputs:
+``file``, ``entry``, ``pinned``, ``drafts`` and the new ``separator`` now
+all arrive LIST-WRAPPED too (ComfyUI wraps every declared input, widget or
+link alike, the same way once a class declares ``INPUT_IS_LIST``).
+``_unwrap_scalar``/``_as_list`` below (adapted from, not imported from,
+``nodes_prompt_builder.py``'s identically-named helpers -- own-your-helpers
+precedent, that module's docstring) undo that wrapping for every read in
+``read_entry``/``IS_CHANGED``. The class docstring below used to say "this
+node sets no INPUT_IS_LIST and its widgets are scalar" -- that sentence is
+now FALSE and has been rewritten there to describe what actually happens
+at the execution engine now that chaining exists.
+
+A ``separator`` STRING widget (default ``", "``, the same
+``_decode_separator`` escape handling as ``EPSPromptBuilder``'s -- ``\\n``/
+``\\t``/``\\\\`` decode to a real newline/tab/backslash) joins the
+incoming text and each selected entry's text. It is TAIL-APPENDED after
+``pinned`` (v0.71.0) and ``drafts`` (v0.86.0) -- FORMAT.md §8:
+``widgets_values`` restores positionally, and this node already carries
+two tail widgets from earlier rounds, so a new one MUST land after both or
+every saved workflow's ``pinned``/``drafts`` values would shift into the
+wrong slot the instant an old workflow is reloaded. ``text``/``name`` are
+``forceInput``-only and create no widget/``widgets_values`` slot at all
+(same as ``EPSPromptBuilder``'s own inputs of the same names), so they
+cost nothing positionally no matter where they sit in ``optional``.
+
+Widget order (declaration = restore order, §8): ``file``, ``entry``
+(required); ``pinned``, ``drafts``, ``separator`` (optional, real
+widgets, in that order); ``text``/``name`` are optional but carry no
+widget slot at all.
 """
 
 from __future__ import annotations
@@ -57,6 +117,22 @@ logger = logging.getLogger("lora_library")
 
 _context: LibraryContext | None = None
 
+#: INPUT_TYPES' own defaults -- named here so IS_CHANGED/read_entry's unwrap
+#: fallbacks can never drift from what the widgets themselves declare
+#: (mirrors nodes_prompt_builder.py's identically-purposed constants).
+DEFAULT_FILE = "loras.md"
+DEFAULT_ENTRY = ""
+DEFAULT_PINNED = ""
+DEFAULT_DRAFTS = "{}"
+DEFAULT_SEPARATOR = ", "
+
+#: The literal escapes `separator` decodes -- a small, fixed vocabulary
+#: (module docstring), not general Python string-escape decoding. Verbatim
+#: the same mapping as nodes_prompt_builder.py's own (own-your-helpers
+#: precedent: this module owns its own tiny copy rather than importing a
+#: sibling family's).
+_SEPARATOR_ESCAPES = {"n": "\n", "t": "\t", "\\": "\\"}
+
 
 def set_context(context: LibraryContext | None) -> None:
     """Wire the shared :class:`LibraryContext` into this module.
@@ -68,6 +144,66 @@ def set_context(context: LibraryContext | None) -> None:
     """
     global _context
     _context = context
+
+
+# --------------------------------------------------------- INPUT_IS_LIST unwrap
+#
+# Chaining inputs (module docstring, owner ask 2026-09-09): INPUT_IS_LIST =
+# True means every input below -- including the previously-scalar `file`/
+# `entry`/`pinned`/`drafts`/`separator` widgets -- now arrives wrapped in a
+# list. Adapted from (not imported from) nodes_prompt_builder.py's helpers
+# of the same names -- own-your-helpers precedent (that module's docstring).
+
+
+def _unwrap_scalar(value: Any, default: str) -> str:
+    """First element of an ``INPUT_IS_LIST``-wrapped widget value, tolerating
+    the bare (already-scalar) form too -- e.g. a test or direct caller that
+    passes ``"loras.md"`` straight instead of ``["loras.md"]``."""
+    if isinstance(value, (list, tuple)):
+        value = value[0] if value else default
+    if value is None:
+        return default
+    return str(value)
+
+
+def _as_list(value: Any) -> list[Any]:
+    """*value* as a plain list -- the shape an ``INPUT_IS_LIST`` LINK input
+    already arrives in (the full upstream list, not sliced per-index).
+    Tolerates a bare scalar (direct/test callers) and ``None`` (callers
+    handle "unwired" themselves before this is ever reached; here it is
+    just "nothing to list")."""
+    if value is None:
+        return []
+    if isinstance(value, (list, tuple)):
+        return list(value)
+    return [value]
+
+
+# ------------------------------------------------------------- separator decode
+
+
+def _decode_separator(raw: str) -> str:
+    """Decode ``\\n``/``\\t``/``\\\\`` escapes in *raw* into real
+    newline/tab/backslash characters (module docstring: a plain STRING
+    widget can't hold a literal newline, so ``\\n`` is how the user asks for
+    one). Only these three escapes are recognized; any other backslash
+    sequence -- ``\\d``, a trailing lone ``\\`` -- passes through UNCHANGED
+    rather than being swallowed or raising. Empty input decodes to empty
+    output (a valid plain-concatenation separator). Verbatim
+    ``nodes_prompt_builder._decode_separator`` (own-your-helpers
+    precedent)."""
+    out: list[str] = []
+    i = 0
+    length = len(raw)
+    while i < length:
+        ch = raw[i]
+        if ch == "\\" and i + 1 < length and raw[i + 1] in _SEPARATOR_ESCAPES:
+            out.append(_SEPARATOR_ESCAPES[raw[i + 1]])
+            i += 2
+        else:
+            out.append(ch)
+            i += 1
+    return "".join(out)
 
 
 def _file_token(path: Path) -> str:
@@ -472,35 +608,52 @@ class LoraLibraryNotebook:
     text and heading name — a single-line ``entry`` is the degenerate
     one-element case, so every pre-multiselect workflow is unchanged.
 
-    Confirmed against a running ComfyUI's ``execution.py``
-    (``_async_map_node_over_list`` / ``merge_result_data``): this node sets
-    no ``INPUT_IS_LIST`` and its widgets are scalar, so ``read_entry``
-    itself still runs exactly ONCE per queued execution — all the fan-out
-    described below is a downstream effect, not a re-invocation of this
-    node. ``merge_result_data`` sees ``OUTPUT_IS_LIST[i] is True`` and
-    ``extend()``s our one result's per-output lists straight into the
-    node's output-slot lists (length = selection count, no wrapping). Any
-    ordinary (non-``INPUT_IS_LIST``) downstream node then computes its own
-    ``max_len_input`` from those list lengths and calls itself once per
-    index via ``slice_dict`` (which repeats the *last* element for any
-    shorter co-input rather than erroring, so ``text``/``name`` — always
-    equal length here — stay correctly paired at every index) — i.e. one
-    queued run fans out into one execution per selected entry downstream,
-    each with its matching (text, name) pair. That is exactly FORMAT.md
-    §6.1's "one queued run = one generation per selected prompt". A
-    single-line ``entry`` yields length-1 lists, so a plain single-
-    selection wiring still executes exactly once downstream too.
+    **Chaining inputs (owner ask 2026-09-09) rewrote the paragraph that used
+    to sit here.** It used to say "this node sets no ``INPUT_IS_LIST`` and
+    its widgets are scalar" -- that is now FALSE: ``INPUT_IS_LIST = True``
+    is declared (module docstring's "Chaining inputs" paragraph) so the new
+    ``text``/``name`` links can arrive as whole lists instead of being
+    mapped over one call per element. The consequence is that EVERY input
+    -- the two required STRING widgets, the three tail STRING widgets
+    (``pinned``/``drafts``/``separator``), and the two new links -- now
+    arrives LIST-WRAPPED, undone by ``_unwrap_scalar``/``_as_list`` at the
+    top of ``read_entry``/``IS_CHANGED``.
+
+    ``INPUT_IS_LIST`` controls how THIS node's own inputs arrive, not how
+    many times it is invoked, so ``read_entry`` still runs exactly ONCE per
+    queued execution, same as always. What it returns has changed: one
+    ``(text, name)`` PAIR per (incoming ``text`` element, selected/pinned
+    entry) combination, in incoming-major order (module docstring's
+    "Chaining inputs" paragraph) -- an unwired ``text`` reduces this to
+    exactly the old per-entry list (one incoming "pass" contributing
+    nothing to the join), so every workflow saved before chaining existed
+    is unaffected. ``OUTPUT_IS_LIST`` stays ``(True, True)``, so
+    ``merge_result_data`` still ``extend()``s this one result's per-output
+    lists straight into the node's output-slot lists (length = incoming
+    count times entry count, no wrapping); an ordinary downstream node then
+    still computes its own ``max_len_input`` and calls itself once per
+    index via ``slice_dict`` exactly as FORMAT.md §6.1 always described --
+    only the LENGTH of that fan-out changed, not the mechanism.
     """
 
     CATEGORY = "EPSNodes/Prompts"
     RETURN_TYPES = ("STRING", "STRING")
     RETURN_NAMES = ("text", "name")
     OUTPUT_IS_LIST = (True, True)
+    # Chaining inputs (owner ask 2026-09-09, module docstring): `text`/`name`
+    # links must arrive as whole lists so read_entry can cross them against
+    # this node's own selected/pinned entries itself, rather than being
+    # mapped over one call per incoming element -- same reasoning as
+    # EPSCrossSweep/EPSPromptBuilder.
+    INPUT_IS_LIST = True
     OUTPUT_TOOLTIPS = (
-        "The selected entry's prompt text. With more than one entry selected, "
-        "this is a list of strings, one per entry, in selection order.",
-        "The selected entry's heading (its name in the list) -- handy as a "
-        "filename prefix or caption. Paired index-for-index with text.",
+        "The combined prompt text: the incoming text (if wired) first, "
+        "then the selected/pinned entry's text, joined by separator. One "
+        "result per (incoming text, entry) pair when text is wired -- "
+        "unwired, this is unchanged from before chaining: a list of "
+        "strings, one per entry, in selection order.",
+        "The combined name: the incoming name (if any) plus the entry's "
+        "name, joined by +. Paired index-for-index with text.",
     )
     FUNCTION = "read_entry"
     DESCRIPTION = (
@@ -512,7 +665,10 @@ class LoraLibraryNotebook:
         "workflow once per prompt, in selection order. Organize entries "
         "under category headings created from the same list. The file is "
         "re-read on every run, so edits made outside ComfyUI are picked up "
-        "automatically."
+        "automatically. Optionally wire text/name in from another Notebook, "
+        "an EPS Prompt Builder, or any STRING source to chain them: each "
+        "incoming value combines with every selected entry (incoming text "
+        "first, joined by separator), multiplying the run count."
     )
 
     #: §6.16 state registry (v0.83.0): the widgets a Universal State
@@ -521,12 +677,17 @@ class LoraLibraryNotebook:
     #: EPS Save Image (§6.14), not something a user picks in the panel.
     #: ``drafts`` (v0.86.0) is excluded for the same reason as `pinned`:
     #: it's mid-edit scratch text the panel maintains, never something a
-    #: state save/apply should carry.
+    #: state save/apply should carry. ``separator`` (chaining inputs, owner
+    #: ask 2026-09-09) IS declared -- it's ordinary user-chosen config, the
+    #: same treatment EPSPromptBuilder gives its own `separator`.
+    #: ``text``/``name`` are wire-only (forceInput, no widget) and never
+    #: appear here, same as EPSPromptBuilder's own of the same names.
     EPS_STATE_WIDGETS: ClassVar[dict[str, Any]] = {
         "format": 1,
         "widgets": {
             "file": {"kind": "string", "max_len": 10000},
             "entry": {"kind": "lines"},
+            "separator": {"kind": "string", "max_len": 10000},
         },
         "excluded": {
             PIN_WIDGET: "provenance from a baked image, not user intent",
@@ -610,6 +771,63 @@ class LoraLibraryNotebook:
                         ),
                     },
                 ),
+                # Chaining inputs (owner ask 2026-09-09, module docstring):
+                # forceInput-only, no widget/widgets_values slot at all, so
+                # -- unlike `separator` below -- WHERE they sit in this dict
+                # is irrelevant to FORMAT.md §8 positional restore. Named
+                # and tooltipped exactly like EPSPromptBuilder's own
+                # `text`/`name` inputs of the same names.
+                "text": (
+                    "STRING",
+                    {
+                        "forceInput": True,
+                        "tooltip": (
+                            "Optional piped-in prompt text(s) -- wire from "
+                            "another EPS Prompt Notebook, an EPS Prompt "
+                            "Builder, or any STRING source to chain them. "
+                            "Each incoming text combines with EVERY "
+                            "selected/pinned entry here (incoming text "
+                            "FIRST, joined by separator): N incoming times "
+                            "M entries makes N*M outputs. Unwired: today's "
+                            "unchanged behavior, one output per entry."
+                        ),
+                    },
+                ),
+                "name": (
+                    "STRING",
+                    {
+                        "forceInput": True,
+                        "tooltip": (
+                            "Optional piped-in name(s), paired index-for-"
+                            "index with text (a single name broadcasts "
+                            "across every incoming text). Combined with "
+                            "each entry's own name, joined by +. Wire-only."
+                        ),
+                    },
+                ),
+                # Chaining inputs (owner ask 2026-09-09, module docstring):
+                # TAIL-APPENDED after `pinned`/`drafts` -- FORMAT.md §8:
+                # widgets_values restores positionally, and this is a REAL
+                # widget (unlike `text`/`name` above), so it MUST come after
+                # every widget already shipped or every saved workflow's
+                # pinned/drafts values shift into the wrong slot. Visible
+                # (no "hidden" flag), same as EPSPromptBuilder's own
+                # `separator` -- this panel never needs to touch it.
+                "separator": (
+                    "STRING",
+                    {
+                        "default": DEFAULT_SEPARATOR,
+                        "multiline": False,
+                        "tooltip": (
+                            "Joins the incoming text (if wired) and each "
+                            "selected/pinned entry's text, in that order. "
+                            "Type \\n for a newline, \\t for a tab, \\\\ "
+                            "for a literal backslash. Empty is allowed -- "
+                            "the parts are concatenated directly. Names "
+                            "always join with + instead, not configurable."
+                        ),
+                    },
+                ),
             },
         }
 
@@ -625,33 +843,139 @@ class LoraLibraryNotebook:
         return True
 
     @classmethod
-    def IS_CHANGED(cls, file: str, entry: str, pinned: str = "", drafts: str = "{}") -> str:
+    def IS_CHANGED(
+        cls,
+        file: Any,
+        entry: Any,
+        pinned: Any = DEFAULT_PINNED,
+        drafts: Any = DEFAULT_DRAFTS,
+        text: Any = None,
+        name: Any = None,
+        separator: Any = DEFAULT_SEPARATOR,
+    ) -> str:
+        # Chaining inputs (owner ask 2026-09-09): INPUT_IS_LIST = True means
+        # every argument below arrives list-wrapped now -- unwrap before
+        # doing anything else (module docstring's "Chaining inputs"
+        # paragraph).
+        file_value = _unwrap_scalar(file, DEFAULT_FILE)
+        entry_value = _unwrap_scalar(entry, DEFAULT_ENTRY)
+        pinned_value = _unwrap_scalar(pinned, DEFAULT_PINNED)
+        drafts_value = _unwrap_scalar(drafts, DEFAULT_DRAFTS)
+        separator_value = _unwrap_scalar(separator, DEFAULT_SEPARATOR)
         # v0.80.0: content-derived, not whole-file mtime -- see
         # _selection_token. The pin/entry/file/drafts WIDGET values are
         # already in core's input-hash key, so a selection, pin, or draft
-        # change re-executes regardless of this token; this only has to
-        # track what the file's (or a draft's) CONTENT contributes to the
-        # output.
-        return _selection_token(_context, file, entry, pinned, drafts)
+        # change re-executes regardless of this token; that part only has
+        # to track what the file's (or a draft's) CONTENT contributes to
+        # the output.
+        base = _selection_token(_context, file_value, entry_value, pinned_value, drafts_value)
+        if text is None and name is None:
+            # Chaining inputs UNWIRED -- every workflow saved before this
+            # feature existed, and still the common case afterward. The
+            # output is byte-identical to pre-chaining (module docstring),
+            # so the token must be too: in particular, the pinned branch's
+            # bare `"pinned"` constant (_selection_token's own docstring:
+            # "while pinned the FILE is irrelevant to the output") must
+            # come back UNCHANGED, or a workflow that never wires text/name
+            # would re-execute for no reason on every load.
+            return base
+        # Chaining inputs (owner ask 2026-09-09): wired, so the OUTPUT now
+        # depends on `text`/`name`/`separator` too -- even while PINNED (a
+        # pin freezes the resolved entries, never the incoming cross
+        # against them, per read_entry below). Fold them in explicitly
+        # rather than assuming core's own input-hash already covers a
+        # wired LIST input the same way it covers a widget -- belt-and-
+        # braces so a chained upstream value moving (file/entry/pinned/
+        # drafts unchanged) can never serve a stale cached run. `text`/
+        # `name` individually unwired (only one of the pair wired) is
+        # tokenized as a fixed marker distinct from any real list.
+        text_token = _as_list(text) if text is not None else "unwired"
+        name_token = _as_list(name) if name is not None else "unwired"
+        return f"{base}:{text_token!r}:{name_token!r}:{separator_value!r}"
 
     def read_entry(
-        self, file: str, entry: str, pinned: str = "", drafts: str = "{}"
+        self,
+        file: Any,
+        entry: Any,
+        pinned: Any = DEFAULT_PINNED,
+        drafts: Any = DEFAULT_DRAFTS,
+        text: Any = None,
+        name: Any = None,
+        separator: Any = DEFAULT_SEPARATOR,
     ) -> tuple[list[str], list[str]]:
-        # Provenance M3 (FORMAT.md §6.1): a pin wins outright -- the pinned
-        # entries' text/name lists come back IN PIN ORDER and the file is
-        # never opened (it may have been edited, renamed or deleted since
-        # the image was saved; that is the whole point). A malformed pin
-        # already warned inside parse_pinned and reads live below. Drafts
-        # are never consulted here either -- a pin already IS the frozen
-        # text a run used (v0.86.0).
-        pinned_entries = parse_pinned(pinned)
+        # Chaining inputs (owner ask 2026-09-09): INPUT_IS_LIST = True means
+        # every argument below -- including the previously-scalar `file`/
+        # `entry`/`pinned`/`drafts`/`separator` -- now arrives list-wrapped
+        # (module docstring). Unwrap ALL of them up front so the rest of
+        # this method (and resolve_selection/parse_pinned, which still take
+        # plain scalars) never has to know the difference.
+        file_value = _unwrap_scalar(file, DEFAULT_FILE)
+        entry_value = _unwrap_scalar(entry, DEFAULT_ENTRY)
+        pinned_value = _unwrap_scalar(pinned, DEFAULT_PINNED)
+        drafts_value = _unwrap_scalar(drafts, DEFAULT_DRAFTS)
+        separator_value = _unwrap_scalar(separator, DEFAULT_SEPARATOR)
+        sep = _decode_separator(separator_value)
+
+        # Resolve the selected/pinned entries EXACTLY as before -- ONE call,
+        # never once per incoming text: the live-by-name/pin posture
+        # (module docstring) is untouched by chaining. Provenance M3
+        # (FORMAT.md §6.1): a pin wins outright -- the pinned entries'
+        # text/name come back IN PIN ORDER and the file is never opened (it
+        # may have been edited, renamed or deleted since the image was
+        # saved; that is the whole point). Drafts are never consulted here
+        # either -- a pin already IS the frozen text a run used (v0.86.0).
+        pinned_entries = parse_pinned(pinned_value)
         if pinned_entries is not None:
-            return (
-                [item["text"] for item in pinned_entries],
-                [item["name"] for item in pinned_entries],
+            entry_texts = [item["text"] for item in pinned_entries]
+            entry_names = [item["name"] for item in pinned_entries]
+        else:
+            context = _context
+            if context is None:
+                raise RuntimeError("EPSNodes: EPS Prompt Notebook has no context configured")
+            entry_texts, entry_names = resolve_selection(
+                context, file_value, entry_value, drafts_value
             )
 
-        context = _context
-        if context is None:
-            raise RuntimeError("EPSNodes: EPS Prompt Notebook has no context configured")
-        return resolve_selection(context, file, entry, drafts)
+        # Chaining inputs (owner ask 2026-09-09, module docstring): cross
+        # every incoming text against every resolved entry, incoming text
+        # FIRST, incoming-major order. `is not None` distinguishes UNWIRED
+        # (a single pass with no incoming part at all -- `sep.join([text])`
+        # is just `text`, so this is byte-identical to pre-chaining
+        # behavior regardless of `sep`) from wired-but-empty (a real
+        # upstream emitted nothing: the outer loop below runs zero times,
+        # so the result is `([], [])` with no special-casing needed) --
+        # verbatim the same distinction, for the same reason, as
+        # EPSPromptBuilder's own `build()`.
+        text_wired = text is not None
+        name_wired = name is not None
+        incoming_texts = _as_list(text) if text_wired else [None]
+        incoming_names = _as_list(name) if name_wired else []
+
+        if name_wired and len(incoming_names) not in (1, len(incoming_texts)):
+            logger.warning(
+                "EPS Prompt Notebook: `name` has %d value(s) but `text` has "
+                "%d -- pairing what overlaps and using \"\" past the end "
+                "of the shorter list",
+                len(incoming_names), len(incoming_texts),
+            )
+
+        out_texts: list[str] = []
+        out_names: list[str] = []
+        for index, incoming_text in enumerate(incoming_texts):
+            has_incoming_text = incoming_text is not None and str(incoming_text).strip()
+
+            incoming_name = ""
+            if name_wired:
+                if len(incoming_names) == 1:
+                    incoming_name = incoming_names[0]
+                elif index < len(incoming_names):
+                    incoming_name = incoming_names[index]
+            has_incoming_name = str(incoming_name).strip()
+
+            for entry_text, entry_name in zip(entry_texts, entry_names, strict=True):
+                text_parts = ([str(incoming_text)] if has_incoming_text else []) + [entry_text]
+                out_texts.append(sep.join(text_parts))
+                name_parts = ([str(incoming_name)] if has_incoming_name else []) + [entry_name]
+                out_names.append("+".join(name_parts))
+
+        return (out_texts, out_names)

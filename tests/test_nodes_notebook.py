@@ -406,6 +406,10 @@ class TestValidateAndInputTypes:
         assert cls.RETURN_NAMES == ("text", "name")
         assert cls.OUTPUT_IS_LIST == (True, True)
         assert cls.FUNCTION == "read_entry"
+        # Chaining inputs (owner ask 2026-09-09): declared so the new
+        # text/name links arrive as whole lists rather than being mapped
+        # over -- see the module docstring's "Chaining inputs" paragraph.
+        assert cls.INPUT_IS_LIST is True
 
 
 # --------------------------------------------------------------- no ComfyUI import
@@ -443,10 +447,14 @@ class TestPinnedM3:
     def test_widget_is_tail_appended_optional_hidden_string(self) -> None:
         spec = nodes_notebook.LoraLibraryNotebook.INPUT_TYPES()
         assert list(spec["required"]) == ["file", "entry"]
-        # `drafts` (v0.86.0) is appended AFTER `pinned` -- FORMAT.md §8's
-        # tail-only law: the final declaration order is
-        # required=[file, entry], optional=[pinned, drafts].
-        assert list(spec["optional"]) == ["pinned", "drafts"]  # the tail -- FORMAT.md §8
+        # `drafts` (v0.86.0) is appended AFTER `pinned`, and chaining's
+        # `text`/`name`/`separator` (owner ask 2026-09-09) after THAT --
+        # FORMAT.md §8's tail-only law: the final declaration order is
+        # required=[file, entry], optional=[pinned, drafts, text, name,
+        # separator]. `text`/`name` are forceInput and carry no
+        # widgets_values slot at all -- see TestChainingInputs's own
+        # widget-order test for the REAL (serialized-widget-only) order.
+        assert list(spec["optional"]) == ["pinned", "drafts", "text", "name", "separator"]
         kind, options = spec["optional"]["pinned"]
         assert kind == "STRING"
         assert options["default"] == ""
@@ -628,7 +636,9 @@ class TestDraftsM4:
     def test_widget_is_tail_appended_after_pinned_optional_hidden_string(self) -> None:
         spec = nodes_notebook.LoraLibraryNotebook.INPUT_TYPES()
         assert list(spec["required"]) == ["file", "entry"]
-        assert list(spec["optional"]) == ["pinned", "drafts"]  # the tail -- FORMAT.md §8
+        # Chaining's `text`/`name`/`separator` (owner ask 2026-09-09) land
+        # AFTER `drafts` -- see TestPinnedM3's identical assertion above.
+        assert list(spec["optional"]) == ["pinned", "drafts", "text", "name", "separator"]
         kind, options = spec["optional"]["drafts"]
         assert kind == "STRING"
         assert options["default"] == "{}"
@@ -846,3 +856,373 @@ class TestDraftsM4:
         # from this result records the DRAFT text, not the file's.
         entries = [{"name": n, "text": t} for t, n in zip(texts, names, strict=True)]
         assert entries == [{"name": "A", "text": "the text this run actually used"}]
+
+
+# --------------------------------------------------- Chaining inputs (2026-09-09)
+#
+# Owner ask 2026-09-09: "The prompt notebook node should also be able to
+# accept text and name as inputs. That way they can be chained together
+# with other nodes or a builder node could come before the notebook node."
+# Chosen semantics (owner): combine/cross-product, incoming text FIRST --
+# one output per (incoming text, selected/pinned entry) pair, in
+# INCOMING-MAJOR order (every entry for incoming #1, then every entry for
+# incoming #2, ...). `text`/`name` are optional forceInput-only STRING
+# inputs (no widget); a new TAIL `separator` STRING widget (after
+# `pinned`/`drafts`) decides how TEXT joins -- names always join with `+`,
+# unconfigurable, matching EPSPromptBuilder. INPUT_IS_LIST = True means
+# every widget -- including the previously-scalar `file`/`entry`/`pinned`/
+# `drafts`/`separator` -- now arrives list-wrapped too.
+
+
+class TestChainingWidgetShape:
+    def test_input_types_declares_text_and_name_forceinput_only(self) -> None:
+        spec = nodes_notebook.LoraLibraryNotebook.INPUT_TYPES()
+        text_type, text_opts = spec["optional"]["text"]
+        name_type, name_opts = spec["optional"]["name"]
+        assert text_type == "STRING"
+        assert text_opts["forceInput"] is True
+        assert "default" not in text_opts  # link-only -- no widget/widgets_values slot
+        assert name_type == "STRING"
+        assert name_opts["forceInput"] is True
+        assert "default" not in name_opts
+
+    def test_separator_widget_is_visible_not_hidden(self) -> None:
+        spec = nodes_notebook.LoraLibraryNotebook.INPUT_TYPES()
+        kind, options = spec["optional"]["separator"]
+        assert kind == "STRING"
+        assert options["default"] == ", "
+        assert options["multiline"] is False
+        # Unlike file/entry/pinned/drafts: a plain visible widget the panel
+        # never touches, same as EPSPromptBuilder's own `separator`.
+        assert "hidden" not in options
+
+    def test_serialized_widget_order_is_pinned_drafts_then_separator(self) -> None:
+        # FORMAT.md §8: widgets_values restores POSITIONALLY. `text`/`name`
+        # are forceInput and carry no widgets_values slot at all, so the
+        # REAL (serialized) widget order is file, entry, pinned, drafts,
+        # separator regardless of where text/name sit in `optional`'s own
+        # declaration order -- this is the hazard the task/owner flagged:
+        # a new tail widget landing before an existing one shifts every
+        # already-saved workflow's values into the wrong slot.
+        spec = nodes_notebook.LoraLibraryNotebook.INPUT_TYPES()
+        serialized = []
+        for section in ("required", "optional"):
+            for name, definition in spec[section].items():
+                options = definition[1] if len(definition) > 1 else {}
+                if options.get("forceInput"):
+                    continue
+                serialized.append(name)
+        assert serialized == ["file", "entry", "pinned", "drafts", "separator"]
+
+    def test_separator_is_declared_in_the_state_registry_text_name_are_absent(self) -> None:
+        descriptor = nodes_notebook.LoraLibraryNotebook.EPS_STATE_WIDGETS
+        assert descriptor["widgets"]["separator"] == {"kind": "string", "max_len": 10000}
+        excluded = descriptor.get("excluded", {})
+        assert "text" not in descriptor["widgets"] and "text" not in excluded
+        assert "name" not in descriptor["widgets"] and "name" not in excluded
+
+
+class TestChainingCombine:
+    def test_unwired_text_is_byte_identical_to_pre_chaining(self, library_dir: Path) -> None:
+        # The backward-compatibility test that matters most: a call shaped
+        # exactly like every pre-chaining call site (no text/name kwargs
+        # at all) must produce EXACTLY today's output.
+        _write_notebook(library_dir, "loras.md", "## A\nfirst\n## B\nsecond\n")
+        node = nodes_notebook.LoraLibraryNotebook()
+        result = node.read_entry(file="loras.md", entry="A\nB")
+        assert result == (["first", "second"], ["A", "B"])
+
+    def test_unwired_single_selection_still_matches_pre_chaining(
+        self, library_dir: Path
+    ) -> None:
+        _write_notebook(library_dir, "loras.md", "## Portrait\nSome prompt text.\n")
+        node = nodes_notebook.LoraLibraryNotebook()
+        assert node.read_entry(file="loras.md", entry="Portrait") == (
+            ["Some prompt text."],
+            ["Portrait"],
+        )
+
+    def test_incoming_text_comes_first_joined_by_separator(self, library_dir: Path) -> None:
+        _write_notebook(library_dir, "loras.md", "## A\nentry text\n")
+        node = nodes_notebook.LoraLibraryNotebook()
+        result = node.read_entry(
+            file="loras.md", entry="A", text=["incoming"], separator=", "
+        )
+        assert result == (["incoming, entry text"], ["A"])
+
+    def test_two_incoming_by_three_entries_is_six_outputs_incoming_major(
+        self, library_dir: Path
+    ) -> None:
+        _write_notebook(
+            library_dir, "loras.md", "## A\nfirst\n## B\nsecond\n## C\nthird\n"
+        )
+        node = nodes_notebook.LoraLibraryNotebook()
+        texts, names = node.read_entry(
+            file="loras.md", entry="A\nB\nC", text=["one", "two"], separator=", "
+        )
+        assert texts == [
+            "one, first", "one, second", "one, third",
+            "two, first", "two, second", "two, third",
+        ]
+        assert names == ["A", "B", "C", "A", "B", "C"]
+        assert len(texts) == len(names) == 6  # NOT 3 -- this is the estimator's own check
+
+    def test_wired_but_empty_text_yields_zero_outputs(self, library_dir: Path) -> None:
+        # A real upstream that emitted nothing -- distinct from UNWIRED.
+        _write_notebook(library_dir, "loras.md", "## A\nfirst\n")
+        node = nodes_notebook.LoraLibraryNotebook()
+        assert node.read_entry(file="loras.md", entry="A", text=[]) == ([], [])
+
+    def test_blank_incoming_text_contributes_no_leading_separator(
+        self, library_dir: Path
+    ) -> None:
+        _write_notebook(library_dir, "loras.md", "## A\nentry text\n")
+        node = nodes_notebook.LoraLibraryNotebook()
+        texts, _names = node.read_entry(
+            file="loras.md", entry="A", text=["   "], separator=", "
+        )
+        assert texts == ["entry text"]
+
+    def test_no_entry_selected_still_raises_even_with_text_wired(
+        self, library_dir: Path
+    ) -> None:
+        # Chaining does not relax the pre-existing "an entry must be
+        # selected" contract -- entries are resolved ONCE, up front,
+        # regardless of the incoming axis.
+        _write_notebook(library_dir, "loras.md", "## A\nx\n")
+        node = nodes_notebook.LoraLibraryNotebook()
+        with pytest.raises(ValueError, match="no entry selected"):
+            node.read_entry(file="loras.md", entry="", text=["incoming"])
+
+
+class TestChainingNamePairing:
+    def test_names_always_join_with_plus_never_separator(self, library_dir: Path) -> None:
+        _write_notebook(library_dir, "loras.md", "## A\nx\n")
+        node = nodes_notebook.LoraLibraryNotebook()
+        _texts, names = node.read_entry(
+            file="loras.md", entry="A", text=["in"], name=["InName"], separator=" | "
+        )
+        assert names == ["InName+A"]
+
+    def test_single_incoming_name_broadcasts_across_every_incoming_text(
+        self, library_dir: Path
+    ) -> None:
+        _write_notebook(library_dir, "loras.md", "## A\nx\n")
+        node = nodes_notebook.LoraLibraryNotebook()
+        _texts, names = node.read_entry(
+            file="loras.md", entry="A", text=["a", "b", "c"], name=["Shared"]
+        )
+        assert names == ["Shared+A", "Shared+A", "Shared+A"]
+
+    def test_n_names_pair_positionally_with_n_incoming_texts(
+        self, library_dir: Path
+    ) -> None:
+        _write_notebook(library_dir, "loras.md", "## A\nx\n## B\ny\n")
+        node = nodes_notebook.LoraLibraryNotebook()
+        _texts, names = node.read_entry(
+            file="loras.md", entry="A\nB", text=["a", "b"], name=["N1", "N2"]
+        )
+        assert names == ["N1+A", "N1+B", "N2+A", "N2+B"]
+
+    def test_absent_incoming_name_falls_back_to_the_entrys_own_name(
+        self, library_dir: Path
+    ) -> None:
+        _write_notebook(library_dir, "loras.md", "## A\nx\n")
+        node = nodes_notebook.LoraLibraryNotebook()
+        _texts, names = node.read_entry(file="loras.md", entry="A", text=["a", "b"])
+        assert names == ["A", "A"]
+
+    def test_blank_incoming_name_contributes_nothing(self, library_dir: Path) -> None:
+        _write_notebook(library_dir, "loras.md", "## A\nx\n")
+        node = nodes_notebook.LoraLibraryNotebook()
+        _texts, names = node.read_entry(
+            file="loras.md", entry="A", text=["a"], name=[""]
+        )
+        assert names == ["A"]
+
+    def test_mismatched_name_length_pairs_what_overlaps_and_warns(
+        self, library_dir: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        _write_notebook(library_dir, "loras.md", "## A\nx\n")
+        node = nodes_notebook.LoraLibraryNotebook()
+        with caplog.at_level(logging.WARNING, logger="lora_library"):
+            _texts, names = node.read_entry(
+                file="loras.md", entry="A", text=["a", "b", "c"], name=["OnlyOne", "Two"]
+            )
+        assert names == ["OnlyOne+A", "Two+A", "A"]
+        assert any("EPS Prompt Notebook" in r.message for r in caplog.records)
+
+
+class TestChainingSeparator:
+    def test_default_separator(self, library_dir: Path) -> None:
+        _write_notebook(library_dir, "loras.md", "## A\nx\n")
+        node = nodes_notebook.LoraLibraryNotebook()
+        texts, _names = node.read_entry(file="loras.md", entry="A", text=["in"])
+        assert texts == ["in, x"]
+
+    def test_custom_separator(self, library_dir: Path) -> None:
+        _write_notebook(library_dir, "loras.md", "## A\nx\n")
+        node = nodes_notebook.LoraLibraryNotebook()
+        texts, _names = node.read_entry(
+            file="loras.md", entry="A", text=["in"], separator=" | "
+        )
+        assert texts == ["in | x"]
+
+    def test_newline_escape_decoded(self, library_dir: Path) -> None:
+        _write_notebook(library_dir, "loras.md", "## A\nx\n")
+        node = nodes_notebook.LoraLibraryNotebook()
+        texts, _names = node.read_entry(
+            file="loras.md", entry="A", text=["in"], separator="\\n"
+        )
+        assert texts == ["in\nx"]
+
+    def test_tab_escape_decoded(self, library_dir: Path) -> None:
+        _write_notebook(library_dir, "loras.md", "## A\nx\n")
+        node = nodes_notebook.LoraLibraryNotebook()
+        texts, _names = node.read_entry(
+            file="loras.md", entry="A", text=["in"], separator="\\t"
+        )
+        assert texts == ["in\tx"]
+
+    def test_backslash_escape_decoded(self, library_dir: Path) -> None:
+        _write_notebook(library_dir, "loras.md", "## A\nx\n")
+        node = nodes_notebook.LoraLibraryNotebook()
+        texts, _names = node.read_entry(
+            file="loras.md", entry="A", text=["in"], separator="\\\\"
+        )
+        assert texts == ["in\\x"]
+
+    def test_unrecognized_escape_passes_through_unchanged(
+        self, library_dir: Path
+    ) -> None:
+        _write_notebook(library_dir, "loras.md", "## A\nx\n")
+        node = nodes_notebook.LoraLibraryNotebook()
+        texts, _names = node.read_entry(
+            file="loras.md", entry="A", text=["in"], separator="\\d"
+        )
+        assert texts == ["in\\dx"]
+
+    def test_empty_separator_is_plain_concatenation(self, library_dir: Path) -> None:
+        _write_notebook(library_dir, "loras.md", "## A\nx\n")
+        node = nodes_notebook.LoraLibraryNotebook()
+        texts, _names = node.read_entry(
+            file="loras.md", entry="A", text=["in"], separator=""
+        )
+        assert texts == ["inx"]
+
+
+class TestChainingWithDraftsAndPinning:
+    def test_draft_still_applies_to_entry_text_when_chaining(
+        self, library_dir: Path
+    ) -> None:
+        _write_notebook(library_dir, "loras.md", "## A\non disk\n")
+        node = nodes_notebook.LoraLibraryNotebook()
+        drafts = json.dumps({"A": "unsaved edit"})
+        texts, _names = node.read_entry(
+            file="loras.md", entry="A", drafts=drafts, text=["incoming"], separator=", "
+        )
+        assert texts == ["incoming, unsaved edit"]
+
+    def test_pinned_entries_still_cross_with_incoming_text(
+        self, library_dir: Path
+    ) -> None:
+        node = nodes_notebook.LoraLibraryNotebook()
+        pin = _pin([{"name": "A", "text": "old A"}, {"name": "B", "text": "old B"}])
+        texts, names = node.read_entry(
+            file="loras.md", entry="ignored", pinned=pin, text=["in1", "in2"], separator=" - "
+        )
+        assert texts == ["in1 - old A", "in1 - old B", "in2 - old A", "in2 - old B"]
+        assert names == ["A", "B", "A", "B"]
+
+
+class TestChainingInputIsListWrapping:
+    """Every widget -- not only the new inputs -- must still read correctly
+    now that INPUT_IS_LIST = True wraps all of them (module docstring's
+    "Chaining inputs" paragraph)."""
+
+    def test_read_entry_accepts_every_widget_list_wrapped(self, library_dir: Path) -> None:
+        _write_notebook(library_dir, "loras.md", "## A\nx\n")
+        node = nodes_notebook.LoraLibraryNotebook()
+        result = node.read_entry(
+            file=["loras.md"],
+            entry=["A"],
+            pinned=[""],
+            drafts=["{}"],
+            text=["incoming"],
+            name=["N"],
+            separator=[", "],
+        )
+        assert result == (["incoming, x"], ["N+A"])
+
+    def test_is_changed_accepts_every_widget_list_wrapped(self, library_dir: Path) -> None:
+        _write_notebook(library_dir, "loras.md", "## A\nx\n")
+        token = nodes_notebook.LoraLibraryNotebook.IS_CHANGED(
+            file=["loras.md"],
+            entry=["A"],
+            pinned=[""],
+            drafts=["{}"],
+            text=["incoming"],
+            name=["N"],
+            separator=[", "],
+        )
+        assert isinstance(token, str)
+
+
+class TestChainingIsChanged:
+    def test_moves_when_incoming_text_changes(self, library_dir: Path) -> None:
+        _write_notebook(library_dir, "loras.md", "## A\nx\n")
+        cls = nodes_notebook.LoraLibraryNotebook
+        token_a = cls.IS_CHANGED(file="loras.md", entry="A", text=["one"])
+        token_b = cls.IS_CHANGED(file="loras.md", entry="A", text=["two"])
+        assert token_a != token_b
+
+    def test_moves_when_incoming_name_changes(self, library_dir: Path) -> None:
+        _write_notebook(library_dir, "loras.md", "## A\nx\n")
+        cls = nodes_notebook.LoraLibraryNotebook
+        token_a = cls.IS_CHANGED(file="loras.md", entry="A", text=["one"], name=["N1"])
+        token_b = cls.IS_CHANGED(file="loras.md", entry="A", text=["one"], name=["N2"])
+        assert token_a != token_b
+
+    def test_moves_when_separator_changes_while_text_is_wired(
+        self, library_dir: Path
+    ) -> None:
+        _write_notebook(library_dir, "loras.md", "## A\nx\n")
+        cls = nodes_notebook.LoraLibraryNotebook
+        token_a = cls.IS_CHANGED(file="loras.md", entry="A", text=["one"], separator=", ")
+        token_b = cls.IS_CHANGED(file="loras.md", entry="A", text=["one"], separator=" | ")
+        assert token_a != token_b
+
+    def test_unwired_token_is_byte_identical_to_pre_chaining(
+        self, library_dir: Path, context: LibraryContext
+    ) -> None:
+        # Backward-compatibility contract: a call shaped exactly like every
+        # pre-chaining call site (no text/name kwargs at all) must return
+        # the bare pre-chaining token, not a decorated one, so an
+        # already-cached run for a never-chained node is never spuriously
+        # invalidated.
+        _write_notebook(library_dir, "loras.md", "## A\nx\n")
+        cls = nodes_notebook.LoraLibraryNotebook
+        token = cls.IS_CHANGED(file="loras.md", entry="A")
+        expected = nodes_notebook._selection_token(context, "loras.md", "A", "", "{}")
+        assert token == expected
+
+    def test_pinned_stays_the_bare_constant_when_chaining_is_unwired(
+        self, library_dir: Path
+    ) -> None:
+        _write_notebook(library_dir, "loras.md", "## A\nx\n")
+        cls = nodes_notebook.LoraLibraryNotebook
+        pin = _pin([{"name": "A", "text": "x"}])
+        assert cls.IS_CHANGED(file="loras.md", entry="A", pinned=pin) == "pinned"
+
+    def test_pinned_still_moves_with_a_wired_incoming_text(self, library_dir: Path) -> None:
+        # A pin freezes the resolved ENTRIES, not the cross against an
+        # incoming value (read_entry still crosses them) -- so IS_CHANGED
+        # must move too, or a chained change under a pin would serve a
+        # stale cached run.
+        _write_notebook(library_dir, "loras.md", "## A\nx\n")
+        cls = nodes_notebook.LoraLibraryNotebook
+        pin = _pin([{"name": "A", "text": "x"}])
+        token_a = cls.IS_CHANGED(file="loras.md", entry="A", pinned=pin, text=["one"])
+        token_b = cls.IS_CHANGED(file="loras.md", entry="A", pinned=pin, text=["two"])
+        assert token_a != token_b
+        assert token_a != "pinned"

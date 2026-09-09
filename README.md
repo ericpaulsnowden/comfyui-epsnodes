@@ -145,6 +145,17 @@ session and often aren't visible to a service-started ComfyUI at all.
 
 ## EPS Prompt Notebook (shipped)
 
+- **Chain prompts into it.** Two new inputs, `text` and `name`, let you wire
+  another Prompt Notebook, an EPS Prompt Builder, or any text source into
+  this one. Whatever arrives is put in front of each prompt you've selected
+  here, joined by the new `separator` box (default `, `).
+- **What that does to your run count.** One incoming prompt — a Builder, or
+  a plain bit of text — leaves the count alone: three selected still runs
+  three times, each with the incoming text in front. Wire in a *Notebook*
+  with two prompts selected and you get all six combinations, taking the
+  first upstream prompt through everything selected here, then the second.
+  Leave the inputs unwired and nothing changes at all.
+
 `EPSNodes → EPS Prompt Notebook`: a two-pane editor inside the node — entry
 list on the left (grouped by `# Category` headings, with `＋ New` /
 `🗑 Delete`), a flexible text editor + `Save` on the right. Outputs:

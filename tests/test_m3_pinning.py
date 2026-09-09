@@ -173,7 +173,12 @@ class TestWidgetIndex:
         # v0.86.0 appended the `drafts` audition buffer as a TAIL widget
         # (§8), so the defaults list grew by one -- the pin's own index is
         # unchanged, which is the property this test exists to protect.
-        assert m.widget_defaults(LoraLibraryNotebook) == ["loras.md", "", "", "{}"]
+        # v0.93.0 chaining (§6.1): `separator` is TAIL-appended after
+        # `pinned`/`drafts`, so the defaults list legitimately GREW by one.
+        # The indices above are what must not move -- and they didn't
+        # (pinned still 2, drafts still 3) -- which is the whole point of
+        # appending at the tail rather than inserting.
+        assert m.widget_defaults(LoraLibraryNotebook) == ["loras.md", "", "", "{}", ", "]
         assert m.widget_defaults(LoraLibraryApplySet) == ["None", 1.0, 0, ""]
         assert m._multiplier_widget_defaults() == m.widget_defaults(EPSCrossSweep)
 

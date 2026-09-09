@@ -659,6 +659,61 @@ ESTIMATE_CASES = [
         {"total": 3, "atLeast": False, "steps": 1, "pairs": 3, "unknowns": [], "error": None},
     ),
     (
+        # CHAINING (§6.1, owner ask 2026-09-09): a BUILDER feeding the
+        # Notebook is ONE incoming prompt, so the count must not move -- the
+        # owner's own words, "for the notebook to run the number of times it
+        # would have already run".
+        "notebook_chained_from_a_builder_keeps_its_own_count",
+        {
+            "nodes": {
+                "80": {
+                    "classType": "EPSPromptBuilder",
+                    "widgets": {"file": "loras.md", "blocks": '["A","B"]'},
+                    "inputs": {},
+                },
+                "90": {
+                    "classType": "LoraLibraryNotebook",
+                    "widgets": {"file": "loras.md", "entry": "First\nSecond\nThird"},
+                    "inputs": {"text": _link("80", 0)},
+                },
+                "5": {
+                    "classType": "EPSCrossSweep",
+                    "widgets": {"pair_mode": "paired", "sweep_mode": "aligned"},
+                    "inputs": {"text": _link("90", 0)},
+                },
+            }
+        },
+        "5",
+        {"total": 3, "atLeast": False, "steps": 1, "pairs": 3, "unknowns": [], "error": None},
+    ),
+    (
+        # CHAINING: notebook -> notebook MULTIPLIES. 2 selected upstream x 3
+        # selected here = 6, not 3. Undercounting here is the failure the
+        # owner is most exposed to, since he queues hundreds of images.
+        "notebook_chained_from_a_notebook_multiplies",
+        {
+            "nodes": {
+                "80": {
+                    "classType": "LoraLibraryNotebook",
+                    "widgets": {"file": "loras.md", "entry": "Up1\nUp2"},
+                    "inputs": {},
+                },
+                "90": {
+                    "classType": "LoraLibraryNotebook",
+                    "widgets": {"file": "loras.md", "entry": "First\nSecond\nThird"},
+                    "inputs": {"text": _link("80", 0)},
+                },
+                "5": {
+                    "classType": "EPSCrossSweep",
+                    "widgets": {"pair_mode": "paired", "sweep_mode": "aligned"},
+                    "inputs": {"text": _link("90", 0)},
+                },
+            }
+        },
+        "5",
+        {"total": 6, "atLeast": False, "steps": 1, "pairs": 6, "unknowns": [], "error": None},
+    ),
+    (
         # Provenance M3: an EMPTY live selection under a valid pin is NOT the
         # "no entry selected" queue-fail -- the pin is what executes.
         "pinned_notebook_with_empty_entry_is_not_a_queue_fail",

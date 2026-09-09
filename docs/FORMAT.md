@@ -4288,6 +4288,47 @@ collapsed group reads as "search is broken". `controller.js` additionally
 leaves `dragRows` empty while searching, the Notebook's own convention, so
 a drag-reorder against a partial view cannot reorder the underlying file.
 
+
+**Chaining inputs (v0.93.0, owner ask 2026-09-09: "The prompt notebook node
+should also be able to accept text and name as inputs. That way they can be
+chained together with other nodes or a builder node could come before the
+notebook node").** Two optional `forceInput`-only STRING inputs, `text` and
+`name`, mirroring §6.15 EPSPromptBuilder's own. Owner-chosen semantics:
+COMBINE (cross product), incoming text FIRST. For each incoming text, for
+each selected/pinned entry, one output -- `separator.join([incoming, entry])`
+for text, `"+".join([incoming_name, entry_name])` for name (names always
+join with `+`, never `separator`). Order is INCOMING-MAJOR, which is the
+owner's own description: *"the first item in the first prompt notebook ...
+added sequentially to the selected items in the second notebook, then the
+second item ... and so on."*
+
+**The single rule covers both cases he described.** A Builder, or any plain
+STRING source, is ONE incoming prompt -- the Builder concatenates its own
+blocks before anything leaves it -- so `1 x 3 = 3` and the Notebook runs
+exactly as often as it would have. Two notebooks chained is `2 x 3 = 6`.
+Multiplication only appears when the upstream genuinely holds several
+prompts.
+
+- **New TAIL widget `separator`** (default `", "`, visible, Builder escape
+  decoding), appended AFTER `pinned`/`drafts`. Verified: `pinned` stays
+  index 2 and `drafts` index 3, so no saved workflow shifts (§8). This is
+  the hazard that makes adding a widget here non-trivial.
+- **`INPUT_IS_LIST = True` is now declared**, which changes how EVERY widget
+  on this node arrives, not only the new links -- `file`, `entry`, `pinned`,
+  `drafts` and `separator` all come list-wrapped and are undone by
+  `_unwrap_scalar`/`_as_list`. The class docstring previously asserted the
+  opposite and was rewritten.
+- **Unwired is byte-identical to before**; `text is not None` separates
+  UNWIRED (one pass, no incoming part) from wired-but-empty (zero outputs).
+- **The run-count estimator multiplies.** `cross_sweep.js`'s
+  `LoraLibraryNotebook` branch now walks the `text` link and returns
+  `inner.count * lines`, with a NEW cycle guard because that branch never
+  recursed before. Contrast the EPSPromptBuilder branch directly below it,
+  which PASSES its axis through rather than multiplying -- the two nodes
+  take the same input and do different arithmetic, so neither branch may be
+  copied from the other. Rig-verified: 2x3 reads "Runs: 6", unwired and
+  Builder-fed both read "Runs: 3".
+
 ## §7 Frontend surfaces
 
 **§7.2 amendment — load-failure is an explicit, value-preserving ERROR

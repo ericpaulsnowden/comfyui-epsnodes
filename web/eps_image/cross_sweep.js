@@ -637,6 +637,17 @@ function sourceCount(snapshot, link, path) {
     // Provenance M3: a valid `pinned` widget value (a baked image's
     // workflow) makes the node output the PINNED entries and ignore
     // `entry`, so the pin's entry count wins; "" / invalid -> live count.
+    // CHAINING (§6.1, owner ask 2026-09-09): the `text`/`name` inputs make
+    // this a MULTIPLYING node -- every incoming prompt combines with every
+    // selected entry, so the count is `incoming x lines`. Contrast the
+    // EPSPromptBuilder branch just below, which PASSES its axis through
+    // (one combined output per incoming) rather than multiplying: the two
+    // nodes take the same input and do different arithmetic with it, which
+    // is exactly why this branch cannot just be copied from that one.
+    // Unwired, this returns `lines` and nothing about the old behaviour
+    // changes. The cycle guard is NEW and required -- this branch never
+    // recursed before, so it never needed one.
+    if (path.has(id)) return { count: 1, atLeast: true, srcId: id }
     const pinnedLines = notebookPinnedCount(node.widgets?.pinned)
     const lines = pinnedLines ?? notebookEntryCount(node.widgets?.entry)
     if (lines === 0) {
@@ -647,7 +658,17 @@ function sourceCount(snapshot, link, path) {
         error: 'EPS Prompt Notebook has no entry selected — the queue will fail'
       }
     }
-    return { count: lines, atLeast: false, srcId: id }
+    const textLink = node.inputs?.text ?? null
+    if (!textLink) return { count: lines, atLeast: false, srcId: id }
+    const inner = sourceCount(snapshot, textLink, new Set([...path, id]))
+    if (!inner) return { count: lines, atLeast: false, srcId: id }
+    if (inner.error) {
+      return { count: inner.count * lines, atLeast: inner.atLeast, srcId: id, error: inner.error }
+    }
+    // An upstream that genuinely emits nothing blocks this node too -- the
+    // cross product of zero incoming with anything is zero.
+    if (inner.count === 0 && !inner.atLeast) return { count: 0, atLeast: false, srcId: id }
+    return { count: inner.count * lines, atLeast: inner.atLeast, srcId: id }
   }
   if (type === 'EPSPromptBuilder') {
     // §6.15: one combined output per incoming `text` -- the piped-in sweep
