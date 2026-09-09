@@ -314,6 +314,10 @@ happen there — and the Builder assembles prompts *out of* it:
 
 ## EPS Universal State Controller (shipped)
 
+- **Search matches several words now, in any order.** Typing `7 state`
+  finds "State 7". Previously only one literal run of characters matched
+  here — word order mattered in this node and nowhere else in the pack.
+
 - **Making a group is easy to find now.** The `Group:` dropdown beside the
   search box has a `＋ New group…` option — pick it, type a name, press
   Enter. With a state selected it moves that state straight into the new
@@ -366,6 +370,13 @@ modes, save prefixes — and applies it back later, or in another session.
   formats.
 
 ## EPS Lora Loader State Controller (shipped; requires rgthree-comfy)
+
+- **Search your states.** A search box sits above the list, the same as the
+  Notebook and the LoRA Picker. Type to filter; several words narrow it
+  further and every word has to match, in any order. Escape clears it. A
+  match inside a collapsed group opens that group, so search never looks
+  broken — and while you're searching, dragging to reorder is switched off
+  so a partial view can't shuffle the real order.
 
 - **`# name` reliably makes a group now.** Typing `# Portraits` in the name
   field and clicking **New State** creates a group. It used to depend on

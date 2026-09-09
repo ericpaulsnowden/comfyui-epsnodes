@@ -893,6 +893,10 @@ VERSION_JS = REPO_ROOT / "web" / "lora_library" / "version.js"
 NOTEBOOK_JS = REPO_ROOT / "web" / "lora_library" / "notebook.js"
 SETTINGS_JS = REPO_ROOT / "web" / "lora_library" / "settings.js"
 PATH_HEAL_JS = REPO_ROOT / "web" / "lora_library" / "path_heal.js"
+# v0.92.0 (shared-panel-code round): controller.js AND notebook.js both now
+# import the shared search matcher -- must ride along too, or the served
+# layout can't resolve either module's import under Node.
+SEARCH_JS = REPO_ROOT / "web" / "lora_library" / "search.js"
 
 STATES_LOC_PROBE_JS = """
 import * as c from './extensions/comfyui-epsnodes/lora_library/controller.js'
@@ -1008,7 +1012,10 @@ def controller_api(tmp_path_factory: pytest.TempPathFactory) -> dict:
     layout = tmp_path_factory.mktemp("web_root")
     module_dir = layout / "extensions" / "comfyui-epsnodes" / "lora_library"
     module_dir.mkdir(parents=True)
-    for src in (CONTROLLER_JS, API_JS, VERSION_JS, NOTEBOOK_JS, SETTINGS_JS, PATH_HEAL_JS):
+    js_files = (
+        CONTROLLER_JS, API_JS, VERSION_JS, NOTEBOOK_JS, SETTINGS_JS, PATH_HEAL_JS, SEARCH_JS
+    )
+    for src in js_files:
         shutil.copyfile(src, module_dir / src.name)
     scripts = layout / "scripts"
     scripts.mkdir(parents=True, exist_ok=True)
@@ -1112,8 +1119,12 @@ def test_states_location_line_sits_under_the_list_and_never_crops_it(controller_
     list (the list shrinks and scrolls), and its row rides in getMinHeight."""
     pane = _method_body(controller_source, "_buildStatePane()")
     assert "this._pane.statesLocEl = el('div', { className: 'llsc-states-loc' }, [" in pane
+    # v0.92.0: gained a search field ABOVE the list (shared-panel-code round,
+    # owner decision 2026-09-08) -- the list-above-states-loc order this test
+    # protects is otherwise unchanged.
     assert (
         "const leftPane = el('div', { className: 'llsc-pane-left' }, [\n"
+        "          this._pane.searchEl,\n"
         "          this._pane.listEl,\n"
         "          this._pane.statesLocEl\n"
         "        ])"
@@ -2456,3 +2467,152 @@ class TestNameFieldStaleReadFixV20260902:
         result = name_field_flush_probe["updateClickAlsoFlushesBeforeRename"]
         assert result["actions"] == ["Save State"]
         assert result["value"] == "Renamed"
+
+
+# ---------------------------------------------------------------------------
+# v0.92.0 shared-panel-code round (owner decision 2026-09-08: "use Notebook
+# as the model and make them all follow that paradigm"): controller.js
+# (the LoRA Loader State Controller) had NO search box at all -- the odd one
+# out among the panels with a left-hand list. It gains one now, matching its
+# closest sibling's placement/rules and sharing web/lora_library/search.js's
+# matcher with every other panel instead of a fourth reimplementation.
+# ---------------------------------------------------------------------------
+
+
+def test_search_field_is_added_above_the_list(controller_source: str) -> None:
+    pane = _method_body(controller_source, "_buildStatePane()")
+    assert "this._pane.searchEl = el('input', {" in pane
+    assert "placeholder: 'Search states…'" in pane
+    assert (
+        "const leftPane = el('div', { className: 'llsc-pane-left' }, [\n"
+        "          this._pane.searchEl,\n"
+        "          this._pane.listEl,\n"
+    ) in pane
+    on_input = pane[pane.index("this._pane.searchEl.addEventListener('input'") :]
+    assert "this._searchQuery = this._pane.searchEl.value" in on_input
+    assert "this._renderStateList()" in on_input
+    keydown = pane[pane.index("this._pane.searchEl.addEventListener('keydown'") :]
+    assert "event.stopPropagation()" in keydown  # canvas hotkeys must not eat search typing
+    assert "'Escape'" in keydown
+    assert "this._pane.searchEl.value = ''" in keydown
+    assert "this._searchQuery = ''" in keydown
+    assert ".llsc-search {" in controller_source
+
+
+def test_search_query_field_is_transient_never_serialized(controller_source: str) -> None:
+    """§7.9: the query is pure VIEW state, correctly NOT persisted -- a
+    plain instance field, initialized alongside its sibling collapse set,
+    never written through a node property or a serialized widget."""
+    ctor = _method_body(controller_source, "constructor(title = NODE_TITLE)")
+    assert "this._searchQuery = ''" in ctor
+    assert "properties['Search" not in controller_source
+    assert "PROP_SEARCH" not in controller_source
+
+
+def test_grouped_rows_filters_by_search_and_ignores_collapse_while_searching(
+    controller_source: str,
+) -> None:
+    """FORMAT.md §7.2: while a query is active, collapse is ignored (a match
+    hidden inside a collapsed group reads as "search is broken") and a group
+    with zero matches drops out entirely -- the Notebook's/Universal State
+    Controller's own rule, now shared here too."""
+    matches = _method_body(controller_source, "_matchesSearch(entry)")
+    assert "entryMatchesSearch(haystack, searchWords(query))" in matches
+    assert "searchHaystack(entry.label || entry.slug || ''" in matches
+    body = _method_body(controller_source, "_groupedRows()")
+    assert "const searching = !!(this._searchQuery || '').trim()" in body
+    assert "this._matchesSearch(entry)" in body
+    assert "if (searching && !slugs.some((slug) => bySlug.has(slug))) continue" in body
+    assert "if (!searching && this._collapsedCategories.has(category)) {" in body
+    # with NO query this is exactly the pre-v0.92.0 method: full cache,
+    # every header, collapse honored -- a pure de-dup for that path
+    assert "const matching = searching\n          ? this._setsCache.filter" in body
+    assert ": this._setsCache" in body
+
+
+def test_category_header_forces_open_while_a_query_is_active(controller_source: str) -> None:
+    header = _method_body(controller_source, "_buildCategoryHeader(category)")
+    assert "const searching = !!(this._searchQuery || '').trim()" in header
+    assert "const collapsed = !searching && this._collapsedCategories.has(category)" in header
+
+
+def test_render_state_list_shows_no_match_message_and_disables_drag_while_searching(
+    controller_source: str,
+) -> None:
+    """Mirrors notebook.js's own filtered-view rule: rows are not pushed to
+    dragRows while a query is active (drag-reorder against a partial view
+    would reorder the file in ways the view can't show); a plain click
+    still selects/applies (that decision is a pointer-movement threshold,
+    not gated on dragRows) -- see the source's own doc comment."""
+    render = _method_body(controller_source, "_renderStateList()")
+    assert "const searching = !!(this._searchQuery || '').trim()" in render
+    assert 'text: `No states match "${query}".`' in render
+    assert render.count("if (!searching) {") == 2  # header push + entry push
+    assert "this._pane.dragRows.push({ kind: 'header'" in render
+    assert "{ kind: 'entry', slug: entry.slug, label: entry.label, el: row }" in render
+
+
+#: (query, entry label, expected) -- same table shape as
+#: tests/test_universal_controller_js.py's SEARCH_MATCH_CASES; the first
+#: case is the point of this whole round (a fourth panel now agrees).
+CONTROLLER_SEARCH_MATCH_CASES = [
+    ("style portrait", "Portrait Style A", True),  # multi-word AND, order-independent
+    ("portrait style", "Portrait Style A", True),
+    ("cine", "Cinematic Wide", True),  # partial-word substring
+    ("portrait missing", "Portrait Style A", False),  # AND: one word absent
+    ("", "Anything", True),  # blank query matches everything
+    ("   ", "Anything", True),  # whitespace-only query matches everything
+    ("xyz", "Portrait Style A", False),  # no match
+]
+
+CONTROLLER_SEARCH_MATCH_PROBE_JS = """
+import { entryMatchesSearch, searchHaystack, searchWords } from './search.js'
+
+function matchesSearch(entry) {
+__MATCHES_SEARCH_BODY__
+}
+
+const cases = %(cases)s
+const out = cases.map(([searchQuery, label]) =>
+  matchesSearch.call({ _searchQuery: searchQuery }, { label })
+)
+process.stdout.write(JSON.stringify(out))
+"""
+
+
+@pytest.fixture(scope="module")
+def controller_search_match_api(
+    controller_source: str, tmp_path_factory: pytest.TempPathFactory
+) -> list:
+    """Splices the REAL, extracted ``_matchesSearch(entry)`` method body --
+    not a re-implementation -- into a standalone function and runs it under
+    Node against the REAL search.js, exactly like
+    tests/test_universal_controller_js.py's own ``search_match_api`` proves
+    that panel's changed behavior. Here the method never changed BEHAVIOR
+    (there was no search box before it), so this proves the NEW box's
+    filtering is correct, using the shared matcher, from a standing start."""
+    body = _method_body(controller_source, "_matchesSearch(entry)")
+    script = CONTROLLER_SEARCH_MATCH_PROBE_JS % {
+        "cases": json.dumps([[query, label] for query, label, _ in CONTROLLER_SEARCH_MATCH_CASES])
+    }
+    script = script.replace("__MATCHES_SEARCH_BODY__", body)
+    layout = tmp_path_factory.mktemp("controller_search_match")
+    shutil.copyfile(SEARCH_JS, layout / "search.js")
+    probe = layout / "probe.mjs"
+    probe.write_text(script, encoding="utf-8")
+    result = subprocess.run(
+        [NODE, str(probe)], capture_output=True, text=True, timeout=30, cwd=layout
+    )
+    assert result.returncode == 0, f"probe failed:\n{result.stderr}"
+    return json.loads(result.stdout)
+
+
+def test_controllers_new_search_box_filters_with_the_shared_multi_word_matcher(
+    controller_search_match_api: list,
+) -> None:
+    expected = [case[2] for case in CONTROLLER_SEARCH_MATCH_CASES]
+    pairs = zip(CONTROLLER_SEARCH_MATCH_CASES, controller_search_match_api, strict=True)
+    for (query, label, want), got in pairs:
+        msg = f"_matchesSearch(query={query!r}, label={label!r}) -> {got!r}, want {want!r}"
+        assert got is want, msg
+    assert controller_search_match_api == expected

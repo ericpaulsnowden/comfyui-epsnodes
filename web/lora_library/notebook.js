@@ -468,6 +468,7 @@
  */
 
 import * as api from './api.js'
+import { entryMatchesSearch, searchHaystack, searchWords } from './search.js'
 
 /** FORMAT.md §6.1 — frozen once shipped. */
 const NODE_CLASS = 'LoraLibraryNotebook'
@@ -3770,30 +3771,20 @@ function updateModeHint(state) {
  * NAME or BODY. Multi-word queries therefore narrow (AND), matching how
  * the Checkpoint Switcher's filter box already behaves.
  *
- * v0.68.1 (perf round): split into its three pure parts so the expensive
- * one runs once per LOAD, not once per entry per keystroke --
- * searchHaystack() lowercases one entry's `name\nbody`, buildSearchCorpus()
+ * v0.68.1 (perf round): split into three pure parts so the expensive one
+ * runs once per LOAD, not once per entry per keystroke -- searchHaystack()
+ * lowercases one entry's `name\nbody`, buildSearchCorpus() (just below)
  * does that for every entry when the include_text payload lands,
  * searchWords() splits the query once per render, and entryMatchesSearch()
- * is the AND over a prebuilt haystack. Semantics are byte-identical to the
- * old per-call entryMatchesSearch(name, text, query).
+ * is the AND over a prebuilt haystack.
+ *
+ * v0.92.0 (docs/ROADMAP-shared-panel-code.md's shared-panel-code
+ * milestone, owner decision 2026-09-08: "use Notebook as the model and
+ * make them all follow that paradigm"): these three moved to `./search.js`
+ * so picker.js/universal_controller.js/controller.js share this exact
+ * implementation instead of reimplementing or diverging -- imported above
+ * under their original bare names, so every call site below is unchanged.
  */
-function entryMatchesSearch(haystack, words) {
-  return words.every((word) => haystack.includes(word))
-}
-
-/** One entry's lowercase haystack: `name\nbody`. */
-function searchHaystack(name, text) {
-  return `${name}\n${text || ''}`.toLowerCase()
-}
-
-/** The query's lowercase words (AND across them); `[]` matches everything. */
-function searchWords(query) {
-  return query
-    .toLowerCase()
-    .split(/\s+/)
-    .filter(Boolean)
-}
 
 /** Rebuilt by reloadNow() right after `entryTextByName` -- the two always
  * describe the same load. Keyed by name; a name the map doesn't know (an

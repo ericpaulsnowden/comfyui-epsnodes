@@ -794,6 +794,7 @@ import * as api from './api.js'
 // dialog's field and this button can never disagree about what was set.
 import { pickServerFolder } from './notebook.js'
 import { setLibraryDir } from './settings.js'
+import { entryMatchesSearch, searchHaystack, searchWords } from './search.js'
 
 // ---------------------------------------------------------------- constants
 
@@ -2388,6 +2389,20 @@ const STATE_PANE_CSS_TEXT = `
   padding: 4px;
   overflow-y: auto;
 }
+.llsc-search {
+  flex: 0 0 auto;
+  margin: 0 0 4px;
+  padding: 4px 6px;
+  border: 1px solid var(--border-color, #444);
+  border-radius: 3px;
+  background: var(--comfy-input-bg, #1c1c1c);
+  color: var(--input-text, #ddd);
+  font-size: 11px;
+  outline: none;
+  min-width: 0;
+}
+.llsc-search:focus { border-color: rgb(66, 133, 244); }
+.llsc-search::placeholder { color: var(--descrip-text, #808080); }
 .llsc-list {
   flex: 1 1 auto;
   min-height: 0;
@@ -2731,6 +2746,10 @@ export function registerControllerNode() {
         // server-healed, cached here; collapse is per-browser view state.
         this._layoutCache = normalizeLayoutClient(null)
         this._collapsedCategories = new Set()
+        // §7.2/shared-panel-code search field (v0.92.0) — pure VIEW state,
+        // never serialized (§7.9: a rebuild is allowed to reset it, exactly
+        // like the Universal State Controller's own `_searchQuery`).
+        this._searchQuery = ''
         this._stateDrag = null
         // v0.67.2 (owner report 2026-08-20: a reorder "moved, then moved
         // back, and finally showed up again where I had moved them"): the
@@ -3184,6 +3203,30 @@ export function registerControllerNode() {
         injectControllerStyles()
 
         this._pane = {}
+        // §7.2/shared-panel-code search field (v0.92.0, owner decision
+        // 2026-09-08: "use Notebook as the model") -- the Universal State
+        // Controller's own `_pane.searchEl` twin (this file's closest
+        // sibling, itself cloned FROM this one), same placement (above the
+        // list), same rules: every keystroke stops propagation (canvas
+        // hotkeys), Escape clears the query in place, transient view state
+        // only (§7.9 -- never serialized, a rebuild is allowed to reset it).
+        this._pane.searchEl = el('input', {
+          className: 'llsc-search',
+          attrs: { type: 'text', placeholder: 'Search states…', spellcheck: 'false' }
+        })
+        this._pane.searchEl.addEventListener('input', () => {
+          this._searchQuery = this._pane.searchEl.value
+          this._renderStateList()
+        })
+        this._pane.searchEl.addEventListener('keydown', (event) => {
+          event.stopPropagation()
+          if (event.key === 'Escape') {
+            event.preventDefault()
+            this._pane.searchEl.value = ''
+            this._searchQuery = ''
+            this._renderStateList()
+          }
+        })
         this._pane.listEl = el('div', { className: 'llsc-list' })
         // NAS round (file header): where the states live -- the Notebook's
         // file-panel idea at the FOOT of the list pane. `flex: 0 0 auto`
@@ -3223,6 +3266,7 @@ export function registerControllerNode() {
         ])
         this._pane.statesLocEl.style.display = 'none'
         const leftPane = el('div', { className: 'llsc-pane-left' }, [
+          this._pane.searchEl,
           this._pane.listEl,
           this._pane.statesLocEl
         ])
@@ -3333,8 +3377,26 @@ export function registerControllerNode() {
        * appends to the uncategorized tail (a just-captured set before the
        * layout refetch).
        */
+      /** v0.92.0 (shared-panel-code round): a query is now a SEARCH pass
+       * folded in, the Universal State Controller's own `_groupedRows()`
+       * twin -- matching entries only, headers whose group has zero
+       * matches dropped, collapse ignored while searching (FORMAT.md §7.2:
+       * a match hidden inside a collapsed group reads as "search is
+       * broken"). With no query every line below is exactly what this
+       * method always did. */
+      _matchesSearch(entry) {
+        const query = (this._searchQuery || '').trim()
+        if (!query) return true
+        const haystack = searchHaystack(entry.label || entry.slug || '', '')
+        return entryMatchesSearch(haystack, searchWords(query))
+      }
+
       _groupedRows() {
-        const bySlug = new Map(this._setsCache.map((entry) => [entry.slug, entry]))
+        const searching = !!(this._searchQuery || '').trim()
+        const matching = searching
+          ? this._setsCache.filter((entry) => this._matchesSearch(entry))
+          : this._setsCache
+        const bySlug = new Map(matching.map((entry) => [entry.slug, entry]))
         const placed = new Set()
         const rows = []
         const pushEntries = (slugs) => {
@@ -3346,7 +3408,7 @@ export function registerControllerNode() {
           }
         }
         pushEntries(this._layoutCache.order[UNCATEGORIZED] || [])
-        const leftovers = this._setsCache.filter((entry) => {
+        const leftovers = matching.filter((entry) => {
           if (placed.has(entry.slug)) return false
           return !this._layoutCache.categories.some((c) =>
             (this._layoutCache.order[c] || []).includes(entry.slug)
@@ -3357,11 +3419,13 @@ export function registerControllerNode() {
           rows.push({ kind: 'entry', entry })
         }
         for (const category of this._layoutCache.categories) {
+          const slugs = this._layoutCache.order[category] || []
+          if (searching && !slugs.some((slug) => bySlug.has(slug))) continue
           rows.push({ kind: 'header', category })
-          if (!this._collapsedCategories.has(category)) {
-            pushEntries(this._layoutCache.order[category] || [])
+          if (!searching && this._collapsedCategories.has(category)) {
+            for (const slug of slugs) placed.add(slug)
           } else {
-            for (const slug of this._layoutCache.order[category] || []) placed.add(slug)
+            pushEntries(slugs)
           }
         }
         return rows
@@ -3405,20 +3469,37 @@ export function registerControllerNode() {
         const scrollTop = listEl.scrollTop
         listEl.replaceChildren()
         // Drag hit-testing reads THIS array, rebuilt every render — the
-        // Notebook's `state.dragRows` twin.
+        // Notebook's `state.dragRows` twin. v0.92.0: left EMPTY while a
+        // search query is active -- same rule as notebook.js's own
+        // filtered view ("rows are NOT pushed to dragRows while filtering
+        // ... drag-reorder against a partial view would reorder the file
+        // in ways the view can't show"); a plain click still works (the
+        // click/drag decision is a pointer-movement threshold, unrelated
+        // to this array -- only an actual drag's drop-target lookup reads
+        // it, and finds nothing to drop onto, which fails soft).
         this._pane.dragRows = []
+        const searching = !!(this._searchQuery || '').trim()
 
         if (!this._setsCache.length && !this._layoutCache.categories.length) {
           listEl.append(el('div', { className: 'llsc-empty', text: PLACEHOLDER_NO_SETS }))
           return
         }
 
+        const rows = this._groupedRows()
+        if (searching && !rows.length) {
+          const query = this._searchQuery.trim()
+          listEl.append(el('div', { className: 'llsc-empty', text: `No states match "${query}".` }))
+          return
+        }
+
         const selected = this._selectedSetEntry()
-        for (const planRow of this._groupedRows()) {
+        for (const planRow of rows) {
           if (planRow.kind === 'header') {
             const header = this._buildCategoryHeader(planRow.category)
             listEl.append(header)
-            this._pane.dragRows.push({ kind: 'header', category: planRow.category, el: header })
+            if (!searching) {
+              this._pane.dragRows.push({ kind: 'header', category: planRow.category, el: header })
+            }
             continue
           }
           const entry = planRow.entry
@@ -3445,7 +3526,11 @@ export function registerControllerNode() {
             this._onSetPicked(entry.label)
           })
           listEl.append(row)
-          this._pane.dragRows.push({ kind: 'entry', slug: entry.slug, label: entry.label, el: row })
+          if (!searching) {
+            this._pane.dragRows.push(
+              { kind: 'entry', slug: entry.slug, label: entry.label, el: row }
+            )
+          }
           if (focusedSlug && entry.slug === focusedSlug) row.focus({ preventScroll: true })
         }
         if (scrollTop) listEl.scrollTop = scrollTop
@@ -3488,7 +3573,10 @@ export function registerControllerNode() {
        * to uncategorized — a state is never deleted from here), drag
        * source for whole-group reordering, tap = collapse toggle. */
       _buildCategoryHeader(category) {
-        const collapsed = this._collapsedCategories.has(category)
+        // v0.92.0: a query FORCES this open regardless of the persisted
+        // collapse -- see `_groupedRows()`'s own doc comment.
+        const searching = !!(this._searchQuery || '').trim()
+        const collapsed = !searching && this._collapsedCategories.has(category)
         const count = (this._layoutCache.order[category] || []).length
         const label = el('span', {
           className: 'llsc-category-label',

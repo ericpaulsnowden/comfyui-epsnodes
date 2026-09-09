@@ -4252,6 +4252,42 @@ re-committing the same width does NOT drift further. `copy from image`
 remains the one deliberate exception, written byte-exact ("copy means
 copy") under an explicit snap-suppression guard.
 
+
+**One shared search module (v0.92.0 — the FIRST milestone of
+`docs/ROADMAP-shared-panel-code.md` to land as a real extraction; owner
+decision 2026-09-08: "use Notebook as the model and make them all follow
+that paradigm").** Search had drifted four ways: `notebook.js` and
+`picker.js` implemented the same multi-word AND algorithm independently,
+`universal_controller.js` did a single substring, and `controller.js` had
+no search at all. There is now ONE implementation —
+`web/lora_library/search.js`, three pure functions (`searchWords`,
+`searchHaystack`, `entryMatchesSearch`), no DOM, no node/graph, no imports
+of its own — which all four panels import UNDER THOSE BARE NAMES.
+
+That last detail is the migration technique this roadmap depends on and is
+worth stating: the JS suites assert on literal source text, so importing a
+helper under its existing name leaves every CALL SITE string untouched and
+confines the churn to the declaration pins. Only those were rewritten, plus
+the Node-execution fixtures in seven test files that copy panels into a
+served layout and therefore must now copy `search.js` too — miss one and it
+is `ERR_MODULE_NOT_FOUND`, not a subtle failure.
+
+Per panel: `notebook.js`/`picker.js` were pure de-duplication (behaviour
+byte-identical; the Notebook KEEPS `buildSearchCorpus`, which lowercases
+each entry once per load rather than once per keystroke — load-bearing for
+large markdown bodies, and picker's haystack is a bare path so it needs no
+cache). `universal_controller.js` CHANGED from substring to multi-word AND,
+so word order no longer matters. `controller.js` gained a search box for
+the first time, mirroring its sibling's placement, Escape-clears, and
+transient (never serialized, §7.9) query.
+
+Both controllers honour the established rule that a query forces every
+matching group OPEN regardless of the persisted collapsed set — the render
+read is gated, the property is untouched — because a match hidden inside a
+collapsed group reads as "search is broken". `controller.js` additionally
+leaves `dragRows` empty while searching, the Notebook's own convention, so
+a drag-reorder against a partial view cannot reorder the underlying file.
+
 ## §7 Frontend surfaces
 
 **§7.2 amendment — load-failure is an explicit, value-preserving ERROR

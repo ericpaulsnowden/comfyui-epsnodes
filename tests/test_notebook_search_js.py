@@ -9,9 +9,15 @@ verified on the rig. Each pin names the invariant it protects.
 
 from pathlib import Path
 
-SRC = (
-    Path(__file__).resolve().parents[1] / "web" / "lora_library" / "notebook.js"
-).read_text(encoding="utf-8")
+REPO_ROOT = Path(__file__).resolve().parents[1]
+SRC = (REPO_ROOT / "web" / "lora_library" / "notebook.js").read_text(encoding="utf-8")
+# v0.92.0 (docs/ROADMAP-shared-panel-code.md's shared-panel-code round, owner
+# decision 2026-09-08: "use Notebook as the model and make them all follow
+# that paradigm"): entryMatchesSearch/searchHaystack/searchWords moved out of
+# notebook.js into this shared module, imported back under their original
+# bare names -- every CALL-SITE pin below is untouched; only the three
+# DECLARATION pins move to check this file instead.
+SEARCH_SRC = (REPO_ROOT / "web" / "lora_library" / "search.js").read_text(encoding="utf-8")
 
 
 def test_search_corpus_rides_the_reload_cycle() -> None:
@@ -26,11 +32,16 @@ def test_matcher_is_and_of_words_over_name_plus_body() -> None:
     # (name + "\n" + body, built once per load -- see the perf pins below);
     # the old per-call entryMatchesSearch(name, text, query) re-lowercased
     # every body on every keystroke. Same semantics, split into pure parts.
-    assert "function entryMatchesSearch(haystack, words)" in SRC
-    assert ".every((word) => haystack.includes(word))" in SRC
-    assert "function searchHaystack(name, text)" in SRC
-    assert "return `${name}\\n${text || ''}`.toLowerCase()" in SRC
-    assert "function searchWords(query)" in SRC
+    # v0.92.0: the three declarations now live in search.js (see SEARCH_SRC
+    # above); notebook.js imports them under their original bare names.
+    assert "function entryMatchesSearch(haystack, words)" in SEARCH_SRC
+    assert ".every((word) => haystack.includes(word))" in SEARCH_SRC
+    assert "function searchHaystack(name, text)" in SEARCH_SRC
+    assert "return `${name}\\n${text || ''}`.toLowerCase()" in SEARCH_SRC
+    assert "function searchWords(query)" in SEARCH_SRC
+    assert (
+        "import { entryMatchesSearch, searchHaystack, searchWords } from './search.js'" in SRC
+    )
 
 
 def test_filtering_is_a_view_that_disarms_drag() -> None:

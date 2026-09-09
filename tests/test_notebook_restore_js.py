@@ -48,6 +48,22 @@ def source() -> str:
     return NOTEBOOK_JS.read_text(encoding="utf-8")
 
 
+def test_search_matcher_is_imported_from_the_shared_module(source: str) -> None:
+    """v0.92.0 (docs/ROADMAP-shared-panel-code.md, owner decision
+    2026-09-08: "use Notebook as the model and make them all follow that
+    paradigm"): the Notebook's own entryMatchesSearch/searchHaystack/
+    searchWords moved to web/lora_library/search.js, imported back here
+    under their original bare names -- this is the ONE line that proves
+    the de-dup actually took (the semantics themselves are pinned in full,
+    against search.js, by tests/test_notebook_search_js.py)."""
+    assert (
+        "import { entryMatchesSearch, searchHaystack, searchWords } from './search.js'" in source
+    )
+    assert "function entryMatchesSearch(haystack, words)" not in source
+    assert "function searchHaystack(name, text)" not in source
+    assert "function searchWords(query)" not in source
+
+
 def test_attach_installs_the_post_configure_reload(source: str) -> None:
     # Without this call the restore path has nothing that re-reads the file
     # after `configure()` lands — defect 1 returns silently.
@@ -463,6 +479,10 @@ def test_first_tap_of_a_pair_notes_the_collapse_state(source: str) -> None:
 WEB = REPO_ROOT / "web"
 API_JS = WEB / "lora_library" / "api.js"
 VERSION_JS = WEB / "lora_library" / "version.js"
+# v0.92.0 (shared-panel-code round): notebook.js now imports its search
+# matcher from here too -- must ride along or the served layout can't
+# resolve notebook.js's import under Node.
+SEARCH_JS = WEB / "lora_library" / "search.js"
 NODE = shutil.which("node")
 
 CACHE_PROBE_JS = """
@@ -690,7 +710,7 @@ def cache_api(tmp_path_factory: pytest.TempPathFactory) -> dict:
     layout = tmp_path_factory.mktemp("web_root")
     module_dir = layout / "extensions" / "comfyui-epsnodes" / "lora_library"
     module_dir.mkdir(parents=True)
-    for src in (NOTEBOOK_JS, API_JS, VERSION_JS):
+    for src in (NOTEBOOK_JS, API_JS, VERSION_JS, SEARCH_JS):
         shutil.copyfile(src, module_dir / src.name)
     scripts = layout / "scripts"
     scripts.mkdir(parents=True, exist_ok=True)

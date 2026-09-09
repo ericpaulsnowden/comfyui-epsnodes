@@ -53,6 +53,10 @@ API_JS = REPO_ROOT / "web" / "lora_library" / "api.js"
 VERSION_JS = REPO_ROOT / "web" / "lora_library" / "version.js"
 ENTRY_JS = REPO_ROOT / "web" / "lora_library.js"
 LORA_CONTROLLER_JS = REPO_ROOT / "web" / "lora_library" / "controller.js"
+# v0.92.0 (shared-panel-code round): this file now imports the shared search
+# matcher (see test_no_import_from_lora_loader_state_controller below --
+# ./search.js is explicitly the ONE new cross-import this boundary allows).
+SEARCH_JS = REPO_ROOT / "web" / "lora_library" / "search.js"
 
 NODE = shutil.which("node")
 
@@ -539,6 +543,7 @@ def controller_api(tmp_path_factory: pytest.TempPathFactory) -> dict:
     # served ComfyUI scripts exactly as test_pll_bridge_js.py/test_picker_js.py do.
     shutil.copyfile(API_JS, module_dir / "api.js")
     shutil.copyfile(VERSION_JS, module_dir / "version.js")
+    shutil.copyfile(SEARCH_JS, module_dir / "search.js")
 
     scripts = layout / "scripts"
     scripts.mkdir(parents=True, exist_ok=True)
@@ -1420,12 +1425,20 @@ def test_is_virtual_node_never_enters_the_api_prompt(source: str) -> None:
 
 
 def test_no_import_from_lora_loader_state_controller(source: str) -> None:
-    """The task's ownership boundary: this file may only import from
-    ./api.js -- never controller.js, whose blueprint it clones by hand."""
+    """The task's ownership boundary: this file may never import from
+    controller.js (whose blueprint it clones by hand) or notebook.js.
+    v0.92.0 (shared-panel-code round) adds exactly ONE new cross-import --
+    ./search.js, the pack's first deliberate shared-panel module -- which
+    is explicitly sanctioned (docs/ROADMAP-shared-panel-code.md: "the
+    no-cross-import folklore is already false") and is not either
+    forbidden sibling, so it does not loosen this boundary."""
     assert "from './controller.js'" not in source
     assert "from './notebook.js'" not in source
     assert "import { app }" in source
     assert "import * as api from './api.js'" in source
+    assert (
+        "import { entryMatchesSearch, searchHaystack, searchWords } from './search.js'" in source
+    )
 
 
 # ------------------------------------------------------- loader wiring (§7.1)
@@ -2410,3 +2423,72 @@ class TestGroupDropdownCreateEntryV20260907:
         assert result["selectDisplay"] == ""
         assert result["inputDisplay"] == "none"
         assert result["selectValue"] == ""  # categoryOfSlug() found 'a' under UNCATEGORIZED
+
+
+# --------------- v0.92.0 shared-panel-code round: search went multi-word AND
+
+#: (query, entry name, expected) -- the owner's 2026-09-08 decision closes
+#: docs/ROADMAP-shared-panel-code.md's open product question: this panel's
+#: search was the ONE outlier (single-substring-only, so word ORDER
+#: mattered); it now shares notebook.js's multi-word AND matcher via
+#: ./search.js, so word order stops mattering -- the first two cases below
+#: are the actual behavior change, not merely re-pinned old behavior.
+SEARCH_MATCH_CASES = [
+    ("style portrait", "Portrait Style A", True),  # reordered words -- was False pre-v0.92.0
+    ("portrait style", "Portrait Style A", True),  # original word order still matches
+    ("cine", "Cinematic Wide", True),  # partial-word substring, unaffected by the change
+    ("portrait missing", "Portrait Style A", False),  # AND: one word absent
+    ("", "Anything", True),  # blank query matches everything
+    ("   ", "Anything", True),  # whitespace-only query matches everything
+    ("xyz", "Portrait Style A", False),  # no match
+]
+
+SEARCH_MATCH_PROBE_JS = """
+import { entryMatchesSearch, searchHaystack, searchWords } from './search.js'
+
+function matchesSearch(entry) {
+__MATCHES_SEARCH_BODY__
+}
+
+const cases = %(cases)s
+const out = cases.map(([searchQuery, entryName]) =>
+  matchesSearch.call({ _searchQuery: searchQuery }, { name: entryName })
+)
+process.stdout.write(JSON.stringify(out))
+"""
+
+
+@pytest.fixture(scope="module")
+def search_match_api(source: str, tmp_path_factory: pytest.TempPathFactory) -> list:
+    """Splices the REAL, extracted ``_matchesSearch(entry)`` method body --
+    not a re-implementation -- into a standalone function and runs it under
+    Node against the REAL search.js. Same splice technique
+    tests/test_pll_bridge_js.py's ``name_field_flush_probe`` uses for
+    controller.js's ``_flushPendingNameEdit``: the class method is private
+    and instance-bound (``this._searchQuery``), so ``.call({...}, entry)``
+    supplies a fake ``this`` instead of standing up a full node."""
+    body = _method_body(source, "_matchesSearch(entry)")
+    script = SEARCH_MATCH_PROBE_JS % {
+        "cases": json.dumps([[query, name] for query, name, _ in SEARCH_MATCH_CASES])
+    }
+    script = script.replace("__MATCHES_SEARCH_BODY__", body)
+    layout = tmp_path_factory.mktemp("search_match")
+    shutil.copyfile(SEARCH_JS, layout / "search.js")
+    probe = layout / "probe.mjs"
+    probe.write_text(script, encoding="utf-8")
+    result = subprocess.run(
+        [NODE, str(probe)], capture_output=True, text=True, timeout=30, cwd=layout
+    )
+    assert result.returncode == 0, f"probe failed:\n{result.stderr}"
+    return json.loads(result.stdout)
+
+
+def test_matches_search_is_now_multi_word_and_not_substring_only(
+    search_match_api: list,
+) -> None:
+    expected = [case[2] for case in SEARCH_MATCH_CASES]
+    pairs = zip(SEARCH_MATCH_CASES, search_match_api, strict=True)
+    for (query, name, want), got in pairs:
+        msg = f"_matchesSearch(query={query!r}, name={name!r}) -> {got!r}, want {want!r}"
+        assert got is want, msg
+    assert search_match_api == expected

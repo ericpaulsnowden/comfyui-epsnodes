@@ -57,6 +57,10 @@ NOTEBOOK_JS = WEB / "lora_library" / "notebook.js"
 SETS_JS = WEB / "lora_library" / "sets.js"
 API_JS = WEB / "lora_library" / "api.js"
 VERSION_JS = WEB / "lora_library" / "version.js"
+# v0.92.0 (shared-panel-code round): notebook.js now imports its search
+# matcher from here too -- must ride along or the served layout can't
+# resolve notebook.js's import under Node.
+SEARCH_JS = WEB / "lora_library" / "search.js"
 CROSS_SWEEP_JS = WEB / "eps_image" / "cross_sweep.js"
 
 NODE = shutil.which("node")
@@ -550,7 +554,7 @@ def m3_api(tmp_path_factory: pytest.TempPathFactory) -> dict:
     layout = tmp_path_factory.mktemp("web_root")
     module_dir = layout / "extensions" / "comfyui-epsnodes" / "lora_library"
     module_dir.mkdir(parents=True)
-    for src in (NOTEBOOK_JS, SETS_JS, API_JS, VERSION_JS):
+    for src in (NOTEBOOK_JS, SETS_JS, API_JS, VERSION_JS, SEARCH_JS):
         shutil.copyfile(src, module_dir / src.name)
     scripts = layout / "scripts"
     scripts.mkdir(parents=True, exist_ok=True)

@@ -43,6 +43,10 @@ VERSION_JS = REPO_ROOT / "web" / "lora_library" / "version.js"
 BRIDGE_JS = REPO_ROOT / "web" / "lora_library" / "pll_bridge.js"
 DASIWA_JS = REPO_ROOT / "web" / "lora_library" / "dasiwa_bridge.js"
 ENTRY_JS = REPO_ROOT / "web" / "lora_library.js"
+# v0.92.0 (shared-panel-code round): picker.js now imports its search
+# matcher (loraMatchesSearch's implementation) from here -- must ride along
+# or the served layout can't resolve picker.js's import under Node.
+SEARCH_JS = REPO_ROOT / "web" / "lora_library" / "search.js"
 
 NODE = shutil.which("node")
 
@@ -467,6 +471,7 @@ def picker_api(tmp_path_factory: pytest.TempPathFactory) -> dict:
     # they only have to resolve).
     shutil.copyfile(BRIDGE_JS, module_dir / "pll_bridge.js")
     shutil.copyfile(DASIWA_JS, module_dir / "dasiwa_bridge.js")
+    shutil.copyfile(SEARCH_JS, module_dir / "search.js")
 
     scripts = layout / "scripts"
     scripts.mkdir(parents=True, exist_ok=True)
@@ -1241,6 +1246,7 @@ def m3_api(tmp_path_factory: pytest.TempPathFactory) -> dict:
     shutil.copyfile(VERSION_JS, module_dir / "version.js")
     shutil.copyfile(BRIDGE_JS, module_dir / "pll_bridge.js")
     shutil.copyfile(DASIWA_JS, module_dir / "dasiwa_bridge.js")
+    shutil.copyfile(SEARCH_JS, module_dir / "search.js")
 
     scripts = layout / "scripts"
     scripts.mkdir(parents=True, exist_ok=True)
@@ -1283,6 +1289,22 @@ class TestM3:
         for (rel, query, expected), got in pairs:
             msg = f"loraMatchesSearch({rel!r}, {query!r}) -> {got!r}, wanted {expected!r}"
             assert got is expected, msg
+
+    def test_lora_matches_search_delegates_to_the_shared_matcher(self, source: str) -> None:
+        """v0.92.0 (docs/ROADMAP-shared-panel-code.md, owner decision
+        2026-09-08: "use Notebook as the model and make them all follow
+        that paradigm"): loraMatchesSearch used to be an independently
+        written copy of notebook.js's entryMatchesSearch; it is now a
+        two-line wrapper around the shared web/lora_library/search.js
+        (the truth table above proves the behavior is unchanged; this
+        proves it is no longer a separate implementation)."""
+        assert (
+            "import { entryMatchesSearch, searchWords } from './search.js'" in source
+        )
+        body = _function_body(source, "loraMatchesSearch(relPath, query)")
+        expected = "return entryMatchesSearch(relPath.toLowerCase(), searchWords(query))"
+        assert body.strip() == expected
+        assert ".split(/\\s+/)" not in body  # the old inline split/filter chain is gone
 
     def test_search_input_sits_below_the_breadcrumb(self, source: str) -> None:
         """Owner ask 2026-08-14: the search field moved one section down,

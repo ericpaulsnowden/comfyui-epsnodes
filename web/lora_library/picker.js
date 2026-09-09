@@ -107,6 +107,7 @@ import * as api from './api.js'
 import { walkLiveNodes, walkGraphs } from './api.js'
 import * as pll from './pll_bridge.js'
 import * as dasiwa from './dasiwa_bridge.js'
+import { entryMatchesSearch, searchWords } from './search.js'
 
 /** Frozen once shipped -- mirrors the Python node's class id (§6.13). */
 export const CLASS_ID = 'EPSLoraPicker'
@@ -395,23 +396,20 @@ export function listFolder(loras, folder) {
 }
 
 /**
- * §6.13 M3 search predicate -- §7.2's search semantics (notebook.js's
- * `entryMatchesSearch` precedent, the v0.53.0 owner ask): case-insensitive,
- * every whitespace-separated query word must appear somewhere in *relPath*,
- * so multi-word queries narrow (AND across words). *relPath* is the lora's
- * path RELATIVE TO THE CURRENT SCOPE -- the caller strips the scope prefix
- * BEFORE calling, so a scope folder's own name never matches everything
- * inside it. An empty/whitespace query matches everything (`every` over an
- * empty word list), though the UI never calls with one.
+ * §6.13 M3 search predicate -- §7.2's search semantics, shared with every
+ * other panel via `./search.js` (v0.92.0: was an independently-written
+ * copy of notebook.js's `entryMatchesSearch`, now the same implementation
+ * both call): case-insensitive, every whitespace-separated query word must
+ * appear somewhere in *relPath*, so multi-word queries narrow (AND across
+ * words). *relPath* is the lora's path RELATIVE TO THE CURRENT SCOPE -- the
+ * caller strips the scope prefix BEFORE calling, so a scope folder's own
+ * name never matches everything inside it. An empty/whitespace query
+ * matches everything (`every` over an empty word list), though the UI
+ * never calls with one.
  * @param {string} relPath @param {string} query @returns {boolean}
  */
 export function loraMatchesSearch(relPath, query) {
-  const haystack = relPath.toLowerCase()
-  return query
-    .toLowerCase()
-    .split(/\s+/)
-    .filter(Boolean)
-    .every((word) => haystack.includes(word))
+  return entryMatchesSearch(relPath.toLowerCase(), searchWords(query))
 }
 
 /** @param {string} name @returns {string} */

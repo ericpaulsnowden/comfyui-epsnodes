@@ -110,6 +110,7 @@
 
 import { app } from '../../../scripts/app.js'
 import * as api from './api.js'
+import { entryMatchesSearch, searchHaystack, searchWords } from './search.js'
 
 // ---------------------------------------------------------------- constants
 
@@ -1816,10 +1817,17 @@ export function registerControllerNode() {
 
       // -------------------------------------------------------- States page
 
+      /** v0.92.0 (owner decision 2026-09-08: "use Notebook as the model and
+       * make them all follow that paradigm"): was single-substring-only --
+       * the one panel that disagreed with the pack-wide standard -- now
+       * the shared `./search.js` matcher (case-insensitive, every
+       * whitespace-separated query word must appear -- AND across words),
+       * same as notebook.js/picker.js/controller.js. */
       _matchesSearch(entry) {
-        const query = (this._searchQuery || '').trim().toLowerCase()
+        const query = (this._searchQuery || '').trim()
         if (!query) return true
-        return (entry.name || entry.slug || '').toLowerCase().includes(query)
+        const haystack = searchHaystack(entry.name || entry.slug || '', '')
+        return entryMatchesSearch(haystack, searchWords(query))
       }
 
       /** §4.2-style render plan: uncategorized first, then each group's
