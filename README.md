@@ -915,6 +915,14 @@ wire into save paths so results land in folders named by model.
 
 ## EPS Resolution (shipped)
 
+- **`multiple_of` now drives the width and height boxes as well.** Set it to
+  8 and the little arrows step by 8; type any number and it snaps to the
+  nearest multiple as soon as you commit it — while you're still typing, it
+  leaves you alone. Change `multiple_of` itself and the current numbers
+  re-snap straight away, so the boxes never show a size the run won't
+  actually use. If you also have a ratio locked and the two can't both be
+  satisfied, the multiple wins and the ratio gives by a few pixels.
+
 `EPSNodes → EPS Resolution`: one image-first node for the everyday
 "resize this and tell me the sizes" job — set a target width/height, pick a
 mode, and get back the resized image **and** the original, plus both sets of

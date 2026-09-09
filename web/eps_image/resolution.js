@@ -441,6 +441,17 @@ const GRID_MAX_DEFAULT = 2048 // node property seed; FORMAT.md §6.5 M2 (owner a
 const GRID_MAX_FLOOR = 256 // "Grid max" property clamp: sane lower bound
 const GRID_MAX_CEILING = 16384 // matches width/height widgets' own INPUT_TYPES max
 const SNAP_FALLBACK = 64 // used when `multiple_of` is 0 (off)
+// Width/height's OWN declared step when `multiple_of` is off (0) --
+// nodes_resolution.py's INPUT_TYPES `"step": 1` for both fields (M5,
+// owner report 2026-09-08 below). NOT the same fallback as SNAP_FALLBACK
+// above: that 64 is a sensible default GRID-LINE spacing for the size pad
+// when no real constraint exists, unrelated to what the backend actually
+// declared these widgets' own arrow/typed step to be. A literal constant,
+// not read live off the widget, because by the time `multiple_of` goes
+// back to 0 this file has already overwritten `options.step`/`step2`
+// itself -- there is nothing left on the widget to "restore" a native
+// value FROM.
+const NATIVE_DIMENSION_STEP = 1
 const GRIDLINE_STEP = 512
 const DEFAULT_ANCHOR = 1024 // plotting anchor when BOTH axes are 0 (matches the backend's own INPUT_TYPES default)
 const ACCENT_COLOR = 'rgb(66, 133, 244)' // house accent, lora_library/notebook.js's selection color
@@ -968,6 +979,41 @@ function getSnapUnit(node) {
 function snapTo(value, unit) {
   if (!(unit > 0)) return value
   return Math.round(value / unit) * unit
+}
+
+/**
+ * Snaps *value* to the nearest multiple of *unit* via `snapTo` above (the
+ * SAME function the M2 grid drag already uses -- no second rounding
+ * implementation, per the M5 owner report below: "for a number to snap to
+ * the nearest number divisible by 4"), then clamps into [min, max]. The
+ * clamp matters because a snap can overshoot a widget's own bound --
+ * width 16383 with multiple_of 100 rounds to 16400, past WIDTH_MAX
+ * (16384) -- something `snapTo` alone never has to guard against (the
+ * grid drag doesn't need it: GRID_MAX_CEILING is itself multiple-of-
+ * friendly, and dragging inside the pad can't exceed it). `unit <= 0`
+ * ("off") skips the SNAP but still clamps -- a plain INT widget always
+ * enforces its own min/max regardless of `multiple_of`, so "off" still
+ * leaves the number unchanged in the only case that matters (an already
+ * in-bounds value passes straight through). Pure; exported for tests.
+ * @param {number} value @param {number} unit @param {number} min @param {number} max
+ * @returns {number}
+ */
+export function snapDimensionValue(value, unit, min, max) {
+  return clamp(snapTo(value, unit), min, max)
+}
+
+/** `multiple_of`'s current value if positive/finite, else 0 ("off") --
+ * shared by the M5 widget-step sync and the width/height self-snap below
+ * so both read the SAME single source, and both fail soft to "off" on a
+ * missing widget or a garbled saved value (a malformed `multiple_of` must
+ * never throw -- FORMAT.md §7/§8). Deliberately its OWN small helper, not
+ * shared with `getSnapUnit` above or `conformNodeSizeToRatio` below: those
+ * two have their OWN "off" fallback (SNAP_FALLBACK=64, and "no snap at
+ * all" respectively), a DIFFERENT semantic from M5's own "off" fallback
+ * (NATIVE_DIMENSION_STEP=1) -- own-your-helpers rather than a shared
+ * function whose callers would disagree on what "off" even returns. */
+function currentMultipleOfValue(node) {
+  return Number(widgetByName(node, 'multiple_of')?.value) || 0
 }
 
 /**
@@ -2164,6 +2210,14 @@ function applyPresetValues(node, name) {
         )
       }
     }
+    // M5 (owner report 2026-09-08): a selected preset's own width/height
+    // must be snapped by its OWN multiple_of too -- the per-field loop
+    // above already wrote this preset's `multiple_of` (last in
+    // PRESET_FIELD_NAMES), so this reads the value that's actually live
+    // now, not a stale prior one. Silent, like every other courtesy
+    // correction in this function -- see `resnapCurrentSizeToMultipleOf`'s
+    // own doc for why a bare write here is safe under this guard.
+    resnapCurrentSizeToMultipleOf(node)
   } finally {
     state.applying = false
   }
@@ -3081,6 +3135,258 @@ function wireRatioLock(node) {
   }
 }
 
+// ------------------------------------------- M5: multiple_of widget step + snap
+//
+// Owner report 2026-09-08: "EPS Resolution can have multiple_of set but it
+// doesn't seem to respect it on the front end. For example if it's set to
+// 4, and I click the arrows I'd expect the number to jump by 4. Or when
+// typing for a number to snap to the nearest number divisible by 4."
+// `multiple_of` was already honoured in two places -- the M2 grid drag
+// (`getSnapUnit`/`snapTo` above) and the backend's own execution-time
+// rounding (nodes_resolution.py's `_round_to_multiple`) -- but never on
+// the `width`/`height` widgets THEMSELVES, exactly what's reported here.
+//
+// Two independent halves, both driven by the SAME `currentMultipleOfValue`
+// read above:
+//
+// 1. The widgets' own arrow-button/drag STEP (`applyMultipleOfWidgetStep`)
+//    -- a plain `options.step`/`options.step2` mutation, no callback wrap
+//    needed, verified against the REAL semantics in the installed
+//    comfyui_frontend_package's own sourcemaps (not guessed -- see the
+//    round report): `getWidgetStep()`
+//    (`litegraph/src/utils/widget.ts`) is `options.step2 || (options.step
+//    || 10) * 0.1` -- `step2` (the modern, real-value field) wins outright
+//    when present, and BOTH the canvas `NumberWidget`'s arrow-click/drag
+//    handlers and the Vue `WidgetInputNumberInput`'s `stepValue` computed
+//    read it live off `this.options`/`props.widget.options` on every
+//    interaction, never cached at widget-creation time -- so mutating it
+//    here is picked up immediately. `useIntWidget.ts` (the composable that
+//    actually builds width/height's widgets, for BOTH renderers per
+//    `scripts/widgets.ts`'s `INT: transformWidgetConstructorV2ToV1(
+//    useIntWidget())`) itself sets `step: step * 10, step2: step` at
+//    creation -- the "historical ×10 scaling" the round brief warned
+//    about -- so mirroring BOTH fields here (not just `step2`) keeps a
+//    frontend build old enough to predate `step2` (Eric's own production
+//    build trails this rig's -- file header, pointer-event paragraph)
+//    stepping correctly too via ITS OWN `(options.step || 10) * 0.1`
+//    fallback math.
+//
+// 2. The typed-commit SNAP (`wireMultipleOfSnap`) -- a `widget.callback`
+//    wrap in this file's own established idiom, deliberately NOT left to
+//    the frontend's built-in step2-driven auto-round alone: that
+//    mechanism lives in `useIntWidget.ts`'s `onValueChange`, a
+//    comparatively recent addition that an older frontend build may not
+//    carry at all, and this fix has to hold on every build the pack
+//    supports, not just this rig's. Reusing `snapTo`
+//    (`snapDimensionValue`) rather than a second rounding implementation,
+//    per the round brief. Verified to fire on COMMIT ONLY, never
+//    mid-keystroke, straight from the installed frontend's own
+//    `ScrubableNumberInput.vue` source: the raw `<input>` has no `@input`
+//    handler at all -- `modelValue` (and so eventually `widget.callback`,
+//    "the one write path both renderers share", file header) is written
+//    ONLY from `@blur`, `@keyup.enter`, the +/- buttons, or a swipe-drag.
+//    So unlike a custom DOM widget's own `<input>` (`frame_saver.js`'s
+//    `setFrameInputElValue`, FORMAT.md §7.9's re-render law), there is no
+//    "clobbered mid-edit" hazard here to guard against with an
+//    `document.activeElement` check -- the widget system's own
+//    architecture already makes `widget.callback` a commit-only hook.
+
+/**
+ * Keeps the width/height widgets' OWN arrow-button/drag step in lockstep
+ * with `multiple_of` -- see this section's own header for the verified
+ * frontend semantics. `multiple_of` <= 0 (off, or a malformed/non-numeric
+ * widget value -- fail soft) restores the plain native step declared in
+ * nodes_resolution.py's own INPUT_TYPES, so "off" really does mean
+ * unchanged-from-before-this-feature. Change-gated (FORMAT.md §7.9) --
+ * only writes a field when it actually differs.
+ */
+function applyMultipleOfWidgetStep(node) {
+  const unit = currentMultipleOfValue(node)
+  const step2 = unit > 0 ? unit : NATIVE_DIMENSION_STEP
+  const step = step2 * 10 // legacy ×10 convention -- see section header
+  for (const name of ['width', 'height']) {
+    const widget = widgetByName(node, name)
+    if (!widget?.options) continue
+    if (widget.options.step2 !== step2) widget.options.step2 = step2
+    if (widget.options.step !== step) widget.options.step = step
+  }
+}
+
+/**
+ * Snaps width/height's OWN value to the current `multiple_of` on every
+ * commit -- the typed-input half of the owner report above ("...or when
+ * typing for a number to snap to the nearest number divisible by 4").
+ * Installed BEFORE `wireRatioLock` in `attach()` so that wrap's own
+ * width/height callback -- which reads the CURRENT widget value in its
+ * `finally` block to derive the OTHER axis -- sees the ALREADY-snapped
+ * anchor: "conform to ratio first, then snap" (the round brief's ordering)
+ * already holds for the DERIVED side via `conformNodeSizeToRatio`'s
+ * existing `roundToMultipleOf`, but `conformToRatio` never touches its own
+ * ANCHOR dimension -- without this wrap, a ratio-locked anchor field would
+ * keep ignoring `multiple_of` even after this fix.
+ *
+ * Skips entirely while `node._epsSuppressMultipleOfSnap` is set --
+ * `attachCopyFromImage`'s own write is a deliberate, owner-endorsed
+ * exception ("'copy' means copy": see that function's own comment) and
+ * must land byte-exact, not snapped.
+ *
+ * A bare `this.value = snapped` (no `.callback()` re-invoke) avoids
+ * recursing back into this very callback -- the established "silent
+ * write" idiom `configure()`'s own restore path already uses (file
+ * header, "Widget-value writes"). No-op when the value's already aligned,
+ * so an on-multiple value never generates a spurious extra write.
+ */
+function wireMultipleOfSnap(node) {
+  for (const name of ['width', 'height']) {
+    const widget = widgetByName(node, name)
+    if (!widget) continue
+    const originalCallback = widget.callback
+    widget.callback = function (...args) {
+      let result
+      try {
+        result = originalCallback?.apply(this, args)
+      } finally {
+        if (!node._epsSuppressMultipleOfSnap) {
+          const unit = currentMultipleOfValue(node)
+          if (unit > 0) {
+            const min = Number(this.options?.min) || 0
+            const max = Number.isFinite(this.options?.max) ? this.options.max : Infinity
+            const snapped = snapDimensionValue(Number(this.value) || 0, unit, min, max)
+            if (snapped !== this.value) this.value = snapped
+          }
+        }
+      }
+      return result
+    }
+  }
+}
+
+/**
+ * Runs *fn* with the M5 self-snap wrap (`wireMultipleOfSnap`) suppressed
+ * for *node* -- `attachCopyFromImage`'s ONLY caller: that button's own
+ * doc is explicit ("'copy' means copy, and a set `multiple_of` then
+ * rounds ... exactly as it would for a hand-typed size" -- true again
+ * post-M5 since a hand-typed size is now ALSO snapped immediately, but
+ * the copy button itself stays the one deliberate exception so the wired
+ * image's exact pixels are always visible). try/finally so a throwing
+ * *fn* can never leave the flag stuck on.
+ */
+function withMultipleOfSnapSuppressed(node, fn) {
+  node._epsSuppressMultipleOfSnap = true
+  try {
+    fn()
+  } finally {
+    node._epsSuppressMultipleOfSnap = false
+  }
+}
+
+/**
+ * Re-snaps the CURRENT width/height widget values to the CURRENT
+ * `multiple_of`, ratio-lock-aware: conforms to the ratio FIRST (anchor
+ * width -- a no-op passthrough when no ratio is locked), THEN snaps BOTH
+ * resulting dimensions -- the anchor side directly (a ratio lock never
+ * touches its own anchor, so without this it would keep ignoring
+ * `multiple_of`), the derived side redundantly-but-harmlessly on top of
+ * `conformNodeSizeToRatio`'s own internal `roundToMultipleOf` (idempotent
+ * on an already-aligned value). Silent -- bare `widget.value = X`, no
+ * `.callback()` -- the SAME idiom `writeSize`/`applyPresetValues` already
+ * use for a courtesy correction that must not read as a second manual
+ * edit or clear a selected preset. Both callers below (`multiple_of`
+ * changing, and a reload reconcile) are exactly that kind of correction,
+ * never a user typing into width/height itself (that path is
+ * `wireMultipleOfSnap`, which snaps in place inside the field's OWN
+ * callback instead). No-op while `multiple_of` is off (0) or either
+ * widget is missing.
+ */
+function resnapCurrentSizeToMultipleOf(node) {
+  const widthWidget = widgetByName(node, 'width')
+  const heightWidget = widgetByName(node, 'height')
+  if (!widthWidget || !heightWidget) return
+  const unit = currentMultipleOfValue(node)
+  if (!(unit > 0)) return
+
+  const conformed = conformNodeSizeToRatio(
+    node,
+    Number(widthWidget.value) || 0,
+    Number(heightWidget.value) || 0,
+    'width'
+  )
+  const widthMin = Number(widthWidget.options?.min) || 0
+  const widthMax = Number.isFinite(widthWidget.options?.max) ? widthWidget.options.max : Infinity
+  const heightMin = Number(heightWidget.options?.min) || 0
+  const heightMax = Number.isFinite(heightWidget.options?.max) ? heightWidget.options.max : Infinity
+
+  const nextWidth = snapDimensionValue(conformed.width, unit, widthMin, widthMax)
+  const nextHeight = snapDimensionValue(conformed.height, unit, heightMin, heightMax)
+
+  if (widthWidget.value !== nextWidth) widthWidget.value = nextWidth
+  if (heightWidget.value !== nextHeight) heightWidget.value = nextHeight
+}
+
+/**
+ * Installs the M5 `multiple_of` <-> width/height wiring on *node*:
+ *
+ * - Applies the initial widget step once (a fresh node's `multiple_of`
+ *   starts at its own default; a reload's saved value lands later, via
+ *   `onConfigure` below -- `attach()` always runs BEFORE `configure()`,
+ *   file header).
+ * - `multiple_of`'s OWN callback: re-syncs the step AND re-snaps the
+ *   CURRENT width/height to the new unit -- this file's standing "Number
+ *   Controller" principle (the M3/M4 sections above lean on it too): the
+ *   box must never show one number while a different one is what the
+ *   backend will actually run at execution (`_round_to_multiple`,
+ *   nodes_resolution.py) -- so width=1023 with a freshly-set
+ *   multiple_of=4 becomes a VISIBLE 1024, not a silent surprise at run
+ *   time. This same callback is what makes a SELECTED PRESET's own
+ *   width/height end up snapped by the preset's own `multiple_of` too:
+ *   `applyPresetValues`'s per-field loop writes `multiple_of` LAST
+ *   (`PRESET_FIELD_NAMES`'s own order), so by the time this fires,
+ *   width/height already hold the preset's freshly-applied raw values.
+ * - `wireMultipleOfSnap`: the typed-commit half (see its own doc).
+ * - `onConfigure`: a saved workflow's restored width/height might not
+ *   satisfy its OWN restored `multiple_of` (`configure()`'s widget
+ *   restore is a bare value assignment with no callback, file header) --
+ *   silently reconciled on load, no toast (a load-time repair, not a user
+ *   action -- same posture as `wireRatioLock`'s own reload reconcile).
+ */
+function wireMultipleOfLock(node) {
+  applyMultipleOfWidgetStep(node)
+
+  const multipleOfWidget = widgetByName(node, 'multiple_of')
+  if (multipleOfWidget) {
+    const originalCallback = multipleOfWidget.callback
+    multipleOfWidget.callback = function (...args) {
+      let result
+      try {
+        result = originalCallback?.apply(this, args)
+      } finally {
+        applyMultipleOfWidgetStep(node)
+        resnapCurrentSizeToMultipleOf(node)
+        renderGrid(node)
+      }
+      return result
+    }
+  }
+
+  wireMultipleOfSnap(node)
+
+  const originalOnConfigure = node.onConfigure
+  node.onConfigure = function multipleOfOnConfigure(info) {
+    let result
+    try {
+      result = originalOnConfigure?.call(this, info)
+    } finally {
+      try {
+        applyMultipleOfWidgetStep(this)
+        resnapCurrentSizeToMultipleOf(this)
+      } catch (error) {
+        console.warn(PREFIX, 'multiple_of post-configure reconcile failed', error)
+      }
+    }
+    return result
+  }
+}
+
 // --------------------------------------------------------------- lifecycle
 
 /** Frontend-only one-time setup: inject the grid's stylesheet once. */
@@ -3185,8 +3491,15 @@ const COPY_FROM_IMAGE_LABEL = 'copy from image'
  * The size comes from `readIncomingImageSize` -- the same live read the
  * source line uses, so the button is right whenever that line is (and the
  * two can never disagree). EXACT pixels, deliberately not snapped to
- * `multiple_of`: "copy" means copy, and a set `multiple_of` then rounds at
- * run time exactly as it would for a hand-typed size.
+ * `multiple_of`: "copy" means copy -- a set `multiple_of` still rounds it
+ * for real at execution, exactly as before. (M5, owner report 2026-09-08:
+ * a HAND-TYPED size now snaps immediately in the panel too, so this
+ * button is the one deliberate exception left where the panel shows a
+ * different number than what will actually run -- on purpose, so the
+ * wired image's exact pixels are always visible here. `writeSize` below
+ * runs under `withMultipleOfSnapSuppressed` so M5's self-snap wrap
+ * (`wireMultipleOfSnap`) leaves this specific write alone; ratio-lock
+ * still applies, same as always.)
  *
  * Failure is never silent (§6.3): nothing wired and "wired but no decoded
  * image yet" are DIFFERENT toasts, because they need different fixes.
@@ -3228,7 +3541,9 @@ function attachCopyFromImage(node) {
     // performs the identical conform before writing; this second call is
     // only to decide whether the two differ enough to be worth a toast.
     const conformed = conformNodeSizeToRatio(node, size.width, size.height, 'width')
-    writeSize(node, size.width, size.height)
+    // M5: this write stays byte-exact even with multiple_of set -- see
+    // this function's own doc.
+    withMultipleOfSnapSuppressed(node, () => writeSize(node, size.width, size.height))
     if (conformed.width !== size.width || conformed.height !== size.height) {
       toast(
         node,
@@ -3319,6 +3634,12 @@ export function attach(node) {
 
   attachSizeGrid(node)
   attachPresetsUi(node)
+  // BEFORE wireRatioLock: M5's width/height self-snap wrap must sit
+  // INSIDE ratio-lock's own width/height wrap (installed after it, so it
+  // runs first/innermost — file header "chain wrap" idiom) so a locked
+  // ratio's finally-block read of the anchor's CURRENT value sees the
+  // already-snapped number, not the raw typed one (M5's own doc).
+  wireMultipleOfLock(node)
   // After attachPresetsUi: wireRatioLock reuses the presets feature's own
   // `state.applying` guard (withRatioApplyGuard), which only exists once
   // attachPresetsUi has run (fail-soft either way -- see that guard's doc).

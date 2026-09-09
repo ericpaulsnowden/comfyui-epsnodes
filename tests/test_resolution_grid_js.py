@@ -501,8 +501,21 @@ class TestCopyFromImageV0630:
         # time exactly as it would for a hand-typed size. (The ratio lock's
         # OWN multiple_of snap, when a ratio is actually locked, lives in
         # conformNodeSizeToRatio -- a separate function -- not literally in
-        # this one's own source text.)
-        assert "multiple_of" not in body
+        # this one's own source text.) This function still does no
+        # multiple_of ROUNDING of its own -- neither `snapDimensionValue`
+        # nor the plain grid `snapTo` appear here.
+        assert "snapDimensionValue(" not in body
+        assert "snapTo(" not in body
+
+    def test_copy_write_suppresses_the_m5_self_snap(self, source: str) -> None:
+        """M5 (owner report 2026-09-08) added a width/height self-snap wrap
+        that fires on every widget commit, including this button's own
+        `writeSize` call -- which would silently break "'copy' means copy"
+        (this function's own doc). The one write here must run under the
+        suppression guard so the wired image's EXACT pixels always land,
+        multiple_of notwithstanding."""
+        body = _function_body(source, "attachCopyFromImage(node)")
+        assert "withMultipleOfSnapSuppressed(node, () => writeSize(" in body
 
     def test_both_failure_modes_toast_differently(self, source: str) -> None:
         """§6.3 never-silent: nothing wired vs wired-but-not-decoded need

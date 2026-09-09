@@ -4216,6 +4216,42 @@ and re-reported against `universal_controller.js` for v0.91.0). Until
 helper's name before you finish fixing it** -- that grep is the only thing
 standing between a fix and its siblings.
 
+
+**M5 — the width/height FIELDS follow `multiple_of` too (v0.91.3, owner
+report 2026-09-08: "EPS Resolution can have multiple_of set but it doesn't
+seem to respect it on the front end ... if it's set to 4, and I click the
+arrows I'd expect the number to jump by 4").** `multiple_of` was already
+honoured by M2's grid drag and by the backend's execution-time rounding --
+but not by the two widgets the owner actually types into. Now:
+
+- **Arrows/drag step by it.** The widget's step tracks `multiple_of` via
+  `options.step2`, mirrored into the legacy `options.step` (`step2 * 10`)
+  for older frontend builds. Verified against the installed
+  `comfyui_frontend_package`'s own sourcemaps, not guessed:
+  `getWidgetStep()` is `options.step2 || (options.step || 10) * 0.1`, read
+  LIVE off the widget on every interaction by both renderers, so mutating
+  it from JS takes effect immediately. `multiple_of` off restores the
+  declared native step.
+- **A typed value snaps on COMMIT, never mid-keystroke.** Implemented by
+  wrapping `widget.callback`, which the Vue number input only fires on
+  blur/Enter/buttons/drag -- there is no `@input` handler, so this is
+  commit-only *by construction* and needs no `document.activeElement`
+  guard (unlike frame_saver.js's own DOM input, §6.7).
+- **Changing `multiple_of` re-snaps the current width/height**, as does
+  loading a file whose saved size doesn't satisfy its own `multiple_of`.
+  The panel must never show a number the backend will not actually run --
+  the same principle as §6.17's INT rounding display.
+
+**Ratio + `multiple_of` when they conflict: `multiple_of` wins, the ratio
+bends, and the result is STABLE.** M4's `conformToRatio` derives and snaps
+the OTHER axis; the new wrap snaps the anchor the user typed. Both land on
+a multiple. Rig-verified: 16:9 with `multiple_of` 16 yields 1920x1088
+(exact 16:9 would be 1080, which is not a multiple of 16) -- about 14px of
+ratio drift, within M4's already-documented `multiple_of`/2 bound -- and
+re-committing the same width does NOT drift further. `copy from image`
+remains the one deliberate exception, written byte-exact ("copy means
+copy") under an explicit snap-suppression guard.
+
 ## §7 Frontend surfaces
 
 **§7.2 amendment — load-failure is an explicit, value-preserving ERROR
