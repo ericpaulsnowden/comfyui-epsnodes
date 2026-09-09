@@ -4195,6 +4195,27 @@ in still holds its slot when switched off, and a wired one still detaches
 and reconnects. A test pins that the two predicates disagree about a
 disabled blank entry -- if they ever agree again, this bug is back.
 
+
+**`installMinWidth()` was dead in four of its nine copies (v0.91.2,
+ROADMAP-shared-panel-code M0).** `node.size` is a PROXY over a typed array
+-- rig-confirmed `node.size.constructor.name === "bound Float64Array"`, so
+`Array.isArray(node.size)` is ALWAYS false. The initial width lift guarded
+by it therefore never ran: a node restored or pasted narrower than its
+minimum stayed narrow, and only the `onResize` wrap protected LATER
+resizes. A v0.68.1 fix replaced that guard with a `setSize()`-aware lift in
+five copies (`picker`, `checkpoint_switcher`, `frame_saver`,
+`number_controller`, `distributor`) and never reached the other four --
+`notebook`, `controller`, `universal_controller`, `prompt_builder`, i.e.
+the four biggest panels -- where it shipped broken until a 2026-09-08
+duplication census found it. NOT found by a user; found by going looking.
+
+This is the pack's hand-duplication convention leaking a fix for the third
+time (see also `_flushPendingNameEdit`, fixed in `controller.js` for v0.90.0
+and re-reported against `universal_controller.js` for v0.91.0). Until
+`docs/ROADMAP-shared-panel-code.md`'s milestones land, **grep `web/` for a
+helper's name before you finish fixing it** -- that grep is the only thing
+standing between a fix and its siblings.
+
 ## §7 Frontend surfaces
 
 **§7.2 amendment — load-failure is an explicit, value-preserving ERROR

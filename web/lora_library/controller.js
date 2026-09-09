@@ -2319,8 +2319,16 @@ function installMinWidth(node, minWidth) {
     if (size && size[0] < minWidth) size[0] = minWidth
     return originalOnResize?.call(this, size)
   }
-  if (Array.isArray(node.size) && node.size[0] < minWidth) {
-    node.size[0] = minWidth
+  // v0.68.1 / ported here 2026-09-08: `node.size` is a PROXY over a typed
+  // array, so the `Array.isArray(node.size)` guard this replaced was always
+  // false -- a node created narrower than `minWidth` never had its width
+  // lifted at all (only the `onResize` wrap above protected LATER resizes).
+  // The fix reached five of this helper's nine copies in v0.68.1 and missed
+  // the four biggest panels for months; see docs/ROADMAP-shared-panel-code.md
+  // M0, and grep `web/` for this helper before touching it again. Lift
+  // through `setSize` so litegraph's own size mirror runs.
+  if (node.size && node.size[0] < minWidth && typeof node.setSize === 'function') {
+    node.setSize([minWidth, node.size[1]])
   }
 }
 

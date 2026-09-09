@@ -87,7 +87,7 @@ So the barrier is habit, not architecture.
 Ordered by value-per-risk. Each is independently shippable and useful on its
 own; none depends on a later one.
 
-### M0 — Fix the live drift first (no refactor)
+### M0 — Fix the live drift first (no refactor) — **DONE, v0.91.2**
 
 Bring the four stale `installMinWidth()` copies in line with the five fixed
 ones. **This is a bug fix, not a cleanup**, and it should not wait behind
@@ -98,7 +98,10 @@ any refactoring.
 - Verify: create each of the four nodes below its minimum width on the rig
   and confirm it lifts.
 
-*Do this even if every other milestone is declined.*
+*Shipped 2026-09-08.* Rig-confirmed the guard was genuinely dead
+(`node.size.constructor.name === "bound Float64Array"`, so
+`Array.isArray` is false), and that all four panels now lift a
+too-narrow restored width. All nine copies agree again.
 
 ### M1 — `web/lora_library/dom_helpers.js`: `el()`
 
