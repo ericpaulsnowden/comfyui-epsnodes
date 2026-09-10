@@ -1304,6 +1304,21 @@ puts you back on the live library.
 
 ## EPS Frame Saver (shipped)
 
+- **Upload a video from the computer you're sitting at.** Click **Upload…**
+  (or drag a video onto the node) to send a file from *your* machine — say,
+  a Mac driving a ComfyUI PC over the network — into ComfyUI. Browse only
+  shows the ComfyUI machine's own folders, so from another computer this is
+  the way in. You get a progress bar and a Cancel, and the video then
+  previews, scrubs and runs exactly like one from the ComfyUI machine. It
+  also appears in core's own Load Video list.
+- **Big videos and the upload limit.** ComfyUI refuses uploads over 100 MB
+  unless you raise its limit. The node reads your server's actual limit and
+  warns before a too-large upload even starts. On ComfyUI Desktop, raise it
+  in **Settings → Server-Config → Network → Maximum Upload Size** and
+  restart; from a command line, use `--max-upload-size <MB>`. Use that field,
+  not Desktop's free-text “Server launch” box — mistyped flags there have
+  stopped Desktop from starting.
+
 `EPSNodes → EPS Frame Saver`: load a video and pull a single frame out of it
 as an image.
 

@@ -238,6 +238,14 @@ def _resolve_input_ref(ref: str) -> tuple[Path | None, str | None]:
     Requires ComfyUI's `folder_paths` (lazy import, injectable for tests via
     :data:`_FOLDER_PATHS_OVERRIDE`); a non-ComfyUI process gets a clean 400,
     never a crash.
+
+    Owner report 2026-09-10 ("Upload…" button, ``nodes_frame_saver.py``
+    module docstring): also called directly from
+    :func:`eps_image.nodes_frame_saver._resolve_execution_path` -- `run()`/
+    `IS_CHANGED` reuse this SAME resolver for an uploaded/annotated
+    `video_path`, rather than a second, drifting implementation. Keep this
+    function's contract (return shape, extension check, the
+    :data:`_FOLDER_PATHS_OVERRIDE` test seam) stable for that caller too.
     """
     trimmed = (ref or "").strip()
     if not trimmed:

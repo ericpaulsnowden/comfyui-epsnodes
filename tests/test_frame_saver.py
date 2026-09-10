@@ -325,6 +325,152 @@ class TestRun:
             node.run(video_path="/no/such/place/nope.mp4", frame=0)
 
 
+# ==================================================== owner report 2026-09-10
+#
+# The "Upload…" button/drag-drop (`web/eps_image/frame_saver.js`) writes an
+# ANNOTATED INPUT REF into `video_path` instead of a literal absolute path --
+# `_resolve_execution_path` (nodes_frame_saver.py) must resolve it via the
+# SAME `routes_frame_saver._resolve_input_ref` the HTTP routes' `input_ref`
+# preview mode already uses, a plain absolute path must stay byte-identical,
+# and a bad/escaping ref must degrade rather than raise unhandled.
+
+
+class TestUploadedInputRefExecution:
+    @pytest.fixture
+    def fake_folder_paths(self, monkeypatch):
+        """Unlike `TestInputRefMode`'s identical-looking fixture below
+        (which only ever exercises BARE names, no bracket), this one also
+        strips a trailing ` [input]`/` [output]`/` [temp]` annotation --
+        mirroring real `folder_paths.annotated_filepath`'s own suffix
+        handling -- so it exercises the exact bracketed form
+        `web/eps_image/frame_saver.js`'s `annotatedInputRef()` writes, not
+        just the bare-filename shape an unwired core LoadVideo ref holds."""
+
+        def strip_annotation(name):
+            for suffix in (" [input]", " [output]", " [temp]"):
+                if name.endswith(suffix):
+                    return name[: -len(suffix)]
+            return name
+
+        class FakeFolderPaths:
+            @staticmethod
+            def exists_annotated_filepath(name):
+                return (_SEEDED_CLIPS_DIR / strip_annotation(name)).is_file()
+
+            @staticmethod
+            def get_annotated_filepath(name):
+                return str(_SEEDED_CLIPS_DIR / strip_annotation(name))
+
+        monkeypatch.setattr(routes_frame_saver, "_FOLDER_PATHS_OVERRIDE", FakeFolderPaths)
+        return FakeFolderPaths
+
+    def test_annotated_ref_resolves_and_extracts_the_frame(self, fake_folder_paths) -> None:
+        _seeded_clip(CLIP_RED)  # skip cleanly if the rig fixture is absent
+        node = EPSFrameSaver()
+        image, width, height = node.run(video_path="clip_red.mp4 [input]", frame=0)
+        assert image.shape == (1, SEEDED_HEIGHT, SEEDED_WIDTH, 3)
+        assert width == SEEDED_WIDTH
+        assert height == SEEDED_HEIGHT
+
+    def test_a_foreign_windows_absolute_path_is_a_path_not_an_input_ref(
+        self, fake_folder_paths
+    ) -> None:
+        """Lead review 2026-09-10: frame_saver.js's looksAbsolutePath treats
+        drive-letter and UNC paths as absolute on EVERY OS, but plain
+        `Path(...).is_absolute()` says `C:\\...` is NOT absolute on POSIX.
+        A workflow saved on the owner's Windows PC and opened on his Linux
+        box must therefore still be read as a PATH here -- not pushed
+        through input-ref resolution, which would raise a misleading
+        "invalid input_ref". On a Windows host these are native absolute
+        paths and come back unchanged anyway, so this holds on any OS."""
+        from eps_image.nodes_frame_saver import _resolve_execution_path
+
+        for foreign in ("C:\\videos\\clip.mp4", "D:/shots/clip.mp4", "\\\\nas\\share\\clip.mp4"):
+            assert _resolve_execution_path(foreign) == foreign
+
+    def test_bare_filename_ref_without_a_bracket_also_resolves(self, fake_folder_paths) -> None:
+        # An unwired core LoadVideo's `file` combo holds a plain filename,
+        # no bracket suffix -- must resolve too (get_annotated_filepath's
+        # own no-suffix fallback to the input directory).
+        _seeded_clip(CLIP_RED)
+        node = EPSFrameSaver()
+        image, _w, _h = node.run(video_path="clip_red.mp4", frame=0)
+        assert image.shape == (1, SEEDED_HEIGHT, SEEDED_WIDTH, 3)
+
+    def test_is_changed_resolves_the_ref_and_stats_the_real_file(self, fake_folder_paths) -> None:
+        path = _seeded_clip(CLIP_RED)
+        key = EPSFrameSaver.IS_CHANGED(video_path="clip_red.mp4 [input]", frame=0)
+        stat = Path(path).stat()
+        assert key == f"{stat.st_mtime}:{stat.st_size}:0"
+
+    def test_is_changed_reflects_a_frame_change_for_the_same_ref(self, fake_folder_paths) -> None:
+        _seeded_clip(CLIP_RED)
+        key0 = EPSFrameSaver.IS_CHANGED(video_path="clip_red.mp4 [input]", frame=0)
+        key5 = EPSFrameSaver.IS_CHANGED(video_path="clip_red.mp4 [input]", frame=5)
+        assert key0 != key5
+
+    def test_absolute_path_is_still_byte_identical_to_pre_upload_behavior(self) -> None:
+        # No fake_folder_paths needed -- an absolute path never reaches the
+        # resolver at all (Path(path).is_absolute() short-circuits it).
+        path = _seeded_clip(CLIP_RED)
+        node = EPSFrameSaver()
+        image, width, height = node.run(video_path=path, frame=0)
+        assert image.shape == (1, SEEDED_HEIGHT, SEEDED_WIDTH, 3)
+        assert width == SEEDED_WIDTH
+        assert height == SEEDED_HEIGHT
+        key = EPSFrameSaver.IS_CHANGED(video_path=path, frame=0)
+        stat = Path(path).stat()
+        assert key == f"{stat.st_mtime}:{stat.st_size}:0"
+
+    def test_unknown_ref_raises_a_clean_value_error_at_run(self, fake_folder_paths) -> None:
+        node = EPSFrameSaver()
+        with pytest.raises(ValueError, match="EPS Frame Saver") as excinfo:
+            node.run(video_path="nope.mp4 [input]", frame=0)
+        assert "no such input video" in str(excinfo.value)
+
+    def test_unknown_ref_degrades_to_missing_in_is_changed_not_a_raise(
+        self, fake_folder_paths
+    ) -> None:
+        key = EPSFrameSaver.IS_CHANGED(video_path="nope.mp4 [input]", frame=0)
+        assert key == "missing"
+
+    def test_escaping_ref_degrades_rather_than_raising_in_is_changed(
+        self, fake_folder_paths
+    ) -> None:
+        key = EPSFrameSaver.IS_CHANGED(video_path="../../etc/passwd [input]", frame=0)
+        assert key == "missing"
+
+    def test_wrong_extension_ref_is_a_clean_value_error_at_run(
+        self, monkeypatch, tmp_path: Path
+    ) -> None:
+        (tmp_path / "notes.txt").write_text("nope")
+
+        class TxtFolderPaths:
+            @staticmethod
+            def exists_annotated_filepath(name):
+                return True
+
+            @staticmethod
+            def get_annotated_filepath(name):
+                return str(tmp_path / "notes.txt")
+
+        monkeypatch.setattr(routes_frame_saver, "_FOLDER_PATHS_OVERRIDE", TxtFolderPaths)
+        node = EPSFrameSaver()
+        with pytest.raises(ValueError, match="unsupported video extension"):
+            node.run(video_path="notes.txt [input]", frame=0)
+
+    def test_no_folder_paths_available_is_a_clean_value_error_not_a_crash(
+        self, monkeypatch
+    ) -> None:
+        # Outside ComfyUI (override unset, the real module unimportable)
+        # the resolver raises a clean ValueError instead of crashing --
+        # mirrors TestInputRefMode.test_no_folder_paths_is_a_clean_400.
+        monkeypatch.setattr(routes_frame_saver, "_FOLDER_PATHS_OVERRIDE", None)
+        node = EPSFrameSaver()
+        with pytest.raises(ValueError, match="requires a running ComfyUI"):
+            node.run(video_path="clip.mp4 [input]", frame=0)
+
+
 # ============================================================= routes_frame_saver
 
 

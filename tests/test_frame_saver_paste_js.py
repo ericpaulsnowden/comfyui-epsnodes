@@ -619,14 +619,17 @@ class TestWiredVideoInput:
         )
 
     def test_input_ref_streams_ungated_and_probes_by_ref(self, frame_saver_source: str) -> None:
+        # v0.9x (owner report 2026-09-10): refreshVideoSource now branches
+        # on effectiveSource()'s unified shape, not state.wired directly --
+        # see TestUploadFrontend for effectiveSource()'s own coverage.
         body = _function_body(frame_saver_source, "refreshVideoSource(state)")
-        assert "input_ref=${encodeURIComponent(state.wired.ref)}" in body
-        assert "startProbe(state, { input_ref: state.wired.ref })" in body
+        assert "const source = effectiveSource(state)" in body
+        assert "input_ref=${encodeURIComponent(source.ref)}" in body
+        assert "startProbe(state, { input_ref: source.ref })" in body
         # the input_ref branch must come BEFORE the isLocal gate branch --
-        # a remote viewer gets the full scrubber for LoadVideo sources.
-        assert body.index("state.wired?.kind === 'input_ref'") < body.index(
-            "state.isLocal === false"
-        )
+        # a remote viewer gets the full scrubber for LoadVideo/uploaded
+        # sources alike.
+        assert body.index("source.kind === 'input_ref'") < body.index("state.isLocal === false")
 
     def test_probe_403_adoption_is_path_mode_only(self, frame_saver_source: str) -> None:
         body = _function_body(frame_saver_source, "startProbe(state, params)")

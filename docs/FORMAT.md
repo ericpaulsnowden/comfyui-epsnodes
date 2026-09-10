@@ -4365,6 +4365,56 @@ not a detail of this fix.
 never the full-res fetch" rule**: clipspace is a PIXEL-CONSUMING path, so
 it gets the real image. Do not "optimise" it back to a thumb.
 
+
+**Upload a video from the VIEWER's own disk (v0.95.0, owner report
+2026-09-10: Frame Saver "only lets you select a frame from a host machine,
+and not from a machine that is connected to it (like one of my macs) ...
+This makes the component mostly unusable for me").** He drives ComfyUI on a
+Windows PC / Linux box from a Mac over the LAN, and the video lives on the
+Mac. Browse lists the SERVER's disk, is correctly host-only, and stays so;
+paste-a-path only takes server paths. So a remote viewer had no way in.
+
+- **An `Upload…` button, shown on local AND remote viewers**, opens the
+  browser's own file picker -- the VIEWER's disk -- and sends the file
+  through core's `POST /upload/image` (no file-type restriction despite the
+  name) into the input root, exactly where core's Load Video looks.
+  Drag-and-drop onto the node takes the same path. Progress uses
+  `XMLHttpRequest` (fetch has no upload-progress event) with Cancel.
+- **`video_path` then holds the annotated ref** `folder_paths` resolves
+  (`clip.mp4 [input]`) -- no new widget, so §8 order is untouched. An
+  uploaded ref rides the SAME ungated `input_ref` preview/probe/stream path a
+  wired Load Video always used (`effectiveSource()` generalised it off
+  `state.wired`); a wire still wins. Execution (`run`/`IS_CHANGED`) resolves
+  it through `routes_frame_saver._resolve_input_ref` -- the routes' own
+  resolver, never a second one. Rig-verified end to end: an upload from
+  outside ComfyUI's folders executed and decoded at the clip's real 320x180.
+- **Path vs ref: "absolute in EITHER platform's syntax" is a path.** The
+  upload round claimed client and server "can never disagree"; they could.
+  `looksAbsolutePath` (JS) treats `C:\...`, `C:/...` and `\\server\...`
+  as absolute on every OS, but `Path(...).is_absolute()` answers in the
+  LOCAL platform's syntax, so on the owner's Linux box a PC-saved path was
+  "not absolute" and got misrouted into input-ref resolution, failing with a
+  misleading "invalid input_ref". The backend now also consults
+  `lora_library.context.is_foreign_absolute` (the pack's 2026-08-28 answer to
+  exactly this). Rig-confirmed the old check misrouted all three Windows
+  shapes, and that a `C:\...` path now fails as "could not open video file".
+- **The upload ceiling is READ, not guessed.** ComfyUI rejects uploads over
+  `--max-upload-size` (default 100 MB) with HTTP 413 -- a few minutes of
+  1080p exceeds it. The server REPORTS its live value: `GET /features` ->
+  `max_upload_size` (bytes), from `comfy_api/feature_flags.py`, where CLI
+  flags are filtered so they can never override a core key -- so it always
+  equals the running flag (rig: 104857600). `fetchServerUploadLimitBytes()`
+  caches the promise, never rejects, falls back to 100 MB on an older server,
+  and does NOT cache a failed read. A pre-upload warning names the real
+  figure; the 413 message is the ground truth. The busy slot is claimed
+  BEFORE that await, or a double click in the gap starts two uploads.
+- **Raising it on ComfyUI Desktop:** Settings -> Server-Config -> Network ->
+  "Maximum Upload Size", then restart (the limit is read once, at
+  `web.Application(client_max_size=...)`). Deliberately NOT Desktop's
+  free-text "Server launch" box: in Comfy-Org/ComfyUI #8690 flags typed there
+  were split into single characters and Desktop would not start. Both
+  messages say so.
+
 ## §7 Frontend surfaces
 
 **§7.2 amendment — load-failure is an explicit, value-preserving ERROR

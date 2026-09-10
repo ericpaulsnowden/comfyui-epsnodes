@@ -182,6 +182,83 @@
  * `test_resolution_grid_js.py` fixture pattern) and locks the JS ext
  * allowlist to `routes_frame_saver.py`'s tuple.
  *
+ * **Upload a video from the VIEWER's own disk (owner report 2026-09-10:
+ * "[EPS Frame Saver] only lets you select a frame from a host machine, and
+ * not from a machine that is connected to it (like one of my macs) ...
+ * this makes the component mostly unusable for me").** Browse/paste both
+ * still require the machine ComfyUI runs on (Browse lists ITS disk; paste
+ * writes a path only that machine can open) -- the owner drives ComfyUI on
+ * a Windows PC/Linux box from a Mac over the LAN, so neither ever worked
+ * for him. The "Upload…" button (`buildPathBar` below) opens an ordinary
+ * `<input type="file">` -- the BROWSER's own native picker, browsing the
+ * VIEWER's disk, not the server's -- and uploads the chosen file through
+ * ComfyUI's OWN `POST /upload/image` (no file-type restriction despite the
+ * name; core's own Load Video uploads through this exact route) straight
+ * into ComfyUI's input folder, landing where core's Load Video would (so
+ * the file also shows up in ITS dropdown -- least surprise). Reimplemented
+ * locally (`uploadVideoFile`/`startUpload` below) rather than imported --
+ * this file's own header already explains why `eps_image/*.js` siblings
+ * duplicate this kind of helper by hand instead of reaching into
+ * `image_grid.js`'s module (`runAddBatch`/`uploadImageFile`/
+ * `ensureFileInput` are that file's own version of the same idea; this
+ * file's shapes are single-file and video-flavored, not multi-file/image).
+ *   - **`video_path` now holds one of TWO shapes**, disambiguated the exact
+ *     same way the backend does (`nodes_frame_saver.py`'s
+ *     `_resolve_execution_path`: `Path(value).is_absolute()`): an ABSOLUTE
+ *     PATH (Browse/paste, unchanged -- pre-existing workflows keep working
+ *     byte-identically) or an ANNOTATED INPUT REF -- `annotatedInputRef()`
+ *     below builds the exact string `folder_paths.get_annotated_filepath`
+ *     resolves, e.g. `clip.mp4 [input]` or `shots/clip.mp4 [input]` (core's
+ *     own upload response's `subfolder`+`name`+`type`, bracket-annotated).
+ *     No new widget -- still `video_path`, so FORMAT.md §8's positional
+ *     widget order and every saved workflow are untouched.
+ *   - **The scrubber/preview/probe path generalizes, never duplicates.**
+ *     `effectiveSource()` below is what `resolveWiredVideo()`'s wired
+ *     `{kind:'input_ref', ref}` shape used to be checked for directly, in
+ *     `refreshVideoSource`/`currentOverlayMessage` -- it now ALSO
+ *     recognizes an unwired, input-ref-SHAPED `video_path`
+ *     (`isInputRefVideoPath`, the client-side twin of the backend's own
+ *     absolute-path check) and returns the identical `{kind:'input_ref',
+ *     ref}` shape for it, so an uploaded file rides the SAME ungated
+ *     `?input_ref=` stream/probe routes a wired Load Video already used --
+ *     no parallel preview implementation, and it scrubs from a remote
+ *     browser exactly like the wired case always has. A wired `video`
+ *     input still wins unconditionally (`effectiveSource` checks
+ *     `state.wired` first, unchanged).
+ *   - **Upload button visible local AND remote; Browse stays host-only.**
+ *     This is the actual fix for the report: Browse needs the SERVER to
+ *     list ITS OWN disk (never the point of the ask), but Upload only ever
+ *     needs the BROWSER's native file picker plus one POST -- nothing
+ *     about it requires the viewer to be on the host machine, so
+ *     `applyGating()` below never touches `state.uploadBtn`.
+ *   - **Progress needs `XMLHttpRequest`, not `fetch`.** `fetch()` has no
+ *     upload-progress event at all; a multi-minute 1080p clip over the
+ *     owner's LAN is slow enough that a percentage (and a Cancel) matters
+ *     -- `uploadVideoFile()` below is an XHR wrapped in a Promise for
+ *     exactly that reason, with `xhr.upload`'s `progress` event driving a
+ *     path-bar status update the same way `image_grid.js`'s `runAddBatch`
+ *     turns ITS button into `Cancel (n/total)` mid-batch.
+ *   - **The 100 MB default ceiling fails LOUDLY, never silently.**
+ *     ComfyUI's own `--max-upload-size` (`comfy/cli_args.py`, default 100)
+ *     sets aiohttp's `client_max_size`; an over-limit upload gets a clean
+ *     HTTP 413 the client can detect (`uploadVideoFile`'s `xhr.status`
+ *     check) -- `oversizeUploadMessage()` below names the flag and the
+ *     default explicitly. The CLIENT can never know the server's ACTUAL
+ *     configured limit (only that ITS default is 100), so a file already
+ *     over 100 MB gets a pre-upload WARNING (`sizeWarningMessage()`)
+ *     rather than a hard block -- the owner may have already raised the
+ *     limit, and refusing to even try would be wrong in that case.
+ *   - **Drag-and-drop reuses the identical upload path.**
+ *     `installVideoDragAndDrop()` below is a thin wrapper around the SAME
+ *     `startUpload()` the button uses -- a dropped file gets identical
+ *     progress/cancel/size-warning/413 handling, not a second
+ *     implementation. This node never had `onDragOver`/`onDragDrop`
+ *     before, so there is no prior behavior to chain onto or break.
+ * Pure helpers (`isInputRefVideoPath`, `annotatedInputRef`,
+ * `displayPathText`, `sizeWarningMessage`, `oversizeUploadMessage`) are
+ * exported; `tests/test_frame_saver_upload_js.py` drives them under Node,
+ * the same fixture pattern `test_frame_saver_paste_js.py` established.
+ *
  * **Five-button transport + press-and-hold auto-repeat (owner ask
  * 2026-07-26: "+5/-5 and a jump-to-start button; holding -5/-1/+1/+5 should
  * keep moving you through the timeline instead of having to click
@@ -307,6 +384,73 @@ const FS_ROOTS = 'ROOTS'
  * tuple -- the hand-lockstep, now machine-checked. */
 export const VIDEO_EXT_LIST = ['.mp4', '.mov', '.webm', '.mkv', '.avi', '.m4v', '.ogv']
 const VIDEO_EXT_PARAM = VIDEO_EXT_LIST.join(',')
+
+//: ComfyUI's own generic upload route (`server.py`'s `image_upload` -- no
+//: file-type restriction despite the name; core's own Load Video uploads
+//: through this exact route). Reused rather than inventing a second
+//: upload endpoint (owner report 2026-09-10, file header's "Upload a
+//: video" section).
+const UPLOAD_ROUTE = '/upload/image'
+
+//: ComfyUI's own `--max-upload-size` DEFAULT in MB (`comfy/cli_args.py`) --
+//: named in both the pre-upload size warning and the 413 toast below. The
+//: owner's actual server may have RAISED this; the client has no way to
+//: read the real configured value, so both messages say "default", never
+//: assert the live ceiling as fact.
+const DEFAULT_MAX_UPLOAD_MB = 100
+
+/**
+ * How the owner raises the ceiling: ComfyUI Desktop's settings field on his
+ * Windows PC, and the plain flag on his Linux box. Deliberately the
+ * DEDICATED Desktop field, not Desktop's free-text "Server launch" box --
+ * flags typed there have been split into single characters and stopped
+ * Desktop from starting (Comfy-Org/ComfyUI issue #8690). A restart is
+ * required either way: ComfyUI reads the limit once, when it builds its web
+ * app (`server.py`, `web.Application(client_max_size=...)`).
+ */
+const RAISE_LIMIT_HINT =
+  'Raise it in ComfyUI Desktop under Settings → Server-Config → Network → ' +
+  'Maximum Upload Size, or start ComfyUI with --max-upload-size <MB>, then ' +
+  'restart ComfyUI.'
+
+let serverUploadLimitPromise = null
+
+/**
+ * The ComfyUI server's REAL upload ceiling in bytes, or `null` when it can't
+ * be read. ComfyUI reports it: `GET /features` carries `max_upload_size`
+ * (bytes) from `comfy_api/feature_flags.py`, where CLI flags are filtered so
+ * they can never override a core key -- so it always equals the running
+ * `--max-upload-size` (rig-verified 2026-09-10: 104857600 = 100 MB). The
+ * upload round shipped a warning claiming this "can't be checked from here";
+ * it can. Owner relevance: on ComfyUI Desktop he raises the limit in a
+ * settings field rather than at a prompt, so seeing the CURRENT figure is
+ * how he knows the change took.
+ *
+ * Cached as a promise so concurrent callers share one request. Never
+ * rejects: an older ComfyUI without the route, a network error, or a
+ * missing/odd key resolves `null` and callers fall back to the 100 MB
+ * default -- and a failed read is NOT cached, so the next upload retries.
+ * @returns {Promise<number | null>}
+ */
+export function fetchServerUploadLimitBytes() {
+  if (!serverUploadLimitPromise) {
+    serverUploadLimitPromise = (async () => {
+      try {
+        const response = await api.fetchApi('/features')
+        if (!response?.ok) return null
+        const features = await response.json()
+        const bytes = Number(features?.max_upload_size)
+        return Number.isFinite(bytes) && bytes > 0 ? bytes : null
+      } catch {
+        return null
+      }
+    })().then((bytes) => {
+      if (bytes === null) serverUploadLimitPromise = null // retry next upload
+      return bytes
+    })
+  }
+  return serverUploadLimitPromise
+}
 
 const STYLE_TAG_ID = 'eps-frame-saver-styles'
 const PICKER_OVERLAY_ID = 'epsfs-picker-overlay'
@@ -868,7 +1012,18 @@ function createState(node, pathWidget, frameWidget) {
     // The per-instance document-level `paste` listener for this node's
     // whole lifetime (paste-a-path, file header) -- registered by
     // installPastePathHandler, removed by wireNodeCleanup's onRemoved wrap.
-    pasteHandler: null
+    pasteHandler: null,
+    // Owner report 2026-09-10 ("Upload…"): DOM ref + bookkeeping for the
+    // upload flow -- see file header's "Upload a video" section.
+    uploadBtn: null,
+    // Lazily created by ensureUploadInput(); detached (never appended to
+    // the DOM), so there is nothing to remove on cleanup beyond dropping
+    // the reference (mirrors image_grid.js's identical file-input idiom).
+    uploadInputEl: null,
+    // `{abort()}` while an upload is in-flight for this node, else `null`
+    // -- the busy-guard AND what the Upload button's Cancel click targets
+    // (startUpload).
+    upload: null
   }
 }
 
@@ -993,11 +1148,30 @@ function buildPathBar(state) {
     if (state.browseBtn.disabled) return
     openPicker(state)
   })
+  // Owner report 2026-09-10: visible on BOTH local and remote viewers,
+  // UNLIKE Browse -- never gated by applyGating() (file header's "Upload a
+  // video" section is the actual fix for the report). Doubles as Cancel
+  // while an upload is in-flight (startUpload() mutates .textContent).
+  state.uploadBtn = el('button', {
+    className: 'epsfs-btn',
+    text: 'Upload…',
+    attrs: {
+      title: "Upload a video from THIS computer/browser into ComfyUI's input folder"
+    }
+  })
+  state.uploadBtn.addEventListener('click', () => {
+    if (state.upload) {
+      state.upload.abort()
+      return
+    }
+    ensureUploadInput(state).click()
+  })
   state.pathTextEl = el('div', { className: 'epsfs-path-text', text: '(no video selected)' })
   state.hostNoteEl = el('div', { className: 'epsfs-host-note' })
   state.pathStatusEl = el('div', { className: 'epsfs-path-status' })
   return el('div', { className: 'epsfs-bar' }, [
     state.browseBtn,
+    state.uploadBtn,
     state.pathTextEl,
     state.hostNoteEl,
     state.pathStatusEl
@@ -1444,11 +1618,15 @@ function currentOverlayMessage(state) {
     )
   }
   if (!state.path && !state.wired) {
-    return 'No video selected — Browse for a video file, or wire a video into the video input.'
+    return (
+      'No video selected — Browse or Upload a video file, or wire a video ' +
+      'into the video input.'
+    )
   }
-  if (!state.wired && state.isLocal === false) {
-    // input_ref previews work remotely (§6.7 v0.60.0) -- only PATH mode
-    // needs the host machine.
+  // v0.9x (owner report 2026-09-10): an uploaded/input-ref `video_path`
+  // works remotely exactly like a wired input_ref always has -- only a
+  // literal PATH (Browse/paste) needs the host machine.
+  if (!state.wired && state.isLocal === false && !isInputRefVideoPath(state.path)) {
     return 'Preview + probing require the machine running ComfyUI — Run still works.'
   }
   if (state.videoPlayable === false) {
@@ -1495,6 +1673,19 @@ function updateControlsEnabled(state) {
 // Path changes -- Browse pick, workflow load/undo resync, or gating flip.
 // ---------------------------------------------------------------------------
 
+/**
+ * *path* with a trailing ` [input]`/` [output]`/` [temp]` annotation
+ * stripped, for DISPLAY only -- `annotatedInputRef()` (Upload button/
+ * drag-drop) writes that bracket into the REAL `video_path` widget value
+ * (unchanged -- still what serializes/resolves), so an uploaded file's
+ * path bar reads `clip.mp4`, not the more mechanical `clip.mp4 [input]`.
+ * @param {string} path
+ */
+export function displayPathText(path) {
+  const value = typeof path === 'string' ? path : ''
+  return value.replace(/ \[(?:input|output|temp)\]$/, '')
+}
+
 function updatePathBarText(state) {
   if (!state.pathTextEl) return
   if (state.wired) {
@@ -1508,7 +1699,7 @@ function updatePathBarText(state) {
     state.pathTextEl.title = label
     return
   }
-  const text = state.path || '(no video selected)'
+  const text = state.path ? displayPathText(state.path) : '(no video selected)'
   state.pathTextEl.textContent = frontTruncate(text)
   state.pathTextEl.title = state.path || ''
 }
@@ -1575,32 +1766,37 @@ function refreshVideoSource(state) {
   state.probe = null
   state.probeToken += 1
 
-  if (state.wired?.kind === 'input_ref') {
-    // §6.7 v0.60.0: an upstream LoadVideo's file, streamed via the routes'
-    // input_ref mode -- deliberately NOT gated on isLocal (an input-dir
-    // file is exposed to every viewer by core's own /view already), so the
-    // scrubber works from a remote browser too.
-    const url = api.apiURL(`/eps_frame_saver/stream?input_ref=${encodeURIComponent(state.wired.ref)}`)
+  // v0.9x (owner report 2026-09-10): `effectiveSource()` folds the wired
+  // `video` input's own `input_ref`/`opaque` shapes together with an
+  // UNWIRED `video_path` that is itself input-ref-shaped (an upload) --
+  // see that function's own docstring and file header.
+  const source = effectiveSource(state)
+  if (source.kind === 'input_ref') {
+    // Deliberately NOT gated on isLocal (an input-dir file is exposed to
+    // every viewer by core's own /view already) -- true whether this ref
+    // came from a wired Load Video or this file's own Upload button.
+    const url = api.apiURL(`/eps_frame_saver/stream?input_ref=${encodeURIComponent(source.ref)}`)
     state.videoEl.src = url
     state.videoEl.load()
-    startProbe(state, { input_ref: state.wired.ref })
-  } else if (state.wired) {
-    // Opaque wired source: the video only exists at run time. No preview
-    // to try; the overlay says so and the frame FIELD stays live.
+    startProbe(state, { input_ref: source.ref })
+  } else if (source.kind === 'opaque') {
+    // Wired to something other than a statically-knowable LoadVideo: the
+    // video only exists at run time. No preview to try; the overlay says
+    // so and the frame FIELD stays live.
     state.videoEl.removeAttribute('src')
     state.videoEl.load()
-  } else if (!state.path || state.isLocal === false) {
-    // Empty path, or a remote viewer (the stream/probe routes are
-    // loopback-only regardless -- FORMAT.md §6.7 -- so don't even try;
-    // avoids a confusing generic video `error` event standing in for "this
-    // requires the host machine").
+  } else if (source.kind === 'none' || (source.kind === 'path' && state.isLocal === false)) {
+    // Empty, or a remote viewer with a literal PATH (the stream/probe
+    // routes are loopback-only for path mode -- FORMAT.md §6.7 -- so don't
+    // even try; avoids a confusing generic video `error` event standing in
+    // for "this requires the host machine").
     state.videoEl.removeAttribute('src')
     state.videoEl.load()
   } else {
-    const url = api.apiURL(`/eps_frame_saver/stream?path=${encodeURIComponent(state.path)}`)
+    const url = api.apiURL(`/eps_frame_saver/stream?path=${encodeURIComponent(source.path)}`)
     state.videoEl.src = url
     state.videoEl.load()
-    startProbe(state, { path: state.path })
+    startProbe(state, { path: source.path })
   }
   updateOverlayUi(state)
   refreshFrameUi(state)
@@ -1666,6 +1862,30 @@ function resolveWiredVideo(node) {
   return { kind: 'opaque', title: '(reroute loop)' }
 }
 
+/**
+ * The ONE decision every preview/probe/overlay function branches on (owner
+ * report 2026-09-10) -- unifies the wired `video` input (`resolveWiredVideo`
+ * above, unchanged: a wire ALWAYS wins) with `video_path`'s own two
+ * possible shapes (`isInputRefVideoPath`: an annotated input ref this
+ * file's Upload button/drag-drop writes, or a literal filesystem path from
+ * Browse/paste) into one shape. Before this, only a WIRED `input_ref`
+ * reached the routes' ungated `?input_ref=` preview mode; this generalizes
+ * that so an UPLOADED, unwired file gets the identical remote-friendly
+ * scrub/preview/probe path -- the actual fix for "[EPS Frame Saver] only
+ * lets you select a frame from a host machine."
+ * @param {object} state
+ * @returns {{kind:'input_ref', ref:string, title?:string}
+ *   | {kind:'opaque', title:string}
+ *   | {kind:'path', path:string}
+ *   | {kind:'none'}}
+ */
+function effectiveSource(state) {
+  if (state.wired) return state.wired // a wire ALWAYS wins -- unchanged
+  if (!state.path) return { kind: 'none' }
+  if (isInputRefVideoPath(state.path)) return { kind: 'input_ref', ref: state.path }
+  return { kind: 'path', path: state.path }
+}
+
 /** Re-derives EVERYTHING from the widgets' CURRENT values AND the wire
  * state -- the single entry point all restore-timing hooks (and the
  * v0.60.0 onConnectionsChange wrap) call (see file header). */
@@ -1714,6 +1934,24 @@ export function looksAbsolutePath(value) {
   if (/^[a-zA-Z]:[\\/]/.test(trimmed)) return true // Windows drive, e.g. C:\ or C:/
   if (trimmed.startsWith('\\\\')) return true // UNC, e.g. \\server\share
   return false
+}
+
+/**
+ * Whether *path* (the widget's CURRENT `video_path` value) should be read
+ * as an ANNOTATED INPUT REF -- what the Upload button (or drag-drop) below
+ * writes, e.g. `clip.mp4 [input]` -- rather than a literal filesystem PATH
+ * (Browse/paste, pre-upload behavior). Mirrors `nodes_frame_saver.py`'s OWN
+ * disambiguation bit-for-bit (`_resolve_execution_path`:
+ * `Path(value).is_absolute()`) so client and server can never land on
+ * different verdicts for the same value: every `video_path` this pack has
+ * ever WRITTEN is either empty, or an absolute path (Browse always lists
+ * full paths; paste only accepts `looksAbsolutePath` text), so "not
+ * absolute" is a safe, unambiguous signal for "this is one of ours,
+ * annotated." See file header's "Upload a video" section.
+ * @param {string} path
+ */
+export function isInputRefVideoPath(path) {
+  return Boolean(path) && !looksAbsolutePath(path)
 }
 
 function dirnameOfServerPath(path) {
@@ -1896,6 +2134,290 @@ function buildPickerFooter(state) {
 function chooseVideoPath(state, path) {
   writeWidgetValue(state.pathWidget, state.node, path)
   onPathChanged(state, path)
+}
+
+// ---------------------------------------------------------------------------
+// Upload a video from the VIEWER's own disk (owner report 2026-09-10) --
+// see file header's "Upload a video" section for the full writeup.
+// Reimplemented locally rather than imported from image_grid.js -- this
+// file's own header already explains why eps_image/*.js siblings duplicate
+// this kind of helper by hand.
+// ---------------------------------------------------------------------------
+
+/**
+ * Lazily creates this node's detached video-file `<input>` (owner report
+ * 2026-09-10) -- single-file, unlike `image_grid.js`'s multi-select
+ * `ensureFileInput` (this node holds exactly one video). Never appended to
+ * the DOM -- a detached `<input type="file">`'s `.click()` still opens the
+ * native OS picker in every evergreen browser, so there is no layout to
+ * manage and nothing to `.remove()` on cleanup beyond dropping the
+ * reference. `accept` narrows the OS dialog to :data:`VIDEO_EXT_PARAM` (a
+ * hint only -- the real gate is `isAllowedVideoFile`/the server's own
+ * extension check, both reused from/by the paste-a-path pipeline and
+ * `nodes_frame_saver.py`'s `_resolve_execution_path`). `value = ''` on
+ * change lets re-picking the SAME file re-fire `change`.
+ */
+function ensureUploadInput(state) {
+  if (state.uploadInputEl) return state.uploadInputEl
+  const input = document.createElement('input')
+  input.type = 'file'
+  input.accept = VIDEO_EXT_PARAM
+  input.style.display = 'none'
+  input.onchange = () => {
+    const file = input.files && input.files[0]
+    input.value = ''
+    if (file) void startUpload(state, file)
+  }
+  state.uploadInputEl = input
+  return input
+}
+
+/**
+ * *uploaded* (core's `/upload/image` JSON response: `{name, subfolder,
+ * type}`) -> the ANNOTATED form `folder_paths.get_annotated_filepath`
+ * resolves, e.g. `clip.mp4 [input]` or `shots/clip.mp4 [input]` -- see file
+ * header's "Upload a video" section. Written straight into `video_path`
+ * (no new widget). `uploadVideoFile` below never SENDS a `subfolder` (so
+ * the file lands in the input ROOT, where core's Load Video dropdown looks
+ * -- least surprise), so `uploaded.subfolder` is normally empty; the
+ * subfolder branch stays here defensively in case that ever changes.
+ * @param {{name?: string, subfolder?: string, type?: string}} uploaded
+ */
+export function annotatedInputRef(uploaded) {
+  const name = String(uploaded?.name || '')
+  const subfolder = String(uploaded?.subfolder || '')
+  const type = String(uploaded?.type || 'input')
+  const withSubfolder = subfolder ? `${subfolder}/${name}` : name
+  return `${withSubfolder} [${type}]`
+}
+
+/**
+ * The pre-upload warning shown when *fileSizeBytes* exceeds the server's
+ * upload ceiling. *limitBytes* is the REAL ceiling from
+ * `fetchServerUploadLimitBytes()` when known -- then this states flatly that
+ * the file will likely be refused and names the figure -- or `null`, when it
+ * falls back to ComfyUI's DEFAULT (100 MB) and only says it MAY be. It never
+ * blocks: the limit may have been raised since the page loaded, and an HTTP
+ * 413 (see `oversizeUploadMessage`) is the ground truth.
+ * @param {number} fileSizeBytes
+ * @param {number | null} [limitBytes]
+ */
+export function sizeWarningMessage(fileSizeBytes, limitBytes = null) {
+  const mb = (fileSizeBytes / (1024 * 1024)).toFixed(0)
+  if (Number.isFinite(limitBytes) && limitBytes > 0) {
+    return (
+      `This video is ${mb} MB, but this ComfyUI server only accepts uploads up ` +
+      `to ${Math.round(limitBytes / (1024 * 1024))} MB, so it will likely be ` +
+      `refused. ${RAISE_LIMIT_HINT} Trying anyway…`
+    )
+  }
+  return (
+    `This file is ${mb} MB — ComfyUI's DEFAULT upload limit is ` +
+    `${DEFAULT_MAX_UPLOAD_MB} MB, and this server did not report its own ` +
+    `limit, so the upload may be rejected. ${RAISE_LIMIT_HINT} Trying anyway…`
+  )
+}
+
+/**
+ * The loud, instructive message for an HTTP 413 (or an unexplained network
+ * failure on a file already over the ceiling -- some setups drop the
+ * connection instead of completing a clean 413 for a large-enough overage).
+ * Never a silent failure (owner report 2026-09-10: "this makes the
+ * component mostly unusable"). Names the server's actual limit when
+ * `fetchServerUploadLimitBytes()` could read it, the default otherwise, and
+ * both ways to raise it.
+ * @param {number | null} [limitBytes]
+ */
+export function oversizeUploadMessage(limitBytes = null) {
+  const limit =
+    Number.isFinite(limitBytes) && limitBytes > 0
+      ? `this ComfyUI server's ${Math.round(limitBytes / (1024 * 1024))} MB upload limit`
+      : `the ComfyUI server's upload limit (default ${DEFAULT_MAX_UPLOAD_MB} MB)`
+  return `This video is larger than ${limit} and was refused. ${RAISE_LIMIT_HINT}`
+}
+
+/**
+ * Uploads *file* to core's `/upload/image` via `XMLHttpRequest` -- NOT
+ * `fetch`, which has no upload-progress event at all (file header).
+ * *onProgress(fraction)* is called with 0..1 whenever the browser can
+ * compute one (`event.lengthComputable`); never called otherwise. Returns
+ * `{promise, abort}`: *promise* resolves to core's `{name, subfolder,
+ * type}` response on HTTP 2xx, or rejects with an `Error` carrying
+ * `.status` (a non-2xx response) or `.cancelled = true` (`abort()` was
+ * called) -- mirrors `getJson()`'s `.status` convention above so callers
+ * can branch on `error.status === 413`. No `subfolder`/`type` fields are
+ * sent -- the upload always lands in the input ROOT (file header).
+ * @param {File} file
+ * @param {(fraction: number) => void} onProgress
+ */
+function uploadVideoFile(file, onProgress) {
+  const xhr = new XMLHttpRequest()
+  const promise = new Promise((resolve, reject) => {
+    xhr.upload.addEventListener('progress', (event) => {
+      if (!event.lengthComputable) return
+      try {
+        onProgress(event.loaded / event.total)
+      } catch (error) {
+        warn('upload progress callback threw', error)
+      }
+    })
+    xhr.addEventListener('load', () => {
+      let data = null
+      try {
+        data = JSON.parse(xhr.responseText)
+      } catch {
+        // Non-JSON body -- fall through to the status check below.
+      }
+      if (xhr.status >= 200 && xhr.status < 300) {
+        resolve(data || {})
+        return
+      }
+      const message = (data && data.error) || `upload failed (HTTP ${xhr.status})`
+      const error = new Error(message)
+      error.status = xhr.status
+      reject(error)
+    })
+    xhr.addEventListener('error', () => reject(new Error('upload failed (network error)')))
+    xhr.addEventListener('abort', () => {
+      const error = new Error('upload cancelled')
+      error.cancelled = true
+      reject(error)
+    })
+    xhr.open('POST', api.apiURL(UPLOAD_ROUTE))
+    try {
+      // Mirrors api.fetchApi()'s own Comfy-User header (multi-user
+      // ComfyUI) -- XHR can't reuse fetchApi() itself (no upload-progress
+      // event, file header), so this is the one header it adds that we
+      // must add by hand for parity.
+      xhr.setRequestHeader('Comfy-User', api.user || '')
+    } catch (error) {
+      warn('could not set Comfy-User header on upload', error)
+    }
+    const formData = new FormData()
+    formData.append('image', file, file.name)
+    xhr.send(formData)
+  })
+  return { promise, abort: () => xhr.abort() }
+}
+
+/**
+ * The whole "Upload…" flow for *file* (owner report 2026-09-10) -- shared
+ * by the Upload button's picker (`ensureUploadInput`) and drag-and-drop
+ * (`installVideoDragAndDrop` below), so both get identical progress/
+ * cancel/size-warning/413 handling from ONE implementation. Refuses to
+ * start a SECOND concurrent upload for this node (mirrors `image_grid.js`'s
+ * `runAddBatch` busy-guard) -- the Upload button itself doubles as Cancel
+ * while one is running (`buildPathBar`'s click handler), so a user-visible
+ * second click cancels rather than silently queuing; a passive trigger
+ * (a drop landing mid-upload) just logs and no-ops instead.
+ *
+ * On success, routes the uploaded file's ANNOTATED ref
+ * (`annotatedInputRef`) through the exact same `chooseVideoPath()` a
+ * Browse pick or paste uses -- writes the REAL `video_path` widget (so it
+ * serializes/reaches `execute()`, and survives a tab-switch/rebuild
+ * exactly like a browsed path always has, FORMAT.md §7.9), then re-derives
+ * the preview through `effectiveSource()`'s new input-ref branch.
+ * @param {object} state
+ * @param {File} file
+ */
+async function startUpload(state, file) {
+  if (state.upload) {
+    warn('an upload is already in progress for this node; ignoring the new file')
+    return
+  }
+
+  // Claim the busy slot BEFORE the first await: reading the server's limit
+  // is async, and without this a second click or drop landing in that gap
+  // would pass the guard above and start a second upload. Replaced by the
+  // real `{ abort }` once the XHR exists; a Cancel pressed before then only
+  // clears it -- nothing is in flight yet -- and the check below bails.
+  state.upload = {
+    abort() {
+      state.upload = null
+    }
+  }
+  const reportedLimit = await fetchServerUploadLimitBytes()
+  if (!state.upload) return // cancelled while the limit was being read
+  const limitBytes = reportedLimit ?? DEFAULT_MAX_UPLOAD_MB * 1024 * 1024
+  const oversizeAlready = file.size > limitBytes
+  if (oversizeAlready) {
+    const warning = sizeWarningMessage(file.size, reportedLimit)
+    setPathBarStatus(state, warning, true)
+    toast(state.node, 'warn', warning)
+  }
+
+  const { promise, abort } = uploadVideoFile(file, (fraction) => {
+    setPathBarStatus(state, `Uploading ${file.name}… ${Math.round(fraction * 100)}%`)
+  })
+  state.upload = { abort }
+  if (state.uploadBtn) state.uploadBtn.textContent = 'Cancel'
+  if (!oversizeAlready) setPathBarStatus(state, `Uploading ${file.name}…`)
+
+  try {
+    const uploaded = await promise
+    setPathBarStatus(state, '')
+    chooseVideoPath(state, annotatedInputRef(uploaded))
+    toast(state.node, 'info', `Uploaded ${file.name}.`)
+  } catch (error) {
+    if (error?.cancelled) {
+      setPathBarStatus(state, 'Upload cancelled.')
+    } else if (error?.status === 413 || (!error?.status && oversizeAlready)) {
+      const message = oversizeUploadMessage(reportedLimit)
+      setPathBarStatus(state, message, true)
+      toast(state.node, 'error', message)
+    } else {
+      const message = error?.message || 'Upload failed.'
+      setPathBarStatus(state, message, true)
+      toast(state.node, 'error', message)
+    }
+  } finally {
+    state.upload = null
+    if (state.uploadBtn) state.uploadBtn.textContent = 'Upload…'
+  }
+}
+
+/** Whether *e* (`dragover`/`dragenter`) carries an OS file worth
+ * remembering this node as the drop target for -- mirrors `image_grid.js`'s
+ * `isDraggingFiles`. Real filtering (video extension) happens in
+ * `onDragDrop` once actual `File` objects are available -- a `DragEvent`'s
+ * `items` don't reliably expose usable MIME types during dragover in every
+ * browser. */
+function isDraggingVideoFile(e) {
+  return (
+    Boolean(e?.dataTransfer?.items) &&
+    Array.from(e.dataTransfer.items).some((item) => item.kind === 'file')
+  )
+}
+
+/** *file*'s extension is in the allowlist (`pathExtension`, shared with the
+ * paste-a-path pipeline below, so drag/paste/the server can never
+ * disagree). */
+function isAllowedVideoFile(file) {
+  const ext = pathExtension(file?.name || '')
+  return Boolean(ext) && VIDEO_EXT_LIST.includes(ext)
+}
+
+/**
+ * Owner report 2026-09-10: dropping a video file from Finder/Explorer
+ * straight onto the node uploads it -- the SAME `startUpload()` the button
+ * uses (file header: "reuses step 2 cleanly"), not a second
+ * implementation. Only the FIRST allowlisted file in the drop is used
+ * (this node holds exactly one video); a drop with none returns `false` so
+ * core's own drop handling (e.g. loading a dropped workflow JSON) still
+ * runs. This node never had `onDragOver`/`onDragDrop` before, so there is
+ * no prior behavior to chain onto -- unlike this file's `onRemoved`/
+ * `onConfigure`/`onConnectionsChange` wraps elsewhere, which DO chain.
+ */
+function installVideoDragAndDrop(state) {
+  const node = state.node
+  node.onDragOver = isDraggingVideoFile
+  node.onDragDrop = (e) => {
+    const files = Array.from(e?.dataTransfer?.files || [])
+    const file = files.find(isAllowedVideoFile)
+    if (!file) return false
+    void startUpload(state, file)
+    return true
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -2154,6 +2676,17 @@ function wireNodeCleanup(state) {
     try {
       closePicker(state)
       removePastePathHandler(state)
+      // Owner report 2026-09-10: a node deleted mid-upload must not leave
+      // an XHR running that later calls back into (or toasts on behalf
+      // of) a node that no longer exists.
+      if (state.upload) {
+        try {
+          state.upload.abort()
+        } catch (error) {
+          warn('in-flight upload abort failed during teardown', error)
+        }
+        state.upload = null
+      }
       // Force-stop any in-flight hold-repeat before tearing down the window
       // listener that would otherwise do it (file header's "press-and-hold"
       // section) -- a node deleted mid-hold must never leave a repeat
@@ -2270,6 +2803,12 @@ export function attach(node) {
     // document listener does, so there is no window where a torn-down node
     // could leak it.
     installPastePathHandler(state)
+    // Owner report 2026-09-10: dropping a video file onto the node uploads
+    // it -- the same startUpload() the Upload button uses (file header).
+    installVideoDragAndDrop(state)
+    // Warm the upload-limit cache so the first Upload/drop rarely waits
+    // on it (never rejects; the result is unused here).
+    fetchServerUploadLimitBytes()
 
     refreshGating(state).catch((error) => warn('initial config load failed', error))
 
