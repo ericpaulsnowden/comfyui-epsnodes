@@ -148,7 +148,9 @@ session and often aren't visible to a service-started ComfyUI at all.
 - **Chain prompts into it.** Two new inputs, `text` and `name`, let you wire
   another Prompt Notebook, an EPS Prompt Builder, or any text source into
   this one. Whatever arrives is put in front of each prompt you've selected
-  here, joined by the new `separator` box (default `, `).
+  here, joined by the new `separator` box — which defaults to a new line,
+  so chained prompts stack rather than running together. Type `\n` for a
+  newline, or put anything else in (a comma and a space, ` | `, whatever).
 - **What that does to your run count.** One incoming prompt — a Builder, or
   a plain bit of text — leaves the count alone: three selected still runs
   three times, each with the incoming text in front. Wire in a *Notebook*
@@ -312,7 +314,8 @@ happen there — and the Builder assembles prompts *out of* it:
   queue fails loudly naming it — never a silently wrong prompt.
 - **Combined behind the scenes:** at run time the blocks' texts are joined in
   order into the `text` output, with a separator you control (a small
-  `separator` widget, default `", "`; type `\n` for a newline). The `name`
+  `separator` widget, defaulting to a new line; type `\n` for one, or put in
+  a comma, ` | `, or anything else). The `name`
   output joins the block names the same way for save paths.
 - **`text`/`name` inputs for chaining:** pipe a Prompt Notebook (or anything)
   in and its text is prepended before your blocks. A **multi-select**
@@ -1041,6 +1044,12 @@ dimensions. It replaces a resize node + a reroute + a get-image-size node.
   image* refuses to guess rather than picking one at random.
 
 ## EPS Image Grid (shipped)
+
+- **Copy (Clipspace) always gives you the full-size image.** Right-click →
+  Copy (Clipspace) now copies the original at full resolution whether you
+  copy from the grid or from the enlarged single-image view. The grid still
+  *displays* small thumbnails so it stays fast — that's what used to get
+  copied when you grabbed one straight from the grid.
 
 Since v0.69.0 the on-node thumbnails are real downscaled previews served by the pack (disk-cached per frame, keyed by each frame's own timestamp), so a big buffer no longer re-downloads every picture after each run and the canvas draws small images, not full-resolution ones.
 

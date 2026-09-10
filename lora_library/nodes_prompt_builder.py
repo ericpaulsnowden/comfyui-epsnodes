@@ -152,7 +152,13 @@ _context: LibraryContext | None = None
 #: fallbacks can never drift from what the widgets themselves declare.
 DEFAULT_FILE = "loras.md"
 DEFAULT_BLOCKS = "[]"
-DEFAULT_SEPARATOR = ", "
+#: Owner ask 2026-09-09: prompts read better one per line than
+#: comma-joined, so the DEFAULT is now the two-character escape
+#: `\n` (a plain STRING widget cannot hold a real newline --
+#: `_decode_separator` turns it into one). Only the DEFAULT moves:
+#: a workflow that already saved `", "` keeps it, because
+#: `widgets_values` carries the value, not the default.
+DEFAULT_SEPARATOR = "\\n"
 #: Same default as `nodes_notebook.py`'s own `drafts` widget -- "no unsaved
 #: edits", so every workflow saved before this widget existed parses to it.
 DEFAULT_DRAFTS = "{}"

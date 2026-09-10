@@ -178,7 +178,7 @@ class TestWidgetIndex:
         # The indices above are what must not move -- and they didn't
         # (pinned still 2, drafts still 3) -- which is the whole point of
         # appending at the tail rather than inserting.
-        assert m.widget_defaults(LoraLibraryNotebook) == ["loras.md", "", "", "{}", ", "]
+        assert m.widget_defaults(LoraLibraryNotebook) == ["loras.md", "", "", "{}", "\\n"]
         assert m.widget_defaults(LoraLibraryApplySet) == ["None", 1.0, 0, ""]
         assert m._multiplier_widget_defaults() == m.widget_defaults(EPSCrossSweep)
 

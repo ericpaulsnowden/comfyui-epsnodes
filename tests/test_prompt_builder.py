@@ -65,7 +65,10 @@ class TestClassShape:
 
         sep_kind, sep_opts = spec["required"]["separator"]
         assert sep_kind == "STRING"
-        assert sep_opts["default"] == ", "
+        # Owner ask 2026-09-09: the DEFAULT is now the `\n` escape (a
+        # STRING widget can't hold a real newline); `", "` stays valid and
+        # any workflow that saved it keeps it.
+        assert sep_opts["default"] == "\\n"
         assert sep_opts["multiline"] is False
         assert "\\n" in sep_opts["tooltip"]
 

@@ -49,6 +49,18 @@
  * `imageIndex` (set by clicking a cell in the free grid pager) already
  * targets at the specific cell the user selected.
  *
+ * **This stopped being entirely true 2026-09-09** (owner report: grid-view
+ * "Copy (Clipspace)" and focused-view "Copy (Clipspace)" produced
+ * different-size images for the same frame). Root cause: `node.imgs` is
+ * 256px THUMBNAILS everywhere except the one focused tile (the M2 perf win
+ * documented at `thumbUrlForRef` below), and `copyToClipspace` copies
+ * `.src` VERBATIM. `installClipspaceCopyFullRes` (search below) wraps that
+ * one static function to force every tile full-res for the duration of the
+ * copy, then restores the thumbnails -- see its own block comment for the
+ * full writeup. Still nothing needed for "Copy Image" (OS clipboard) or
+ * "Paste (Clipspace)": both already read straight off `fullResImageUrl`
+ * (this file's own menu item) or off whatever `copyToClipspace` just wrote.
+ *
  * ---- Paste IN needs real code — `node.pasteFiles` ----
  *
  * There's no free equivalent for "add an image to this specific node's
@@ -2969,6 +2981,155 @@ function installCopyImageMenuItem(node) {
 }
 
 // ---------------------------------------------------------------------------
+// Clipspace copy full-res parity (owner report 2026-09-09): "if you right
+// click to copy clipspace from the image grid node, if you copy from the
+// grid you get a different image size than if you copy from the 1 up view.
+// No matter which view you copy from you should get the same (largest
+// possible) size image."
+//
+// Root cause: `node.imgs` holds 256px disk-cached THUMBNAILS
+// (`thumbUrlForRef`, the frame route -- file header's "Thumbnails only
+// here" section) for every tile in grid view, and only the one FOCUSED tile
+// gets swapped to a genuine full-resolution element
+// (`ensureFocusedFullRes`/`installFocusedFullResSwap` above) -- every OTHER
+// tile stays a thumbnail regardless of view. Core's `ComfyApp.
+// copyToClipspace` (`scripts/app.ts`) copies `node.imgs[i].src` VERBATIM --
+// a plain STRING -- into fresh `Image` objects for every `i`; it never
+// decodes pixels. So a grid-view copy carried thumbnail urls for every tile
+// straight into `ComfyApp.clipspace`, while a focused-view copy happened to
+// carry one real full-res `.src` (whichever tile was enlarged) among
+// otherwise-thumbnail siblings -- two different result sizes for the exact
+// same underlying frame, purely a function of which view was showing when
+// the user right-clicked.
+//
+// `copyToClipspace` is STATIC (confirmed live: `typeof ComfyApp.
+// copyToClipspace === 'function'`, no per-instance override point --
+// `window.comfyAPI.app.ComfyApp === app.constructor`), so there is no
+// `getExtraMenuOptions`-style per-node hook the way `installCopyImageMenuItem`
+// above uses for the OS-clipboard "Copy image" item. Wrapped ONCE at module
+// scope instead (`installClipspaceCopyFullRes`, called from `init()` at the
+// bottom of this file), guarded by `clipspaceCopyWrapped` below -- the same
+// "wrap once, chain, never replace" idiom `save_image.js`'s `app.handleFile`
+// wrap already uses (§7.5): the `installed`-style flag, a fail-soft
+// try/catch around this file's OWN new logic, and calling through to
+// *original* unconditionally.
+//
+// Wrapping the FUNCTION rather than the "Copy (Clipspace)" context-menu
+// STRING is deliberate: that label is localized (the installed frontend
+// bundle carries `コピー (Clipspace)`, `کپی (Clipspace)`, ...) -- matching
+// text would silently stop working for any non-English user and would
+// still miss every OTHER caller of the same function (the free "Paste
+// (Clipspace)"/selection-toolbox routes all funnel through this one static
+// method too). The static function itself is the one locale-independent
+// seam every route into clipspace goes through.
+//
+// PIXEL-CONSUMING EXCEPTION: the file header's M2 section, and
+// `thumbUrlForRef`'s own docstring, are explicit that the grid path "never"
+// uses full-res urls for `node.imgs` -- this wrap is the documented
+// exception, a genuinely pixel-consuming path (a clipspace copy is read
+// back as real image bytes elsewhere -- editing, re-upload, a mask). The
+// swap below only ever holds for the exact synchronous span
+// `copyToClipspace` reads `.src` in, and is undone before this function
+// returns; do not "optimise" it back to a thumbnail read.
+// ---------------------------------------------------------------------------
+
+/**
+ * Runs *fn* with every `node.imgs[i].src` this node has a resolvable
+ * full-res ref for temporarily pointed at `imageUrlForRef(node.images[i])`
+ * -- the same resolution `fullResImageUrl`'s primary branch already uses --
+ * then restores each touched `.src` to its EXACT previous string in a
+ * `finally`, whether *fn* returns or throws. Returns whatever *fn* returns.
+ *
+ * Deliberately does not read or write `node.imageIndex` at all: it treats
+ * every tile the same regardless of which one (if any) is focused, which is
+ * exactly what makes a grid-view copy and a focused-view copy produce the
+ * SAME full-res src for the same frame -- there is no "which view" branch
+ * to keep in sync.
+ *
+ * Fail-soft per tile (FORMAT §7): `node.images` missing entirely (a node
+ * mid-load with no ref buffer yet), a length mismatch against `node.imgs`,
+ * a missing/refless entry, or `imageUrlForRef` itself throwing all just
+ * skip THAT one tile -- it copies through whatever `.src` it already had --
+ * never any of this file's own new logic escaping to abort the whole call.
+ * A no-op skip (`fullSrc === img.src` -- e.g. a tile with no dedicated
+ * full-res, or an already-full-res focused tile per `ensureFocusedFullRes`)
+ * is never pushed to the restore list, so nothing is touched that didn't
+ * need to be.
+ *
+ * Restoring to the EXACT previous string (never a "reset" default) is what
+ * keeps this repaint-free: an `<img>` whose `src` is set back to a URL it
+ * was already showing, fully loaded, fires no new `load`/`error` -- the
+ * HTML img element's own update-the-image-data algorithm collapses
+ * same-tick reassignments to only the LAST one queued and no-ops when that
+ * one matches an already-complete current request (the same rule that
+ * makes `img.src = img.src` a documented non-reload). Nothing here mutates
+ * `node.images` or `node.imageIndex`, so none of this file's own
+ * change-gated repaint checks (`setNodeImagesFromRefs`'s content diff,
+ * `mergeBufferRefs`'s array identity) see this swap either -- there is
+ * nothing here for them to react to. Exported for tests.
+ */
+export function withGridFullResSrcs(node, fn) {
+  const imgs = node && node.imgs
+  if (!Array.isArray(imgs) || !imgs.length) return fn()
+  const images = node.images
+  const restore = []
+  for (let i = 0; i < imgs.length; i++) {
+    const img = imgs[i]
+    if (!img) continue
+    try {
+      const ref = Array.isArray(images) ? images[i] : null
+      if (!ref || !ref.filename) continue
+      const fullSrc = imageUrlForRef(ref, { epoch: getBufferGeneration(node) })
+      if (!fullSrc || fullSrc === img.src) continue
+      restore.push({ img, src: img.src })
+      img.src = fullSrc
+    } catch (error) {
+      console.warn(PREFIX, 'clipspace full-res swap skipped one tile', error)
+    }
+  }
+  try {
+    return fn()
+  } finally {
+    for (const { img, src } of restore) img.src = src
+  }
+}
+
+let clipspaceCopyWrapped = false
+
+/**
+ * Wraps `ComfyApp.copyToClipspace(node, ...)` (static, core) ONCE per page
+ * load: for an `EPSImageGrid` node, every tile is pointed at its full-res
+ * url (`withGridFullResSrcs` above) for the exact duration of the original
+ * call, so whichever index core selects as `selectedIndex` (the focused
+ * tile's `imageIndex`, or its own grid-view default) lands in `ComfyApp.
+ * clipspace` at full resolution regardless. `node.imageIndex` itself is
+ * never read or written here -- core's own selection logic runs completely
+ * unmodified, so a focused copy still selects that frame and a grid copy
+ * still selects whatever core would have selected with or without this
+ * wrap. Any node that isn't an `EPSImageGrid` passes straight through to
+ * *original*, untouched -- no swap logic runs for it at all.
+ *
+ * Guarded by `clipspaceCopyWrapped` so this can only ever install once per
+ * page load (mirrors `save_image.js`'s `installed` flag for `app.
+ * handleFile` exactly -- §7.5, "chained, never replaced"). Fails soft: the
+ * only new logic this adds (`withGridFullResSrcs`'s per-tile resolution) is
+ * already self-guarding (see its own docstring), and a throwing *original*
+ * still propagates normally to ITS caller -- exactly as it would without
+ * this wrap -- only after `withGridFullResSrcs`'s `finally` has restored
+ * every `.src` this call touched.
+ */
+function installClipspaceCopyFullRes() {
+  if (clipspaceCopyWrapped) return
+  clipspaceCopyWrapped = true
+  const original = ComfyApp && ComfyApp.copyToClipspace
+  if (typeof original !== 'function') return
+  ComfyApp.copyToClipspace = function (node, ...rest) {
+    if (nodeClassOf(node) !== CLASS_ID) return original.call(this, node, ...rest)
+    return withGridFullResSrcs(node, () => original.call(this, node, ...rest))
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Delete image (owner ask, un-defers roadmap M5 -- 2026-07-29: "right click
 // and delete individual images or tiles ... a duplicate image ... makes the
 // grid useless and you have to start fresh"). Scope is deliberately narrow:
@@ -3803,6 +3964,7 @@ function installExecutedMerge(node) {
  * exactly once per extension load. */
 export function init() {
   installExecutionRefreshListener()
+  installClipspaceCopyFullRes() // 2026-09-09 grid-vs-1-up clipspace copy size parity
   // v0.52.0 (owner direction 2026-08-03): the backend's Collect-with-
   // nothing-wired dead-wire detection is a NON-BLOCKING warning now, not a
   // queue error -- a Collect grid parked behind a toggled-off switcher row

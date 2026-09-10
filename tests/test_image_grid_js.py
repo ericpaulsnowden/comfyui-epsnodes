@@ -651,6 +651,131 @@ out.basenames = [
   }
 }
 
+// ---- Clipspace copy full-res parity (owner report 2026-09-09):
+// "if you right click to copy clipspace from the image grid node, if you
+// copy from the grid you get a different image size than if you copy from
+// the 1 up view ... you should get the same (largest possible) size image."
+// `withGridFullResSrcs` is the pure swap/restore core of the fix; the
+// `ComfyApp.copyToClipspace` wrap itself (`installClipspaceCopyFullRes`) is
+// pinned by source text below, the same convention this file already uses
+// for `installCopyImageMenuItem`/`installFocusedFullResSwap`.
+{
+  const R4 = (name) => ({ filename: name, subfolder: '', type: 'output' })
+  const makeThumbImg = (src) => {
+    const img = new Image()
+    img.src = src
+    return img
+  }
+
+  // A grid node with three thumbnail tiles -- the shape setNodeImagesFromRefs
+  // itself would produce, built by hand so this doesn't depend on that
+  // function's own internals.
+  function makeCopyNode(overrides = {}) {
+    const images = [R4('a.png'), R4('b.png'), R4('c.png')]
+    const imgs = images.map((ref) => makeThumbImg(`/eps_image_grid/frame?filename=${ref.filename}`))
+    return { id: 900, graph: rootGraph, images, imgs, imageIndex: null, ...overrides }
+  }
+  const expectedFull = (ref) => grid.imageUrlForRef(ref, { epoch: 0 })
+
+  // Grid view (imageIndex null) and focused view (imageIndex set) must
+  // yield the IDENTICAL full-res src for the same frame -- the bug's own
+  // symptom, and the property this fix exists to guarantee. Neither call
+  // reads/writes imageIndex at all, which is exactly why they agree.
+  const gridNode = makeCopyNode({ imageIndex: null })
+  const gridThumbs = gridNode.imgs.map((i) => i.src)
+  let duringGrid
+  grid.withGridFullResSrcs(gridNode, () => {
+    duringGrid = gridNode.imgs.map((i) => i.src)
+  })
+  const afterGrid = gridNode.imgs.map((i) => i.src)
+
+  const focusedNode = makeCopyNode({ imageIndex: 1 })
+  let duringFocused
+  grid.withGridFullResSrcs(focusedNode, () => {
+    duringFocused = focusedNode.imgs.map((i) => i.src)
+  })
+  const afterFocused = focusedNode.imgs.map((i) => i.src)
+
+  const matchesExpected = (srcs, node) =>
+    srcs.every((src, i) => src === expectedFull(node.images[i]))
+
+  out.clipspaceFullRes = {
+    sameFullResRegardlessOfView: duringGrid[1] === duringFocused[1],
+    gridMatchesExpected: matchesExpected(duringGrid, gridNode),
+    focusedMatchesExpected: matchesExpected(duringFocused, focusedNode),
+    restoredAfterGridCopy: JSON.stringify(afterGrid) === JSON.stringify(gridThumbs),
+    restoredAfterFocusedCopy: JSON.stringify(afterFocused) === JSON.stringify(gridThumbs),
+    returnsFnResult: grid.withGridFullResSrcs(makeCopyNode(), () => 42) === 42
+  }
+
+  // No `node.images` at all (a node mid-load, nothing buffered yet) -- every
+  // tile is left exactly as it was; fn still runs.
+  const noImagesNode = makeCopyNode({ images: undefined })
+  const noImagesBefore = noImagesNode.imgs.map((i) => i.src)
+  let noImagesFnRan = false
+  grid.withGridFullResSrcs(noImagesNode, () => { noImagesFnRan = true })
+  const noImagesAfter = noImagesNode.imgs.map((i) => i.src)
+  out.clipspaceFullRes.noImagesArrayDegradesToANoop = {
+    fnRan: noImagesFnRan,
+    untouched: JSON.stringify(noImagesAfter) === JSON.stringify(noImagesBefore)
+  }
+
+  // A length mismatch (fewer refs than imgs, e.g. a node mid-load) swaps
+  // only the tiles that line up and leaves the rest untouched -- then
+  // restores everything it DID touch.
+  const shortNode = makeCopyNode()
+  shortNode.images = shortNode.images.slice(0, 1)
+  const shortBefore = shortNode.imgs.map((i) => i.src)
+  let duringShort
+  grid.withGridFullResSrcs(shortNode, () => {
+    duringShort = shortNode.imgs.map((i) => i.src)
+  })
+  out.clipspaceFullRes.lengthMismatch = {
+    firstSwapped: duringShort[0] === expectedFull(shortNode.images[0]),
+    restLeftAsThumbs: duringShort[1] === shortBefore[1] && duringShort[2] === shortBefore[2],
+    allRestored: JSON.stringify(shortNode.imgs.map((i) => i.src)) === JSON.stringify(shortBefore)
+  }
+
+  // A ref missing `filename` degrades only that one tile.
+  const badRefNode = makeCopyNode()
+  badRefNode.images[2] = { subfolder: '', type: 'output' }
+  const badRefBefore = badRefNode.imgs.map((i) => i.src)
+  let duringBadRef
+  grid.withGridFullResSrcs(badRefNode, () => {
+    duringBadRef = badRefNode.imgs.map((i) => i.src)
+  })
+  out.clipspaceFullRes.missingRefFilename = {
+    othersStillSwapped: duringBadRef[0] === expectedFull(badRefNode.images[0]),
+    badTileLeftAsThumb: duringBadRef[2] === badRefBefore[2]
+  }
+
+  // No `node.imgs` at all (nothing collected yet) -- fn still runs, its
+  // result still returned, and there is nothing to restore.
+  {
+    let ran = false
+    const bareNode = { id: 901, graph: rootGraph, images: undefined, imgs: null }
+    const result = grid.withGridFullResSrcs(bareNode, () => { ran = true; return 'ok' })
+    out.clipspaceFullRes.noImgsArrayStillCallsThrough = { ran, result }
+  }
+
+  // A throwing fn (standing in for a throwing `original`) still restores
+  // every touched src before the throw propagates -- never swallowed.
+  const throwNode = makeCopyNode()
+  const throwBefore = throwNode.imgs.map((i) => i.src)
+  let threw = null
+  try {
+    grid.withGridFullResSrcs(throwNode, () => {
+      throw new Error('boom')
+    })
+  } catch (error) {
+    threw = error.message
+  }
+  out.clipspaceFullRes.throwingFnPropagatesAndStillRestores = {
+    threw,
+    restored: JSON.stringify(throwNode.imgs.map((i) => i.src)) === JSON.stringify(throwBefore)
+  }
+}
+
 process.stdout.write(JSON.stringify(out))
 """
 
@@ -1489,3 +1614,107 @@ def test_clear_node_preview_marks_the_buffer_settled() -> None:
     guard that protects a not-yet-restored one."""
     body = _function_body("function clearNodePreview")
     assert "markBufferSettled(node)" in body
+
+
+# ---- Clipspace copy full-res parity (owner report 2026-09-09) ----
+#
+# "if you right click to copy clipspace from the image grid node, if you
+# copy from the grid you get a different image size than if you copy from
+# the 1 up view. No matter which view you copy from you should get the
+# same (largest possible) size image."
+#
+# `withGridFullResSrcs` (the pure swap/restore core) is Node-probed above;
+# `installClipspaceCopyFullRes` (the `ComfyApp.copyToClipspace` wrap itself)
+# is closure-bound over a static core method the same way
+# `installCopyImageMenuItem`/`installFocusedFullResSwap` are, so it's pinned
+# by source text below, following this file's own convention for that shape
+# of wiring.
+
+
+def test_grid_view_and_focused_view_copy_the_same_full_res_src(grid_api: dict) -> None:
+    result = grid_api["clipspaceFullRes"]
+    assert result["sameFullResRegardlessOfView"] is True
+    assert result["gridMatchesExpected"] is True
+    assert result["focusedMatchesExpected"] is True
+
+
+def test_full_res_swap_restores_the_thumbnails_afterwards(grid_api: dict) -> None:
+    result = grid_api["clipspaceFullRes"]
+    assert result["restoredAfterGridCopy"] is True
+    assert result["restoredAfterFocusedCopy"] is True
+
+
+def test_with_grid_full_res_srcs_returns_the_wrapped_calls_result(grid_api: dict) -> None:
+    assert grid_api["clipspaceFullRes"]["returnsFnResult"] is True
+
+
+def test_with_grid_full_res_srcs_degrades_when_node_images_is_missing(grid_api: dict) -> None:
+    """A node mid-load with no ref buffer yet (`node.images` still
+    `undefined`) must not break the copy -- every tile is left exactly as
+    it was, and the wrapped call still runs."""
+    result = grid_api["clipspaceFullRes"]["noImagesArrayDegradesToANoop"]
+    assert result == {"fnRan": True, "untouched": True}
+
+
+def test_with_grid_full_res_srcs_degrades_on_a_length_mismatch(grid_api: dict) -> None:
+    """Fewer refs than `imgs` swaps only the tiles that line up and leaves
+    the rest as thumbnails -- then restores everything it DID touch."""
+    result = grid_api["clipspaceFullRes"]["lengthMismatch"]
+    assert result == {"firstSwapped": True, "restLeftAsThumbs": True, "allRestored": True}
+
+
+def test_with_grid_full_res_srcs_degrades_on_a_ref_missing_filename(grid_api: dict) -> None:
+    result = grid_api["clipspaceFullRes"]["missingRefFilename"]
+    assert result == {"othersStillSwapped": True, "badTileLeftAsThumb": True}
+
+
+def test_with_grid_full_res_srcs_passes_through_a_node_with_no_imgs(grid_api: dict) -> None:
+    """A node nothing has ever been collected into (`node.imgs` still
+    `null`) still runs the wrapped call and returns its result -- there is
+    nothing to swap or restore."""
+    result = grid_api["clipspaceFullRes"]["noImgsArrayStillCallsThrough"]
+    assert result == {"ran": True, "result": "ok"}
+
+
+def test_with_grid_full_res_srcs_restores_before_a_throw_propagates(grid_api: dict) -> None:
+    """A throwing original (stood in for here by a throwing *fn*) must
+    never break the copy silently -- every touched src is restored in the
+    `finally` before the error propagates; it is never swallowed."""
+    result = grid_api["clipspaceFullRes"]["throwingFnPropagatesAndStillRestores"]
+    assert result == {"threw": "boom", "restored": True}
+
+
+def test_clipspace_copy_full_res_is_wrapped_once_and_class_gated() -> None:
+    body = _function_body("function installClipspaceCopyFullRes")
+    assert "if (clipspaceCopyWrapped) return" in body
+    assert "clipspaceCopyWrapped = true" in body
+    assert "ComfyApp.copyToClipspace = function (node, ...rest) {" in body
+    # Non-EPSImageGrid nodes pass straight through to *original* -- no swap
+    # logic runs for them at all.
+    assert "if (nodeClassOf(node) !== CLASS_ID) return original.call(this, node, ...rest)" in body
+    # The original itself always runs, wrapped in the full-res swap for a
+    # grid node -- never replaced, never skipped.
+    assert "withGridFullResSrcs(node, () => original.call(this, node, ...rest))" in body
+
+
+def test_clipspace_copy_full_res_never_touches_image_index() -> None:
+    """The whole reason a grid-view copy and a focused-view copy agree:
+    neither `installClipspaceCopyFullRes` nor `withGridFullResSrcs` reads or
+    writes `node.imageIndex` -- core's own selection logic is left
+    completely alone."""
+    install_body = _function_body("function installClipspaceCopyFullRes")
+    swap_body = _function_body("export function withGridFullResSrcs")
+    assert "imageIndex" not in install_body
+    assert "imageIndex" not in swap_body
+
+
+def test_clipspace_copy_full_res_restores_in_a_finally() -> None:
+    body = _function_body("export function withGridFullResSrcs")
+    finally_index = body.index("finally")
+    assert finally_index != -1
+    assert "img.src = src" in body[finally_index:]
+
+
+def test_init_installs_the_clipspace_copy_full_res_wrap() -> None:
+    body = _function_body("export function init")
+    assert "installClipspaceCopyFullRes()" in body

@@ -124,7 +124,13 @@ DEFAULT_FILE = "loras.md"
 DEFAULT_ENTRY = ""
 DEFAULT_PINNED = ""
 DEFAULT_DRAFTS = "{}"
-DEFAULT_SEPARATOR = ", "
+#: Owner ask 2026-09-09: prompts read better one per line than
+#: comma-joined, so the DEFAULT is now the two-character escape
+#: `\n` (a plain STRING widget cannot hold a real newline --
+#: `_decode_separator` turns it into one). Only the DEFAULT moves:
+#: a workflow that already saved `", "` keeps it, because
+#: `widgets_values` carries the value, not the default.
+DEFAULT_SEPARATOR = "\\n"
 
 #: The literal escapes `separator` decodes -- a small, fixed vocabulary
 #: (module docstring), not general Python string-escape decoding. Verbatim

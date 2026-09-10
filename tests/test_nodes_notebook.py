@@ -890,7 +890,10 @@ class TestChainingWidgetShape:
         spec = nodes_notebook.LoraLibraryNotebook.INPUT_TYPES()
         kind, options = spec["optional"]["separator"]
         assert kind == "STRING"
-        assert options["default"] == ", "
+        # Owner ask 2026-09-09: default is the `\n` ESCAPE, not a literal
+        # newline -- a plain STRING widget cannot hold one, so
+        # `_decode_separator` converts it at run time.
+        assert options["default"] == "\\n"
         assert options["multiline"] is False
         # Unlike file/entry/pinned/drafts: a plain visible widget the panel
         # never touches, same as EPSPromptBuilder's own `separator`.
@@ -1058,7 +1061,9 @@ class TestChainingSeparator:
         _write_notebook(library_dir, "loras.md", "## A\nx\n")
         node = nodes_notebook.LoraLibraryNotebook()
         texts, _names = node.read_entry(file="loras.md", entry="A", text=["in"])
-        assert texts == ["in, x"]
+        # Owner ask 2026-09-09: the default separator is now a NEWLINE --
+        # prompts read better one per line than comma-joined.
+        assert texts == ["in\nx"]
 
     def test_custom_separator(self, library_dir: Path) -> None:
         _write_notebook(library_dir, "loras.md", "## A\nx\n")

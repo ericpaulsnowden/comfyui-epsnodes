@@ -3863,7 +3863,8 @@ references no longer invalidates sweeps built on this node. Own
 
 New in v0.76.0 (owner spec 2026-08-23, four design choices confirmed the same
 day: notebook DROPDOWN as the file source; blocks are LIVE references;
-one-output-per-incoming fan-out; separator WIDGET defaulting to `", "`).
+one-output-per-incoming fan-out; separator WIDGET defaulting to `\n`
+(owner ask 2026-09-09, was `", "`)).
 `lora_library/nodes_prompt_builder.py` + `web/lora_library/prompt_builder.js`;
 category "EPSNodes"; class id frozen once shipped (§8).
 
@@ -4309,7 +4310,12 @@ exactly as often as it would have. Two notebooks chained is `2 x 3 = 6`.
 Multiplication only appears when the upstream genuinely holds several
 prompts.
 
-- **New TAIL widget `separator`** (default `", "`, visible, Builder escape
+- **New TAIL widget `separator`** (default `\n` since 2026-09-09 -- the
+  owner's ask, "should be \n not a comma"; a plain STRING widget cannot
+  hold a real newline, so the widget carries the two-character ESCAPE and
+  `_decode_separator` converts it. Only the DEFAULT moved: `widgets_values`
+  carries the VALUE, so any workflow that already saved `", "` keeps it.)
+  (visible, Builder escape
   decoding), appended AFTER `pinned`/`drafts`. Verified: `pinned` stays
   index 2 and `drafts` index 3, so no saved workflow shifts (§8). This is
   the hazard that makes adding a widget here non-trivial.
@@ -4328,6 +4334,36 @@ prompts.
   take the same input and do different arithmetic, so neither branch may be
   copied from the other. Rig-verified: 2x3 reads "Runs: 6", unwired and
   Builder-fed both read "Runs: 3".
+
+
+**Clipspace copy is full-res from EITHER view (v0.94.0, owner report
+2026-09-09: "if you copy from the grid you get a different image size than
+if you copy from the 1 up view ... you should get the same (largest
+possible) size image").** The grid deliberately renders 256px thumbnails
+(`thumbUrlForRef`) and swaps the full-res image in only for the FOCUSED
+tile -- a real performance win, kept. But core's `ComfyApp.copyToClipspace`
+copies `node.imgs[i].src` verbatim, so a grid-view copy carried a thumbnail
+and a 1-up copy carried the original. Rig-measured on a 1536x864 frame: the
+grid displays 256x144, and the grid-view copy used to hand you exactly that.
+
+Fixed by wrapping the STATIC `ComfyApp.copyToClipspace` once at module
+scope, guarded, chained-never-replaced -- the same posture `save_image.js`
+uses for its one-time `app.handleFile` wrap. For an EPSImageGrid node every
+tile's `.src` points at its full-res URL for the exact duration of the
+original call and is restored in a `finally`; every other node type passes
+straight through. `imageIndex`/selection is never touched, so only the
+SIZE changes. Both views now yield 1536x864.
+
+**Wrap the FUNCTION, never the menu entry.** The obvious hook is the "Copy
+(Clipspace)" context-menu item, but that label is localized -- the frontend
+bundle ships `コピー (Clipspace)`, `کپی (Clipspace)` and more -- so matching
+on its text would silently do nothing for a non-English user AND would
+cover only that one route in. This is a general rule for hooking core UI,
+not a detail of this fix.
+
+**This is the documented exception to the file's own "thumbnails only,
+never the full-res fetch" rule**: clipspace is a PIXEL-CONSUMING path, so
+it gets the real image. Do not "optimise" it back to a thumb.
 
 ## §7 Frontend surfaces
 
