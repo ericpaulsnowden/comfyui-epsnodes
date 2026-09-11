@@ -5187,6 +5187,41 @@ Tuning that survived the first live run against the owner's real install:
 back onto their own directory is not a traversal, and `startswith(os.pardir)`
 is a string check rather than a containment check.
 
+**The listing exemption is scoped to its loop (v0.95.1).** The listing is
+routinely on the line ABOVE the join (`for name in os.listdir(root):` then
+`os.path.join(root, name)`), which a one-line `exclude` cannot see, so
+`path.unclamped_join` carries `skip_listing_vars` and `_ListingScopes`
+tracks it. A first draft collected loop variables FILE-WIDE. Because `name`
+is reused everywhere, any later join on the same identifier went silent,
+including a request handler's parameter in a different function, which is
+the exact shape this rule exists to find. It never shipped. The rules now:
+
+- the skip holds only on the loop's indented body (a dedent ends it);
+- any rebinding cancels it for the rest of the body. That covers
+  assignment (plain, tuple, annotated or augmented), walrus, `as`, and a
+  nested `for` over the same name;
+- a nested `def` or `class` hides the loop variable entirely, and a line
+  with a `lambda` gets no skip;
+- a rebinding is applied AFTER its own line is judged, because Python
+  evaluates the right-hand side first. `f = os.path.join(folder, f)` is the
+  common safe idiom, and it stays quiet;
+- two joins on one line are judged separately.
+
+Where the shape is in doubt (a dedented continuation line, a keyword
+argument that reads like an assignment), the skip is dropped. A spare
+finding is the safe way for a scanner to be wrong. Validated against 25k
+real files (10M lines): the scoped version silences 50 of the 77 joins the
+file-wide draft did, never one the draft flagged, and every other rule's
+findings are unchanged. Of the 27 it reports again, 14 were this scanner's
+own test fixtures. 9 were joins over a DIFFERENT loop that merely reused a
+listed name, which is the bug. The remaining 4 are one deliberate gap: a
+comprehension written across lines, whose `for … in os.listdir(…)` clause
+sits on its own line, opens no indented body. So a join on the next clause
+line is still reported, as it was before the skip existed. Closing that
+needs bracket counting across lines, and a string holding a bracket throws
+the count off. A test pins the gap so it is not "fixed" by going file-wide
+again.
+
 ### Surfaces
 
 | Surface | Shape |

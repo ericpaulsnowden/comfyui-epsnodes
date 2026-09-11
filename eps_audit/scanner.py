@@ -72,6 +72,16 @@ class Rule:
     #: carve one well-understood benign shape out of an otherwise useful
     #: rule, rather than dropping the rule or drowning it in noise.
     exclude: re.Pattern | None = None
+    #: Skip a join, INSIDE the body of a loop over a directory LISTING, whose
+    #: joined name is that loop's variable and has not been reassigned since.
+    #: `exclude` only sees one line, but the listing is routinely the line
+    #: above:
+    #:     for name in sorted(os.listdir(root)):
+    #:         adir = os.path.join(root, name)
+    #: which is enumeration, not resolution — the names came from `root`.
+    #: (ComfyUI-VDN-H3 spec.py:323, 2026-09-09.) Scoped by `_ListingScopes`:
+    #: never file-wide, because `name` is reused everywhere.
+    skip_listing_vars: bool = False
 
 
 @dataclass(frozen=True)
@@ -112,6 +122,7 @@ RULES: tuple[Rule, ...] = (
             r"os\.listdir\(|os\.scandir\(|glob\.|\.iterdir\(|"
             r"os\.path\.join\([^,]+,\s*_?[A-Z][A-Z0-9_]*\s*\)"
         ),
+        skip_listing_vars=True,
     ),
     Rule(
         id="path.startswith_check",
@@ -240,6 +251,133 @@ RULES: tuple[Rule, ...] = (
 )
 
 
+#: A `for` STATEMENT over a directory listing -- the binding that makes a join
+#: over its variable, inside its body, pure enumeration. Matched against the
+#: stripped line, so a comprehension mid-line never opens a scope (its variable
+#: does not leak, and a one-line comprehension join already hits `exclude`).
+#: Deliberately loose about what sits between the `in` and the call.
+_LISTING_LOOP_RE = re.compile(
+    r"(?:async\s+)?for\s+([A-Za-z_]\w*)\s+in\s+[^\n:]*"
+    r"(?:os\.listdir\(|os\.scandir\(|glob\.glob\(|glob\.iglob\(|\.iterdir\()"
+)
+
+#: The targets of any `for` statement, listing or not.
+_FOR_TARGETS_RE = re.compile(r"(?:async\s+)?for\s+(.+?)\s+in\b")
+
+#: A nested function or class has its own names, so no enclosing loop's
+#: variable reaches a join inside it.
+_NEW_NAMESPACE_RE = re.compile(r"(?:async\s+)?def\s|class\s")
+
+#: A join whose second argument is a plain identifier, matched against ONE
+#: rule match so a line holding two joins is judged join by join.
+_JOIN_SECOND_ARG_RE = re.compile(r"os\.path\.join\([^,]+,\s*([A-Za-z_]\w*)\s*\)")
+
+
+def _indent_of(line: str) -> int:
+    expanded = line.expandtabs()
+    return len(expanded) - len(expanded.lstrip())
+
+
+def _rebind_re(var: str) -> re.Pattern:
+    """A line that gives *var* a new value, so it no longer holds a listed name."""
+    v = re.escape(var)
+    return re.compile(
+        # Plain, chained, tuple-unpacking, annotated or augmented assignment.
+        # Anchored to the statement start so `f(name=x)` is not a rebind.
+        rf"^(?:[\w.\[\]'\"]+\s*=(?!=)\s*)*\(?\s*(?:\*?[\w.]+\s*,\s*)*\*?{v}\s*"
+        rf"(?:,\s*\*?[\w.]+\s*)*\)?\s*(?::[^=]*)?(?:[-+*/%&|^@]|//|\*\*|>>|<<)?=(?!=)"
+        rf"|\b{v}\s*:="    # walrus
+        rf"|\bas\s+{v}\b"  # with / except / import ... as
+    )
+
+
+@dataclass
+class _Scope:
+    """One open block that changes what a join inside it means.
+
+    *var* is the listing loop's variable, or None for a nested def/class,
+    which hides every enclosing loop's variable.
+    """
+
+    indent: int
+    var: str | None
+    rebind: re.Pattern | None = None
+    rebound: bool = False
+
+
+class _ListingScopes:
+    """Which names are, right now, a name read out of a directory listing.
+
+    The exemption is scoped to the loop that did the listing: it holds only
+    on the loop's indented body and ends the moment the name is given any
+    other value. The first version collected loop names FILE-WIDE, so any
+    later join on a reused identifier (`name` is everywhere) went silent,
+    including a request handler's parameter in a different function
+    (lead review, 2026-09-10). Wherever the shape is in doubt (a dedented
+    continuation line, a keyword argument that looks like an assignment),
+    the skip is dropped and the join is reported. For a scanner, a spare
+    finding is the safe way to be wrong.
+    """
+
+    def __init__(self) -> None:
+        self._stack: list[_Scope] = []
+
+    def enter_line(self, line: str) -> None:
+        """Close every block this line has dedented out of."""
+        if not self._stack:
+            return  # the common case: no listing loop open, nothing to measure
+        indent = _indent_of(line)
+        while self._stack and self._stack[-1].indent >= indent:
+            self._stack.pop()
+
+    def is_listed_name(self, var: str) -> bool:
+        """Whether a join over *var*, on the current line, is enumeration."""
+        for scope in reversed(self._stack):
+            if scope.var is None:
+                return False  # inside a def/class nested in the loop
+            if scope.var == var:
+                return not scope.rebound
+        return False
+
+    def leave_line(self, line: str, stripped: str) -> None:
+        """Apply what this line binds, after its joins were judged.
+
+        Rebinding is applied AFTER the check because Python evaluates the
+        right-hand side first: in `f = os.path.join(folder, f)` the join
+        still sees the listed name, and that is a common, safe idiom.
+        """
+        if self._stack:
+            loop_targets = _FOR_TARGETS_RE.match(stripped)
+            # A trailing comma marks an argument/element continuation line
+            # (`name=value,` inside a call), never a plausible assignment.
+            assigns = not stripped.endswith(",")
+            for scope in self._stack:
+                if scope.var is None or scope.rebound:
+                    continue
+                if (
+                    (loop_targets and re.search(rf"\b{scope.var}\b", loop_targets.group(1)))
+                    or (assigns and scope.rebind.search(stripped))
+                ):
+                    scope.rebound = True
+        listing = _LISTING_LOOP_RE.match(stripped)
+        if listing is not None:
+            var = listing.group(1)
+            self._stack.append(_Scope(_indent_of(line), var, _rebind_re(var)))
+        elif self._stack and _NEW_NAMESPACE_RE.match(stripped):
+            self._stack.append(_Scope(_indent_of(line), None))
+
+
+def _is_finding(rule: Rule, line: str, scopes: _ListingScopes | None) -> bool:
+    if scopes is None or "lambda" in line:
+        # A lambda's parameters shadow the loop's name on its own line.
+        return rule.pattern.search(line) is not None
+    for match in rule.pattern.finditer(line):
+        joined = _JOIN_SECOND_ARG_RE.fullmatch(match.group(0))
+        if joined is None or not scopes.is_listed_name(joined.group(1)):
+            return True
+    return False
+
+
 def scan_text(text: str, *, pack: str = "", path: str = "", rules=RULES) -> list[Finding]:
     """Findings for one file's *text*, in file order.
 
@@ -250,20 +388,25 @@ def scan_text(text: str, *, pack: str = "", path: str = "", rules=RULES) -> list
     active = [rule for rule in rules if all(need in text for need in rule.needs)]
     if not active:
         return []
+    scopes = _ListingScopes() if any(rule.skip_listing_vars for rule in active) else None
     findings: list[Finding] = []
     for number, line in enumerate(text.splitlines(), start=1):
         stripped = line.strip()
         if not stripped or stripped.startswith("#"):
             continue  # a comment quoting an idiom is not that idiom
+        if scopes is not None:
+            scopes.enter_line(line)
         for rule in active:
             if rule.exclude is not None and rule.exclude.search(line):
                 continue
-            if rule.pattern.search(line):
+            if _is_finding(rule, line, scopes if rule.skip_listing_vars else None):
                 findings.append(Finding(
                     rule_id=rule.id, severity=rule.severity, title=rule.title,
                     why=rule.why, pack=pack, path=path, line=number,
                     excerpt=stripped[:160],
                 ))
+        if scopes is not None:
+            scopes.leave_line(line, stripped)
     return findings
 
 

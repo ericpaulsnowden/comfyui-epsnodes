@@ -780,6 +780,11 @@ patterns worth knowing about.
   exactly that. Red means "look at this one first", nothing stronger.
   Nothing here ever suggests removing or distrusting a pack; the suggested
   action is always to look, or to ask the author.
+- **Going through a folder's own files isn't a false alarm any more.** Code
+  that lists a folder and builds each file's path from that same folder is
+  not flagged, because the names came from the folder itself. The exception
+  covers only the loop doing the listing. A risky path built anywhere else in
+  the same file, even with the same variable name, is still reported.
 - **Things most packs simply do** — starting another program, accepting a
   filename over the network — are listed for each pack as *what it can do*,
   and deliberately don't move the colour. Otherwise everything would be red

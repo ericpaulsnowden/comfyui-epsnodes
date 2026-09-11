@@ -166,6 +166,152 @@ class TestScannerRules:
         text = "p = os.path.join(input_dir, rel)\n"
         assert [f for f in scanner.scan_text(text) if f.rule_id == "path.unclamped_join"]
 
+    def test_a_loop_variable_from_a_listing_is_not_a_traversal(self) -> None:
+        # The listing binds the name on an EARLIER line, so the one-line
+        # `exclude` cannot see it (ComfyUI-VDN-H3 spec.py:323, 2026-09-09).
+        text = (
+            "for name in sorted(os.listdir(adapters_root)):\n"
+            "    adir = os.path.join(adapters_root, name)\n"
+        )
+        assert [f for f in scanner.scan_text(text) if f.rule_id == "path.unclamped_join"] == []
+
+    def test_a_request_value_join_is_still_a_finding_in_a_file_with_listings(self) -> None:
+        # The guard is per-NAME, not per-file: an unrelated listing elsewhere
+        # must not launder a genuinely caller-supplied path.
+        text = (
+            "for name in os.listdir(root):\n"
+            "    pass\n"
+            "p = os.path.join(input_dir, rel)\n"
+        )
+        assert [f for f in scanner.scan_text(text) if f.rule_id == "path.unclamped_join"]
+
+    # --- Listing-loop skip must be SCOPED to that loop (lead review 2026-09-10).
+    # The first version collected loop names FILE-WIDE, so any later join on
+    # the same identifier was skipped -- including caller-supplied values.
+    # `adapters_root` is used deliberately: the rule's pattern needs a
+    # dir/root/base/folder SUFFIX after at least one character, so a bare
+    # `root` never matches and a "still skipped" test built on it would pass
+    # for the wrong reason.
+
+    @staticmethod
+    def _joins(text: str) -> list[int]:
+        return [f.line for f in scanner.scan_text(text) if f.rule_id == "path.unclamped_join"]
+
+    def test_the_same_name_rebound_after_the_loop_is_still_a_finding(self) -> None:
+        text = (
+            "for name in os.listdir(adapters_root):\n"
+            "    pass\n"
+            "name = request.query['file']\n"
+            "p = os.path.join(base_dir, name)\n"
+        )
+        assert self._joins(text) == [4]
+
+    def test_the_same_name_in_a_different_function_is_still_a_finding(self) -> None:
+        # The dangerous shape: a handler whose PARAMETER merely shares its name
+        # with an unrelated listing loop elsewhere in the file.
+        text = (
+            "def list_it(adapters_root):\n"
+            "    for name in os.listdir(adapters_root):\n"
+            "        yield name\n"
+            "\n"
+            "def serve(base_dir, name):\n"
+            "    return os.path.join(base_dir, name)\n"
+        )
+        assert self._joins(text) == [6]
+
+    def test_a_rebind_inside_the_loop_body_cancels_the_skip(self) -> None:
+        text = (
+            "for name in os.listdir(adapters_root):\n"
+            "    name = request.query['file']\n"
+            "    p = os.path.join(adapters_root, name)\n"
+        )
+        assert self._joins(text) == [3]
+
+    def test_the_skip_ends_with_the_loop_body(self) -> None:
+        # Python leaks `name` past the loop, but a later join is no longer
+        # visibly enumeration -- flag it; that is the conservative direction.
+        text = (
+            "for name in os.listdir(adapters_root):\n"
+            "    pass\n"
+            "p = os.path.join(adapters_root, name)\n"
+        )
+        assert self._joins(text) == [3]
+
+    def test_a_join_nested_deeper_in_the_loop_body_is_still_skipped(self) -> None:
+        text = (
+            "for name in sorted(os.listdir(adapters_root)):\n"
+            "    if name.endswith('.json'):\n"
+            "        p = os.path.join(adapters_root, name)\n"
+        )
+        assert self._joins(text) == []
+
+    def test_blank_lines_and_comments_do_not_end_the_loop_body(self) -> None:
+        text = (
+            "for name in os.listdir(adapters_root):\n"
+            "\n"
+            "    # build the path\n"
+            "    p = os.path.join(adapters_root, name)\n"
+        )
+        assert self._joins(text) == []
+
+    def test_a_comparison_is_not_a_rebind(self) -> None:
+        text = (
+            "for name in os.listdir(adapters_root):\n"
+            "    if name == 'skip':\n"
+            "        continue\n"
+            "    p = os.path.join(adapters_root, name)\n"
+        )
+        assert self._joins(text) == []
+
+    def test_a_nested_non_listing_loop_rebinding_the_name_cancels_the_skip(self) -> None:
+        text = (
+            "for name in os.listdir(adapters_root):\n"
+            "    for name in request.json['files']:\n"
+            "        p = os.path.join(adapters_root, name)\n"
+        )
+        assert self._joins(text) == [3]
+
+    def test_joining_the_listed_name_onto_itself_is_still_skipped(self) -> None:
+        # Python evaluates the right-hand side first, so the join sees the
+        # listed name; the rebind only affects LATER lines.
+        text = (
+            "for f in os.listdir(adapters_root):\n"
+            "    f = os.path.join(adapters_root, f)\n"
+            "    g = os.path.join(base_dir, f)\n"
+        )
+        assert self._joins(text) == [3]
+
+    def test_a_second_join_on_the_same_line_is_judged_on_its_own(self) -> None:
+        text = (
+            "for name in os.listdir(adapters_root):\n"
+            "    a, b = os.path.join(adapters_root, name), os.path.join(base_dir, rel)\n"
+        )
+        assert self._joins(text) == [2]
+
+    def test_a_keyword_argument_is_not_a_rebind(self) -> None:
+        text = (
+            "for name in os.listdir(adapters_root):\n"
+            "    log(name=name)\n"
+            "    p = os.path.join(adapters_root, name)\n"
+        )
+        assert self._joins(text) == []
+
+    def test_a_multi_line_comprehension_clause_is_still_reported(self) -> None:
+        # Deliberate, measured gap: a comprehension's `for` clause on its own
+        # line opens no indented body (the next clause shares its indent), so
+        # the skip never starts. 5 of 628 findings in a 10M-line corpus, all
+        # also flagged before the skip existed. Closing it needs bracket
+        # counting across lines, which a string holding a bracket throws off.
+        # Do NOT "fix" this by collecting names file-wide again.
+        text = (
+            "names = [\n"
+            "    name\n"
+            "    for name in os.listdir(adapters_root)\n"
+            "    if os.path.isfile(os.path.join(adapters_root, name))\n"
+            "]\n"
+        )
+        assert self._joins(text) == [4]
+
     def test_a_commented_out_idiom_is_not_a_finding(self) -> None:
         text = "# p = os.path.join(input_dir, rel)  <- the bug we fixed\n"
         assert scanner.scan_text(text) == []
