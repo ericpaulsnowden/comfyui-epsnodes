@@ -2455,6 +2455,32 @@ add; single batch-aware IMAGE input; disk-backed, survive-restart, NO cap.
   2026-07-29; count, reorder, batch-count guard still open). No cap in
   v1. No module-scope torch/ComfyUI import (lazy inside functions).
 
+**Concurrency: one lock per grid (v0.96.0, 2026-09-13 release review #2).** Every store
+mutator holds a per-grid `threading.RLock` across its whole read-manifest -> allocate-name ->
+write -> commit-manifest sequence: `append_batch`, `append_uploaded_image`, `remove_frame`,
+`clear` and `clone_buffer`. The lock is keyed on the buffer directory after `realpath` and
+`normcase`.
+
+Before this, two writers to the same grid could both read the same manifest and both
+allocate `0001.png`. One image vanished while both callers reported success. The frontend
+serialised only its OWN `/add` calls, so a workflow run collecting while the browser pasted,
+removed, cleared or cloned into the same grid still raced.
+
+- **Lock type.** A `threading` lock, never `asyncio.Lock`, because `append_batch` runs on the
+  prompt-executor thread and the routes run on `to_thread` workers; neither is on the loop.
+- **Clone.** `clone_buffer` locks source and destination in sorted-key order, so opposite
+  clones cannot deadlock, and a grid cloned onto itself takes one lock. It must hold the
+  destination lock because it REPLACES the destination manifest.
+- **Readers stay lock-free.** `os.replace` makes each manifest swap atomic. Thumbnails are
+  idempotent derived files.
+- **Different grids never wait on each other.**
+- **The mtime display cache has its own small lock.** A lock-free get-then-`move_to_end`
+  could raise `KeyError` when a write on another thread invalidated the same uuid between
+  the two calls.
+
+Cross-PROCESS writers (two servers sharing one output dir) are out of scope: grid buffers
+live in each server's own output directory.
+
 ## §6.7 `EPSFrameSaver` (display: "EPS Frame Saver") — video frame picker
 
 **Typing a frame number could be overwritten out from under the user (§7.9,

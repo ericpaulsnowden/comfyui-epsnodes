@@ -160,8 +160,10 @@ same-named re-upload; this appends to a live buffer you can see.
 
 Today each image is **two** sequential HTTP round trips (`/upload/image` then
 `/eps_image_grid/add`). Uploads could run 3–4 wide (pure I/O), but `/add` **must stay
-sequential** — `append_uploaded_image` does an unlocked read-modify-write of `manifest.json`,
-so concurrent adds would lose entries.
+sequential** — `append_uploaded_image` did an unlocked read-modify-write of `manifest.json`,
+so concurrent adds would lose entries. *(Closed at the store layer in v0.96.0: every mutator now
+takes a per-grid lock, FORMAT §6.6 "Concurrency". Concurrent `/add`s are now SAFE, but they queue
+behind one another on the same grid, so a batch route would still be the only real speed-up.)*
 
 If needed: add `POST /eps_image_grid/add_many` taking a list. **Do not repurpose `/add`** —
 `docs/FORMAT.md:1642-1644` freezes shipped route contracts; new capabilities add routes/fields.
@@ -180,7 +182,8 @@ only if bulk add lands and the buffer becomes hard to curate.
    debounced 1500ms (`:1956`) — a long batch can straddle a remint, sending the tail into a
    different buffer than the head. Worse, `clone_buffer` **replaces** the destination manifest
    (`image_grid_store.py:489`), so concurrent appends survive on disk but vanish from the
-   manifest. Capture the uuid once per batch, and serialize bulk-add against clone.
+   manifest. Capture the uuid once per batch, and serialize bulk-add against clone. *(The clone half
+is closed by the v0.96.0 per-grid lock; the uuid-remint half still stands.)*
 2. **Never write the uuid.** Read via `currentUuid` only (`:660-662`); `FORMAT.md:946-957`
    requires identity to stay stable across load/undo/configure.
 3. **Never reconstruct filenames.** ComfyUI auto-suffixes collisions as `IMG_1234 (1).jpg`, and

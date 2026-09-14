@@ -102,6 +102,7 @@ import os
 import re
 import shutil
 import tempfile
+import threading
 from collections import OrderedDict
 from pathlib import Path
 from typing import Any
@@ -211,6 +212,120 @@ def _manifest_path(directory: Path) -> Path:
     return directory / MANIFEST_FILENAME
 
 
+# --------------------------------------------------------------- locking
+# (2026-09-13 data-loss fix, RELEASE-REVIEW-2026-09-13.md finding #2.)
+
+#: A per-grid ``threading.RLock``, keyed on that grid's buffer directory
+#: (:func:`_lock_key`), guarding the WHOLE read-manifest -> allocate-name ->
+#: write-image(s) -> commit-manifest sequence in every mutator below
+#: (:func:`append_batch`, :func:`append_uploaded_image`, :func:`remove_frame`,
+#: :func:`clear`, :func:`clone_buffer`). Fixes a real data-loss bug
+#: (reproduced with a ``threading.Barrier`` placed right after each thread's
+#: manifest read, see the test file): two concurrent mutators of the SAME
+#: grid both read the same manifest, both compute the same "next" frame
+#: name, and the second writer's PNG + manifest entry silently clobbers the
+#: first's -- one image vanishes (from disk, or just from the manifest)
+#: while BOTH callers report success.
+#:
+#: **Why a plain OS thread lock, not asyncio.Lock:** :func:`append_batch`
+#: runs synchronously on ComfyUI's prompt-executor thread
+#: (``nodes_image_grid.py``'s ``run()``) -- not on the asyncio event loop at
+#: all -- while ``routes_image_grid.py``'s handlers reach the other four
+#: mutators via ``asyncio.to_thread``, i.e. also off the loop, on a
+#: threadpool worker. Neither caller is a coroutine scheduled on the loop,
+#: so an ``asyncio.Lock`` (which only coordinates coroutines on ONE loop,
+#: and is documented as not thread-safe to touch from any other thread)
+#: cannot serialize them against each other at all -- only a real
+#: ``threading`` lock, which blocks whatever OS thread calls it regardless
+#: of what that thread is running, actually closes this race.
+#:
+#: **Why RLock, not a plain Lock:** :func:`clone_buffer` locks BOTH its
+#: source and destination grids for the whole copy (below); when the two
+#: uuids happen to be equal that resolves to the SAME lock, and a plain
+#: ``Lock`` would deadlock a thread trying to acquire what it already
+#: holds. (:func:`_locked` also de-duplicates identical keys down to a
+#: single ``acquire()`` call, so this exact spot never actually re-enters
+#: today -- but the registry hands out RLocks unconditionally rather than
+#: depend on that de-dup staying the only path in here: no OTHER mutator
+#: below ever calls another locked mutator, or re-acquires its own lock, so
+#: RLock costs those call sites nothing extra.)
+#:
+#: **Why keyed on the resolved directory, not the raw ``grid_uuid`` string:**
+#: the uuid IS the buffer dir's one path segment (:func:`buffer_dir`), so
+#: the string alone would already be a fine key in practice -- normalising
+#: through :func:`_lock_key` (``os.path.realpath`` + ``os.path.normcase``)
+#: is defensive belt-and-suspenders so a symlinked output dir or a
+#: case-insensitive filesystem can never let two different-LOOKING paths to
+#: the SAME on-disk grid end up guarded by two independent locks, which
+#: would silently defeat this whole fix.
+#:
+#: Never evicted (unlike :data:`_mtime_cache`, which is deliberately
+#: bounded): a bare ``RLock`` is a handful of bytes, one per DISTINCT grid
+#: this process has ever mutated -- cheap enough for a process lifetime
+#: that eviction would only add complexity for no real memory win.
+_grid_locks: dict[str, threading.RLock] = {}
+#: Guards *creation* of a new entry in :data:`_grid_locks` -- the only
+#: mutation that dict ever sees. Without this, two threads racing to mint
+#: the FIRST lock for the same never-yet-seen grid could each build their
+#: own ``RLock`` and each proceed believing it holds "the" lock -- exactly
+#: the check-then-act race this whole module exists to close, just one
+#: level up.
+_grid_locks_guard = threading.Lock()
+
+
+def _lock_key(directory: Path) -> str:
+    """*directory*'s canonical on-disk identity for :data:`_grid_locks` --
+    ``os.path.realpath`` resolves symlinks, ``os.path.normcase`` folds case
+    on a case-insensitive filesystem -- so two different-looking paths to
+    the SAME grid always share one lock (see :data:`_grid_locks`'s
+    docstring)."""
+    return os.path.normcase(os.path.realpath(str(directory)))
+
+
+def _grid_lock(directory: Path) -> threading.RLock:
+    """The single :class:`threading.RLock` guarding *directory* -- minted
+    on first use, reused forever after (see :data:`_grid_locks`)."""
+    key = _lock_key(directory)
+    with _grid_locks_guard:
+        lock = _grid_locks.get(key)
+        if lock is None:
+            lock = threading.RLock()
+            _grid_locks[key] = lock
+        return lock
+
+
+@contextlib.contextmanager
+def _locked(*directories: Path):
+    """Hold the lock(s) for *directories* for the ``with`` block's duration
+    -- the one choke point every mutator below funnels its whole
+    read -> allocate -> write -> commit sequence through.
+
+    Locks are acquired in a FIXED order -- sorted by :func:`_lock_key`, not
+    argument order -- so two threads locking the same PAIR of grids in
+    opposite directions (e.g. two concurrent clones, A->B and B->A racing
+    each other) can never each hold one lock while blocked waiting on the
+    other. Passing the same directory more than once (:func:`clone_buffer`
+    with ``src_uuid == dst_uuid``) de-duplicates to a single acquire, so
+    that case can't self-deadlock either.
+
+    Holding a grid's lock while its PNGs are written (tens to hundreds of
+    milliseconds for a large batch) only serializes mutators of THIS ONE
+    grid against each other -- a different ``grid_uuid`` has its own lock
+    and proceeds fully in parallel.
+    """
+    unique: dict[str, threading.RLock] = {}
+    for directory in directories:
+        unique[_lock_key(directory)] = _grid_lock(directory)
+    ordered = [unique[key] for key in sorted(unique)]
+    for lock in ordered:
+        lock.acquire()
+    try:
+        yield
+    finally:
+        for lock in reversed(ordered):
+            lock.release()
+
+
 # ---------------------------------------------------------------- manifest
 
 
@@ -292,22 +407,33 @@ def append_batch(grid_uuid: str, image_batch: Any) -> list[dict]:
 
     import numpy as np
 
-    manifest = _load_manifest(directory)
-    frames = manifest["frames"]
+    # 2026-09-13 data-loss fix: the WHOLE read-manifest -> allocate-name ->
+    # write-PNG(s) -> commit-manifest sequence must be atomic w.r.t. every
+    # OTHER mutator of this same grid_uuid (a concurrent /add, /remove,
+    # /clear or /clone from routes_image_grid.py, or another Run of this
+    # same node) -- see _grid_locks's docstring for why this specific race
+    # (two threads reading the same manifest and allocating the same "next"
+    # frame name) was silently losing images.
+    with _locked(directory):
+        manifest = _load_manifest(directory)
+        frames = manifest["frames"]
 
-    batch_len = int(image_batch.shape[0])
-    for i in range(batch_len):
-        # Mirrors core `SaveImage.save_images`'s own tensor->PNG conversion
-        # exactly (ComfyUI `nodes.py`): scale 0..1 floats to 0..255 bytes,
-        # clip defensively against a slightly-out-of-range upstream tensor.
-        frame = image_batch[i]
-        array = (255.0 * frame.detach().cpu().numpy()).clip(0, 255).astype(np.uint8)
-        name = _next_frame_filename(frames)
-        _atomic_write_bytes(directory / name, _encode_png(array))
-        frames.append(name)
+        batch_len = int(image_batch.shape[0])
+        for i in range(batch_len):
+            # Mirrors core `SaveImage.save_images`'s own tensor->PNG
+            # conversion exactly (ComfyUI `nodes.py`): scale 0..1 floats to
+            # 0..255 bytes, clip defensively against a slightly-out-of-range
+            # upstream tensor.
+            frame = image_batch[i]
+            array = (255.0 * frame.detach().cpu().numpy()).clip(0, 255).astype(np.uint8)
+            name = _next_frame_filename(frames)
+            _atomic_write_bytes(directory / name, _encode_png(array))
+            frames.append(name)
 
-    _save_manifest(directory, manifest)
-    _mtime_cache_invalidate(grid_uuid)  # 2026-08-26: a write must drop any cached decoration
+        _save_manifest(directory, manifest)
+        _mtime_cache_invalidate(grid_uuid)  # a write must drop any cached decoration
+    # `frames` is this call's OWN local list (from `_load_manifest`, never
+    # shared with another call) -- safe to read after releasing the lock.
     return _refs_for(grid_uuid, frames)
 
 
@@ -413,13 +539,21 @@ def append_uploaded_image(
         logger.warning("eps_image_grid: could not read %s to add (%s)", source_path, exc)
         return list_refs(grid_uuid)
 
-    manifest = _load_manifest(directory)
-    frames = manifest["frames"]
-    name = _next_frame_filename(frames)
-    _atomic_write_bytes(directory / name, png_bytes)
-    frames.append(name)
-    _save_manifest(directory, manifest)
-    _mtime_cache_invalidate(grid_uuid)  # 2026-08-26: a write must drop any cached decoration
+    # 2026-09-13 data-loss fix: the decode above reads from a DIFFERENT
+    # directory (input/output/temp, not this grid's buffer dir) and doesn't
+    # depend on this grid's state at all, so it deliberately runs BEFORE the
+    # lock is taken -- only the read-manifest -> allocate-name -> write ->
+    # commit-manifest sequence below needs to be atomic against this grid's
+    # other mutators (see _grid_locks's docstring).
+    with _locked(directory):
+        manifest = _load_manifest(directory)
+        frames = manifest["frames"]
+        name = _next_frame_filename(frames)
+        _atomic_write_bytes(directory / name, png_bytes)
+        frames.append(name)
+        _save_manifest(directory, manifest)
+        _mtime_cache_invalidate(grid_uuid)  # a write must drop any cached decoration
+    # `frames` is this call's OWN local list -- safe to read post-unlock.
     return _refs_for(grid_uuid, frames)
 
 
@@ -464,26 +598,33 @@ def remove_frame(grid_uuid: str, filename: str) -> list[dict]:
     directory = buffer_dir(grid_uuid)
     if directory is None:
         return []
-    manifest = _load_manifest(directory)
-    frames = manifest.get("frames", [])
-    if filename not in frames:
-        return _refs_for(grid_uuid, frames)
-    manifest["frames"] = [name for name in frames if name != filename]
-    _save_manifest(directory, manifest)
-    _mtime_cache_invalidate(grid_uuid)  # 2026-08-26: a write must drop any cached decoration
-    try:
-        (directory / filename).unlink()
-    except OSError:
-        logger.warning(
-            "eps_image_grid: frame file %s could not be deleted (manifest entry removed)",
-            filename,
-        )
-    # Its cached thumbnail goes too (2026-08-21) -- best-effort, same as the
-    # frame: a stale thumb is unreachable anyway (`thumbnail_path` refuses
-    # anything the manifest no longer lists) and `clear` rmtrees the lot.
-    with contextlib.suppress(OSError):
-        _thumb_path_for(directory / filename).unlink()
-    return _refs_for(grid_uuid, manifest["frames"])
+    # 2026-09-13 data-loss fix: the whole read-manifest -> rewrite ->
+    # commit-manifest sequence (plus the best-effort unlinks that follow --
+    # kept inside the same locked section so no concurrent mutator can ever
+    # observe this grid mid-removal) must be atomic against this grid's
+    # other mutators. See _grid_locks's docstring.
+    with _locked(directory):
+        manifest = _load_manifest(directory)
+        frames = manifest.get("frames", [])
+        if filename not in frames:
+            return _refs_for(grid_uuid, frames)
+        manifest["frames"] = [name for name in frames if name != filename]
+        _save_manifest(directory, manifest)
+        _mtime_cache_invalidate(grid_uuid)  # a write must drop any cached decoration
+        try:
+            (directory / filename).unlink()
+        except OSError:
+            logger.warning(
+                "eps_image_grid: frame file %s could not be deleted (manifest entry removed)",
+                filename,
+            )
+        # Its cached thumbnail goes too (2026-08-21) -- best-effort, same as
+        # the frame: a stale thumb is unreachable anyway (`thumbnail_path`
+        # refuses anything the manifest no longer lists) and `clear` rmtrees
+        # the lot.
+        with contextlib.suppress(OSError):
+            _thumb_path_for(directory / filename).unlink()
+        return _refs_for(grid_uuid, manifest["frames"])
 
 
 def buffer_generation(grid_uuid: str) -> int:
@@ -627,23 +768,29 @@ _MTIME_CACHE_MAX_UUIDS = 64
 #: was built from the SAME frame sequence a same-generation caller is now
 #: asking about, on top of the generation match itself.
 _mtime_cache: OrderedDict[str, tuple[int, list[Any], list[dict]]] = OrderedDict()
+#: The cache is read lock-free by /list and node runs while writes on OTHER
+#: threads invalidate it, and a get-then-move_to_end is not atomic: an
+#: invalidate landing between the two raised KeyError (2026-09-13 review).
+_mtime_cache_lock = threading.Lock()
 
 
 def _mtime_cache_get(grid_uuid: str, generation: int, names: list[Any]) -> list[dict] | None:
-    entry = _mtime_cache.get(grid_uuid)
-    if entry is None or entry[0] != generation or entry[1] != names:
-        return None
-    _mtime_cache.move_to_end(grid_uuid)
-    return entry[2]
+    with _mtime_cache_lock:
+        entry = _mtime_cache.get(grid_uuid)
+        if entry is None or entry[0] != generation or entry[1] != names:
+            return None
+        _mtime_cache.move_to_end(grid_uuid)
+        return entry[2]
 
 
 def _mtime_cache_put(
     grid_uuid: str, generation: int, names: list[Any], decorated: list[dict]
 ) -> None:
-    _mtime_cache[grid_uuid] = (generation, names, decorated)
-    _mtime_cache.move_to_end(grid_uuid)
-    while len(_mtime_cache) > _MTIME_CACHE_MAX_UUIDS:
-        _mtime_cache.popitem(last=False)  # evict the least-recently-used uuid
+    with _mtime_cache_lock:
+        _mtime_cache[grid_uuid] = (generation, names, decorated)
+        _mtime_cache.move_to_end(grid_uuid)
+        while len(_mtime_cache) > _MTIME_CACHE_MAX_UUIDS:
+            _mtime_cache.popitem(last=False)  # evict the least-recently-used uuid
 
 
 def _mtime_cache_invalidate(grid_uuid: str) -> None:
@@ -656,7 +803,8 @@ def _mtime_cache_invalidate(grid_uuid: str) -> None:
     resolution at all, matching :func:`buffer_generation`'s own documented
     ms-collision caveat rather than trusting it never bites this cache too.
     """
-    _mtime_cache.pop(grid_uuid, None)
+    with _mtime_cache_lock:
+        _mtime_cache.pop(grid_uuid, None)
 
 
 def _mtime_cache_clear() -> None:
@@ -670,7 +818,8 @@ def _mtime_cache_clear() -> None:
     throwaway buffers could otherwise share a stale entry if two fast tests
     land on the same millisecond-resolution generation.
     """
-    _mtime_cache.clear()
+    with _mtime_cache_lock:
+        _mtime_cache.clear()
 
 
 def with_frame_mtimes(grid_uuid: str, refs: list[dict]) -> list[dict]:
@@ -888,11 +1037,20 @@ def clear(grid_uuid: str) -> bool:
     missing/malformed dir").
     """
     directory = buffer_dir(grid_uuid)
-    if directory is None or not directory.exists():
+    if directory is None:
         return False
-    shutil.rmtree(directory, ignore_errors=True)
-    _mtime_cache_invalidate(grid_uuid)  # 2026-08-26: a write must drop any cached decoration
-    return True
+    # 2026-09-13 data-loss fix: the exists-check + rmtree must be atomic
+    # against every other mutator of this grid -- an append racing an
+    # unlocked Clear could otherwise write its PNG/manifest entry into a
+    # directory that Clear is mid-rmtree'ing (or immediately after, losing
+    # that append entirely with no error reported to either caller). See
+    # _grid_locks's docstring.
+    with _locked(directory):
+        if not directory.exists():
+            return False
+        shutil.rmtree(directory, ignore_errors=True)
+        _mtime_cache_invalidate(grid_uuid)  # a write must drop any cached decoration
+        return True
 
 
 # --------------------------------------------------------------------- clone
@@ -930,26 +1088,45 @@ def clone_buffer(src_uuid: str, dst_uuid: str) -> list[dict]:
             dst_uuid,
         )
         return []
-    if not src_dir.exists():
-        return []
+    # 2026-09-13 data-loss fix: a clone REPLACES the destination manifest
+    # (`_save_manifest` below is a full overwrite, not a merge) -- so an
+    # unlocked append into *dst_uuid* landing between this function's own
+    # manifest read/copy and its `_save_manifest` used to survive on disk as
+    # an orphan PNG but vanish from the manifest the very next read (the
+    # append's caller had already been told it succeeded). Locking BOTH
+    # source and destination for the whole copy closes that, and also stops
+    # a concurrent `remove_frame`/`clear` of the SOURCE from deleting a
+    # frame out from under this function's own read loop below. Fixed
+    # acquisition order (sorted lock keys, not src/dst argument order) inside
+    # `_locked` prevents a two-clone deadlock; src == dst de-duplicates to
+    # one lock, so cloning a grid into itself can't self-deadlock either --
+    # see `_locked`'s and `_grid_locks`'s docstrings for both.
+    with _locked(src_dir, dst_dir):
+        if not src_dir.exists():
+            return []
 
-    manifest = _load_manifest(src_dir)
-    copied: list[str] = []
-    for name in manifest["frames"]:
-        src_path = src_dir / name
-        try:
-            data = src_path.read_bytes()
-        except OSError as exc:
-            logger.warning(
-                "eps_image_grid: clone skipping unreadable frame %s (%s)", src_path, exc
-            )
-            continue
-        _atomic_write_bytes(dst_dir / name, data)
-        copied.append(name)
+        manifest = _load_manifest(src_dir)
+        copied: list[str] = []
+        for name in manifest["frames"]:
+            src_path = src_dir / name
+            try:
+                data = src_path.read_bytes()
+            except OSError as exc:
+                logger.warning(
+                    "eps_image_grid: clone skipping unreadable frame %s (%s)", src_path, exc
+                )
+                continue
+            _atomic_write_bytes(dst_dir / name, data)
+            copied.append(name)
 
-    if not copied:
-        return []
+        if not copied:
+            return []
 
-    _save_manifest(dst_dir, {"format": CURRENT_FORMAT, "frames": copied})
-    _mtime_cache_invalidate(dst_uuid)  # 2026-08-26: a write must drop any cached decoration
-    return list_refs(dst_uuid)
+        _save_manifest(dst_dir, {"format": CURRENT_FORMAT, "frames": copied})
+        _mtime_cache_invalidate(dst_uuid)  # a write must drop any cached decoration
+        # Built from `copied` directly (this call's OWN local list) rather
+        # than a fresh `list_refs(dst_uuid)` re-read -- so the returned refs
+        # are an exact snapshot of what THIS clone just wrote, still taken
+        # while the destination lock is held, immune to a write landing in
+        # the gap between releasing the lock and re-reading the manifest.
+        return _refs_for(dst_uuid, copied)

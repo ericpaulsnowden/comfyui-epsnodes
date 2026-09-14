@@ -1088,6 +1088,9 @@ times to gather images, then send the whole set through a workflow at once.
   folder, keyed to that node), so it's still there after you close and reopen
   ComfyUI. A **Clear** button wipes it; deleting the node abandons it. No cap.
 - Each node keeps its own independent buffer, even after copy/paste.
+- **Safe to use while it runs.** Paste, delete, clear or copy images in a grid while a queued
+  run is still collecting into it, and nothing is lost. Before v0.96.0 two changes landing at
+  the same moment could silently drop one image.
 - **Copy/paste:** right-click a collected image → Copy image (to the OS
   clipboard, for Photoshop/etc.) or Copy (Clipspace) (into the mask editor or
   another node). Five ways to ADD images: the **Add images… button** (a
