@@ -14,11 +14,13 @@ forwarded request is treated as non-loopback regardless of its value).
 
 from __future__ import annotations
 
+import asyncio
+import time
 from pathlib import Path
 
 from aiohttp import web
 
-from lora_library import routes_notebook
+from lora_library import markdown_store, routes_notebook
 from lora_library.context import LibraryContext
 from lora_library.routes import build_routes
 
@@ -2402,3 +2404,252 @@ async def test_get_notebook_include_text_category_descriptions_matches_the_dedic
         )
     ).json()
     assert rich["category_descriptions"]["Cat A"] == dedicated["description"]
+
+
+# --------------------------------------------------------------- concurrency
+#
+# RELEASE-REVIEW-2026-09-13.md finding 3: every mutation route used to
+# `load_notebook`, `check_conflict`, mutate, then `save_notebook` as four
+# separate awaits, so a second request's own load could land in the gap
+# between a first request's load and save -- both would pass the conflict
+# check against the same base_mtime, and the second save silently discarded
+# the first's change even when the two requests touched different entries.
+# `path_locks.lock_for(path)` now wraps each route's whole
+# load->check->mutate->save sequence as one locked transaction (see
+# routes_notebook.py's module docstring).
+#
+# These tests widen the load->save window by making `load_notebook` sleep
+# ~50ms AFTER its real read, long enough that a second concurrent request is
+# guaranteed to have started (and, without the lock, would race) before the
+# first request's save lands. Deliberately NO Barrier after the read: WITH
+# the lock, the second request can never reach its own load until the first
+# request's lock is released, so a barrier waiting for "both requests have
+# read" would simply hang forever -- the lock itself is what serializes them.
+
+
+def _make_slow_load_notebook(monkeypatch, delay: float = 0.05) -> None:
+    """Patches ``markdown_store.load_notebook`` to sleep *delay* seconds
+    after doing its real read -- see the section comment above. Runs on a
+    real OS thread (every caller reaches this through `asyncio.to_thread`),
+    so the sleep widens the race window without blocking the event loop
+    the way an `await asyncio.sleep` inside the coroutine would.
+    """
+    real_load_notebook = markdown_store.load_notebook
+
+    def slow_load_notebook(path):
+        result = real_load_notebook(path)
+        time.sleep(delay)
+        return result
+
+    monkeypatch.setattr(markdown_store, "load_notebook", slow_load_notebook)
+
+
+async def _entry_text(client, file: str, name: str) -> str:
+    resp = await client.get("/lora_library/notebook/entry", params={"file": file, "name": name})
+    body = await resp.json()
+    return body["text"]
+
+
+async def test_concurrent_upserts_from_the_same_base_never_silently_lose_an_edit(
+    context: LibraryContext, aiohttp_client, monkeypatch
+) -> None:
+    """The review's reproduction (finding 3), made deterministic: two
+    upserts loaded from the SAME base_mtime, each editing a DIFFERENT
+    entry, fired at once. Before this fix both routinely returned 200 and
+    the second write discarded the first's change even though the two
+    requests never touched the same entry. With the lock serializing the
+    whole load->check->mutate->save sequence per file, the second
+    request's own load now happens strictly after the first request's
+    save landed, so its base_mtime is honestly stale: one 200, one 409 --
+    never two silent 200s with a lost edit.
+    """
+    client = await aiohttp_client(make_app(context))
+    await client.post(
+        "/lora_library/notebook/entry", json={"file": "loras.md", "name": "A", "text": "orig-a"}
+    )
+    created_b = await client.post(
+        "/lora_library/notebook/entry", json={"file": "loras.md", "name": "B", "text": "orig-b"}
+    )
+    base_mtime = (await created_b.json())["mtime"]
+
+    _make_slow_load_notebook(monkeypatch)
+
+    resp_a, resp_b = await asyncio.gather(
+        client.post(
+            "/lora_library/notebook/entry",
+            json={"file": "loras.md", "name": "A", "text": "new-a", "base_mtime": base_mtime},
+        ),
+        client.post(
+            "/lora_library/notebook/entry",
+            json={"file": "loras.md", "name": "B", "text": "new-b", "base_mtime": base_mtime},
+        ),
+    )
+    statuses = sorted([resp_a.status, resp_b.status])
+    assert statuses == [200, 409], (
+        "with the lock in place, exactly one request wins the race and the "
+        "other gets an honest conflict -- never two silent 200s"
+    )
+
+    # No silent loss either way: whichever request won kept ITS edit, and
+    # the loser's request never wrote at all, so the OTHER entry still
+    # holds exactly what it had before this race -- never overwritten,
+    # never half-applied.
+    text_a = await _entry_text(client, "loras.md", "A")
+    text_b = await _entry_text(client, "loras.md", "B")
+    if resp_a.status == 200:
+        assert text_a == "new-a"
+        assert text_b == "orig-b"
+    else:
+        assert resp_b.status == 200
+        assert text_b == "new-b"
+        assert text_a == "orig-a"
+
+
+async def test_concurrent_move_and_upsert_from_the_same_base_never_silently_lose_an_edit(
+    context: LibraryContext, aiohttp_client, monkeypatch
+) -> None:
+    """Same interleaving as the upsert/upsert test above, but one side is
+    `/notebook/move` -- proving the lock covers every mutating route, not
+    just the entry route the review happened to reproduce with."""
+    client = await aiohttp_client(make_app(context))
+    await client.post(
+        "/lora_library/notebook/entry", json={"file": "loras.md", "name": "A", "text": "orig-a"}
+    )
+    created_b = await client.post(
+        "/lora_library/notebook/entry", json={"file": "loras.md", "name": "B", "text": "orig-b"}
+    )
+    base_mtime = (await created_b.json())["mtime"]
+
+    _make_slow_load_notebook(monkeypatch)
+
+    resp_move, resp_entry = await asyncio.gather(
+        client.post(
+            "/lora_library/notebook/move",
+            json={"file": "loras.md", "name": "A", "category": "Cat", "base_mtime": base_mtime},
+        ),
+        client.post(
+            "/lora_library/notebook/entry",
+            json={"file": "loras.md", "name": "B", "text": "new-b", "base_mtime": base_mtime},
+        ),
+    )
+    statuses = sorted([resp_move.status, resp_entry.status])
+    assert statuses == [200, 409]
+
+    final = await (await client.get("/lora_library/notebook", params={"file": "loras.md"})).json()
+    by_name = {e["name"]: e for e in final["entries"]}
+    text_b = await _entry_text(client, "loras.md", "B")
+    if resp_move.status == 200:
+        assert by_name["A"]["category"] == "Cat"
+        assert text_b == "orig-b"
+    else:
+        assert resp_entry.status == 200
+        assert text_b == "new-b"
+        assert by_name["A"]["category"] == ""
+
+
+async def test_concurrent_delete_and_upsert_from_the_same_base_never_silently_lose_an_edit(
+    context: LibraryContext, aiohttp_client, monkeypatch
+) -> None:
+    """Same interleaving again, this time one side is `/notebook/delete`."""
+    client = await aiohttp_client(make_app(context))
+    await client.post(
+        "/lora_library/notebook/entry", json={"file": "loras.md", "name": "A", "text": "orig-a"}
+    )
+    created_b = await client.post(
+        "/lora_library/notebook/entry", json={"file": "loras.md", "name": "B", "text": "orig-b"}
+    )
+    base_mtime = (await created_b.json())["mtime"]
+
+    _make_slow_load_notebook(monkeypatch)
+
+    resp_delete, resp_entry = await asyncio.gather(
+        client.post(
+            "/lora_library/notebook/delete",
+            json={"file": "loras.md", "name": "A", "base_mtime": base_mtime},
+        ),
+        client.post(
+            "/lora_library/notebook/entry",
+            json={"file": "loras.md", "name": "B", "text": "new-b", "base_mtime": base_mtime},
+        ),
+    )
+    statuses = sorted([resp_delete.status, resp_entry.status])
+    assert statuses == [200, 409]
+
+    final = await (await client.get("/lora_library/notebook", params={"file": "loras.md"})).json()
+    names = {e["name"] for e in final["entries"]}
+    if resp_delete.status == 200:
+        assert "A" not in names
+        assert await _entry_text(client, "loras.md", "B") == "orig-b"
+    else:
+        assert resp_entry.status == 200
+        assert "A" in names
+        assert await _entry_text(client, "loras.md", "B") == "new-b"
+
+
+async def test_sequential_chain_using_each_responses_mtime_never_409s(
+    context: LibraryContext, aiohttp_client
+) -> None:
+    """A well-behaved caller that threads each response's own `mtime` into
+    the NEXT request's `base_mtime` -- exactly what the panel's
+    `state.baseMtime`/`noteFileMtime` bookkeeping does (see
+    web/lora_library/notebook.js) -- never spuriously conflicts with
+    itself, lock or no lock, across three DIFFERENT mutating routes."""
+    client = await aiohttp_client(make_app(context))
+    r1 = await client.post(
+        "/lora_library/notebook/entry", json={"file": "loras.md", "name": "A", "text": "v1"}
+    )
+    assert r1.status == 200
+    mtime1 = (await r1.json())["mtime"]
+
+    r2 = await client.post(
+        "/lora_library/notebook/entry",
+        json={"file": "loras.md", "name": "A", "text": "v2", "base_mtime": mtime1},
+    )
+    assert r2.status == 200
+    mtime2 = (await r2.json())["mtime"]
+
+    r3 = await client.post(
+        "/lora_library/notebook/move",
+        json={"file": "loras.md", "name": "A", "category": "Cat", "base_mtime": mtime2},
+    )
+    assert r3.status == 200
+    mtime3 = (await r3.json())["mtime"]
+
+    r4 = await client.post(
+        "/lora_library/notebook/delete",
+        json={"file": "loras.md", "name": "A", "base_mtime": mtime3},
+    )
+    assert r4.status == 200
+
+
+async def test_concurrent_mutations_to_different_files_are_not_serialized_against_each_other(
+    context: LibraryContext, aiohttp_client, monkeypatch
+) -> None:
+    """`path_locks.lock_for` keys on the RESOLVED path -- two different
+    notebook files must never block, or falsely conflict with, each other."""
+    client = await aiohttp_client(make_app(context))
+    created_1 = await client.post(
+        "/lora_library/notebook/entry", json={"file": "one.md", "name": "A", "text": "orig-a"}
+    )
+    created_2 = await client.post(
+        "/lora_library/notebook/entry", json={"file": "two.md", "name": "B", "text": "orig-b"}
+    )
+    base_1 = (await created_1.json())["mtime"]
+    base_2 = (await created_2.json())["mtime"]
+
+    _make_slow_load_notebook(monkeypatch)
+
+    resp_1, resp_2 = await asyncio.gather(
+        client.post(
+            "/lora_library/notebook/entry",
+            json={"file": "one.md", "name": "A", "text": "new-a", "base_mtime": base_1},
+        ),
+        client.post(
+            "/lora_library/notebook/entry",
+            json={"file": "two.md", "name": "B", "text": "new-b", "base_mtime": base_2},
+        ),
+    )
+    assert resp_1.status == 200
+    assert resp_2.status == 200
+    assert await _entry_text(client, "one.md", "A") == "new-a"
+    assert await _entry_text(client, "two.md", "B") == "new-b"

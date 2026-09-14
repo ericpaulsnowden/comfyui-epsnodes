@@ -283,6 +283,38 @@ the server refuses with `409 {"error", "mtime"}` and writes nothing; the UI
 offers reload-then-reapply. Omitting `base_mtime` skips the check (first
 save to a brand-new file).
 
+**Within one server, each mutation is one locked transaction (v0.96.1,
+2026-09-13 release review #3).** The check above only compares mtimes. Every
+notebook mutation route used to load, check, mutate and save as four separate
+awaits, so two overlapping requests from the same base both passed the check
+and the second save silently dropped the first's change, even when they
+touched different entries.
+
+- **What is locked.** All six routes (`entry`, `category`, `delete`, `move`,
+  `move_category`, `delete_category`) now run the whole sequence inside ONE
+  `asyncio.to_thread` call while holding `path_locks.lock_for(path)`. That is
+  a `threading.Lock` keyed on `realpath` plus `normcase`, and it is resolved
+  in the worker because a NAS `realpath` can block.
+- **The effect.** A request that overlaps another now gets an honest 409 (its
+  base really is stale by then) and the panel's Reload/Overwrite banner.
+  Responses are otherwise byte-identical.
+- **The panel never races itself.** Every write path sets `state.busy` before
+  its first await; the multi-select move and delete functions now also check
+  it themselves.
+- **LoRA Picker favorites/recents.** `lora_picker.json` does its own
+  load-mutate-write per star click and recents stamp, so it takes the same
+  lock.
+- **Still NOT locked, deliberately.**
+  - Sets and Universal State content saves, and both groups/layout sidecars:
+    the client sends the whole document and the server never merges against
+    the old file, so they are plain last-write-wins with no server-side race.
+  - `config.json` (`POST /config`, `/remote_dirs`): it does read-modify-write,
+    but it is a loopback-only, rare settings change.
+
+The lock is per PROCESS. Two ComfyUI servers sharing a NAS notebook still rely
+on `base_mtime` alone, which catches their saves when they happen one after
+another. A truly simultaneous save from two machines is not guarded.
+
 ### §3.6 Line endings
 
 On write, the file's dominant existing line ending (CRLF vs LF; LF for new

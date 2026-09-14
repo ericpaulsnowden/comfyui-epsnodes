@@ -211,6 +211,10 @@ captions).
   paths (including NAS shares) work as-is. Edit it in ComfyUI, VS Code, or
   on the other machine; the node re-reads the file every run, so external
   edits are picked up automatically (`IS_CHANGED` hashes the file).
+- **Two tabs, one notebook, no lost edits (v0.96.1):** if two browser tabs, or
+  your Mac and the PC, change the same notebook at almost the same moment, the
+  second one now gets the usual "File changed on disk" banner with Reload and
+  Overwrite. Before, it could quietly undo the other change.
 - **Putting it on a NAS — just click it in Browse…:** the picker lists the
   shares and drives your machine already has mounted, **wherever they
   live**, named for humans (`personal_folder on my-nas.local`,

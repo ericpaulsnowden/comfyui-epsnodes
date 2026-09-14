@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import json
 import os
+import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -665,3 +667,99 @@ class TestNonUtf8Files:
         assert new_state["favorites"] == ["a.safetensors"]
         assert isinstance(mtime, float)
         assert (context.default_library_dir / store.PICKER_FILENAME).is_file()
+
+
+# --------------------------------------------------------------- concurrency
+#
+# Sidecar audit (RELEASE-REVIEW-2026-09-13.md finding 3's sibling issue):
+# unlike the sets/universal-states layout sidecars (client sends the WHOLE
+# document; the server heals it against the current listing, never against
+# the OLD layout file -- no server-side merge, so no race), every function
+# here does its own load->mutate->write of favorites/recents relative to
+# whatever is ALREADY on disk (star ON TOP of existing favorites, a recents
+# stamp moved to the front of the existing list, ...). That is a real
+# server-side read-modify-write of a shared file, so it gets the same
+# `path_locks.lock_for` treatment `routes_notebook.py` does.
+#
+# Unlike the notebook, these routes never send `base_mtime` (module
+# docstring, FORMAT.md §6.13: a star click must not 409) -- so the
+# observable invariant here isn't "one 200, one 409", it's "no star/recents
+# stamp from either caller is ever lost", which the lock delivers by making
+# the second call's own read happen strictly after the first call's write.
+
+
+def _make_slow_load_state(monkeypatch, delay: float = 0.05) -> None:
+    """Patches ``store.load_state`` to sleep *delay* seconds after doing
+    its real read, widening the window between the read and the write
+    every mutator here does -- same technique
+    ``test_routes_notebook.py``'s ``_make_slow_load_notebook`` uses, for
+    the same reason (long enough that a second concurrent call is
+    guaranteed to have started its own read before the first call's write
+    lands)."""
+    real_load_state = store.load_state
+
+    def slow_load_state(ctx):
+        result = real_load_state(ctx)
+        time.sleep(delay)
+        return result
+
+    monkeypatch.setattr(store, "load_state", slow_load_state)
+
+
+def _run_concurrently(*funcs) -> None:
+    threads = [threading.Thread(target=fn) for fn in funcs]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+
+class TestConcurrency:
+    def test_concurrent_toggle_favorite_calls_never_lose_a_star(
+        self, context: LibraryContext, monkeypatch
+    ) -> None:
+        _make_slow_load_state(monkeypatch)
+
+        _run_concurrently(
+            lambda: store.toggle_favorite(context, "a.safetensors", True),
+            lambda: store.toggle_favorite(context, "b.safetensors", True),
+        )
+
+        state, _mtime = store.load_state(context)
+        assert set(state["favorites"]) == {"a.safetensors", "b.safetensors"}
+
+    def test_concurrent_toggle_favorite_and_record_recents_never_lose_either(
+        self, context: LibraryContext, monkeypatch
+    ) -> None:
+        """Two DIFFERENT mutators racing on the same file, not just two
+        calls to the same one."""
+        _make_slow_load_state(monkeypatch)
+
+        _run_concurrently(
+            lambda: store.toggle_favorite(context, "a.safetensors", True),
+            lambda: store.record_recents(context, ["b.safetensors"]),
+        )
+
+        state, _mtime = store.load_state(context)
+        assert state["favorites"] == ["a.safetensors"]
+        assert [row["file"] for row in state["recents"]] == ["b.safetensors"]
+
+    def test_concurrent_reorder_favorites_and_toggle_favorite_never_lose_either(
+        self, context: LibraryContext, monkeypatch
+    ) -> None:
+        store.toggle_favorite(context, "a.safetensors", True)
+        store.toggle_favorite(context, "b.safetensors", True)
+
+        _make_slow_load_state(monkeypatch)
+
+        _run_concurrently(
+            lambda: store.reorder_favorites(context, ["b.safetensors", "a.safetensors"]),
+            lambda: store.toggle_favorite(context, "c.safetensors", True),
+        )
+
+        state, _mtime = store.load_state(context)
+        # Whichever call's write landed first, the lock guarantees the
+        # second call's read (and therefore its write) reflects it -- so
+        # the reorder's two names AND the new star all survive together,
+        # never just one side of the race.
+        assert set(state["favorites"]) == {"a.safetensors", "b.safetensors", "c.safetensors"}

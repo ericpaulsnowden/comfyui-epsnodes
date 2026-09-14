@@ -43,6 +43,7 @@ import logging
 import time
 from pathlib import Path
 
+from . import path_locks
 from .context import LibraryContext, _atomic_write_text
 
 logger = logging.getLogger("lora_library")
@@ -337,23 +338,33 @@ def toggle_favorite(
     (:func:`_require_picker_path`); :class:`ConflictError` if *base_mtime*
     is given and stale (FORMAT.md §6.13: the routes themselves never send
     one). Returns ``(fresh state, new mtime)``.
+
+    RELEASE-REVIEW-2026-09-13.md finding 3's fix, applied here too: this
+    whole load->check->mutate->write sequence runs while holding
+    ``path_locks.lock_for(path)`` (this module's own file is the only
+    thing it ever names), so two concurrent calls -- a star click and a
+    recents stamp arriving on two different worker threads at once, say
+    -- can't interleave their reads and silently drop one's write.
+    Same reasoning as ``routes_notebook.py``'s locked workers; see that
+    module's docstring for the full story.
     """
     clean_file = _require_file_name(file)
 
-    _require_picker_path(context)
-    state, current_mtime = load_state(context)
-    check_conflict(base_mtime, current_mtime)
+    path = _require_picker_path(context)
+    with path_locks.lock_for(path):
+        state, current_mtime = load_state(context)
+        check_conflict(base_mtime, current_mtime)
 
-    favorites = list(state["favorites"])
-    if on:
-        if clean_file not in favorites:
-            favorites.append(clean_file)
-    else:
-        favorites = [name for name in favorites if name != clean_file]
+        favorites = list(state["favorites"])
+        if on:
+            if clean_file not in favorites:
+                favorites.append(clean_file)
+        else:
+            favorites = [name for name in favorites if name != clean_file]
 
-    new_state = {"favorites": favorites, "recents": state["recents"]}
-    new_mtime = _write(context, new_state)
-    return new_state, new_mtime
+        new_state = {"favorites": favorites, "recents": state["recents"]}
+        new_mtime = _write(context, new_state)
+        return new_state, new_mtime
 
 
 def record_recents(
@@ -387,26 +398,29 @@ def record_recents(
     (:func:`_require_picker_path`); :class:`ConflictError` if *base_mtime*
     is given and stale (FORMAT.md §6.13: the routes themselves never send
     one). Returns ``(fresh state, new mtime)``.
+
+    Locked exactly like :func:`toggle_favorite` -- see its docstring.
     """
     if not files:
         return load_state(context)
 
     clean_files = [_require_file_name(file) for file in files]
 
-    _require_picker_path(context)
-    state, current_mtime = load_state(context)
-    check_conflict(base_mtime, current_mtime)
+    path = _require_picker_path(context)
+    with path_locks.lock_for(path):
+        state, current_mtime = load_state(context)
+        check_conflict(base_mtime, current_mtime)
 
-    recents = list(state["recents"])
-    now = time.time()
-    for file in reversed(clean_files):
-        recents = [row for row in recents if row["file"] != file]
-        recents.insert(0, {"file": file, "ts": now})
-    recents = recents[:RECENTS_CAP]
+        recents = list(state["recents"])
+        now = time.time()
+        for file in reversed(clean_files):
+            recents = [row for row in recents if row["file"] != file]
+            recents.insert(0, {"file": file, "ts": now})
+        recents = recents[:RECENTS_CAP]
 
-    new_state = {"favorites": state["favorites"], "recents": recents}
-    new_mtime = _write(context, new_state)
-    return new_state, new_mtime
+        new_state = {"favorites": state["favorites"], "recents": recents}
+        new_mtime = _write(context, new_state)
+        return new_state, new_mtime
 
 
 def clear_recents(
@@ -420,14 +434,17 @@ def clear_recents(
     unreachable (:func:`_require_picker_path`); :class:`ConflictError` if
     *base_mtime* is given and stale (FORMAT.md §6.13: the routes themselves
     never send one). Returns ``(fresh state, new mtime)``.
-    """
-    _require_picker_path(context)
-    state, current_mtime = load_state(context)
-    check_conflict(base_mtime, current_mtime)
 
-    new_state = {"favorites": state["favorites"], "recents": []}
-    new_mtime = _write(context, new_state)
-    return new_state, new_mtime
+    Locked exactly like :func:`toggle_favorite` -- see its docstring.
+    """
+    path = _require_picker_path(context)
+    with path_locks.lock_for(path):
+        state, current_mtime = load_state(context)
+        check_conflict(base_mtime, current_mtime)
+
+        new_state = {"favorites": state["favorites"], "recents": []}
+        new_mtime = _write(context, new_state)
+        return new_state, new_mtime
 
 
 # --------------------------------------------------- favorites reorder (M3)
@@ -485,24 +502,27 @@ def reorder_favorites(
     (:func:`_require_picker_path`); :class:`ConflictError` if *base_mtime*
     is given and stale (FORMAT.md §6.13: the routes themselves never send
     one). Returns ``(fresh state, new mtime)``.
+
+    Locked exactly like :func:`toggle_favorite` -- see its docstring.
     """
     clean_files = _require_reorder_files(files)
 
-    _require_picker_path(context)
-    state, current_mtime = load_state(context)
-    check_conflict(base_mtime, current_mtime)
+    path = _require_picker_path(context)
+    with path_locks.lock_for(path):
+        state, current_mtime = load_state(context)
+        check_conflict(base_mtime, current_mtime)
 
-    current_favorites = state["favorites"]
-    current_set = set(current_favorites)
+        current_favorites = state["favorites"]
+        current_set = set(current_favorites)
 
-    new_favorites: list[str] = []
-    for name in clean_files:
-        if name in current_set and name not in new_favorites:
-            new_favorites.append(name)
-    for name in current_favorites:
-        if name not in new_favorites:
-            new_favorites.append(name)
+        new_favorites: list[str] = []
+        for name in clean_files:
+            if name in current_set and name not in new_favorites:
+                new_favorites.append(name)
+        for name in current_favorites:
+            if name not in new_favorites:
+                new_favorites.append(name)
 
-    new_state = {"favorites": new_favorites, "recents": state["recents"]}
-    new_mtime = _write(context, new_state)
-    return new_state, new_mtime
+        new_state = {"favorites": new_favorites, "recents": state["recents"]}
+        new_mtime = _write(context, new_state)
+        return new_state, new_mtime

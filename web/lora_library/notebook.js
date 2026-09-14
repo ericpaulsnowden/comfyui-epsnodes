@@ -4967,6 +4967,16 @@ async function performMoveRun(state, names, target, { force = false } = {}) {
     showLoadError(state)
     return
   }
+  // RELEASE-REVIEW-2026-09-13.md finding 3 hardening: every OTHER performX
+  // sibling (performMove, performMoveCategory, onDeleteClick before
+  // performDeleteRun) refuses to start while a previous mutation is still
+  // in flight -- this one didn't. Today's only call site (finishDrag) can't
+  // actually reach here while busy (a drag can't even BEGIN until a
+  // pointermove observes state.busy===false, see onEntryPointerDown's
+  // onMove), so this was latent rather than live; matching the sibling
+  // idiom here closes the gap for good rather than leaving it to the next
+  // call site that doesn't happen to be gated the same way.
+  if (state.busy) return
   const entriesBeforeMove = state.entries
   state.entries = reorderEntriesLocallyMany(state.entries, names, target, state.categories)
   renderList(state)
@@ -5890,6 +5900,13 @@ function cancelDeleteConfirm(state) {
  * "Multi-delete" paragraph.
  */
 async function performDeleteRun(state, names, { force = false } = {}) {
+  // RELEASE-REVIEW-2026-09-13.md finding 3 hardening -- see performMoveRun's
+  // identical comment. onDeleteClick (this function's only caller) already
+  // checks state.busy itself before arming/confirming, so this was latent
+  // rather than live; added anyway so this function is safe on its own,
+  // like every other performX sibling, rather than depending on its one
+  // caller to keep doing so.
+  if (state.busy) return
   state.busy = true
   updateSaveButtonEnabled(state)
   updateDeleteButtonEnabled(state)
