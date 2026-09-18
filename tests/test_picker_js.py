@@ -337,6 +337,69 @@ FLOOR_ROWS_CASES = [
     ((False, None), 2),
 ]
 
+#: ((rows, fromIndex, toIndex), expected moveSelectedRow() result) -- the
+#: §6.13 "Live sync" round's Selected-list drag-reorder pure math. `rows`
+#: are plain strings here (the function is shape-agnostic); real callers
+#: pass row objects.
+MOVE_SELECTED_ROW_CASES = [
+    ((["a", "b", "c", "d"], 2, 0), ["c", "a", "b", "d"]),  # up
+    ((["a", "b", "c", "d"], 0, 2), ["b", "c", "a", "d"]),  # down
+    ((["a", "b", "c", "d"], 3, 0), ["d", "a", "b", "c"]),  # to the top end
+    ((["a", "b", "c", "d"], 0, 3), ["b", "c", "d", "a"]),  # to the bottom end
+    ((["a", "b", "c", "d"], 1, 1), ["a", "b", "c", "d"]),  # no-op: same slot
+    ((["a", "b", "c", "d"], -1, 0), ["a", "b", "c", "d"]),  # out of range: negative fromIndex
+    ((["a", "b", "c", "d"], 4, 0), ["a", "b", "c", "d"]),  # out of range: fromIndex >= length
+    ((["a", "b", "c", "d"], 0, 99), ["b", "c", "d", "a"]),  # toIndex clamps to the bottom end
+    ((["a", "b", "c", "d"], 0, -99), ["a", "b", "c", "d"]),  # toIndex clamps to fromIndex -> no-op
+    (([], 0, 0), []),  # empty array degrades, never throws
+    ((["solo"], 0, 0), ["solo"]),  # single element is always a no-op
+]
+
+#: ((a, b), expected selectionRowsChanged()) -- file/order/on/strength/
+#: strength_clip is the exact field set serializeSelection writes and every
+#: loader adapter reads; strength_clip null/undefined compare equal.
+_ROW = {"file": "x.st", "on": True, "strength": 1, "strength_clip": None}
+SELECTION_ROWS_CHANGED_CASES = [
+    (([_ROW], [dict(_ROW)]), False),  # identical content, different objects
+    (([], []), False),
+    (([_ROW], []), True),  # length differs
+    (
+        (
+            [_ROW, {"file": "y.st", "on": True, "strength": 1, "strength_clip": None}],
+            [{"file": "y.st", "on": True, "strength": 1, "strength_clip": None}, _ROW],
+        ),
+        True,  # same rows, different ORDER
+    ),
+    (([_ROW], [{**_ROW, "on": False}]), True),
+    (([_ROW], [{**_ROW, "strength": 0.5}]), True),
+    (
+        (
+            [{"file": "x.st", "on": True, "strength": 1}],
+            [{"file": "x.st", "on": True, "strength": 1, "strength_clip": None}],
+        ),
+        False,  # missing key vs explicit null strength_clip are the same row
+    ),
+]
+
+#: ((rowCount, syncedOnce), expected shouldWriteLinkedSync()) -- never wipe
+#: a loader just because it was linked with nothing selected; once ANY
+#: write has landed, a later empty selection is a real "clear" and mirrors.
+SHOULD_WRITE_LINKED_SYNC_CASES = [
+    ((0, False), False),
+    ((0, True), True),
+    ((3, False), True),
+    ((3, True), True),
+]
+
+#: (raw PROP_LINKED_LOADER value, expected linkedLoaderIdFromProperty()).
+LINKED_LOADER_ID_FROM_PROPERTY_CASES = [
+    ("3:2", "3:2"),
+    ("", None),
+    (None, None),
+    (True, None),  # a hand-edited non-string degrades instead of throwing
+    (42, None),
+]
+
 PROBE_JS = """
 import * as m from './extensions/comfyui-epsnodes/lora_library/picker.js'
 
@@ -376,7 +439,12 @@ const out = {
     hasSplitHeights: typeof m.splitHeights === 'function',
     hasSplitFractionFromNode: typeof m.splitFractionFromNode === 'function',
     // 2026-08-26 while-running round: loadPicker's content gate
-    hasFeedContentEqual: typeof m.feedContentEqual === 'function'
+    hasFeedContentEqual: typeof m.feedContentEqual === 'function',
+    // §6.13 "Live sync" round
+    hasMoveSelectedRow: typeof m.moveSelectedRow === 'function',
+    hasSelectionRowsChanged: typeof m.selectionRowsChanged === 'function',
+    hasShouldWriteLinkedSync: typeof m.shouldWriteLinkedSync === 'function',
+    hasLinkedLoaderIdFromProperty: typeof m.linkedLoaderIdFromProperty === 'function'
   },
   constants: {
     classId: m.CLASS_ID,
@@ -391,7 +459,8 @@ const out = {
     propBrowsePath: m.PROP_BROWSE_PATH,
     splitFractionMin: m.SPLIT_FRACTION_MIN,
     splitFractionMax: m.SPLIT_FRACTION_MAX,
-    defaultSplitFraction: m.DEFAULT_SPLIT_FRACTION
+    defaultSplitFraction: m.DEFAULT_SPLIT_FRACTION,
+    propLinkedLoader: m.PROP_LINKED_LOADER
   },
   autoGrowFromValue: [%(auto_grow_values)s].map((v) => m.autoGrowFromValue(v)),
   clampSplitFraction: [%(split_fraction_values)s].map((v) => m.clampSplitFraction(v)),
@@ -444,7 +513,20 @@ const out = {
   feedContentEqualSameRef: (() => {
     const obj = { loras: [], previews: [], favorites: [], recents: [] }
     return m.feedContentEqual(obj, obj)
-  })()
+  })(),
+  // §6.13 "Live sync" round
+  moveSelectedRow: %(move_selected_row_inputs)s.map(
+    ([rows, fromIndex, toIndex]) => m.moveSelectedRow(rows, fromIndex, toIndex)
+  ),
+  selectionRowsChanged: %(selection_rows_changed_inputs)s.map(
+    ([a, b]) => m.selectionRowsChanged(a, b)
+  ),
+  shouldWriteLinkedSync: %(should_write_linked_sync_inputs)s.map(
+    ([rowCount, syncedOnce]) => m.shouldWriteLinkedSync(rowCount, syncedOnce)
+  ),
+  linkedLoaderIdFromProperty: [%(linked_loader_id_values)s].map(
+    (v) => m.linkedLoaderIdFromProperty(v)
+  )
 }
 
 process.stdout.write(JSON.stringify(out))
@@ -496,6 +578,18 @@ def picker_api(tmp_path_factory: pytest.TempPathFactory) -> dict:
             "split_fraction_values": ", ".join(js for js, _ in SPLIT_FRACTION_CASES),
             "split_heights_inputs": json.dumps([list(args) for args, _ in SPLIT_HEIGHTS_CASES]),
             "feed_content_equal_inputs": json.dumps([[a, b] for a, b, _ in FEED_CONTENT_EQUAL_CASES]),
+            "move_selected_row_inputs": json.dumps(
+                [list(args) for args, _ in MOVE_SELECTED_ROW_CASES]
+            ),
+            "selection_rows_changed_inputs": json.dumps(
+                [list(args) for args, _ in SELECTION_ROWS_CHANGED_CASES]
+            ),
+            "should_write_linked_sync_inputs": json.dumps(
+                [list(args) for args, _ in SHOULD_WRITE_LINKED_SYNC_CASES]
+            ),
+            "linked_loader_id_values": ", ".join(
+                json.dumps(raw) for raw, _ in LINKED_LOADER_ID_FROM_PROPERTY_CASES
+            ),
         },
         encoding="utf-8",
     )
@@ -567,6 +661,12 @@ def test_module_exports_the_entry_point_and_pure_helpers(picker_api: dict) -> No
         "hasSplitHeights": True,
         "hasSplitFractionFromNode": True,
         "hasFeedContentEqual": True,
+        # §6.13 "Live sync" round: drag-reorder math + the linked-loader
+        # sync decision cores
+        "hasMoveSelectedRow": True,
+        "hasSelectionRowsChanged": True,
+        "hasShouldWriteLinkedSync": True,
+        "hasLinkedLoaderIdFromProperty": True,
     }
 
 
@@ -578,6 +678,46 @@ def test_feed_content_equal_cases(picker_api: dict) -> None:
     for (a, b, expected), got in pairs:
         assert got is expected, f"feedContentEqual({a!r}, {b!r}) -> {got!r}, wanted {expected!r}"
     assert picker_api["feedContentEqualSameRef"] is True
+
+
+def test_move_selected_row_cases(picker_api: dict) -> None:
+    """§6.13 "Live sync": the Selected-list drag's pure reorder math -- up,
+    down, to either end, a same-slot no-op, and out-of-range indices in
+    both directions all degrade to a safe result instead of throwing."""
+    pairs = zip(MOVE_SELECTED_ROW_CASES, picker_api["moveSelectedRow"], strict=True)
+    for (args, expected), got in pairs:
+        assert got == expected, f"moveSelectedRow({args!r}) -> {got!r}, wanted {expected!r}"
+
+
+def test_selection_rows_changed_cases(picker_api: dict) -> None:
+    """The linked-sync gate for an EXTERNAL rewrite of `selection`: file,
+    order, `on`, `strength`, and `strength_clip` (null/undefined treated as
+    equal) are the only fields that count -- a same-content re-announce must
+    never look like a change worth pushing to a linked loader."""
+    pairs = zip(SELECTION_ROWS_CHANGED_CASES, picker_api["selectionRowsChanged"], strict=True)
+    for (args, expected), got in pairs:
+        assert got is expected, f"selectionRowsChanged({args!r}) -> {got!r}, wanted {expected!r}"
+
+
+def test_should_write_linked_sync_cases(picker_api: dict) -> None:
+    """§6.13 "Live sync" items 3/4's write-or-skip core: never wipe a loader
+    just because it was linked with nothing selected (rowCount=0,
+    syncedOnce=False); once ANY write has landed, a later empty selection
+    is a real clear and mirrors through."""
+    pairs = zip(SHOULD_WRITE_LINKED_SYNC_CASES, picker_api["shouldWriteLinkedSync"], strict=True)
+    for (args, expected), got in pairs:
+        assert got is expected, f"shouldWriteLinkedSync({args!r}) -> {got!r}, wanted {expected!r}"
+
+
+def test_linked_loader_id_from_property_cases(picker_api: dict) -> None:
+    """PROP_LINKED_LOADER's raw value -> the pathId string or None -- a
+    hand-edited non-string/blank degrades instead of throwing, the
+    browsePathFromProperty/autoGrowFromValue convention."""
+    pairs = zip(
+        LINKED_LOADER_ID_FROM_PROPERTY_CASES, picker_api["linkedLoaderIdFromProperty"], strict=True
+    )
+    for (raw, expected), got in pairs:
+        assert got == expected, f"linkedLoaderIdFromProperty({raw!r}) -> {got!r}, want {expected!r}"
 
 
 def test_drill_path_after_reload_cases(picker_api: dict) -> None:
@@ -689,7 +829,7 @@ def test_reload_from_widget_keeps_the_path_unless_the_scope_changed(source: str)
     local, reused a few lines down by `tryApplyPendingPathSeed()` -- same
     value, just named once instead of re-read three times.
     """
-    body = _function_body(source, "reloadFromWidget(state)")
+    body = _function_body(source, "reloadFromWidget(state, options)")
     assert "const prevScope = state.selection?.scope || ''" in body
     assert "const nextScope = state.selection.scope || ''" in body
     assert "drillPathAfterReload(prevScope, nextScope, state.path, state.loras)" in body
@@ -839,7 +979,10 @@ def test_attach_installs_the_shared_external_write_subscription(source: str) -> 
     State Controller's Apply reaches it without either file importing the
     other."""
     body = _function_body(source, "attachPickerPanel(node)")
-    assert "node.__epsLpReload = () => reloadFromWidget(state)" in body
+    # §6.13 "Live sync": this seam is now also how a genuine external write
+    # is told apart from a restore-only reload -- see reloadFromWidget's own
+    # header -- so the poke passes `{ external: true }`.
+    assert "node.__epsLpReload = () => reloadFromWidget(state, { external: true })" in body
     assert "installExternalWriteSubscription()" in body
 
 
@@ -890,7 +1033,7 @@ def test_fetch_and_configure_both_reconcile_through_the_same_resync(source: str)
     load = _function_body(source, "loadPicker(state)")
     assert "applyFeed(state, lastFeed)" in load
     assert "applyFeed(state, data)" in load
-    reload_body = _function_body(source, "reloadFromWidget(state)")
+    reload_body = _function_body(source, "reloadFromWidget(state, options)")
     assert "selectionFromWidgetValue(state.widget.value)" in reload_body
 
 
@@ -1040,7 +1183,7 @@ class TestReviewFixes20260809:
         assert "strength._epsCommit = commitStrength" in source
 
     def test_reload_from_widget_commits_before_the_reparse(self, source: str) -> None:
-        body = _function_body(source, "reloadFromWidget(state)")
+        body = _function_body(source, "reloadFromWidget(state, options)")
         commit = body.index("commitActiveStrengthEdit(state)")
         reparse = body.index("selectionFromWidgetValue(state.widget.value)")
         assert commit < reparse, "the commit must land in the widget BEFORE the re-parse"
@@ -1063,12 +1206,17 @@ class TestReviewFixes20260809:
 
 
 class TestSendToLoaderM2:
-    """Source pins for the M2 Send-to-loader row (§6.13): render-time probe
-    gating, the id-keyed transient target, the re-probe on click, and the
-    §6.3-vocabulary surfaces -- all closure-bound against a live graph, so
-    source-pinned like the rest of this file. pll_bridge.js itself (the
-    probe/grow/shrink/assign technique and the vocabulary contract against
-    controller.js) is covered by tests/test_pll_bridge_js.py."""
+    """Source pins for the M2/M4 Send-to-loader row's surviving plumbing
+    (§6.13): row position, the option template, the keydown guard --
+    closure-bound against a live graph, so source-pinned like the rest of
+    this file. The "Live sync" round (owner ask: "once a loader is chosen,
+    every change should push to it automatically -- no Send button")
+    replaced the button/click/single-candidate-auto-adopt half of this
+    class with `state.linkedTargetId` + `PROP_LINKED_LOADER` +
+    `performLinkedSync`; see TestLiveSyncLinkedLoader below for those. pll_
+    bridge.js itself (the probe/grow/shrink/assign technique and the
+    vocabulary contract against controller.js) is covered by
+    tests/test_pll_bridge_js.py."""
 
     def test_send_row_renders_as_the_last_section(self, source: str) -> None:
         """§6.13 M5 (owner ask 2026-08-23 "move the send section to the
@@ -1105,92 +1253,49 @@ class TestSendToLoaderM2:
         assert "attrs: { value: pathId }" in body
 
     def test_previous_target_reselected_by_id_when_still_present(self, source: str) -> None:
+        # §6.13 "Live sync": pllTargetId -> linkedTargetId (persisted link,
+        # not a transient click target) -- same reselect-by-id shape.
         body = _function_body(source, "renderSend(state)")
-        assert "fresh.some((c) => c.pathId === state.pllTargetId)" in body
-        assert "select.value = state.pllTargetId" in body
+        assert "fresh.some((c) => c.pathId === state.linkedTargetId)" in body
+        assert "select.value = state.linkedTargetId" in body
 
     def test_vanished_target_stays_on_placeholder_never_first_option(self, source: str) -> None:
-        # Review 2026-08-09: a deleted target must NOT silently retarget to
-        # the first PLL -- Send would destructively overwrite a loader the
-        # user never chose. The placeholder option makes "no choice"
+        # Review 2026-08-09, still true post "Live sync": a deleted target
+        # must NOT silently retarget to the first candidate -- a sync would
+        # destructively overwrite a loader the user never chose. The
+        # placeholder ("Not linked", was "Pick a loader…") makes "no link"
         # representable; the never-guess branch keeps it selected.
         body = _function_body(source, "renderSend(state)")
-        assert "'Pick a loader…'" in body
+        assert "'Not linked'" in body
         assert "select.value = ''" in body
         assert "never guess" in body.lower() or "NEVER fall through" in body
 
-    def test_single_candidate_auto_adopt_gated_on_no_choice(self, source: str) -> None:
-        body = _function_body(source, "renderSend(state)")
-        assert "state.pllTargetId == null && fresh.length === 1" in body
-
-    def test_options_rebuilt_on_mousedown_and_change_reprobes(self, source: str) -> None:
+    def test_options_rebuilt_on_mousedown_and_change_links(self, source: str) -> None:
         # Review 2026-08-09: candidates recompute on open (controller.js's
-        # values-function pattern) and a target switch re-probes.
+        # values-function pattern). §6.13 "Live sync": a combo change is now
+        # an explicit LINK, routed through setLinkedTarget (which persists
+        # the property and may fire one immediate sync) rather than a bare
+        # re-render.
         body = _function_body(source, "renderSend(state)")
         assert "select.addEventListener('mousedown', buildOptions)" in body
         change = body[body.index("select.addEventListener('change'"):]
-        assert "renderSend(state)" in change
-
-    def test_probe_failure_blocks_but_does_not_disable_send(self, source: str) -> None:
-        # Review 2026-08-09: a DISABLED button can never run the click-time
-        # re-probe, so a graph fixed after render would have no recovery
-        # path. Probe failure marks the button blocked (styled, message in
-        # title + status span) while the click stays live and re-checks.
-        body = _function_body(source, "renderSend(state)")
-        # M4: the probe is registry-dispatched (family-agnostic null legs in
-        # probeSendTarget, per-family gates in the bridges) -- same render-
-        # time probe, same blocked-not-disabled posture.
-        assert "const probe = probeSendTarget(resolveSendTarget(state))" in body
-        gated = body[body.index("if (!probe.ok)"):]
-        assert "sendBtn.classList.add('eps-lp-btn-blocked')" in gated
-        assert "sendBtn.disabled = true" not in gated[:gated.index("} else if")]
-        assert "sendBtn.title = probe.message" in gated
-        assert "statusEl.textContent = probe.message" in gated
-
-    def test_send_click_refuses_an_empty_selection_instead_of_truncating(self, source: str) -> None:
-        # Reachable via the blocked-not-disabled button: an empty send would
-        # SHRINK the target loader to zero rows.
-        body = _function_body(source, "sendToPll(state)")
-        assert "rows.length === 0" in body
-        assert "never truncate" in body
-
-    def test_send_click_adopts_a_lone_late_added_pll(self, source: str) -> None:
-        body = _function_body(source, "sendToPll(state)")
-        assert "candidates.length === 1" in body
-        assert "state.pllTargetId = candidates[0].pathId" in body
-
-    def test_empty_selection_disables_send_with_its_own_title(self, source: str) -> None:
-        body = _function_body(source, "renderSend(state)")
-        assert "state.selection.loras.length === 0" in body
-        assert "sendBtn.title = 'Nothing selected'" in body
-
-    def test_click_reprobes_then_sends_all_rows(self, source: str) -> None:
-        """The target may have been deleted since render -- the click
-        re-resolves by id, re-probes, and toasts the failure; success
-        writes ALL rows (`on` preserved, §6.13) through the target's own
-        family adapter (M4: registry-dispatched, was pll.writeRowsToPll)."""
-        body = _function_body(source, "sendToPll(state)")
-        assert "const node = resolveSendTarget(state)" in body
-        assert "const probe = probeSendTarget(node)" in body
-        assert "toast('error', 'EPS LoRA Picker', probe.message)" in body
-        assert "const rows = state.selection.loras" in body
-        assert "SEND_ADAPTERS[node.type].write(node, rows)" in body
-
-    def test_send_success_toast_names_count_and_target(self, source: str) -> None:
-        expected = "`Sent ${rows.length} lora(s) to ${node.title || node.type} #${node.id}`"
-        assert expected in _function_body(source, "sendToPll(state)")
+        assert "setLinkedTarget(state, select.value || null)" in change
 
     def test_select_keydown_stops_propagation(self, source: str) -> None:
         body = _function_body(source, "renderSend(state)")
         assert "select.addEventListener('keydown', (event) => event.stopPropagation())" in body
 
-    def test_target_choice_is_transient_and_never_serialized(self, source: str) -> None:
-        """§6.13 M2 adds no widget: the target id lives in panel state only,
-        and the Send row never touches the selection JSON."""
-        assert "pllTargetId: null" in _function_body(source, "createState(node, widget)")
-        assert "pllTargetId" not in _function_body(source, "serializeSelection(selection)")
+    def test_link_choice_is_persisted_via_a_property_not_the_selection_json(
+        self, source: str
+    ) -> None:
+        """§6.13 "Live sync" item 1: unlike M2's transient `pllTargetId`,
+        the link now SURVIVES save/reload -- but it is still a node
+        PROPERTY, never part of the `selection` JSON the widget/undo track."""
+        assert "linkedTargetId" in _function_body(source, "createState(node, widget)")
+        assert "linkedTargetId" not in _function_body(source, "serializeSelection(selection)")
         assert "writeSelectionWidget" not in _function_body(source, "renderSend(state)")
-        assert "writeSelectionWidget" not in _function_body(source, "sendToPll(state)")
+        assert "writeSelectionWidget" not in _function_body(source, "findSendCandidates()")
+        assert "writeSelectionWidget" not in _function_body(source, "resolveSendTarget(state)")
 
     def test_still_no_window_listeners(self, source: str) -> None:
         assert "window.addEventListener" not in source
@@ -1362,7 +1467,7 @@ class TestM3:
         crumbs = _function_body(source, "renderCrumbs(state)")
         assert crumbs.count("clearSearch(state)") == 2  # root crumb + tail crumbs
         assert "clearSearch(state)" in _function_body(source, "setScope(state, scopePath)")
-        assert "clearSearch(state)" in _function_body(source, "reloadFromWidget(state)")
+        assert "clearSearch(state)" in _function_body(source, "reloadFromWidget(state, options)")
 
     # -------------------------------------------------------- thumbnails
 
@@ -1653,41 +1758,464 @@ class TestSendRegistryM4:
         assert "adapter.probe(node)" in body
 
     def test_target_resolution_spans_both_families(self, source: str) -> None:
+        # §6.13 "Live sync": pllTargetId -> linkedTargetId.
         body = _function_body(source, "resolveSendTarget(state)")
-        assert "findSendCandidates().find((c) => c.pathId === state.pllTargetId)?.node" in body
+        assert "findSendCandidates().find((c) => c.pathId === state.linkedTargetId)?.node" in body
 
-    def test_auto_adopt_universe_is_cross_family_in_render_and_click_paths(
-        self, source: str
-    ) -> None:
-        """§6.13 M4: "single-candidate auto-adopt means a single candidate
-        ACROSS both families" -- both the combo rebuild and the click-time
-        late-adopt draw from the merged candidate list."""
+    def test_candidate_list_is_cross_family_in_the_combo(self, source: str) -> None:
+        """§6.13 M4's "cross both families" property survives the "Live
+        sync" round -- the combo still draws from the merged candidate
+        list. The click-time late-adopt this test used to also pin is GONE
+        (see TestLiveSyncLinkedLoader.test_single_candidate_never_auto_links):
+        §6.13 "Live sync" item 2 retired auto-adopt entirely, not just its
+        M4 cross-family scope."""
         render = _function_body(source, "renderSend(state)")
         assert "const fresh = findSendCandidates()" in render
-        send = _function_body(source, "sendToPll(state)")
-        assert "const candidates = findSendCandidates()" in send
 
-    def test_dasiwa_send_toast_appends_the_loud_lossy_notes(self, source: str) -> None:
-        """Success toast unchanged for rgthree (its write returns nothing);
-        a DaSiWa write's {flattened, clamped} basenames append the two owner-
-        decided notes -- lossy edges are loud, never silent."""
-        body = _function_body(source, "sendToPll(state)")
+    def test_dasiwa_lossy_notes_appear_in_the_sync_status(self, source: str) -> None:
+        """Status-span success message unchanged in SHAPE for rgthree (its
+        write returns nothing, so no notes); a DaSiWa write's {flattened,
+        clamped} basenames still append the two owner-decided notes -- lossy
+        edges are loud, never silent. Delivery moved from a per-send toast
+        (M2/M4) to the status span every time, PLUS a toast gated on the
+        lossy set actually changing (see TestLiveSyncLinkedLoader)."""
+        body = _function_body(source, "performLinkedSync(state)")
         flattened_note = (
             "model strength used for ${result.flattened.length} row(s) "
             "with a different clip strength: ${result.flattened.join(', ')}"
         )
         assert flattened_note in body
         assert "clamped to ±5: ${result.clamped.join(', ')}" in body
-        assert "notes.length ? `${sent} — ${notes.join('; ')}` : sent" in body
-        assert "`Sent ${rows.length} lora(s) to ${node.title || node.type} #${node.id}`" in body
+        assert "notes.length ? `${base} — ${notes.join('; ')}` : base" in body
+        expected_base = (
+            "`Synced ${rows.length} lora(s) → ${node.title || node.type} "
+            "#${state.linkedTargetId}`"
+        )
+        assert expected_base in body
 
     def test_registry_never_touches_the_selection_widget(self, source: str) -> None:
         """M4 adds no persistence: the registry plumbing stays out of the
-        selection JSON exactly as M2's transient-target rule demands."""
-        for fn in ("findSendCandidates()", "probeSendTarget(node)", "resolveSendTarget(state)"):
+        selection JSON exactly as M2's transient-target rule demands --
+        still true of the "Live sync" round's linking/syncing functions."""
+        for fn in (
+            "findSendCandidates()",
+            "probeSendTarget(node)",
+            "resolveSendTarget(state)",
+            "setLinkedTarget(state, id)",
+            "performLinkedSync(state)",
+        ):
             assert "writeSelectionWidget" not in _function_body(source, fn), fn
 
     def test_still_no_window_listeners_after_m4(self, source: str) -> None:
+        assert "window.addEventListener" not in source
+
+
+class TestSelectedDragReorder:
+    """§6.13 "Live sync" round, Feature A (owner ask: "drag to reorder the
+    selected loras"): each Selected row grows a ≡ handle, wired exactly like
+    the M3 favorites drag (TestM3's own drag pins) but retargeted at
+    `state.selectedListEl`/`state.selectedDragRowEls`. The pure reorder math
+    (`moveSelectedRow`) is Node-driven above (test_move_selected_row_cases);
+    everything else here is closure-bound DOM wiring, source-pinned like the
+    rest of this file."""
+
+    @pytest.fixture(scope="class")
+    def source(self) -> str:
+        return PICKER_JS.read_text(encoding="utf-8")
+
+    def test_every_row_gets_a_handle_that_never_gates_on_view_or_ghost(self, source: str) -> None:
+        """Unlike the favorites drag (favorites-view-only, never a ghost),
+        every Selected row is draggable -- including a ⚠ missing one, since
+        order still matters for a row the server can't currently confirm."""
+        body = _function_body(source, "buildSelectedRowEl(state, row)")
+        assert "className: 'eps-lp-drag-handle'" in body
+        assert "wireSelectedDrag(state, handle, row.file)" in body
+        assert "const draggable" not in body  # no gate, unlike buildLoraRowEl's favorite drag
+
+    def test_handle_is_first_and_row_controls_are_unaffected(self, source: str) -> None:
+        """The handle is a SEPARATE element from the checkbox/strength/
+        remove controls, so a drag can only ever start from it -- those
+        controls keep their own listeners untouched."""
+        body = _function_body(source, "buildSelectedRowEl(state, row)")
+        assert "[handle, checkbox, label, strength, removeBtn]" in body
+        assert "checkbox.addEventListener('change'" in body
+        assert "strength.addEventListener('change', commitStrength)" in body
+        assert "removeBtn.addEventListener('click'" in body
+
+    def test_drag_uses_pointer_capture_with_element_level_listeners(self, source: str) -> None:
+        """The same §7.5-safe shape as the M3 favorites drag: setPointerCapture
+        retargets the gesture at the handle, so no window listener is ever
+        needed -- Vue-nodes mode (window listeners must be capture-phase) and
+        classic canvas mode both just work."""
+        body = _function_body(source, "wireSelectedDrag(state, handle, file)")
+        assert "handle.setPointerCapture(event.pointerId)" in body
+        assert "handle.addEventListener('pointermove', onMove)" in body
+        assert "handle.addEventListener('pointerup', onUp)" in body
+        assert "handle.addEventListener('pointercancel', onCancel)" in body
+        assert "handle.addEventListener('lostpointercapture', onLost)" in body
+        assert "handle.releasePointerCapture(drag.pointerId)" in body
+        assert "event.stopPropagation()" in body  # canvas must never pan mid-drag
+
+    def test_still_no_window_listeners_after_drag_reorder(self, source: str) -> None:
+        assert "window.addEventListener" not in source
+
+    def test_dragged_element_is_never_reparented_mid_drag(self, source: str) -> None:
+        """moveDraggedFavorite's live-verified 2026-08-09 rule (removing the
+        captured handle's ancestor implicitly RELEASES pointer capture) --
+        only the OTHER rows move around the stationary dragged element."""
+        body = _function_body(source, "moveDraggedSelectedRow(state, drag, clientY)")
+        assert "insertBefore(dragged.el" not in body
+        assert "insertBefore(row.el, dragged.el)" in body
+        assert "anchor.after(row.el)" in body
+
+    def test_auto_scroll_nudges_near_either_edge_only_when_scrollable(self, source: str) -> None:
+        """Owner ask: dragging near the top/bottom of the Selected list
+        should auto-scroll. A cheap per-pointermove nudge (no RAF/timer to
+        leak), skipped when the list isn't actually overflowing."""
+        body = _function_body(source, "autoScrollSelectedList(state, clientY)")
+        assert "if (!list || list.scrollHeight <= list.clientHeight) return" in body
+        assert "list.scrollTop = Math.max(0, list.scrollTop - SELECTED_DRAG_SCROLL_STEP_PX)" in body
+        assert (
+            "list.scrollTop = Math.min(list.scrollHeight - list.clientHeight, "
+            "list.scrollTop + SELECTED_DRAG_SCROLL_STEP_PX)" in body
+        )
+        move = _function_body(source, "wireSelectedDrag(state, handle, file)")
+        assert "autoScrollSelectedList(state, moveEvent.clientY)" in move
+
+    def test_drop_reorders_via_the_pure_helper_and_writes_through_the_one_funnel(
+        self, source: str
+    ) -> None:
+        """finishSelectedDrag turns the dragged DOM order into a
+        moveSelectedRow() call against the canonical selection, and only
+        writes (through writeSelectionWidget -- the same funnel every other
+        edit uses, so undo behaves identically) when that actually changes
+        anything."""
+        body = _function_body(source, "finishSelectedDrag(state, drag)")
+        assert "moveSelectedRow(state.selection.loras, fromIndex, toIndex)" in body
+        assert "if (changed) {" in body
+        write_leg = body[body.index("if (changed) {"):]
+        assert "state.selection.loras = reordered" in write_leg
+        assert "writeSelectionWidget(state)" in write_leg
+        assert "scheduleLinkedSync(state)" in write_leg
+        assert "renderSelected(state)" in body  # always repaints, changed or not
+
+    def test_cancel_never_touches_the_selection(self, source: str) -> None:
+        """pointercancel/lost-capture: `state.selection.loras` was never
+        mutated during the drag, so cancel is a pure repaint -- the exact
+        cancelFavoriteDrag posture."""
+        body = _function_body(source, "cancelSelectedDrag(state)")
+        assert "writeSelectionWidget" not in body
+        assert "scheduleLinkedSync" not in body
+        assert "renderSelected(state)" in body
+
+    def test_selected_drag_row_els_rebuilt_every_render(self, source: str) -> None:
+        """The drag's own row-order tracking array (favRowEls's sibling) is
+        rebuilt fresh on every renderSelected, so a mid-drag re-render (an
+        external apply, a controller push) can never leave it stale."""
+        body = _function_body(source, "renderSelected(state)")
+        assert "state.selectedDragRowEls = []" in body
+        assert "state.selectedDragRowEls.push({ file: row.file, el: rowEl })" in body
+
+
+class TestLiveSyncLinkedLoader:
+    """§6.13 "Live sync" round, Feature B (owner ask: "once a loader is
+    chosen, every change should push to it automatically -- no Send
+    button"). `PROP_LINKED_LOADER` persists an EXPLICIT combo choice (never
+    auto-adopted); `scheduleLinkedSync`/`performLinkedSync` push every
+    selection change to it, debounced; `setSyncStatus` drives the status
+    span and gates toasts on a FAILURE TRANSITION or a DaSiWa lossy-set
+    change. All closure-bound against a live graph/node, so source-pinned
+    like the rest of this file -- see test_should_write_linked_sync_cases
+    above for the one pure decision core this round factored out."""
+
+    @pytest.fixture(scope="class")
+    def source(self) -> str:
+        return PICKER_JS.read_text(encoding="utf-8")
+
+    # -- the property: registration, restore, never a sync from onPropertyChanged
+
+    def test_prop_linked_loader_constant(self, picker_api: dict) -> None:
+        assert picker_api["constants"]["propLinkedLoader"] == "Linked loader"
+
+    def test_property_registered_at_attach_after_browse_path(self, source: str) -> None:
+        attach = _function_body(source, "attachPickerPanel(node)")
+        assert "wireLinkedLoaderProperty(state)" in attach
+        assert attach.index("wireBrowsePathProperty(state)") < attach.index(
+            "wireLinkedLoaderProperty(state)"
+        )
+        wire = _function_body(source, "wireLinkedLoaderProperty(state)")
+        assert "node.addProperty(PROP_LINKED_LOADER, '', 'string')" in wire
+
+    def test_property_change_only_reseeds_and_repaints_never_syncs(self, source: str) -> None:
+        """This handler fires for a configure restore (workflow load,
+        undo/redo, the tab-switch rebuild) AND our own explicit
+        setLinkedTarget write -- so it must NEVER itself call
+        performLinkedSync/scheduleLinkedSync, only re-derive state and
+        repaint (§6.13 "Live sync" items 2 and 5)."""
+        wire = _function_body(source, "wireLinkedLoaderProperty(state)")
+        assert "if (name === PROP_LINKED_LOADER)" in wire
+        assert "const restored = linkedLoaderIdFromProperty(value)" in wire
+        assert "state.linkedTargetId = restored" in wire
+        assert "renderSend(state)" in wire
+        # A restore (a different id) counts as already synced, so emptying the
+        # picker after a reload still mirrors (lead review 2026-09-17).
+        assert (
+            "if (restored !== state.linkedTargetId) "
+            "state.linkedSyncedOnce = restored != null"
+        ) in wire
+        assert "performLinkedSync" not in wire
+        assert "scheduleLinkedSync" not in wire
+
+    def test_create_state_seeds_linked_target_from_the_property(self, source: str) -> None:
+        """Same best-effort-read-plus-later-reseed race as PROP_BROWSE_PATH's
+        `pendingPathSeed` -- `node.properties` may already carry a restored
+        value before this node's own onPropertyChanged wrapper exists."""
+        body = _function_body(source, "createState(node, widget)")
+        assert (
+            "const linkedTargetId = "
+            "linkedLoaderIdFromProperty(node?.properties?.[PROP_LINKED_LOADER])"
+            in body
+        )
+        assert "linkedTargetId," in body  # returned on the state object
+
+    # -- isLinked / setLinkedTarget: explicit-only linking, immediate sync
+
+    def test_is_linked_reads_the_state_field_directly(self, source: str) -> None:
+        body = _function_body(source, "isLinked(state)")
+        assert "return state.linkedTargetId != null" in body
+
+    def test_set_linked_target_persists_via_set_property_like_note_manual_resize(
+        self, source: str
+    ) -> None:
+        body = _function_body(source, "setLinkedTarget(state, id)")
+        assert "node.setProperty(PROP_LINKED_LOADER, id || '')" in body
+        assert "node.properties[PROP_LINKED_LOADER] = id || ''" in body  # no-setProperty fallback
+
+    def test_set_linked_target_resets_bookkeeping_only_on_a_real_change(self, source: str) -> None:
+        body = _function_body(source, "setLinkedTarget(state, id)")
+        assert "const changed = state.linkedTargetId !== id" in body
+        reset_leg = body[body.index("if (changed) {"):]
+        assert "state.linkedSyncedOnce = false" in reset_leg
+        assert "state.lastSyncStatus = null" in reset_leg
+        assert "state.lastLossySignature = null" in reset_leg
+        assert "clearTimeout(state.syncTimer)" in reset_leg
+
+    def test_set_linked_target_syncs_immediately_only_on_a_new_link(self, source: str) -> None:
+        """A re-pick of the SAME target (changed=false, e.g. reopening the
+        combo) must not re-sync; unlinking (id=null) must not sync either --
+        only a genuinely NEW link does, and performLinkedSync itself is what
+        decides write-vs-skip for an empty selection (item 3)."""
+        body = _function_body(source, "setLinkedTarget(state, id)")
+        assert "if (changed && id != null) performLinkedSync(state)" in body
+
+    def test_single_candidate_never_auto_links(self, source: str) -> None:
+        """§6.13 "Live sync" item 2: the M2/M4 single-candidate auto-adopt is
+        GONE for good -- nowhere in renderSend's option-building or anywhere
+        else does the code ever assign state.linkedTargetId except
+        setLinkedTarget (an explicit combo pick) and the property-restore
+        paths (createState's seed, wireLinkedLoaderProperty's reseed)."""
+        options = _function_body(source, "renderSend(state)")
+        assert "fresh.length === 1" not in options
+        assert "state.linkedTargetId =" not in options  # renderSend only READS it
+
+    # -- scheduleLinkedSync: the debounce shape
+
+    def test_schedule_linked_sync_is_a_noop_when_not_linked(self, source: str) -> None:
+        body = _function_body(source, "scheduleLinkedSync(state)")
+        assert "if (!isLinked(state)) return" in body
+
+    def test_schedule_linked_sync_debounces_on_its_own_timer_slot(self, source: str) -> None:
+        """The exact scheduleSearchRender/SEARCH_DEBOUNCE_MS shape (clear
+        then set), a SEPARATE slot (`state.syncTimer`, not `searchTimer`) so
+        the two debounces can never race or cancel each other -- this is
+        also what makes a burst of N rapid changes collapse into exactly one
+        eventual `performLinkedSync` call: each call cancels the previous
+        pending timer before arming a new one."""
+        body = _function_body(source, "scheduleLinkedSync(state)")
+        assert "clearTimeout(state.syncTimer)" in body
+        assert "}, SYNC_DEBOUNCE_MS)" in body
+        assert "state.syncTimer = setTimeout(() => {" in body
+        assert "performLinkedSync(state)" in body
+        assert "const SYNC_DEBOUNCE_MS = 150" in source
+
+    def test_sync_timer_cleared_on_node_removal(self, source: str) -> None:
+        """A pending debounced sync must not fire after the node is torn
+        down (tab switch/undo/redo/workflow reload) and write a since-gone
+        picker's last selection into its linked loader."""
+        body = _function_body(source, "wireNodeCleanup(state)")
+        assert "clearTimeout(state.syncTimer)" in body
+        assert "state.syncTimer = null" in body
+
+    # -- performLinkedSync: probe, write-or-skip, mirror, lossy notes
+
+    def test_perform_linked_sync_is_a_noop_when_not_linked(self, source: str) -> None:
+        body = _function_body(source, "performLinkedSync(state)")
+        assert "if (!isLinked(state)) return" in body
+
+    def test_perform_linked_sync_reprobes_and_records_failure_without_throwing(
+        self, source: str
+    ) -> None:
+        body = _function_body(source, "performLinkedSync(state)")
+        assert "const node = resolveSendTarget(state)" in body
+        assert "const probe = probeSendTarget(node)" in body
+        fail_leg = body[body.index("if (!probe.ok) {"):]
+        expected_fail = (
+            "setSyncStatus(state, { ok: false, message: probe.message, "
+            "failCode: probe.code })"
+        )
+        assert expected_fail in fail_leg
+
+    def test_perform_linked_sync_gates_empty_writes_through_the_pure_helper(
+        self, source: str
+    ) -> None:
+        body = _function_body(source, "performLinkedSync(state)")
+        assert "shouldWriteLinkedSync(rows.length, state.linkedSyncedOnce)" in body
+        skip_leg = body[body.index("if (!shouldWriteLinkedSync"):]
+        assert "'Linked — add a lora to sync.'" in skip_leg[:200]
+
+    def test_perform_linked_sync_writes_all_rows_and_marks_synced_once(self, source: str) -> None:
+        body = _function_body(source, "performLinkedSync(state)")
+        assert "const rows = state.selection.loras" in body
+        assert "SEND_ADAPTERS[node.type].write(node, rows)" in body
+        assert "state.linkedSyncedOnce = true" in body
+        assert (
+            "const base = `Synced ${rows.length} lora(s) → ${node.title || node.type} "
+            "#${state.linkedTargetId}`" in body
+        )
+
+    def test_perform_linked_sync_never_throws_out_of_a_write_failure(self, source: str) -> None:
+        body = _function_body(source, "performLinkedSync(state)")
+        assert "} catch (error) {" in body
+        assert "api.warn('linked loader sync failed', error)" in body
+        assert "failCode: 'write-threw'" in body
+
+    def test_perform_linked_sync_folds_dasiwa_lossy_notes_into_the_status(
+        self, source: str
+    ) -> None:
+        body = _function_body(source, "performLinkedSync(state)")
+        flattened_note = (
+            "model strength used for ${result.flattened.length} row(s) "
+            "with a different clip strength: ${result.flattened.join(', ')}"
+        )
+        assert flattened_note in body
+        assert "clamped to ±5: ${result.clamped.join(', ')}" in body
+
+    # -- computeLinkStatus / setSyncStatus: status text + toast-once-per-transition
+
+    def test_compute_link_status_not_linked_reuses_the_m2_vocabulary(self, source: str) -> None:
+        body = _function_body(source, "computeLinkStatus(state)")
+        assert "if (!isLinked(state)) {" in body
+        not_linked = body[: body.index("if (state.lastSyncStatus?.ok)")]
+        assert "MSG_NO_SEND_TARGET_SELECTED" in not_linked
+        assert "MSG_NO_SEND_TARGET_IN_GRAPH" in not_linked
+
+    def test_compute_link_status_linked_prefers_last_ok_outcome(self, source: str) -> None:
+        """An OK lastSyncStatus (a real sync or a recorded empty-selection
+        skip) describes something that already happened, so it is shown
+        as-is regardless of the target's live health right now."""
+        body = _function_body(source, "computeLinkStatus(state)")
+        assert "if (state.lastSyncStatus?.ok) return state.lastSyncStatus" in body
+
+    def test_compute_link_status_probes_before_trusting_the_last_sync(
+        self, source: str
+    ) -> None:
+        """The status re-probes on every render BEFORE trusting the last
+        outcome: a deleted target must stop saying "Synced" at once (lead
+        review 2026-09-17), and one that comes back (an undo) or rgthree
+        finishing a late load must heal without a write from this read."""
+        body = _function_body(source, "computeLinkStatus(state)")
+        probe_at = body.index("const probe = probeSendTarget(node)")
+        gone_at = body.index(
+            "if (!node) return { ok: false, message: linkedTargetGoneMessage(state) }"
+        )
+        trust_at = body.index("if (state.lastSyncStatus?.ok) return state.lastSyncStatus")
+        assert gone_at < probe_at < trust_at
+        assert "SEND_ADAPTERS[" not in body  # never writes from a status read
+
+    def test_a_deleted_linked_target_names_itself(self, source: str) -> None:
+        """Linked-but-gone gets its own message and fail code, not the generic
+        "no loader in graph" text that read as if the link had never existed."""
+        assert "function linkedTargetGoneMessage(state)" in source
+        sync = _function_body(source, "performLinkedSync(state)")
+        assert "failCode: 'target-gone'" in sync
+        assert "undo to bring it back" in source
+
+    def test_a_restored_link_counts_as_already_synced(self, source: str) -> None:
+        body = _function_body(source, "createState(node, widget)")
+        assert "linkedSyncedOnce: linkedTargetId != null," in body
+
+    def test_toast_fires_only_on_a_failure_transition(self, source: str) -> None:
+        """A deleted target must not spam a toast on every keystroke while
+        it stays deleted -- only newly-failing, or failing a DIFFERENT way
+        than last time."""
+        body = _function_body(source, "setSyncStatus(state, status, lossySignature)")
+        expected_gate = (
+            "if (!status.ok && (!prev || prev.ok || prev.failCode !== status.failCode)) {"
+        )
+        assert expected_gate in body
+        assert "toast('error', 'EPS LoRA Picker', status.message)" in body
+
+    def test_lossy_toast_fires_only_when_the_affected_set_changes(self, source: str) -> None:
+        """Owner decision 2026-08-09: DaSiWa's lossy edges are loud on
+        purpose -- but still not on EVERY sync, only when the SET of
+        affected rows actually moves."""
+        body = _function_body(source, "setSyncStatus(state, status, lossySignature)")
+        assert "lossySignature !== EMPTY_LOSSY_SIGNATURE" in body
+        assert "lossySignature !== state.lastLossySignature" in body
+        assert "toast('warn', 'EPS LoRA Picker', status.message)" in body
+
+    def test_set_sync_status_always_repaints(self, source: str) -> None:
+        body = _function_body(source, "setSyncStatus(state, status, lossySignature)")
+        assert "renderSend(state)" in body
+
+    # -- the row itself: no button, "Not linked" placeholder, status span
+
+    def test_no_send_button_remains(self, source: str) -> None:
+        assert "sendBtn" not in source
+        assert "'Send'" not in source
+
+    def test_status_span_reflects_ok_and_error_styling(self, source: str) -> None:
+        body = _function_body(source, "renderSend(state)")
+        assert "statusEl.classList.toggle('eps-lp-status-error', !status.ok)" in body
+
+    # -- the mutation-path inventory: which selection edits sync
+
+    def test_every_selection_mutation_schedules_a_sync(self, source: str) -> None:
+        """The mutation-path inventory (report table): Add, on/off, strength
+        commit, remove, and the drag-reorder drop all call
+        scheduleLinkedSync -- restoring state (configure/tab-switch/feed
+        refresh) never does (see the reloadFromWidget tests below)."""
+        assert "scheduleLinkedSync(state)" in _function_body(source, "addLora(state, file)")
+        row_body = _function_body(source, "buildSelectedRowEl(state, row)")
+        # on/off toggle, strength commit, and remove are three separate
+        # closures inside the same function body -- all three must call it
+        # after their own write.
+        assert row_body.count("scheduleLinkedSync(state)") == 3
+        drag_body = _function_body(source, "finishSelectedDrag(state, drag)")
+        assert "scheduleLinkedSync(state)" in drag_body
+
+    def test_reload_from_widget_syncs_only_when_external_and_changed(self, source: str) -> None:
+        """§6.13 "Live sync" items 4/5: an external write (the controller's
+        applySetToPicker, a Universal State Controller apply) syncs when the
+        rows actually changed; workflow load/paste/undo/redo/the tab-switch
+        rebuild (wireConfigureReload, no options) and a background feed
+        refresh (applyFeed, no options) never do -- `options` defaults to
+        nothing, so `external` reads false there."""
+        body = _function_body(source, "reloadFromWidget(state, options)")
+        assert "const external = !!options?.external" in body
+        assert (
+            "if (external && selectionRowsChanged(prevLoras, state.selection.loras)) {" in body
+        )
+        assert "scheduleLinkedSync(state)" in body[body.index("if (external"):]
+        # The two internal callers pass no options at all.
+        assert "reloadFromWidget(state)" in _function_body(source, "wireConfigureReload(state)")
+        assert "reloadFromWidget(state)" in _function_body(source, "applyFeed(state, data)")
+        # The one external seam passes { external: true }.
+        assert (
+            "node.__epsLpReload = () => reloadFromWidget(state, { external: true })" in source
+        )
+
+    def test_still_no_window_listeners_after_live_sync(self, source: str) -> None:
         assert "window.addEventListener" not in source
 
 
@@ -1745,8 +2273,12 @@ class TestUiRound20260814:
         )
 
     def test_send_row_says_it_is_optional(self, source: str) -> None:
+        """§6.13 "Live sync" round: "Send to" became "Link to" (the row now
+        links a loader for automatic syncing instead of one-shot copying),
+        but the optional-ness framing -- the picker applies its own loras --
+        is unchanged."""
         send = _function_body(source, "renderSend(state)")
-        assert "text: 'Send to'" in send
+        assert "text: 'Link to'" in send
         assert "The picker itself already applies its loras" in send
 
 
@@ -1814,7 +2346,7 @@ class TestClickToLoadV0640:
 
     def test_send_watch_covers_subgraphs(self, source: str) -> None:
         assert "for (const graph of walkGraphs(app.graph)) installGraphNodeWatch(graph)" in source
-        assert "node.__epsLpReload = () => reloadFromWidget(state)" in source
+        assert "node.__epsLpReload = () => reloadFromWidget(state, { external: true })" in source
 
 
 class TestTabSwitchFixesV0651:
@@ -1830,7 +2362,7 @@ class TestTabSwitchFixesV0651:
         reload then rendered N and added N*SELECTED_ROW_PX ON TOP of the
         restored size, compounding per switch. A wholesale selection
         replace forgets the baseline -- the floor still prevents crops."""
-        body = _function_body(source, "reloadFromWidget(state)")
+        body = _function_body(source, "reloadFromWidget(state, options)")
         assert "state.lastSelectedCount = null" in body
 
     def test_cached_feed_paints_instantly_and_refresh_failure_keeps_it(
@@ -2293,8 +2825,8 @@ class TestFixedHeightRound20260822:
         kept) and touches no size itself; with auto-grow OFF the growth step
         returns before any setSize, so an applied big state leaves the node
         exactly as tall as the user made it. With it ON, today's behaviour."""
-        assert "node.__epsLpReload = () => reloadFromWidget(state)" in source
-        reload = _function_body(source, "reloadFromWidget(state)")
+        assert "node.__epsLpReload = () => reloadFromWidget(state, { external: true })" in source
+        reload = _function_body(source, "reloadFromWidget(state, options)")
         assert "state.lastSelectedCount = null" in reload
         assert "render(state)" in reload
         assert "setSize" not in reload

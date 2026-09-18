@@ -100,6 +100,32 @@
  * pointermove/pointerup at the handle itself -- so element-level listeners
  * on the handle see the drag end even when the pointer leaves the node,
  * and no window listener (capture-phase or otherwise) is ever needed.
+ *
+ * **"Live sync" round (§6.13, owner asks: drag to reorder Selected; link a
+ * loader instead of a Send button).** (1) Each Selected row gets its own
+ * ≡ handle, wired exactly like the M3 favorites drag
+ * (`wireSelectedDrag`/`moveDraggedSelectedRow`/`finishSelectedDrag`/
+ * `cancelSelectedDrag` mirror `wireFavoriteDrag`'s own quartet almost line
+ * for line, retargeted at `state.selectedListEl`/`state.selectedDragRowEls`)
+ * -- the pure reorder math lives in `moveSelectedRow`, unit-tested directly.
+ * The drop commits through `writeSelectionWidget`, the same funnel every
+ * other selection edit uses, so undo and a linked sync see it identically.
+ * (2) The M2/M4 "Send to" row is now "Link to": choosing a loader in the
+ * combo is an explicit, PERSISTED link (`PROP_LINKED_LOADER`, the PROP_*
+ * convention `PROP_SELECTED_SPLIT`/`PROP_BROWSE_PATH` already established)
+ * -- the single-candidate auto-adopt those M2/M4 rounds shipped is GONE for
+ * good, on purpose: only a combo pick or a restored property may ever link.
+ * Once linked, EVERY change to the selection -- add, remove, toggle,
+ * strength, reorder, and an EXTERNAL write from the controller/Universal
+ * State Controller -- pushes to the loader through `scheduleLinkedSync`'s
+ * debounce (`SYNC_DEBOUNCE_MS`, one write per quiet burst) via
+ * `performLinkedSync`, reusing the same `SEND_ADAPTERS`/probe/write
+ * plumbing M2/M4 built. Restoring state (configure, the tab-switch rebuild,
+ * a background feed refresh) never syncs -- only `reloadFromWidget`'s
+ * `{external: true}` callers do, and only when the rows actually changed
+ * (`selectionRowsChanged`). No toast per sync; the status span carries it,
+ * with a toast only on a FAILURE TRANSITION or a change in DaSiWa's loud
+ * lossy row set (`setSyncStatus`).
  */
 
 import { app } from '../../../scripts/app.js'
@@ -179,6 +205,19 @@ export const PROP_SELECTED_SPLIT = 'Selected split'
  */
 export const PROP_BROWSE_PATH = 'Browse folder'
 
+/**
+ * §6.13 "Live sync" round (owner ask: "once a loader is chosen, every
+ * change should push to it automatically -- no Send button"). The combo's
+ * explicit choice, persisted so it survives save/reload and the tab-switch
+ * rebuild -- the pathId string from `findSendCandidates()` (§6.13 M4's
+ * "3:2"-style id), or `''`/absent for "not linked". Registered at attach
+ * like every other PROP_* here (`addProperty` every attach -- a saved value
+ * wins later via configure's property loop); ONLY an explicit combo pick or
+ * a restored value may ever populate it -- see `setLinkedTarget`'s header
+ * for why the single-candidate auto-adopt this replaced is gone for good.
+ */
+export const PROP_LINKED_LOADER = 'Linked loader'
+
 /** clampSplitFraction()'s usable range -- generous enough that either
  * section can dominate, never so extreme that the other collapses to a
  * sliver no wider than its own chrome. */
@@ -238,6 +277,19 @@ const COPY_TOAST_MAX_CHARS = 120
  * WHOLE folder. Escape/clear stays instant (clearSearch cancels the pending
  * repaint). Same value as notebook.js's SEARCH_DEBOUNCE_MS. */
 const SEARCH_DEBOUNCE_MS = 120
+
+/** §6.13 "Live sync" round: while linked, a burst of rapid selection edits
+ * (typing/dragging a strength) collapses into ONE write after this many ms
+ * of quiet -- `scheduleLinkedSync`'s own timer slot, the exact
+ * `scheduleSearchRender`/`SEARCH_DEBOUNCE_MS` shape (clear-then-set on a
+ * dedicated slot so the two debounces can never cancel each other). */
+const SYNC_DEBOUNCE_MS = 150
+
+/** `performLinkedSync`'s "nothing changed" signature for the DaSiWa lossy
+ * lists -- the fallback so `setSyncStatus` never mistakes "never synced" for
+ * "synced with zero lossy rows" when deciding whether the lossy SET changed
+ * (§6.13 "Live sync" item 7: loud only when the affected set itself moves). */
+const EMPTY_LOSSY_SIGNATURE = JSON.stringify({ flattened: [], clamped: [] })
 
 /** v0.68.1: the flat search view renders at most this many rows; a
  * trailing "…N more — keep typing" row says what was left out. A 2000-lora
@@ -351,6 +403,95 @@ export function serializeSelection(selection) {
     return out
   })
   return JSON.stringify({ scope, loras })
+}
+
+/**
+ * Pure reorder math for the Selected-list drag (§6.13 "Live sync" round,
+ * owner ask: "drag to reorder the selected loras"): a NEW array with the
+ * element at *fromIndex* moved so it lands at *toIndex* counting the array
+ * WITH that element already removed -- i.e. the same "insert at this
+ * position among the others" semantics `moveDraggedFavorite`'s own
+ * `insertAt` already uses, just as a one-shot pure function instead of a
+ * live per-pointer-move DOM walk. Never throws: a non-array *rows*
+ * degrades to `[]`, an out-of-range *fromIndex* (negative, `>= length`, or
+ * non-integer) is a no-op copy (nothing to move), and *toIndex* is clamped
+ * into `[0, length - 1]` (of the array WITHOUT the moved element) rather
+ * than rejected -- "drag past the last row" means "move it to the end", not
+ * an error. A same-index drop (post-clamp) is likewise a no-op copy, so a
+ * caller can always compare the result against the input by reference-per-
+ * slot to decide whether anything actually changed (see `finishSelectedDrag`).
+ * @param {Array<unknown>} rows
+ * @param {number} fromIndex
+ * @param {number} toIndex
+ * @returns {Array<unknown>}
+ */
+export function moveSelectedRow(rows, fromIndex, toIndex) {
+  const list = Array.isArray(rows) ? rows : []
+  const n = list.length
+  if (!Number.isInteger(fromIndex) || fromIndex < 0 || fromIndex >= n) return list.slice()
+  const rest = list.slice()
+  const [moved] = rest.splice(fromIndex, 1)
+  const maxTo = rest.length // rest.length === n - 1
+  const clampedTo = Math.min(Math.max(Number.isInteger(toIndex) ? toIndex : fromIndex, 0), maxTo)
+  if (clampedTo === fromIndex) return list.slice()
+  rest.splice(clampedTo, 0, moved)
+  return rest
+}
+
+/**
+ * True when *a* and *b* (both `selection.loras`-shaped arrays) differ in
+ * FILE, ORDER, `on`, `strength`, or `strength_clip` -- the exact set of
+ * fields `serializeSelection` writes and every loader adapter reads.
+ * `strength_clip` compares `null`/`undefined` as equal (a restored row
+ * omitting the key vs. one carrying an explicit `null` are the same row).
+ * Used to gate whether an external rewrite of the `selection` widget (a
+ * controller's Apply, a Universal State Controller apply) is a REAL change
+ * worth pushing to a linked loader, as opposed to a same-content
+ * re-announce. Never throws: non-array input degrades to `[]`.
+ * @param {Array<{file: string, on?: boolean, strength?: number, strength_clip?: number|null}>} a
+ * @param {Array<{file: string, on?: boolean, strength?: number, strength_clip?: number|null}>} b
+ * @returns {boolean}
+ */
+export function selectionRowsChanged(a, b) {
+  const ra = Array.isArray(a) ? a : []
+  const rb = Array.isArray(b) ? b : []
+  if (ra.length !== rb.length) return true
+  return ra.some((row, i) => {
+    const other = rb[i]
+    if (!other) return true
+    return (
+      row.file !== other.file ||
+      row.on !== other.on ||
+      row.strength !== other.strength ||
+      (row.strength_clip ?? null) !== (other.strength_clip ?? null)
+    )
+  })
+}
+
+/**
+ * §6.13 "Live sync" item 3/4's pure decision core: may `performLinkedSync`
+ * actually WRITE to the linked loader right now? Never write an EMPTY
+ * selection into a loader that has never been synced yet -- linking a
+ * picker with nothing selected must not wipe the loader's existing rows
+ * just because it was chosen. Once at least one write has landed
+ * (*syncedOnce*), a later empty selection is a real "the user cleared it"
+ * and mirrors through like any other change, zero rows included.
+ * @param {number} rowCount @param {boolean} syncedOnce @returns {boolean}
+ */
+export function shouldWriteLinkedSync(rowCount, syncedOnce) {
+  return rowCount > 0 || !!syncedOnce
+}
+
+/**
+ * Parses `PROP_LINKED_LOADER`'s raw property value into the pathId string
+ * `state.linkedTargetId` wants, or `null` for "not linked" -- the
+ * `browsePathFromProperty`/`autoGrowFromValue` convention (degrade instead
+ * of throw on anything malformed: missing property, a hand-cleared `''`, a
+ * non-string hand-edit).
+ * @param {unknown} raw @returns {string|null}
+ */
+export function linkedLoaderIdFromProperty(raw) {
+  return typeof raw === 'string' && raw !== '' ? raw : null
 }
 
 /** Case-insensitive A-Z with a deterministic case-sensitive tiebreak. */
@@ -678,6 +819,15 @@ function createState(node, widget) {
   // by the `PROP_BROWSE_PATH` `onPropertyChanged` handler if the property
   // itself hadn't restored yet at THIS point either.
   const seeded = browsePathFromProperty(node?.properties?.[PROP_BROWSE_PATH])
+  // §6.13 "Live sync" round: the same best-effort-read-plus-later-
+  // onPropertyChanged-reseed race as PROP_BROWSE_PATH's `seeded` above --
+  // `node.properties` may already carry a restored PROP_LINKED_LOADER at
+  // this exact point, or it may land later via `wireLinkedLoaderProperty`'s
+  // onPropertyChanged handler (configure's own property loop, or the
+  // Properties panel). Either order is safe: this is a pure re-derivation
+  // (see `linkedLoaderIdFromProperty`) of a value that is never itself
+  // "consumed" the way the browse-path seed is.
+  const linkedTargetId = linkedLoaderIdFromProperty(node?.properties?.[PROP_LINKED_LOADER])
   return {
     node,
     widget,
@@ -692,10 +842,20 @@ function createState(node, widget) {
     view: 'browse', // 'browse' | 'favorites' | 'recent' -- transient, never serialized (§6.13 M3: view mode itself, unlike the path below, is cheap to re-derive by clicking and stays out of PROP_BROWSE_PATH on purpose)
     path: [], // drill-down segments below the scope root -- see `pendingPathSeed` for how a tab switch repopulates this before the first meaningful paint
     pendingPathSeed: seeded.path.length ? seeded : null, // {scope, path} restored from PROP_BROWSE_PATH, or null -- consumed by tryApplyPendingPathSeed()
-    pllTargetId: null, // Send-to-loader target node id -- transient, M2 adds no widget (§6.13)
+    linkedTargetId, // §6.13 "Live sync": the LINKED loader's pathId, persisted in PROP_LINKED_LOADER (null = not linked) -- an explicit combo pick or a restored property value only, never auto-adopted
+    // Has the link been synced? Gates "never wipe on link" vs "mirror to
+    // empty" (shouldWriteLinkedSync). A link RESTORED from the saved
+    // workflow was made (and synced) in an earlier session, so it counts as
+    // synced -- otherwise emptying the picker after a reload would leave the
+    // loader holding a stale row (lead review 2026-09-17).
+    linkedSyncedOnce: linkedTargetId != null,
+    syncTimer: null, // pending debounced trailing sync (scheduleLinkedSync), own slot so it can never race searchTimer
+    lastSyncStatus: null, // {ok, message, failCode} from the last performLinkedSync attempt -- drives the status span + the toast-once-per-failure-transition gate
+    lastLossySignature: null, // JSON {flattened, clamped} of the last DaSiWa lossy write -- toast again only when the affected row SET changes
     searchQuery: '', // §6.13 M3 view-only filter -- transient, never serialized
     searchTimer: null, // v0.68.1: pending debounced search repaint (scheduleSearchRender)
     favDrag: null, // in-flight M3 favorites drag -- element-level, pointer-captured
+    selectedDrag: null, // in-flight Selected-list reorder drag -- same pointer-captured shape as favDrag
     splitDrag: null, // in-flight M5 split-divider drag -- same pointer-captured shape
     splitResizeObserver: null, // M5: reapplies the split when state.root's own size changes
     loadToken: 0, // guards a stale/superseded fetch from clobbering fresher state
@@ -704,6 +864,7 @@ function createState(node, widget) {
     root: null,
     searchInputEl: null,
     favRowEls: [], // favorites-view row order (file+el) for the M3 drag -- rebuilt each render
+    selectedDragRowEls: [], // Selected-list row order (file+el) for the reorder drag -- rebuilt each renderSelected
     browserRowEls: new Map(), // file -> installed browser row el, rebuilt each render (v0.68.1 highlight toggle)
     starRowEls: new Map(), // 2026-08-26: file -> star button el for THIS paint (ghosts included) -- lets a star toggle patch the icon in place instead of a full renderBrowser
     favBadgeEl: null, // 2026-08-26: the root browse view's "★ Favorites (n)" label, when on screen -- patched in place by patchCountBadges
@@ -948,15 +1109,29 @@ function tryApplyPendingPathSeed(state) {
   return true
 }
 
-/** Re-derives `state.selection` from the widget's CURRENT value and
- * repaints -- the shared reconciliation step both the fetch-completion path
- * and wireConfigureReload call. */
-function reloadFromWidget(state) {
+/**
+ * Re-derives `state.selection` from the widget's CURRENT value and
+ * repaints -- the shared reconciliation step the fetch-completion path,
+ * wireConfigureReload, and an EXTERNAL write (§6.13 "Live sync" item 4) all
+ * call. `options.external` is true ONLY for the `__epsLpReload` seam
+ * (installExternalWriteSubscription's Universal-State-Controller-apply
+ * handler, and controller.js's own `applySetToPicker` poke) -- a genuine
+ * outside write of new content, which schedules a linked-loader sync when
+ * the rows actually changed (`selectionRowsChanged`). The two INTERNAL
+ * callers (wireConfigureReload's onConfigure -- workflow load, paste,
+ * undo/redo, the tab-switch rebuild -- and applyFeed's background
+ * reconcile) pass no options: restoring state is not a change (§6.13 "Live
+ * sync" item 5), and a feed refresh doesn't touch `selection` at all.
+ * @param {{external?: boolean}} [options]
+ */
+function reloadFromWidget(state, options) {
+  const external = !!options?.external
   // BEFORE the re-parse, not just in render(): the commit must land in the
   // widget JSON so the fresh parse below picks the typed value up -- the
   // in-render commit alone would mutate a row object this line discards.
   commitActiveStrengthEdit(state)
   const prevScope = state.selection?.scope || ''
+  const prevLoras = state.selection?.loras
   state.selection = selectionFromWidgetValue(state.widget.value)
   // The selection was just replaced WHOLESALE (a configure restore, the
   // controller's apply, a fetch reconcile) -- the node's CURRENT size is
@@ -986,6 +1161,12 @@ function reloadFromWidget(state) {
   tryApplyPendingPathSeed(state)
   syncBrowsePathProperty(state)
   render(state)
+  // §6.13 "Live sync" item 4: an external write of genuinely different rows
+  // pushes to a linked loader like any other change; item 5: restoring the
+  // SAME content (or any internal caller at all) never does.
+  if (external && selectionRowsChanged(prevLoras, state.selection.loras)) {
+    scheduleLinkedSync(state)
+  }
 }
 
 // Universal State Controller Apply fix (2026-08-29, owner report:
@@ -1251,10 +1432,18 @@ function wireConfigureReload(state) {
  * yet blurred/changed) would otherwise be silently discarded along with the
  * input that held it -- the exact "in-memory JS state destroyed by a
  * repaint the user never asked for" shape notebook.js's v0.87.3 fix
- * addressed for its textarea. Scoped to exactly that one flush -- picker.js
- * has no timers/listeners of its own that outlive the node the way
- * notebook.js's/prompt_builder.js's fuller `teardown()` guards against, so
- * there is nothing else for this hook to do.
+ * addressed for its textarea.
+ *
+ * §6.13 "Live sync" round: also clears `state.syncTimer`. A tab
+ * switch/undo/redo/workflow reload tears this node down WITHOUT running
+ * `cancelSelectedDrag`/`finishSelectedDrag` or any other in-picker cleanup,
+ * so a pending debounced sync (`scheduleLinkedSync`) armed just before the
+ * teardown would otherwise fire afterwards and write this now-gone
+ * picker's last selection into its linked loader -- harmless data, but a
+ * write nothing on screen asked for. Every other write path
+ * (`performLinkedSync`'s immediate call from `setLinkedTarget`) already
+ * only ever runs synchronously off a live user gesture, so this is the one
+ * outstanding timer that can outlive the node.
  */
 function wireNodeCleanup(state) {
   const node = state.node
@@ -1273,6 +1462,8 @@ function wireNodeCleanup(state) {
     } catch (error) {
       api.warn('picker strength flush on remove failed', error)
     }
+    clearTimeout(state.syncTimer)
+    state.syncTimer = null
     return result
   }
 }
@@ -1334,6 +1525,7 @@ function addLora(state, file) {
   state.highlightedFile = file // the just-added row stays the current one
   writeSelectionWidget(state)
   renderSelected(state)
+  scheduleLinkedSync(state) // §6.13 "Live sync": Add is a selection change like any other
   // v0.68.1: the browser's own repaint is owned by recordRecent (it
   // touches the browser anyway -- the 🕘 Recent count moved -- so painting
   // this highlight there too avoided a second one). 2026-08-26: that
@@ -1547,12 +1739,17 @@ function renderSelected(state) {
   state.selectedHeaderEl.textContent = `Selected (${rows.length})`
   state.selectedListEl.replaceChildren()
   state.selectedRowEls.clear()
+  state.selectedDragRowEls = [] // rebuilt fresh every repaint -- the reorder drag's own row order
   if (rows.length === 0) {
     state.selectedListEl.append(
       el('div', { className: 'eps-lp-empty', text: 'Nothing selected — Add loras from the browser below.' })
     )
   } else {
-    for (const row of rows) state.selectedListEl.append(buildSelectedRowEl(state, row))
+    for (const row of rows) {
+      const rowEl = buildSelectedRowEl(state, row)
+      state.selectedDragRowEls.push({ file: row.file, el: rowEl })
+      state.selectedListEl.append(rowEl)
+    }
   }
   syncFixedClass(state) // re-derived every repaint, so a Properties flip or a restore can't leave it stale
   applySplit(state) // §6.13 M5: re-derived every repaint too, same reasoning
@@ -1767,6 +1964,46 @@ function wireBrowsePathProperty(state) {
   }
 }
 
+/**
+ * Registers `PROP_LINKED_LOADER` the same way `wireBrowsePathProperty`
+ * registers `PROP_BROWSE_PATH` -- `addProperty` every attach,
+ * `onPropertyChanged` CHAINED (fourth on the hook now). This handler is
+ * ONLY ever a re-derivation of `state.linkedTargetId` from whatever the
+ * property now says, plus a repaint -- it NEVER schedules a sync itself.
+ * That is deliberate (§6.13 "Live sync" items 2 and 5): this same handler
+ * fires for a restored value during configure's property loop (workflow
+ * load, undo/redo, the tab-switch rebuild -- must never sync), a
+ * Properties-panel hand-edit (an edge case, but the same "never guess"
+ * rule applies), AND our own explicit `setLinkedTarget` write (which
+ * already decided, itself, whether an immediate sync is warranted, BEFORE
+ * calling `node.setProperty`). The one place a NEW link actually triggers
+ * a sync is `setLinkedTarget`'s own explicit call, gated on `changed` --
+ * never a reaction to the property merely existing.
+ */
+function wireLinkedLoaderProperty(state) {
+  const node = state.node
+  if (typeof node.addProperty === 'function') node.addProperty(PROP_LINKED_LOADER, '', 'string')
+  const original = node.onPropertyChanged
+  node.onPropertyChanged = function (name, value, prevValue) {
+    const result = original?.call(this, name, value, prevValue)
+    if (name === PROP_LINKED_LOADER) {
+      try {
+        const restored = linkedLoaderIdFromProperty(value)
+        // setLinkedTarget pre-assigns linkedTargetId before calling
+        // setProperty, so an unchanged id here means our own write; a
+        // DIFFERENT id is a restore (configure/undo/redo) -- see the
+        // linkedSyncedOnce note where the state is built.
+        if (restored !== state.linkedTargetId) state.linkedSyncedOnce = restored != null
+        state.linkedTargetId = restored
+        renderSend(state)
+      } catch (error) {
+        api.warn('linked loader property change failed', error)
+      }
+    }
+    return result
+  }
+}
+
 // --- §6.13 M5: draggable Selected/browse split (owner ask 2026-08-23) ---
 
 /**
@@ -1975,11 +2212,26 @@ function cancelSplitDrag(state) {
 function buildSelectedRowEl(state, row) {
   const missing = state.loaded && !state.loraSet.has(row.file)
 
+  // §6.13 "Live sync" round: drag-to-reorder handle -- the exact
+  // wireFavoriteDrag shape (pointerdown + setPointerCapture + stopPropagation
+  // on the HANDLE only), so a drag can never start from the checkbox,
+  // strength input, or remove button below, and the canvas never pans.
+  // Order is the applied/emitted order (nodes_picker.py's `build`) and what
+  // gets saved, so every row -- including a ⚠ missing one -- stays
+  // reorderable.
+  const handle = el('span', {
+    className: 'eps-lp-drag-handle',
+    text: '≡',
+    attrs: { title: 'Drag to reorder — this is the order loras apply and are emitted in' }
+  })
+  wireSelectedDrag(state, handle, row.file)
+
   const checkbox = el('input', { attrs: { type: 'checkbox', title: 'On/off — an off row stays saved but is skipped at run time.' } })
   checkbox.checked = row.on
   checkbox.addEventListener('change', () => {
     row.on = checkbox.checked
     writeSelectionWidget(state)
+    scheduleLinkedSync(state) // §6.13 "Live sync"
   })
 
   const label = el('span', {
@@ -2006,6 +2258,7 @@ function buildSelectedRowEl(state, row) {
     strength.value = String(clamped)
     row.strength = clamped
     writeSelectionWidget(state)
+    scheduleLinkedSync(state) // §6.13 "Live sync" -- debounced, so a drag/typed edit coalesces
   }
   // Exposed for commitActiveStrengthEdit(): a full repaint may destroy this
   // input while it holds focus, which fires neither change nor blur.
@@ -2025,11 +2278,179 @@ function buildSelectedRowEl(state, row) {
     state.selection.loras = state.selection.loras.filter((entry) => entry !== row)
     writeSelectionWidget(state)
     renderSelected(state)
+    scheduleLinkedSync(state) // §6.13 "Live sync" -- a removal down to zero still mirrors once synced
   })
 
-  const rowEl = el('div', { className: 'eps-lp-row' }, [checkbox, label, strength, removeBtn])
+  const rowEl = el('div', { className: 'eps-lp-row' }, [handle, checkbox, label, strength, removeBtn])
   state.selectedRowEls.set(row.file, rowEl)
   return rowEl
+}
+
+// --- §6.13 "Live sync" round: Selected-list drag-to-reorder -- the exact
+// wireFavoriteDrag/moveDraggedFavorite/finishFavoriteDrag/cancelFavoriteDrag
+// shape (pointerdown + setPointerCapture + stopPropagation, the dragged
+// element never reparented, cancel is a pure repaint), retargeted at
+// state.selectedListEl/state.selectedDragRowEls instead of the favorites
+// view's listEl/favRowEls. Every row is draggable (missing ones included --
+// order still matters for a row the server can't currently confirm), so
+// there is no `draggable` gate to compute the way buildLoraRowEl's favorite
+// drag has one. ---
+
+/** Auto-scroll floor/ceiling (owner ask: "dragging near the top/bottom
+ * should auto-scroll") -- a per-pointermove nudge, not a RAF loop: the
+ * browser already fires pointermove at a healthy rate while the pointer is
+ * down, so a plain "are we within EDGE_PX of an edge -> nudge scrollTop"
+ * check on every move is enough, needs no timer to install or tear down,
+ * and can never leave a runaway interval behind if a drag ends unusually
+ * (a mid-drag re-render, a lost capture). Skipped entirely when the list
+ * isn't actually scrolling (auto-grow ON, or short enough to fit). */
+const SELECTED_DRAG_EDGE_PX = 24
+const SELECTED_DRAG_SCROLL_STEP_PX = 12
+
+function autoScrollSelectedList(state, clientY) {
+  const list = state.selectedListEl
+  if (!list || list.scrollHeight <= list.clientHeight) return
+  const rect = list.getBoundingClientRect()
+  if (clientY < rect.top + SELECTED_DRAG_EDGE_PX) {
+    list.scrollTop = Math.max(0, list.scrollTop - SELECTED_DRAG_SCROLL_STEP_PX)
+  } else if (clientY > rect.bottom - SELECTED_DRAG_EDGE_PX) {
+    list.scrollTop = Math.min(list.scrollHeight - list.clientHeight, list.scrollTop + SELECTED_DRAG_SCROLL_STEP_PX)
+  }
+}
+
+function wireSelectedDrag(state, handle, file) {
+  handle.addEventListener('pointerdown', (event) => {
+    if (event.button > 0) return // primary button / touch / pen only
+    if (state.selectedDrag) return // one gesture at a time
+    event.preventDefault()
+    event.stopPropagation()
+    try {
+      handle.setPointerCapture(event.pointerId)
+    } catch (error) {
+      // Without capture the element-level move/up listeners would go blind
+      // the moment the pointer left the handle -- no capture, no drag.
+      api.warn('selected drag: setPointerCapture failed; drag unavailable', error)
+      return
+    }
+    const start = state.selectedDragRowEls.find((row) => row.file === file)
+    if (!start) return
+    const drag = { pointerId: event.pointerId, file }
+    state.selectedDrag = drag
+    start.el.classList.add('eps-lp-row-dragging')
+
+    const onMove = (moveEvent) => {
+      if (moveEvent.pointerId !== drag.pointerId) return
+      autoScrollSelectedList(state, moveEvent.clientY)
+      moveDraggedSelectedRow(state, drag, moveEvent.clientY)
+    }
+    const onUp = (upEvent) => {
+      if (upEvent.pointerId !== drag.pointerId) return
+      detach()
+      finishSelectedDrag(state, drag)
+    }
+    const onCancel = (cancelEvent) => {
+      if (cancelEvent.pointerId !== drag.pointerId) return
+      detach()
+      cancelSelectedDrag(state)
+    }
+    const onLost = () => {
+      // Implicit capture release (row detached by a mid-drag re-render):
+      // treat as cancel. Our own detach() removes this listener BEFORE
+      // releasing, so a normal finish never double-fires.
+      detach()
+      cancelSelectedDrag(state)
+    }
+    function detach() {
+      handle.removeEventListener('pointermove', onMove)
+      handle.removeEventListener('pointerup', onUp)
+      handle.removeEventListener('pointercancel', onCancel)
+      handle.removeEventListener('lostpointercapture', onLost)
+      try {
+        handle.releasePointerCapture(drag.pointerId)
+      } catch {
+        // Already released, or never captured.
+      }
+    }
+    handle.addEventListener('pointermove', onMove)
+    handle.addEventListener('pointerup', onUp)
+    handle.addEventListener('pointercancel', onCancel)
+    handle.addEventListener('lostpointercapture', onLost)
+  })
+}
+
+/**
+ * Live reorder while the pointer moves -- moveDraggedFavorite's exact shape
+ * (see its own header for the full "never reparent the dragged element"
+ * rationale, live-verified 2026-08-09): the dragged row slots in wherever
+ * *clientY* sits among the OTHER rows' midpoints, both the DOM and
+ * `state.selectedDragRowEls` move together, and `state.selection.loras`
+ * itself is untouched until the drop (`finishSelectedDrag` reads the final
+ * DOM order there; `cancelSelectedDrag` never looks at it at all).
+ */
+function moveDraggedSelectedRow(state, drag, clientY) {
+  const rows = state.selectedDragRowEls
+  const fromIndex = rows.findIndex((row) => row.file === drag.file)
+  if (fromIndex === -1) return // mid-drag re-render replaced the rows
+  const dragged = rows[fromIndex]
+  const others = rows.filter((_, index) => index !== fromIndex)
+  let insertAt = others.length
+  for (let i = 0; i < others.length; i++) {
+    const rect = others[i].el.getBoundingClientRect()
+    if (clientY < rect.top + rect.height / 2) {
+      insertAt = i
+      break
+    }
+  }
+  if (insertAt === fromIndex) return
+  state.selectedDragRowEls = [...others.slice(0, insertAt), dragged, ...others.slice(insertAt)]
+  // Rows now ABOVE the dragged one: re-inserted before it, in order...
+  for (const row of others.slice(0, insertAt)) state.selectedListEl.insertBefore(row.el, dragged.el)
+  // ...rows now BELOW it: chained after it, each becoming the next anchor.
+  let anchor = dragged.el
+  for (const row of others.slice(insertAt)) {
+    anchor.after(row.el)
+    anchor = row.el
+  }
+}
+
+/**
+ * Drop commit: reads the FINAL dragged order straight off
+ * `state.selectedDragRowEls` (the DOM/array pair `moveDraggedSelectedRow`
+ * already kept in sync), turns it into a `moveSelectedRow` call against the
+ * canonical `state.selection.loras` (pure math, unit-tested directly), and
+ * -- only when that actually changes anything -- persists through the same
+ * `writeSelectionWidget` funnel every other selection edit uses (so undo
+ * and a linked-loader sync see a reorder exactly like any other edit) and
+ * schedules a sync. Always repaints at the end: `renderSelected` both
+ * drops the `eps-lp-row-dragging` styling and re-derives every row/element
+ * from the (possibly reordered) canonical state, discarding the live
+ * mid-drag DOM order -- `finishFavoriteDrag`'s own "rebuild also drops the
+ * dragging class" posture.
+ */
+function finishSelectedDrag(state, drag) {
+  state.selectedDrag = null
+  const orderedFiles = state.selectedDragRowEls.map((row) => row.file)
+  const fromIndex = state.selection.loras.findIndex((row) => row.file === drag.file)
+  const toIndex = orderedFiles.indexOf(drag.file)
+  if (fromIndex !== -1 && toIndex !== -1) {
+    const reordered = moveSelectedRow(state.selection.loras, fromIndex, toIndex)
+    const changed = reordered.some((entry, i) => entry !== state.selection.loras[i])
+    if (changed) {
+      state.selection.loras = reordered
+      writeSelectionWidget(state)
+      scheduleLinkedSync(state) // §6.13 "Live sync": a reorder is a change too
+    }
+  }
+  renderSelected(state) // rebuild also drops the eps-lp-row-dragging styling
+}
+
+/** pointercancel / lost capture: abandon the gesture. `state.selection.loras`
+ * was never touched during the drag, so the repaint alone restores the
+ * pre-drag order and clears the dragging style -- `cancelFavoriteDrag`'s
+ * exact posture. */
+function cancelSelectedDrag(state) {
+  state.selectedDrag = null
+  renderSelected(state)
 }
 
 /** Breadcrumb segments for the current view: scope root (basename, or
@@ -2785,7 +3206,7 @@ const SEND_ADAPTERS = {
  * from every adapter's label so it names both supported loaders (and any
  * future third automatically), in M2's own message shape. */
 const SEND_FAMILY_LABELS = Object.values(SEND_ADAPTERS).map((adapter) => adapter.label)
-const MSG_NO_SEND_TARGET_IN_GRAPH = `Optional — the picker applies its loras itself via its model/clip outputs. To copy the list into a loader node instead, add a ${SEND_FAMILY_LABELS.join(
+const MSG_NO_SEND_TARGET_IN_GRAPH = `Optional — the picker applies its loras itself via its model/clip outputs. To keep a loader node in sync with it automatically, add a ${SEND_FAMILY_LABELS.join(
   ' or '
 )} node, then pick it here.`
 const MSG_NO_SEND_TARGET_SELECTED = 'Pick a target loader node above.'
@@ -2886,11 +3307,11 @@ function findSendCandidates() {
   return candidates
 }
 
-/** The live loader the select currently names, or null -- resolved BY ID at
- * use time, since the node may have been deleted since the last render. */
+/** The live loader the LINK currently names, or null -- resolved BY ID at
+ * use time, since the node may have been deleted since it was linked. */
 function resolveSendTarget(state) {
-  if (state.pllTargetId == null) return null
-  return findSendCandidates().find((c) => c.pathId === state.pllTargetId)?.node || null
+  if (state.linkedTargetId == null) return null
+  return findSendCandidates().find((c) => c.pathId === state.linkedTargetId)?.node || null
 }
 
 /**
@@ -2913,21 +3334,26 @@ function probeSendTarget(node) {
 }
 
 /**
- * The Send-to-loader row (§6.13 M2, targets registry-driven since M4): a
- * target combo of every supported loader in the graph (ascending id ACROSS
- * adapter families) + Send. Rebuilt on every render; the previously chosen
- * target is re-selected by id when still present -- transient state only,
- * M2 adds no widget. A failed probe (no rgthree, no loader in the graph,
- * shape drift) disables Send and shows the owning family's §6.3-style
- * message vocabulary in both the button title and the muted status span;
- * an empty selection disables it with its own title.
+ * The Link-to-loader row (§6.13 M2/M4's "Send to" row, replaced by the
+ * "Live sync" round: owner ask "once a loader is chosen, every change
+ * should push to it automatically -- no Send button"): a target combo of
+ * every supported loader in the graph (ascending id ACROSS adapter
+ * families) -- choosing one is an explicit LINK (persisted, see
+ * `setLinkedTarget`), choosing "Not linked" un-links. No button: linking
+ * itself may trigger one immediate sync (`setLinkedTarget`), and every
+ * later selection change pushes automatically through `scheduleLinkedSync`.
+ * Rebuilt on every render; the linked target is re-selected by id when
+ * still present. The status span is the one feedback surface now --
+ * `computeLinkStatus` decides its text from `state.lastSyncStatus` (a real
+ * sync/skip/failure this session) falling back to a fresh read-only probe
+ * (so a broken link is visible immediately, before anything changes).
  */
 function renderSend(state) {
   state.sendRowEl.replaceChildren()
 
   const select = el('select', {
     className: 'eps-lp-pll-select',
-    attrs: { title: 'Target loader node' }
+    attrs: { title: 'Target loader node -- linking syncs the selection to it automatically' }
   })
   // Options are rebuilt IN PLACE on every open (mousedown), not just per
   // render -- controller.js's values-function pattern: a loader added after
@@ -2936,119 +3362,232 @@ function renderSend(state) {
   const buildOptions = () => {
     const fresh = findSendCandidates()
     select.replaceChildren(
-      el('option', {
-        text: fresh.length ? 'Pick a loader…' : 'No loader in graph',
-        attrs: { value: '' }
-      }),
+      el('option', { text: 'Not linked', attrs: { value: '' } }),
       ...fresh.map(({ node, pathId }) =>
         el('option', { text: `${node.title || node.type} #${pathId}`, attrs: { value: pathId } })
       )
     )
-    if (state.pllTargetId != null && fresh.some((c) => c.pathId === state.pllTargetId)) {
-      select.value = state.pllTargetId
-    } else if (state.pllTargetId == null && fresh.length === 1) {
-      // No explicit choice + exactly one candidate ACROSS families (§6.13
-      // M4): adopt it (controller.js's "picked automatically when there is
-      // exactly one" behavior).
-      state.pllTargetId = fresh[0].pathId
-      select.value = state.pllTargetId
+    if (state.linkedTargetId != null && fresh.some((c) => c.pathId === state.linkedTargetId)) {
+      // An explicit link (a combo pick, or a restored PROP_LINKED_LOADER)
+      // whose target still resolves -- reselect it by id.
+      select.value = state.linkedTargetId
     } else {
-      // The chosen target is GONE (deleted since it was picked): stay on the
-      // placeholder and keep remembering the id (an undo brings it back) --
-      // NEVER fall through to the first option; adopting a loader the user
-      // didn't choose makes Send destructively overwrite it (§6.3 "never
-      // guess"; review 2026-08-09).
+      // Not linked, or the linked target is GONE (deleted since it was
+      // chosen): stay on the placeholder and keep remembering the id (an
+      // undo brings it back) -- NEVER fall through to the first candidate,
+      // single or not. §6.13 "Live sync" item 2: only an EXPLICIT choice
+      // may ever link; the old single-candidate auto-adopt is gone for
+      // good -- a picker must never write into a loader the user didn't
+      // pick (§6.3 "never guess").
       select.value = ''
     }
   }
   buildOptions()
   select.addEventListener('mousedown', buildOptions)
   select.addEventListener('change', () => {
-    state.pllTargetId = select.value || null
-    // Re-probe with the fresh choice -- storing the id alone left the button
-    // frozen in the previous target's probe verdict (review 2026-08-09).
-    renderSend(state)
+    setLinkedTarget(state, select.value || null)
   })
   // Canvas hotkeys must not intercept the combo -- the strength input's rule.
   select.addEventListener('keydown', (event) => event.stopPropagation())
 
   const sendLabel = el('span', {
     className: 'eps-lp-send-label',
-    text: 'Send to',
+    text: 'Link to',
     attrs: {
       title:
-        'Optional: copy the selection into a Power Lora Loader (rgthree) or ' +
-        'DaSiWa loader node. The picker itself already applies its loras — ' +
-        'wire model/clip through it, or use its lora_stack output.'
+        'Optional: link this picker to a Power Lora Loader (rgthree) or DaSiWa ' +
+        'loader node -- every change to the selection then syncs to it ' +
+        'automatically. The picker itself already applies its loras — wire ' +
+        'model/clip through it, or use its lora_stack output.'
     }
   })
   const statusEl = el('span', { className: 'eps-lp-send-status' })
-  const sendBtn = el('button', { className: 'eps-lp-btn', text: 'Send' })
-  const probe = probeSendTarget(resolveSendTarget(state))
-  if (!probe.ok) {
-    // Marked blocked but NOT disabled: a disabled button could never run the
-    // click-time re-probe, so a graph fixed after this render (a loader
-    // added, rgthree finished loading) would have no recovery path (review
-    // 2026-08-09). The click either proceeds against the healed graph or
-    // toasts this same message.
-    sendBtn.classList.add('eps-lp-btn-blocked')
-    sendBtn.title = probe.message
-    statusEl.textContent = probe.message
-    statusEl.title = probe.message
-  } else if (state.selection.loras.length === 0) {
-    sendBtn.disabled = true
-    sendBtn.title = 'Nothing selected'
-  } else {
-    sendBtn.title = `Write the selection's ${state.selection.loras.length} row(s) into the target loader`
-  }
-  sendBtn.addEventListener('click', () => sendToPll(state))
+  const status = computeLinkStatus(state)
+  statusEl.textContent = status.message
+  statusEl.title = status.message
+  statusEl.classList.toggle('eps-lp-status-error', !status.ok)
 
-  state.sendRowEl.append(sendLabel, select, sendBtn, statusEl)
+  state.sendRowEl.append(sendLabel, select, statusEl)
 }
 
 /**
- * Send click: re-resolve and RE-PROBE by id -- the render-time probe can
- * be stale (the target may have been deleted since), so failure here is a
- * toast, not a silent no-op. Writes ALL selection rows (`on` preserved --
- * §6.13) through the target's own family adapter (§6.13 M4). The success
- * toast is unchanged for rgthree; a lossy DaSiWa write (dual strengths
- * flattened to the model strength, strengths clamped to DaSiWa's ±5)
- * appends LOUD notes naming every affected row -- owner decision
- * 2026-08-09: lossy edges are loud, never silent.
+ * The status span's text for the CURRENT state -- never itself performs a
+ * write, so it is safe to call from `renderSend` on every repaint. Not
+ * linked: the same family-agnostic §6.3-vocabulary messages M2/M4 always
+ * showed.
+ *
+ * Linked: an OK `state.lastSyncStatus` (a real sync, or a recorded
+ * "add a lora to sync" skip) is authoritative and shown as-is -- it
+ * describes something that actually happened, not the target's live
+ * health, so it stays correct regardless of what the graph does next. A
+ * FAILING `lastSyncStatus`, though, is re-checked against a FRESH
+ * read-only probe every render: a deleted target that comes BACK (an
+ * undo) or rgthree finishing a late load must stop showing a stale
+ * "not found" the instant the graph heals, even though nothing has
+ * changed on the SELECTION side yet to trigger a real `performLinkedSync`
+ * (§6.13 "Live sync" item 5 -- healing is not itself a change that syncs).
+ * No `lastSyncStatus` at all (a just-restored link, nothing attempted this
+ * session) falls through to that same fresh probe.
  */
-function sendToPll(state) {
-  // Same single-candidate adoption the render path applies -- a loader
-  // added AFTER the last render must make a plain Send click work without
-  // first touching the combo (review 2026-08-09). Never adopts among
-  // several; "single candidate" spans BOTH adapter families (§6.13 M4).
-  if (state.pllTargetId == null) {
-    const candidates = findSendCandidates()
-    if (candidates.length === 1) state.pllTargetId = candidates[0].pathId
+function computeLinkStatus(state) {
+  if (!isLinked(state)) {
+    const hasAny = findSendCandidates().length > 0
+    return { ok: true, message: hasAny ? MSG_NO_SEND_TARGET_SELECTED : MSG_NO_SEND_TARGET_IN_GRAPH }
   }
+  // Probe FIRST: a successful sync followed by the loader's deletion must
+  // not keep saying "Synced" until the next edit (lead review 2026-09-17).
   const node = resolveSendTarget(state)
+  if (!node) return { ok: false, message: linkedTargetGoneMessage(state) }
+  const probe = probeSendTarget(node)
+  if (!probe.ok) return { ok: false, message: probe.message }
+  if (state.lastSyncStatus?.ok) return state.lastSyncStatus
+  return { ok: true, message: `Linked to ${node.title || node.type} #${state.linkedTargetId} — syncs automatically.` }
+}
+
+/** Whether *state* currently names a linked loader (persisted in
+ * PROP_LINKED_LOADER) -- regardless of whether that loader still resolves.
+ * Every sync entry point (`scheduleLinkedSync`, `performLinkedSync`) is a
+ * no-op when this is false, so every mutation call site can call them
+ * unconditionally. */
+function isLinked(state) {
+  return state.linkedTargetId != null
+}
+
+/** Linked, but the loader is gone (deleted, or a different workflow): name
+ * it, and say the link is kept -- an undo restores the loader and the link
+ * picks up again. The generic "no loader in graph" text read as if the link
+ * had never been made. */
+function linkedTargetGoneMessage(state) {
+  return `The linked loader #${state.linkedTargetId} is no longer in this workflow — undo to bring it back, or pick another.`
+}
+
+/**
+ * The combo's explicit link/unlink (§6.13 "Live sync" item 1/2): persists
+ * *id* into `PROP_LINKED_LOADER` (via `setProperty` when available, the
+ * `noteManualResize` convention, so the node's own change-tracking sees it
+ * like any other property edit) and updates `state.linkedTargetId`
+ * directly first (so the very next line's `changed` check, and the
+ * `onPropertyChanged` re-derivation that `setProperty` triggers
+ * synchronously, both read the true value). A genuine NEW link (id
+ * actually changed) also
+ * resets the per-link sync bookkeeping and, when the selection is
+ * non-empty, fires ONE immediate sync (item 3) -- gated the normal way
+ * through `performLinkedSync`/`shouldWriteLinkedSync`, so linking an empty
+ * picker never touches the target's existing rows.
+ */
+function setLinkedTarget(state, id) {
+  const changed = state.linkedTargetId !== id
+  state.linkedTargetId = id
+  const node = state.node
+  if (typeof node.setProperty === 'function') {
+    node.setProperty(PROP_LINKED_LOADER, id || '')
+  } else {
+    node.properties = node.properties || {}
+    node.properties[PROP_LINKED_LOADER] = id || ''
+  }
+  if (changed) {
+    state.linkedSyncedOnce = false
+    state.lastSyncStatus = null
+    state.lastLossySignature = null
+    clearTimeout(state.syncTimer)
+    state.syncTimer = null
+  }
+  renderSend(state)
+  if (changed && id != null) performLinkedSync(state)
+}
+
+/**
+ * Debounced coalescer for every selection change while linked (§6.13 "Live
+ * sync" item 6): many rapid edits (typing/dragging a strength, a burst of
+ * external applies) collapse into ONE write after `SYNC_DEBOUNCE_MS` of
+ * quiet -- `scheduleSearchRender`'s exact clear-then-set shape, its own
+ * timer slot. A no-op when not linked (no timer armed, nothing to do), so
+ * every mutation call site can call this unconditionally regardless of
+ * link state.
+ */
+function scheduleLinkedSync(state) {
+  if (!isLinked(state)) return
+  clearTimeout(state.syncTimer)
+  state.syncTimer = setTimeout(() => {
+    state.syncTimer = null
+    performLinkedSync(state)
+  }, SYNC_DEBOUNCE_MS)
+}
+
+/**
+ * Records *status* as the authoritative status-span text and decides
+ * whether it needs a toast too (§6.13 "Live sync" item 7): a FAILURE toasts
+ * only on a TRANSITION -- newly failing, or failing a DIFFERENT way than
+ * last time -- never on every repeated change while a link stays broken
+ * (a deleted target must not spam a toast on every keystroke). DaSiWa's
+ * lossy edges are the opposite posture -- loud on purpose (owner decision
+ * 2026-08-09): *lossySignature*, when given, toasts whenever the AFFECTED
+ * ROW SET changes, even across an otherwise-quiet run of successful syncs.
+ * Always repaints the row so the span reflects the new status immediately.
+ */
+function setSyncStatus(state, status, lossySignature) {
+  const prev = state.lastSyncStatus
+  state.lastSyncStatus = status
+  if (!status.ok && (!prev || prev.ok || prev.failCode !== status.failCode)) {
+    toast('error', 'EPS LoRA Picker', status.message)
+  }
+  if (
+    status.ok &&
+    lossySignature !== undefined &&
+    lossySignature !== EMPTY_LOSSY_SIGNATURE &&
+    lossySignature !== state.lastLossySignature
+  ) {
+    toast('warn', 'EPS LoRA Picker', status.message)
+  }
+  if (lossySignature !== undefined) state.lastLossySignature = lossySignature
+  renderSend(state)
+}
+
+/**
+ * Performs (or deliberately skips) one write to the linked loader --
+ * §6.13 "Live sync"'s actual sync engine, called immediately on a fresh
+ * link and via `scheduleLinkedSync`'s debounce for every later change. A
+ * no-op when not linked. Re-resolves and RE-PROBES by id every time (the
+ * target may have been deleted, or rgthree/DaSiWa may have loaded/unloaded,
+ * since the last attempt) -- failure never throws, it records a status
+ * (and toasts on a transition, `setSyncStatus`). `shouldWriteLinkedSync`
+ * decides write-or-skip for an empty selection (never wipe a loader just
+ * because it was linked; DO mirror an empty selection once at least one
+ * real write has landed). Writes ALL rows (`on` preserved, §6.13) through
+ * the target's own family adapter (§6.13 M4); a lossy DaSiWa write's
+ * `{flattened, clamped}` basenames are folded into the status message and
+ * gate their own loud toast via `setSyncStatus`'s lossySignature.
+ */
+function performLinkedSync(state) {
+  if (!isLinked(state)) return
+  const node = resolveSendTarget(state)
+  if (!node) {
+    setSyncStatus(state, { ok: false, message: linkedTargetGoneMessage(state), failCode: 'target-gone' })
+    return
+  }
   const probe = probeSendTarget(node)
   if (!probe.ok) {
-    toast('error', 'EPS LoRA Picker', probe.message)
-    renderSend(state)
+    setSyncStatus(state, { ok: false, message: probe.message, failCode: probe.code })
     return
   }
   const rows = state.selection.loras
-  if (rows.length === 0) {
-    // Reachable via the blocked-not-disabled button: an empty send would
-    // SHRINK the target loader to zero rows -- refuse, never truncate.
-    toast('warn', 'EPS LoRA Picker', 'Nothing selected — Add loras before sending.')
-    renderSend(state)
+  if (!shouldWriteLinkedSync(rows.length, state.linkedSyncedOnce)) {
+    setSyncStatus(state, { ok: true, message: 'Linked — add a lora to sync.', failCode: null })
     return
   }
   let result
   try {
     result = SEND_ADAPTERS[node.type].write(node, rows)
   } catch (error) {
-    api.warn('send to loader failed', error)
-    toast('error', 'EPS LoRA Picker', `Send failed: ${error?.message || error}`)
+    api.warn('linked loader sync failed', error)
+    setSyncStatus(state, {
+      ok: false,
+      message: `Sync failed: ${error?.message || error}`,
+      failCode: 'write-threw'
+    })
     return
   }
-  const sent = `Sent ${rows.length} lora(s) to ${node.title || node.type} #${node.id}`
+  state.linkedSyncedOnce = true
   const notes = []
   if (result?.flattened?.length) {
     notes.push(
@@ -3058,8 +3597,13 @@ function sendToPll(state) {
   if (result?.clamped?.length) {
     notes.push(`clamped to ±5: ${result.clamped.join(', ')}`)
   }
-  toast('success', 'EPS LoRA Picker', notes.length ? `${sent} — ${notes.join('; ')}` : sent)
-  renderSend(state)
+  const base = `Synced ${rows.length} lora(s) → ${node.title || node.type} #${state.linkedTargetId}`
+  const message = notes.length ? `${base} — ${notes.join('; ')}` : base
+  const lossySignature = JSON.stringify({
+    flattened: result?.flattened || [],
+    clamped: result?.clamped || []
+  })
+  setSyncStatus(state, { ok: true, message, failCode: null }, lossySignature)
 }
 
 // --- Public entry point (called from web/lora_library.js's nodeCreated) ---
@@ -3091,7 +3635,7 @@ export function attachPickerPanel(node) {
     // (v0.64.0) — and the controller's APPLY writes this node's selection
     // widget from outside, so publish the panel-reload seam it pokes.
     for (const graph of walkGraphs(app.graph)) installGraphNodeWatch(graph)
-    node.__epsLpReload = () => reloadFromWidget(state)
+    node.__epsLpReload = () => reloadFromWidget(state, { external: true })
     installExternalWriteSubscription()
     state.selection = selectionFromWidgetValue(widget.value)
     // Read-only info surfaced in right-click -> Properties (owner ask
@@ -3108,6 +3652,10 @@ export function attachPickerPanel(node) {
     // Tab-switch drill-down fix: `Browse folder` -- chained onto the same
     // hook again (see wireBrowsePathProperty).
     wireBrowsePathProperty(state)
+    // §6.13 "Live sync": `Linked loader` -- chained onto the same hook
+    // again (see wireLinkedLoaderProperty). No sync fires from this call
+    // itself -- only a later explicit combo pick (setLinkedTarget) does.
+    wireLinkedLoaderProperty(state)
     hideSelectionWidget(state)
     buildUi(state)
     wireConfigureReload(state)

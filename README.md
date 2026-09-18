@@ -494,10 +494,10 @@ three everyday pains at once: the flat everything-in-one-dropdown lora
 list, no way to scope a workflow to one folder and its subfolders, and no
 favorites or recently-used anywhere in the ecosystem.
 
-- **The panel, top to bottom:** the **Selected** rows — on/off toggle,
-  name, strength, ✕ remove per row (the section grows with your picks so
-  the full list is always visible — the node makes the room, nothing
-  crops or scrolls); the **Send to** row; then the **browser** — a
+- **The panel, top to bottom:** the **Selected** rows — a ≡ drag handle,
+  on/off toggle, name, strength, ✕ remove per row (the section grows with
+  your picks so the full list is always visible — the node makes the room,
+  nothing crops or scrolls); the **Link to** row; then the **browser** — a
   breadcrumb you drill down through (with a ✕ at its right edge to clear
   a pinned scope — and the folder you drilled into stays put until you
   navigate back or change the scope; since v0.67.2 a background refresh
@@ -517,6 +517,11 @@ favorites or recently-used anywhere in the ecosystem.
 - **Click a lora once to select it, again to load it** — the second click
   does exactly what ＋ Add does, and the just-added lora stays
   highlighted. Added loras always arrive enabled.
+- **Drag to reorder the Selected list (v0.97.0).** Grab a row by its ≡
+  handle to move it — the order is what applies and what gets emitted, so
+  reordering changes patching order, not just how the list looks. Works
+  in both the classic node view and Vue nodes; dragging near the top or
+  bottom of a scrolled list auto-scrolls.
 - **Works with the State Controller and saved states** (since v0.64.0):
   the [EPS Lora Loader State Controller](#eps-lora-loader-state-controller-shipped-requires-rgthree-comfy)
   lists pickers in its target dropdown right next to Power Lora Loaders —
@@ -544,26 +549,34 @@ favorites or recently-used anywhere in the ecosystem.
   `filename_prefix`. An empty or all-off selection just passes through —
   never an error. A selection saved on Windows resolves on macOS/Linux
   (same separator-insensitive matching as saved sets).
-- **Send to loader — entirely optional:** the picker **applies its loras
-  itself** — wire `model`/`clip` through it (or use `lora_stack`) and
-  you're done; "no loader in graph" on the Send row is not a problem to
-  fix. The row exists only to *copy* your picks into another pack's
-  loader node: it targets any
+- **Link to loader — entirely optional, and now automatic (v0.97.0):** the
+  picker **applies its loras itself** — wire `model`/`clip` through it (or
+  use `lora_stack`) and you're done; "no loader in graph" on the Link row
+  is not a problem to fix. Pick a loader in the row's dropdown and every
+  later change — add, remove, on/off, strength, reordering — pushes to it
+  automatically, no button to click. It targets any
   [rgthree Power Lora Loader](https://github.com/rgthree/rgthree-comfy)
   **or [DaSiWa Advanced LoRA
   Loader](https://github.com/darksidewalker/ComfyUI-DaSiWa-Nodes)** in
   the graph and writes your picked loras straight in — on/off and
   strengths included. Neither pack is required; with neither installed
-  the row just says so. It never guesses a target: delete the loader
-  you'd picked and Send refuses until you pick again. DaSiWa specifics,
-  always said out loud, never silent: it stores ONE strength per lora
-  (a row whose clip strength differs sends the model strength, and the
-  toast names it), strengths clamp to its ±5 range (also named), and
-  re-sending preserves the video/audio (`vs`/`as`) multipliers you've
+  the row just says so. The link is saved with the workflow and it never
+  guesses a target: only picking one in the dropdown links it (a lone
+  loader in the graph is no longer linked automatically), and deleting
+  the linked loader leaves the link in place (status says so; undo brings
+  it back) rather than silently retargeting. Linking a picker with
+  nothing selected never touches the loader's existing rows; once
+  anything has synced, clearing the selection back to empty mirrors that
+  too. No toast on every sync — the status line under the row says what
+  happened — but a failure or a DaSiWa lossy edge still toasts. DaSiWa
+  specifics, always said out loud, never silent: it stores ONE strength
+  per lora (a row whose clip strength differs sends the model strength,
+  named in the status), strengths clamp to its ±5 range (also named), and
+  re-syncing preserves the video/audio (`vs`/`as`) multipliers you've
   tuned in DaSiWa's own UI for loras already in the loader.
 - **Already-works-by-wire:** stackers that take a `LORA_STACK` input —
   Efficiency's LoRA Stacker, Easy-Use's loraStack, Comfyroll's CR LoRA
-  Stack — need no Send support at all: wire this node's `lora_stack`
+  Stack — need no loader link at all: wire this node's `lora_stack`
   output straight in.
 - **Search, thumbnails, trigger words, ordering:** the search field under
   the breadcrumb filters as you type (debounced, and a very long result
@@ -583,9 +596,9 @@ favorites or recently-used anywhere in the ecosystem.
   room. The split saves with the workflow. Grabbing it while *Auto-grow
   with selection* is on switches that off first (your hand is on the
   height now), same as a corner drag.
-- **Send lives at the bottom (v0.78.0).** The send-to-loader row moved
-  below the browser, so the panel reads top-to-bottom: Selected, divider,
-  browse, send.
+- **The link row lives at the bottom (v0.78.0).** It moved below the
+  browser, so the panel reads top-to-bottom: Selected, divider, browse,
+  link.
 
 ## EPS Apply LoRA Set (shipped)
 

@@ -3456,6 +3456,77 @@ model/CLIP/VAE from one checkpoint must never drift out of alignment.
 
 ## §6.13 `EPSLoraPicker` (display: "EPS LoRA Picker") — folder-scoped browse, favorites, recents → stack
 
+**"Live sync" round (v0.97.0, owner asks: drag to reorder the Selected
+loras; link a loader instead of a one-shot Send button).**
+1. **Drag-to-reorder the Selected list.** Each Selected row grows a ≡
+   handle to the left of its on/off checkbox; dragging it reorders
+   `selection.loras` — the order loras apply and are emitted in
+   (`nodes_picker.py`'s `build`), and what gets saved. Wired exactly like
+   the M3 favorites drag (pointerdown + `setPointerCapture` +
+   `stopPropagation` on the HANDLE only, so the checkbox/strength/remove
+   controls and the canvas itself are never touched by a drag start; the
+   dragged element is never reparented, only the others move around it)
+   and retargeted at the Selected list/its own row-order array. The pure
+   reorder math is `moveSelectedRow(rows, fromIndex, toIndex)`, exported
+   and unit-tested directly. The drop commits through the same
+   `writeSelectionWidget` funnel every other selection edit already uses,
+   so undo behaves identically; dragging near the top/bottom edge
+   auto-scrolls the list (a plain per-pointermove nudge, no timer to
+   leak). Works in both the classic canvas renderer and Vue nodes mode —
+   the same pointer-capture shape the M3 favorites drag already needed
+   for both.
+2. **The M2/M4 "Send to loader" row is now "Link to."** Choosing a
+   loader in the combo is an explicit, PERSISTED link
+   (`PROP_LINKED_LOADER`, `'Linked loader'` — the `PROP_SELECTED_SPLIT`/
+   `PROP_BROWSE_PATH` property convention: `addProperty` every attach, a
+   saved value wins later via configure's property loop), not a
+   transient click target — the combo's first option is "Not linked."
+   The single-candidate auto-adopt M2/M4 shipped is GONE for good: only
+   an explicit combo pick, or a link restored from the workflow, may ever
+   populate it (§6.3 "never guess," taken further). Once linked, EVERY
+   change to the selection — add, remove, on/off, strength, the new drag
+   reorder, and an EXTERNAL write from the Lora Loader State Controller
+   or the Universal State Controller — pushes to the loader
+   automatically, debounced 150 ms so a burst of rapid edits (typing or
+   dragging a strength) collapses into one write; restoring state
+   (workflow load, undo/redo, the tab-switch rebuild, a background feed
+   refresh) never syncs on its own. Linking a picker with an EMPTY
+   selection never touches the target's existing rows — but once at
+   least one write has landed, clearing the selection back to zero
+   mirrors an empty list through, same as any other change. No toast per
+   sync: the status span carries it (`Synced N lora(s) → <loader title>
+   #<pathId>`), with a toast only on a FAILURE TRANSITION (not every
+   repeated change while a link stays broken) or when DaSiWa's loud lossy
+   row set changes. A deleted target keeps its remembered link (an undo
+   restores it) and the status re-probes fresh on every repaint so it
+   stops looking stale the instant the graph heals. Reuses
+   `SEND_ADAPTERS`/`probeSendTarget`/`resolveSendTarget`/
+   `findSendCandidates` and both bridges unchanged — no per-family write
+   logic duplicated.
+3. **Lead review, then rig-verified on a real rgthree Power Lora Loader
+   (2026-09-17).** Three fixes on top of the agent's build:
+   - A deleted target gets its own message (`linkedTargetGoneMessage`,
+     fail code `target-gone`). It names the loader and says undo brings it
+     back. The generic "no loader in graph" text read as if the link had
+     never been made.
+   - The status re-probes BEFORE trusting the last successful sync, so it
+     no longer says "Synced" after the loader is deleted.
+   - A link RESTORED from the saved workflow counts as already synced
+     (`linkedSyncedOnce`). Otherwise emptying the picker after a reload
+     left the loader holding a stale row.
+
+   Verified live on the rig:
+   - No auto-link with one loader in the graph.
+   - Linking copies at once; linking an empty picker leaves the loader's
+     rows alone.
+   - Strength edits sync once after the pause; toggles and removals sync.
+   - A real mouse drag reorders both the picker and the loader.
+   - Reopening a workflow writes nothing (a row hand-edited into the saved
+     loader survived), and the restored link keeps syncing, down to empty.
+   - Unlinking stops writes.
+   - A deleted loader shows the clear status, with one toast across
+     repeated edits.
+
 **Two tab-switch fixes (§7.9, sweep 2026-08-31/09-01): the drill-down folder
 now survives a rebuild, and a mid-typed strength value is flushed instead of
 lost.**
