@@ -56,7 +56,9 @@
  * widget's entry count when a baked image's workflow pinned the node,
  * provenance M3), §6.6 Image Grid
  * (Emit ⇒ buffer count as a FLOOR -- the injected `imageGridCount` is a
- * client-side echo of SERVER state; Collect ⇒ 0), §6.8 LoRA Iterator (its
+ * client-side echo of SERVER state; Collect ⇒ 0; v0.98.0 Collect only ⇒ 0
+ * too, but as a true known-blocked branch -- see that branch's own
+ * comment), §6.8 LoRA Iterator (its
  * own widget step math x the max of its mapped model/clip input counts --
  * nodes_sweep.py has no INPUT_IS_LIST, so core maps it; per-lora mode
  * follows the `lora_stack` wire -- a §6.13 Picker's enabled rows are
@@ -698,7 +700,23 @@ function sourceCount(snapshot, link, path) {
     // client-side ECHO of that server state -- it can lag or lie, so it
     // upgrades the count from "1, unknowable" to "N, still a floor":
     // atLeast stays true and the readout keeps its `≥`.
-    if (node.widgets?.mode === 'Collect') return { count: 0, atLeast: false, srcId: id }
+    //
+    // v0.98.0 "Collect only": unlike plain Collect (a policy floor -- it
+    // MAY actually pass a real frame downstream, the estimator just counts
+    // it as 0 regardless), Collect only is a TRUE known-blocked branch --
+    // nodes_image_grid.py's run() returns the silent `ExecutionBlocker`
+    // triple on EVERY call in this mode, wired or not, buffer empty or
+    // not. That is exactly the header's "BLOCKED/EMPTY PROPAGATION"
+    // family (a statically-all-off switcher, an empty-selection Checkpoint
+    // Switcher): `{count: 0, atLeast: false}`, no `error` -- the consuming
+    // multiplier's own zero-collapse already names the empty/blocked input
+    // for the user, so this node doesn't need to explain itself twice.
+    // Same numeric result as plain Collect, different (stronger) reason --
+    // both land on the one shape the header already reserves for "this
+    // output is provably empty this run".
+    if (node.widgets?.mode === 'Collect' || node.widgets?.mode === 'Collect only') {
+      return { count: 0, atLeast: false, srcId: id }
+    }
     if (typeof node.widgets?.focus === 'string' && node.widgets.focus.trim() !== '') {
       // §6.6 focus (owner ask 2026-08-23): a double-click-focused frame
       // narrows Emit to exactly THAT frame -- one, no floor. A STALE focus

@@ -1,9 +1,12 @@
 """``EPSImageGrid`` (FORMAT.md §6.6, display: "EPS Image Grid") -- a
 pass-through recorder: whatever is wired to `image` ALWAYS flows straight
-through to the output; `Collect` mode ALSO records it into a disk-backed
-buffer that grows across separate Runs and survives a ComfyUI restart;
-`Emit` mode fans the whole buffer back out, with whatever's currently wired
-appended at the end.
+through to the output in `Collect` mode; `Collect` mode ALSO records it into
+a disk-backed buffer that grows across separate Runs and survives a ComfyUI
+restart; `Emit` mode fans the whole buffer back out, with whatever's
+currently wired appended at the end. `Collect only` (v0.98.0, owner ask:
+"let me collect without running the rest of the workflow every time")
+records exactly like `Collect` but never passes anything downstream --
+every node past this one is skipped for that Run, silently.
 
 M1 (`research/roadmap-eps-image-grid.md`): Collect/Emit toggle, the buffer
 itself, the free thumbnail grid, Clear, and per-node identity/dedup (the
@@ -107,10 +110,17 @@ logger = logging.getLogger("eps_image")
 CATEGORY_NAME = "EPSNodes/Images"
 
 #: FORMAT.md §6.6 — user-facing, stable identifiers (widget values persist
-#: in saved workflows; don't rename these once shipped).
+#: in saved workflows; don't rename these once shipped). `MODE_COLLECT_ONLY`
+#: (v0.98.0) sits BETWEEN the other two in `MODES` -- combo widgets restore
+#: by VALUE, not by index (litegraph reads the saved STRING back and looks
+#: it up in the current options list), so inserting a value here is safe for
+#: every already-saved workflow: an old save's "Collect"/"Emit" still means
+#: exactly what it always did, and this is a pure ADDITION to the option
+#: set, not a reorder of existing ones.
 MODE_COLLECT = "Collect"
+MODE_COLLECT_ONLY = "Collect only"
 MODE_EMIT = "Emit"
-MODES = [MODE_COLLECT, MODE_EMIT]
+MODES = [MODE_COLLECT, MODE_COLLECT_ONLY, MODE_EMIT]
 
 #: `optional` (not `required`) default for the hidden identity bridge —
 #: mirrors `nodes_switcher.py`'s `toggles` rationale: a hand-built `/prompt`
@@ -148,11 +158,13 @@ def _expand_to_frames(image_batch: Any) -> list:
 
 class EPSImageGrid:
     """Wire an image loader in; whatever's wired ALWAYS flows straight
-    through to the output, in both modes — `mode` only decides whether it's
-    also recorded, or whether the grid's whole collection is fanned out
-    alongside it (owner: "the node plugged into the front should always
-    flow through; the mode decides whether it's collected or whether the
-    grid emits the other collected images").
+    through to the output in `Collect`/`Emit` — `mode` decides whether it's
+    also recorded, whether the grid's whole collection is fanned out
+    alongside it, or whether everything downstream is skipped outright
+    (owner: "the node plugged into the front should always flow through;
+    the mode decides whether it's collected or whether the grid emits the
+    other collected images"; v0.98.0 owner ask: "let me collect without
+    running the rest of the workflow every time").
 
     - `Collect`: records the wired input into a buffer that grows across
       separate Runs and survives a restart (no cap — you manage disk use,
@@ -162,6 +174,15 @@ class EPSImageGrid:
       Downstream only gets THIS Run's just-recorded frame(s) — a tee, not a
       fan-out of the whole buffer. Nothing wired -> nothing to pass, an
       `ExecutionBlocker` triple (module docstring "Empty-buffer safety").
+    - `Collect only` (v0.98.0): records EXACTLY like `Collect` — same
+      append, same thumbnail-grid update — but never passes anything
+      downstream: ALL THREE outputs are always the silent `ExecutionBlocker`
+      triple, wired or not, buffer empty or not. This is the whole point of
+      the mode (owner: collect a batch without re-running the rest of the
+      workflow on every single frame), so unlike plain `Collect` there is no
+      "nothing wired" warning either — a blocked Run here is never a miswire.
+      Switch to `Emit` (or back to `Collect`) once you actually want the
+      grid to feed downstream again.
     - `Emit`: records nothing. Downstream gets the WHOLE buffer, in the
       order it was recorded, with whatever's CURRENTLY wired appended as
       the final image(s) (buffer of 10 + 1 wired -> 11, the rest of the
@@ -173,7 +194,8 @@ class EPSImageGrid:
       "this one plus the usual tail). A `focus` that no longer resolves
       (the frame it names was deleted) degrades to the unfocused Emit
       behavior above, with a logged warning — never a hard error. `Collect`
-      mode ignores `focus` entirely; it only ever affects Emit.
+      and `Collect only` both ignore `focus` entirely; it only ever affects
+      Emit.
 
     Re-reads the on-disk buffer on every execution — there is no in-memory
     state to go stale between Runs (a second EPSImageGrid instance pointed
@@ -187,27 +209,32 @@ class EPSImageGrid:
     OUTPUT_IS_LIST = (True, True, True)
     OUTPUT_NODE = True
     OUTPUT_TOOLTIPS = (
-        "In Collect mode, the image(s) just fed in. In Emit mode, the "
-        "whole buffer plus whatever's currently wired, oldest first -- one "
-        "run downstream per image. Double-click a frame in the grid to "
-        "focus it, and Emit sends ONLY that one frame instead.",
+        "In Collect mode, the image(s) just fed in. In Collect only mode, "
+        "nothing -- every node downstream of this one is skipped while "
+        "still recording to the buffer. In Emit mode, the whole buffer "
+        "plus whatever's currently wired, oldest first -- one run "
+        "downstream per image. Double-click a frame in the grid to focus "
+        "it, and Emit sends ONLY that one frame instead.",
         "Each output image's width, index-aligned with image.",
         "Each output image's height, index-aligned with image.",
     )
     FUNCTION = "run"
     DESCRIPTION = (
-        "Wire an image loader in -- it always flows straight through to "
-        "the output. In Collect mode, each run also adds that image to a "
-        "buffer that grows across separate runs and survives a restart, "
-        "shown as a thumbnail grid on the node; only the image you just "
-        "fed in continues downstream this run, not the whole buffer. "
-        "Switch to Emit and run once to send the whole buffer downstream "
-        "instead, in the order it was collected, with whatever's currently "
-        "wired appended at the end. Clear the buffer from the node any "
-        "time; there's no size cap, so keep an eye on disk use. Double-"
-        "click a frame to focus it -- while focused, Emit sends ONLY that "
-        "one frame; unfocus (double-click again) to go back to the whole "
-        "buffer."
+        "Wire an image loader in. In Collect mode, it always flows "
+        "straight through to the output, and each run also adds that "
+        "image to a buffer that grows across separate runs and survives a "
+        "restart, shown as a thumbnail grid on the node; only the image "
+        "you just fed in continues downstream this run, not the whole "
+        "buffer. Collect only records to that same buffer but skips "
+        "everything downstream of this node, with no warning -- use it to "
+        "gather a batch without re-running the rest of the workflow on "
+        "every single frame. Switch to Emit and run once to send the "
+        "whole buffer downstream instead, in the order it was collected, "
+        "with whatever's currently wired appended at the end. Clear the "
+        "buffer from the node any time; there's no size cap, so keep an "
+        "eye on disk use. Double-click a frame to focus it -- while "
+        "focused, Emit sends ONLY that one frame; unfocus (double-click "
+        "again) to go back to the whole buffer."
     )
 
     #: §6.16 state registry (v0.83.0): the widgets a Universal State
@@ -234,9 +261,14 @@ class EPSImageGrid:
                         "default": MODE_COLLECT,
                         "tooltip": (
                             "Collect adds the wired image to the buffer "
-                            "and passes just that image downstream. Emit "
-                            "sends the whole buffer downstream instead, "
-                            "without adding to it."
+                            "and passes just that image downstream. "
+                            "Collect only does the same buffering but "
+                            "passes nothing downstream -- everything past "
+                            "this node is skipped, silently, so you can "
+                            "gather a batch without re-running the rest of "
+                            "the workflow every time. Emit sends the whole "
+                            "buffer downstream instead, without adding to "
+                            "it."
                         ),
                     },
                 ),
@@ -307,7 +339,11 @@ class EPSImageGrid:
         # v0.80.0 (sweep-performance round) -- split by mode:
         #  - Collect APPENDS (a side effect core's cache must never skip):
         #    the NaN always-changed sentinel stays, exactly the module
-        #    docstring's original rationale.
+        #    docstring's original rationale. Collect only (v0.98.0) appends
+        #    exactly the same way -- it just never emits anything downstream
+        #    -- so it stays on this same branch (`mode != MODE_EMIT` already
+        #    covers it without needing its own clause): the append is still
+        #    a side effect the cache must never skip.
         #  - Emit is side-effect-free ("Emit simply skips the append") and
         #    its output depends only on tracked inputs + BUFFER STATE,
         #    which lives outside the input hash -- so the token IS the
@@ -334,10 +370,34 @@ class EPSImageGrid:
         live = _expand_to_frames(image)
         #: Refs THIS run actually appended to disk — the ONLY thing `ui`
         #: ever reports (module docstring point 1). Stays `[]` (and `"ui"`
-        #: is therefore omitted below) unless Collect mode both had
-        #: something wired AND a valid `grid_uuid` to append it to; Emit
+        #: is therefore omitted below) unless Collect/Collect only mode both
+        #: had something wired AND a valid `grid_uuid` to append it to; Emit
         #: mode never touches this at all.
         new_refs: list[dict] = []
+
+        if mode == MODE_COLLECT_ONLY:
+            # v0.98.0 owner ask: collect without re-running the rest of the
+            # workflow on every single frame. Appends EXACTLY like Collect
+            # (same store.append_batch call, same new_refs slice, so the
+            # on-node thumbnail grid updates the same way -- module
+            # docstring point 1) but is a dead end on purpose: ALL THREE
+            # outputs are always the silent ExecutionBlocker triple this
+            # node already uses for "nothing to emit" (module docstring
+            # "Empty-buffer safety" / nodes_switcher.py's identical
+            # mechanism), regardless of whether anything was wired or
+            # appended. Deliberately bypasses the dead-wire warning below
+            # entirely -- a blocked Run in THIS mode is never a miswire, it
+            # is the mode doing exactly what it says (class docstring).
+            if live:
+                all_refs = store.append_batch(grid_uuid, image)
+                new_refs = all_refs[-len(live) :]
+            from comfy_execution.graph import ExecutionBlocker
+
+            blocked = [ExecutionBlocker(None)]
+            out: dict[str, Any] = {"result": (blocked, blocked, blocked)}
+            if new_refs:
+                out["ui"] = {"images": new_refs}
+            return out
 
         if mode == MODE_COLLECT:
             if live:

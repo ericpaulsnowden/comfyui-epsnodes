@@ -410,6 +410,40 @@ export const TOGGLES_WIDGET_NAME = 'toggles'
 
 const HEADER_WIDGET_NAME = '__eps_distributor_toggle_all'
 
+/**
+ * v0.98.0 cross-file link-colour convention with `eps_image/image_grid.js`
+ * ("Collect only" mode). Both files can write a shared `LLink`'s `.color`:
+ * this file recolors a link it owns the INPUT (or an output) side of BY
+ * ADOPTED TYPE (mechanism 4, right below); image_grid.js dims a link it
+ * owns the OUTPUT side of while its node is in "Collect only" (the owner's
+ * "make the wire look disconnected" ask). A Grid feeding this node's
+ * `image` input is the exact same `LLink` object to both files, so
+ * whichever one wrote `.color` LAST would otherwise win by pure timing --
+ * including flapping back and forth if both re-run on the same event.
+ *
+ * The fix (mirrored verbatim in image_grid.js -- keep the two in lockstep):
+ * a link an EPS module is force-colouring for a reason OTHER than plain
+ * type-adoption stashes a truthy tag at `link[LINK_COLOR_OWNER_KEY]` (a
+ * transient, in-memory-only property -- never serialized into a saved
+ * workflow, so it never survives a reload with a stale value). This file's
+ * `syncSlotTypes` checks that tag immediately before EVERY `link.color =`
+ * write and skips the ones that carry it -- it still updates that slot's
+ * `.type`/`.label` as usual, it just leaves the disputed link's colour
+ * alone. This file never sets the tag itself (it has no state worth
+ * asserting priority over); image_grid.js is the only current writer.
+ *
+ * `node[LINK_COLOR_RESYNC_HOOK]` (set on THIS node, right below in
+ * `attach()`) is the other half: a plain, duck-typed, no-arg method any
+ * node that owns dynamic link colouring may expose, so a module that just
+ * finished force-colouring a link can invite the rightful owner to
+ * immediately reassert its OWN current colour once it lets go -- closing
+ * the one race a caller's own literal-restore can't (the adopted type
+ * moving WHILE the link sat recoloured for someone else). A single direct
+ * call, never polled or subscribed to, so there is no repaint ping-pong.
+ */
+const LINK_COLOR_OWNER_KEY = '__epsLinkColorOwner'
+const LINK_COLOR_RESYNC_HOOK = '__epsResyncLinkColors'
+
 // --------------------------------------------------------- draw geometry
 // See file header's "Per-slot toggle draw + hit-test" section for the
 // `_processNodeClick` citation these numbers clear.
@@ -1122,7 +1156,12 @@ function syncSlotTypes(node) {
         changed = true
       }
       const link = linkById(node.graph, input.link)
-      if (link) {
+      // v0.98.0: a link someone else (image_grid.js's "Collect only" dim)
+      // is force-colouring for a reason unrelated to type adoption wins --
+      // see LINK_COLOR_OWNER_KEY's own docstring above. Still fine to have
+      // updated `input.type`/`.label` above; only the disputed link's own
+      // `.color` is left alone.
+      if (link && !link[LINK_COLOR_OWNER_KEY]) {
         const color = linkColorFor(type)
         if (link.color !== color) {
           link.color = color
@@ -1141,7 +1180,7 @@ function syncSlotTypes(node) {
       if (Array.isArray(links)) {
         for (const linkId of links) {
           const link = linkById(node.graph, linkId)
-          if (!link) continue
+          if (!link || link[LINK_COLOR_OWNER_KEY]) continue // v0.98.0 -- see above
           const color = linkColorFor(type)
           if (link.color !== color) {
             link.color = color
@@ -1824,6 +1863,14 @@ export function attach(node) {
     if (nodeClassOf(node) !== CLASS_ID) return
     if (attachedNodes.has(node)) return
     attachedNodes.add(node)
+
+    // v0.98.0 -- LINK_COLOR_RESYNC_HOOK's own docstring above: lets
+    // image_grid.js (or any future module force-colouring a link into this
+    // node) invite an immediate, one-shot re-sync of THIS node's own
+    // adopted-type colouring the moment it lets go of a link it was
+    // dimming/overriding, closing the "adopted type moved while the link
+    // was disputed" race without polling or a subscription.
+    node.__epsResyncLinkColors = () => syncSlotTypes(node)
 
     hideTogglesWidget(node)
     installMinWidth(node, MIN_NODE_WIDTH)

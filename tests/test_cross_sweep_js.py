@@ -462,6 +462,36 @@ ESTIMATE_CASES = [
         },
     ),
     (
+        # v0.98.0: Collect only is a TRUE known-blocked branch (unlike plain
+        # Collect, which is merely a §6.10 policy floor -- see the
+        # estimator's own comment) -- same zero-collapse shape either way.
+        "collect_only_grid_counts_zero_and_blocks_the_same_way_as_collect",
+        {
+            "nodes": {
+                "30": _notebook("First\nSecond"),
+                "31": {
+                    "classType": "EPSImageGrid",
+                    "widgets": {"mode": "Collect only"},
+                    "inputs": {},
+                },
+                "5": {
+                    "classType": "EPSCrossSweep",
+                    "widgets": {"pair_mode": "multiply", "sweep_mode": "aligned"},
+                    "inputs": {"image": _link("31"), "text": _link("30", 0)},
+                },
+            }
+        },
+        "5",
+        {
+            "total": 0,
+            "atLeast": False,
+            "steps": 1,
+            "pairs": 0,
+            "error": None,
+            "breakdown": "nothing to run (image input is empty/blocked)",
+        },
+    ),
+    (
         "per_lora_iterator_with_picker_two_rows_times_three_values",
         {
             "nodes": {

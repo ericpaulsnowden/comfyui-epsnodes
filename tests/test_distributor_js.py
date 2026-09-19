@@ -876,6 +876,28 @@ def test_sync_slot_types_never_touches_output_name(distributor_source: str) -> N
     assert "output.name" not in body
 
 
+def test_sync_slot_types_skips_a_link_another_module_owns(distributor_source: str) -> None:
+    """v0.98.0 cross-file convention with image_grid.js's "Collect only" dim
+    (LINK_COLOR_OWNER_KEY's own docstring): a link tagged by another module
+    must never have its `.color` overwritten here -- checked immediately
+    before BOTH `link.color =` writes (the `image` input's own link, and
+    every output link), not just one of the two."""
+    assert "const LINK_COLOR_OWNER_KEY = '__epsLinkColorOwner'" in distributor_source
+    body = _function_body(distributor_source, "syncSlotTypes(node)")
+    assert "if (link && !link[LINK_COLOR_OWNER_KEY]) {" in body
+    assert "if (!link || link[LINK_COLOR_OWNER_KEY]) continue" in body
+
+
+def test_attach_exposes_the_link_color_resync_hook(distributor_source: str) -> None:
+    """The other half of the same convention: a node that owns dynamic link
+    colouring exposes LINK_COLOR_RESYNC_HOOK so a module that was force-
+    colouring one of its links can invite an immediate one-shot resync the
+    moment it lets go -- see that constant's own docstring."""
+    assert "const LINK_COLOR_RESYNC_HOOK = '__epsResyncLinkColors'" in distributor_source
+    attach_body = _function_body(distributor_source, "attach(node)")
+    assert "node.__epsResyncLinkColors = () => syncSlotTypes(node)" in attach_body
+
+
 def test_deferred_pass_still_has_the_growth_short_circuit(distributor_source: str) -> None:
     """The pre-existing no-op guard (test_deferred_growth_skips_no_op_passes
     above) must survive the v0.75.0 restructure that made syncSlotTypes run

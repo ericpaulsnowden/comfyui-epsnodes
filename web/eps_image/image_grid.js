@@ -830,11 +830,63 @@ const MODE_WIDGET_NAME = 'mode'
 //: strings frozen, user-facing identifiers once shipped (same "mirror, don't
 //: import" idiom `GRID_UUID_RE` below already uses for the backend's regex).
 const MODE_EMIT_VALUE = 'Emit'
+//: v0.98.0 -- same mirroring rationale, for `nodes_image_grid.py`'s
+//: `MODE_COLLECT_ONLY`. Blocks every output downstream (an `ExecutionBlocker`
+//: triple, run()'s own docstring) while still appending to the buffer --
+//: the visual half of that (this file's job) is dimming the node's three
+//: output links so they read like the EPS Number Controller's unticked-row
+//: "disconnected" look, WITHOUT actually unplugging anything (an IMAGE
+//: input has no fallback value the way a Number Controller's target does).
+const MODE_COLLECT_ONLY_VALUE = 'Collect only'
 
 //: Mirrors the backend's own validation (`image_grid_store.py`
 //: `_GRID_UUID_RE`) rather than re-deriving a second, possibly-drifting
 //: regex -- deliberately a little looser than canonical UUID4.
 const GRID_UUID_RE = /^[0-9a-fA-F-]{8,64}$/
+
+//: This node's three RETURN_NAMES (nodes_image_grid.py) -- every one of
+//: them gets dimmed together while Collect only is active (the backend
+//: blocks all three outputs at once; there is no per-output granularity).
+const DIMMABLE_OUTPUT_NAMES = ['image', 'width', 'height']
+
+//: A dim, unambiguously-"off" grey at low alpha -- zoomed and eyeballed
+//: live against this rig's dark canvas theme next to every real
+//: `LGraphCanvas.link_type_colors` entry IMAGE/INT links normally draw as
+//: (see FORMAT.md §6.6 for the note); low enough alpha that it reads as
+//: "not really there" rather than "a different colour link".
+const DIM_LINK_COLOR = 'rgba(128,128,128,0.25)'
+
+/**
+ * v0.98.0 cross-file link-colour convention with `distributor.js`'s own
+ * dynamic type-adoption colouring (its "mechanism 4"). Mirrored verbatim
+ * there -- keep the two in lockstep if this ever changes. Both files can
+ * write a shared `LLink`'s `.color`: this file dims a link it owns the
+ * OUTPUT side of while its node is in Collect only; distributor.js
+ * recolors a link it owns the INPUT (or an output) side of by adopted
+ * type. A Grid feeding a Distributor's `image` input is the exact same
+ * `LLink` object to both files.
+ *
+ * `LINK_COLOR_OWNER_KEY` -- a plain, TRANSIENT property this file stamps
+ * onto an `LLink` instance while dimming it (confirmed NOT serialized into
+ * a saved workflow -- see this file's `link.color` finding below), so any
+ * OTHER module that owns dynamic link colouring (distributor.js's
+ * `syncSlotTypes`) can check it and skip that ONE link's `.color` write
+ * while this file has it claimed -- dim always wins over a fresh type
+ * colour while Collect only is active.
+ *
+ * `LINK_COLOR_RESYNC_HOOK` -- an OPTIONAL, duck-typed, no-arg instance
+ * method a node may expose if IT owns dynamic link colouring of its own
+ * (distributor.js sets this in its own `attach()`). Called ONCE, directly,
+ * on a link's TARGET node right after this file restores/releases that
+ * link's colour, so a node like the Distributor gets one immediate chance
+ * to reassert its OWN current colour if its adopted type moved WHILE this
+ * file had the link dimmed -- the one race a literal stash-and-restore
+ * can't close by itself. A single direct call, never a subscription or a
+ * poll, so there is no repaint ping-pong between the two files.
+ */
+const LINK_COLOR_OWNER_KEY = '__epsLinkColorOwner'
+const LINK_COLOR_OWNER_GRID = 'EPSImageGrid:collect-only'
+const LINK_COLOR_RESYNC_HOOK = '__epsResyncLinkColors'
 
 /** Nodes we've already wired, guarding against a double `nodeCreated`. */
 const attachedNodes = new WeakSet()
@@ -2163,9 +2215,12 @@ function writeFocusWidget(node, value) {
  * exactly `runAddBatch`'s `Cancel (n/total)` button-label mutation. Shown on
  * `mode` (always present, always visible, right next to the widget that
  * actually decides whether a Run reads it) only while it would truly change
- * what a Run does: Emit mode AND a resolved focus value -- Collect ignores
- * `focus` entirely (backend `run()`), so hinting "narrowed" there would be
- * misleading. Idempotent; safe to call every draw.
+ * what a Run does: Emit mode AND a resolved focus value -- Collect (and,
+ * v0.98.0, Collect only -- `run()`'s class docstring: "Collect and Collect
+ * only both ignore `focus` entirely") ignores `focus` entirely, so hinting
+ * "narrowed" there would be misleading. The `=== MODE_EMIT_VALUE` check
+ * below already excludes Collect only for free -- no separate clause
+ * needed. Idempotent; safe to call every draw.
  */
 function updateFocusHint(node, focusValue) {
   const modeWidget = findWidget(node, MODE_WIDGET_NAME)
@@ -2205,6 +2260,238 @@ function installFocusWidgetSync(node) {
       syncFocusFromView(this)
     } catch (error) {
       console.warn(PREFIX, 'focus widget sync failed', error)
+    }
+    return typeof original === 'function' ? original.apply(this, args) : undefined
+  }
+}
+
+// ---------------------------------------------------------------------------
+// v0.98.0 "Collect only" link dimming (owner ask: while collecting, make
+// everything downstream of the grid visibly look disconnected, like the EPS
+// Number Controller's unticked-row wire -- WITHOUT actually unplugging
+// anything, since an IMAGE input has no fallback value the way a Number
+// Controller's target does; nodes_image_grid.py's run() returns a silent
+// `ExecutionBlocker` triple instead). See LINK_COLOR_OWNER_KEY/
+// LINK_COLOR_RESYNC_HOOK above for the cross-file convention with
+// distributor.js this section honors.
+//
+// **Does `link.color` survive a save?** No -- checked directly against this
+// rig's bundled frontend (`comfyui_frontend_package`'s `LLink.ts`/
+// `LGraph.ts` source maps). `LLink.prototype.asSerialisable()` (and the
+// deprecated array `serialize()`) copy exactly `{id, origin_id, origin_slot,
+// target_id, target_slot, type, parentId}` -- `color` is never one of them,
+// on either the whole-graph or the per-node path. Symmetrically, EVERY link
+// restore on load (`LGraph.prototype.configure`) rebuilds links via
+// `LLink.createFromArray`/`LLink.create`, both of which only ever read
+// those same fixed fields from the saved JSON -- so a link's `.color` is
+// PURELY an in-memory, this-session-only annotation: a workflow saved while
+// dimmed carries no colour information at all, and every fresh graph load
+// hands every link a brand-new `LLink` instance whose `.color` starts
+// `undefined` regardless of what the previous session's canvas showed. The
+// practical upshot: nothing here can ever leave a PERMANENTLY grey link
+// baked into a save -- the worst a stale dim could do is last until the
+// next `reconcileLinkDimming` call, which the hooks below make immediate.
+// -- and this is also WHY `dimStash` below needs no persistence of its own:
+// a link that predates this JS module's own load, or that survives a tab
+// switch/undo/redo/reload, is a BRAND NEW `LLink` object every time (the
+// same rebuild `LLink.createFromArray`/`create` above performs), so there
+// is never a "previous session's colour" to remember across one of those
+// events -- only within one link object's own live-object lifetime
+// (connect -> toggle Collect only on and off, or connect -> disconnect).
+//
+// **Vue nodes ("New node design").** Checked directly against this rig's
+// bundled frontend: `components/graph/GraphCanvas.vue` always renders the
+// classic `<canvas id="graph-canvas">` underneath, and only gates the Vue
+// node-BODY overlay (`LGraphNode.vue`, widgets/title only -- it contains no
+// link/wire/connection code of its own at all) behind
+// `shouldRenderVueNodes`. `LGraphCanvas.ts`'s own link-drawing path
+// (`drawConnections`/`renderLink`, which is what actually reads
+// `link.color || LGraphCanvas.link_type_colors[link.type] || ...`) has no
+// Vue-nodes awareness whatsoever -- wires are ALWAYS drawn by the classic
+// canvas renderer, in both modes. So this section's dimming applies
+// identically whether Vue nodes are on or off; nothing here is
+// canvas-renderer-specific.
+
+//: Per-link-instance stash of "the colour to restore when this file stops
+//: dimming this link" -- keyed by the LLink OBJECT itself (its identity IS
+//: its lifetime; see the serialization note above for why that's the only
+//: span that ever matters). `{color}` wraps the value so `undefined` (by
+//: far the common case -- "usually undefined", per the owner ask) is
+//: distinguishable from "never stashed at all".
+const dimStash = new WeakMap()
+
+/** Same lookup shape as distributor.js's/number_controller.js's own
+ * `linkById` (this pack's "duplicate BY HAND" convention -- 119 source
+ * comments already say so; the shared-panel-code lesson is to grep every
+ * sibling before calling a helper fixed, not to actually share the code) --
+ * kept as an independent copy here rather than imported. */
+function linkById(graph, linkId) {
+  if (linkId == null || !graph) return null
+  return graph.links?.[linkId] ?? graph.links?.get?.(linkId) ?? null
+}
+
+/** Every link id currently wired to one of *node*'s three dimmable outputs
+ * (`DIMMABLE_OUTPUT_NAMES`) -- the "should be dimmed" candidate set while
+ * Collect only is active. Tolerates a missing/malformed `.links` array the
+ * same way every other slot-walk in this pack does. Exported for tests. */
+export function outputLinkIds(node) {
+  const ids = []
+  for (const name of DIMMABLE_OUTPUT_NAMES) {
+    const output = node.outputs?.find((o) => o && o.name === name)
+    const links = output?.links
+    if (Array.isArray(links)) {
+      for (const id of links) {
+        if (id !== null && id !== undefined) ids.push(id)
+      }
+    }
+  }
+  return ids
+}
+
+/**
+ * Dims or restores *node*'s three output links to match its CURRENT `mode`
+ * widget value -- ALWAYS DERIVED, never assumed (FORMAT.md §7.9's rebuild
+ * law), so it is safe -- and required -- to call this from every place
+ * that can change either the mode or the wiring: the `mode` widget's own
+ * callback, the `onConfigure` wrap (covers load/undo/redo/tab-switch/a
+ * pasted node's own restore -- every one of those goes through
+ * `LGraphNode.configure()`, which fires `onConfigure` at the very end),
+ * `onConnectionsChange` (a link freshly landing on -- or leaving -- an
+ * output while already in Collect only), and `onRemoved` (`forceUndim`,
+ * belt-and-suspenders -- see that installer's own docstring).
+ *
+ * Reconciles against `node.__epsGridDimmedLinkIds` (this file's own
+ * tracking set, a plain per-instance `Set` -- a rebuild always hands this
+ * node a fresh object per FORMAT.md §7.9, so it starts empty again exactly
+ * when it should): anything tracked that is no longer in the CURRENT
+ * "should be dimmed" set (mode left Collect only, the link was
+ * disconnected, or `forceUndim`) is restored -- its stashed pre-dim colour
+ * put back EXACTLY (`dimStash`, "usually `undefined`"), its
+ * `LINK_COLOR_OWNER_KEY` tag cleared, and its TARGET node's
+ * `LINK_COLOR_RESYNC_HOOK` invited to reassert its own colour if it has
+ * one (see that constant's own docstring for why). Anything newly desired
+ * that this file doesn't already own is dimmed: its current colour stashed
+ * first, then overwritten to `DIM_LINK_COLOR` and tagged as owned.
+ *
+ * Change-gated (`setDirtyCanvas` only when something actually moved) and
+ * wrapped by every caller in try/catch, matching this file's other
+ * `install*`/sync helpers; never throws itself either way. Exported for
+ * tests.
+ */
+export function reconcileLinkDimming(node, { forceUndim = false } = {}) {
+  if (!node) return
+  const modeWidget = findWidget(node, MODE_WIDGET_NAME)
+  const shouldDim = !forceUndim && modeWidget?.value === MODE_COLLECT_ONLY_VALUE
+  const graph = node.graph
+  const tracked = node.__epsGridDimmedLinkIds || (node.__epsGridDimmedLinkIds = new Set())
+  const desired = shouldDim ? new Set(outputLinkIds(node)) : new Set()
+  let changed = false
+
+  // Restore anything tracked that should no longer be dimmed.
+  for (const id of tracked) {
+    if (desired.has(id)) continue
+    const link = linkById(graph, id)
+    if (link && link[LINK_COLOR_OWNER_KEY] === LINK_COLOR_OWNER_GRID) {
+      const stash = dimStash.get(link)
+      link.color = stash ? stash.color : undefined
+      delete link[LINK_COLOR_OWNER_KEY]
+      dimStash.delete(link)
+      changed = true
+      try {
+        const target = graph?.getNodeById?.(link.target_id)
+        const resync = target?.[LINK_COLOR_RESYNC_HOOK]
+        if (typeof resync === 'function') resync()
+      } catch (error) {
+        console.warn(PREFIX, 'link colour resync hook failed', error)
+      }
+    }
+    tracked.delete(id)
+  }
+
+  // Dim anything newly desired that this file doesn't already own.
+  for (const id of desired) {
+    const link = linkById(graph, id)
+    if (!link) continue
+    if (link[LINK_COLOR_OWNER_KEY] !== LINK_COLOR_OWNER_GRID) {
+      dimStash.set(link, { color: link.color })
+      link.color = DIM_LINK_COLOR
+      link[LINK_COLOR_OWNER_KEY] = LINK_COLOR_OWNER_GRID
+      changed = true
+    }
+    tracked.add(id)
+  }
+
+  if (changed) node.graph?.setDirtyCanvas?.(true, true)
+}
+
+/**
+ * Chains *node*'s `mode` widget callback (never replaces it -- this file's
+ * established `writeUuid`/`writeFocusWidget` idiom) so switching to or from
+ * Collect only re-derives the dim immediately, the moment the user picks
+ * it from the combo. Guarded on the WIDGET (not the node), matching
+ * `installFocusWidgetSync`'s own per-hook guard shape.
+ */
+function installModeDimSync(node) {
+  const widget = findWidget(node, MODE_WIDGET_NAME)
+  if (!widget || widget.__epsGridDimSyncInstalled) return
+  widget.__epsGridDimSyncInstalled = true
+  const originalCallback = widget.callback
+  widget.callback = function (...args) {
+    const result =
+      typeof originalCallback === 'function' ? originalCallback.apply(this, args) : undefined
+    try {
+      reconcileLinkDimming(node)
+    } catch (error) {
+      console.warn(PREFIX, 'link dim sync (mode callback) failed', error)
+    }
+    return result
+  }
+}
+
+/**
+ * Chains *node*'s `onConnectionsChange` (never replaces) so a link freshly
+ * landing on -- or leaving -- one of the three dimmable outputs while
+ * already in Collect only is caught immediately, without waiting for the
+ * next draw or mode change. Fires unconditionally on every connect/
+ * disconnect on this node (input included) rather than filtering by slot
+ * name/type: `reconcileLinkDimming` is cheap (three named outputs, its own
+ * change-gated repaint) and fully idempotent, so there is no real cost to
+ * paying for it on every call, unlike distributor.js's considerably more
+ * expensive growth/type-adoption pass.
+ */
+function installLinkDimConnectionsSync(node) {
+  if (node.__epsGridLinkDimConnectionsWrapped) return
+  node.__epsGridLinkDimConnectionsWrapped = true
+  const original = node.onConnectionsChange
+  node.onConnectionsChange = function (...args) {
+    const result = typeof original === 'function' ? original.apply(this, args) : undefined
+    try {
+      reconcileLinkDimming(this)
+    } catch (error) {
+      console.warn(PREFIX, 'link dim sync (onConnectionsChange) failed', error)
+    }
+    return result
+  }
+}
+
+/**
+ * Chains *node*'s `onRemoved` (never replaces) to restore every link this
+ * file is still dimming before *node* is torn down. Belt-and-suspenders: an
+ * ordinary node removal already disconnects (and so destroys) every
+ * attached link on its own, so there is normally nothing left to restore by
+ * the time this runs -- but a link this file failed to release for any
+ * other reason must never outlive the node that dimmed it, carrying a
+ * `LINK_COLOR_OWNER_GRID` tag nothing will ever clear again.
+ */
+function installLinkDimCleanup(node) {
+  if (node.__epsGridLinkDimCleanupWrapped) return
+  node.__epsGridLinkDimCleanupWrapped = true
+  const original = node.onRemoved
+  node.onRemoved = function (...args) {
+    try {
+      reconcileLinkDimming(this, { forceUndim: true })
+    } catch (error) {
+      console.warn(PREFIX, 'link dim cleanup (onRemoved) failed', error)
     }
     return typeof original === 'function' ? original.apply(this, args) : undefined
   }
@@ -3671,6 +3958,19 @@ function installConfigureRefresh(node) {
       // AFTER the graph has been quiet, so transient rebuild states never
       // trigger it (the v0.19.2 lesson), but a PERSISTED duplicate does.
       scheduleSettledCollisionSweep()
+      // v0.98.0: re-derive Collect-only link dimming from the JUST-RESTORED
+      // `mode` widget value. Unlike scheduleRefresh above, this is cheap
+      // and purely local (no network round trip), so -- unlike that call --
+      // there is no reason to defer it past a mid-graph-configure pass:
+      // every restored link starts undimmed regardless (`link.color` is
+      // never serialized, reconcileLinkDimming's own docstring), so this is
+      // what actually re-applies the dim after a load/undo/redo/tab-switch/
+      // pasted-node restore.
+      try {
+        reconcileLinkDimming(this)
+      } catch (error) {
+        console.warn(PREFIX, 'link dim sync (onConfigure) failed', error)
+      }
     }
     return result
   }
@@ -4049,6 +4349,9 @@ export function attach(node) {
     installExecutedMerge(node) // 2026-07-27 focus-clobber root fix -- see its docstring
     installFocusedFullResSwap(node) // 2026-08-21 thumbnails: focused tile stays full-res
     installFocusWidgetSync(node) // 2026-08-23 focused emit: keeps `focus` synced to imageIndex
+    installModeDimSync(node) // v0.98.0 Collect only: dim/restore on the mode combo itself
+    installLinkDimConnectionsSync(node) // v0.98.0: dim/restore a link the instant it (dis)connects
+    installLinkDimCleanup(node) // v0.98.0: never leave a dimmed link behind when this node dies
 
     // Deferred one tick -- the paste-collision path. See file header
     // point 1 for exactly why this can't run synchronously here. Awaiting

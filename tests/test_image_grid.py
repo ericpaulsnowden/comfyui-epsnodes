@@ -115,9 +115,13 @@ class TestClassShapeMatchesFormatMdSection6_6:
 
 class TestInputTypes:
     def test_mode_combo_is_required_with_collect_default(self) -> None:
+        # v0.98.0: "Collect only" inserted BETWEEN "Collect" and "Emit" --
+        # see nodes_image_grid.py's MODES comment for why the position (a
+        # pure addition to the option list) is safe for already-saved
+        # workflows.
         input_types = EPSImageGrid.INPUT_TYPES()
         mode_type, mode_spec = input_types["required"]["mode"]
-        assert mode_type == ["Collect", "Emit"]
+        assert mode_type == ["Collect", "Collect only", "Emit"]
         assert mode_spec["default"] == "Collect"
 
     def test_image_is_optional(self) -> None:
@@ -162,6 +166,25 @@ class TestInputTypes:
         assert list(input_types["optional"].keys()) == ["image", "grid_uuid", "focus"]
 
 
+class TestModesConstant:
+    """v0.98.0: `MODES`' ORDER is user-facing (it's the combo's on-screen
+    option order) -- "Collect only" sits BETWEEN "Collect" and "Emit", per
+    the owner ask. A pure addition to the option list, never a reorder of
+    the other two, is what keeps an older saved workflow's `mode` value
+    (restored by VALUE, not by index) meaning exactly what it always did."""
+
+    def test_order_and_default(self) -> None:
+        assert nodes_image_grid.MODES == ["Collect", "Collect only", "Emit"]
+        assert nodes_image_grid.MODE_COLLECT == "Collect"
+        assert nodes_image_grid.MODE_COLLECT_ONLY == "Collect only"
+        assert nodes_image_grid.MODE_EMIT == "Emit"
+
+    def test_input_types_default_is_still_collect(self) -> None:
+        input_types = EPSImageGrid.INPUT_TYPES()
+        _mode_type, mode_spec = input_types["required"]["mode"]
+        assert mode_spec["default"] == nodes_image_grid.MODE_COLLECT
+
+
 class TestIsChanged:
     def test_returns_nan_with_no_args(self) -> None:
         # No args = the Collect default: appends are a side effect the
@@ -173,6 +196,15 @@ class TestIsChanged:
         # IS_CHANGED results as "the same".
         assert EPSImageGrid.IS_CHANGED(mode="Collect") != EPSImageGrid.IS_CHANGED(
             mode="Collect"
+        )
+
+    def test_collect_only_is_also_the_always_changed_sentinel(self) -> None:
+        # v0.98.0: Collect only appends exactly like Collect -- the same
+        # side-effect-must-never-be-cached-away rationale applies, and
+        # `mode != MODE_EMIT` already covers it without a dedicated branch.
+        assert math.isnan(EPSImageGrid.IS_CHANGED(mode="Collect only"))
+        assert EPSImageGrid.IS_CHANGED(mode="Collect only") != EPSImageGrid.IS_CHANGED(
+            mode="Collect only"
         )
 
     def test_emit_is_the_buffer_state_token_not_nan(self, fake_folder_paths: Path) -> None:
@@ -381,6 +413,132 @@ class TestCollectMode:
         images, _widths, _heights = result["result"]
         for i, image in enumerate(images):
             assert torch.equal(image, batch[i : i + 1])
+
+
+class TestCollectOnlyMode:
+    """v0.98.0 owner ask ("let me collect without running the rest of the
+    workflow every time"): appends EXACTLY like Collect (same store append,
+    same `ui.images` delta so the on-node thumbnail grid updates the same
+    way) but NEVER passes anything downstream -- all three outputs are
+    always the silent `ExecutionBlocker` triple, wired or not, buffer empty
+    or not, and -- unlike plain Collect -- there is no "nothing wired"
+    warning: a blocked Run in this mode is the mode working as designed."""
+
+    def test_appends_like_collect_but_all_three_outputs_are_blocked(
+        self, fake_folder_paths: Path, fake_execution_blocker: type
+    ) -> None:
+        node = _node()
+        result = node.run(mode="Collect only", image=_make_batch(2), grid_uuid=VALID_UUID)
+        images, widths, heights = result["result"]
+        for lst in (images, widths, heights):
+            assert len(lst) == 1
+            assert isinstance(lst[0], fake_execution_blocker)
+        assert len(store.list_refs(VALID_UUID)) == 2  # buffer still grew
+
+    def test_batch_b_greater_than_1_appends_all_b_but_still_blocks(
+        self, fake_folder_paths: Path, fake_execution_blocker: type
+    ) -> None:
+        node = _node()
+        result = node.run(mode="Collect only", image=_make_batch(5), grid_uuid=VALID_UUID)
+        for lst in result["result"]:
+            assert len(lst) == 1
+            assert isinstance(lst[0], fake_execution_blocker)
+        assert len(store.list_refs(VALID_UUID)) == 5
+
+    def test_second_run_ui_images_is_only_the_delta_not_the_whole_buffer(
+        self, fake_folder_paths: Path, fake_execution_blocker: type
+    ) -> None:
+        node = _node()
+        node.run(mode="Collect only", image=_make_batch(2), grid_uuid=VALID_UUID)
+        result = node.run(mode="Collect only", image=_make_batch(1), grid_uuid=VALID_UUID)
+        whole_buffer = store.list_refs(VALID_UUID)
+        assert len(whole_buffer) == 3
+        assert result["ui"]["images"] == whole_buffer[-1:]  # the delta, same as Collect
+
+    def test_unwired_blocks_and_appends_nothing_and_omits_ui(
+        self, fake_folder_paths: Path, fake_execution_blocker: type
+    ) -> None:
+        node = _node()
+        result = node.run(mode="Collect only", image=None, grid_uuid=VALID_UUID)
+        for lst in result["result"]:
+            assert len(lst) == 1
+            assert isinstance(lst[0], fake_execution_blocker)
+        assert "ui" not in result
+        assert len(store.list_refs(VALID_UUID)) == 0
+
+    def test_unwired_with_something_already_buffered_still_blocks_and_appends_nothing(
+        self, fake_folder_paths: Path, fake_execution_blocker: type
+    ) -> None:
+        node = _node()
+        node.run(mode="Collect only", image=_make_batch(2), grid_uuid=VALID_UUID)
+        result = node.run(mode="Collect only", image=None, grid_uuid=VALID_UUID)
+        for lst in result["result"]:
+            assert isinstance(lst[0], fake_execution_blocker)
+        assert "ui" not in result
+        assert len(store.list_refs(VALID_UUID)) == 2  # untouched
+
+    def test_unwired_with_a_downstream_consumer_sends_no_warning_event(
+        self, fake_folder_paths: Path, fake_execution_blocker: type,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # Contrast plain Collect's test_collect_unwired_with_consumer_warns_
+        # and_skips_nonblocking -- skipping downstream IS the point of this
+        # mode, so there is nothing to warn about, consumer or not.
+        sent = TestCollectMode._fake_prompt_server(monkeypatch)
+        node = _node()
+        result = node.run(
+            mode="Collect only", image=None, grid_uuid=VALID_UUID,
+            prompt=TestCollectMode._prompt_consuming_me(), unique_id="3",
+        )
+        for lst in result["result"]:
+            assert isinstance(lst[0], fake_execution_blocker)
+        assert sent == []
+
+    def test_invalid_grid_uuid_appends_nothing_but_still_blocks(
+        self, fake_folder_paths: Path, fake_execution_blocker: type
+    ) -> None:
+        node = _node()
+        result = node.run(mode="Collect only", image=_make_batch(2), grid_uuid="not valid!")
+        for lst in result["result"]:
+            assert isinstance(lst[0], fake_execution_blocker)
+        assert "ui" not in result
+
+    def test_ignores_focus_entirely_same_as_collect(
+        self, fake_folder_paths: Path, fake_execution_blocker: type
+    ) -> None:
+        node = _node()
+        result = node.run(
+            mode="Collect only", image=_make_batch(2), grid_uuid=VALID_UUID, focus="0001.png"
+        )
+        for lst in result["result"]:
+            assert len(lst) == 1
+        assert len(store.list_refs(VALID_UUID)) == 2
+
+    def test_emitted_tensors_and_frames_are_full_batch_recorded(
+        self, fake_folder_paths: Path, fake_execution_blocker: type
+    ) -> None:
+        # Confirms the append is the real per-frame expansion (same as
+        # Collect), even though nothing of it is ever returned downstream.
+        node = _node()
+        node.run(
+            mode="Collect only",
+            image=_make_batch(3, height=8, width=10),
+            grid_uuid=VALID_UUID,
+        )
+        refs = store.list_refs(VALID_UUID)
+        assert len(refs) == 3
+
+    def test_collect_and_emit_are_unaffected_by_collect_only_existing(
+        self, fake_folder_paths: Path
+    ) -> None:
+        # Regression guard: Collect only is a separate early-return branch
+        # in run() -- this pins that plain Collect/Emit still behave
+        # exactly as before once that branch exists.
+        node = _node()
+        collect_result = node.run(mode="Collect", image=_make_batch(2), grid_uuid=VALID_UUID)
+        assert len(collect_result["result"][0]) == 2
+        emit_result = node.run(mode="Emit", grid_uuid=VALID_UUID)
+        assert len(emit_result["result"][0]) == 2
 
 
 class TestEmitMode:

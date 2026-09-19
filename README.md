@@ -1075,12 +1075,22 @@ Since v0.69.0 the on-node thumbnails are real downscaled previews served by the 
 Runs** into a buffer and then fans them out — wire a loader in, run it a few
 times to gather images, then send the whole set through a workflow at once.
 
-- **Flow-through, always:** whatever's wired into the node always continues
-  downstream. **Collect** mode ALSO records it into the buffer (only that
-  Run's own image(s) continue downstream — Collect doesn't replay the whole
-  buffer). Switch to **Emit** and Run once to send the WHOLE buffer
-  downstream instead, with whatever's currently wired appended as the final
-  image(s) (10 buffered + 1 wired → 11 runs).
+- **Flow-through, always (in Collect/Emit):** whatever's wired into the node
+  continues downstream. **Collect** mode ALSO records it into the buffer
+  (only that Run's own image(s) continue downstream — Collect doesn't
+  replay the whole buffer). Switch to **Emit** and Run once to send the
+  WHOLE buffer downstream instead, with whatever's currently wired appended
+  as the final image(s) (10 buffered + 1 wired → 11 runs).
+- **Collect only (v0.98.0):** just want to gather a batch without re-running
+  the rest of the workflow on every single image? Switch to **Collect
+  only** — it records to the buffer exactly like Collect, but nothing goes
+  downstream at all: every node past the grid is skipped, silently, no
+  error. The node's three output wires (image/width/height) draw DIM while
+  this mode is active — a visual cue that everything past them is paused,
+  the same idea as unticking a row on the EPS Number Controller, but
+  without actually unplugging anything (an image input can't fall back to
+  a typed-in value the way a number can). Switch back to Collect or Emit
+  and the wires return to normal and downstream runs again.
 - **Navigable grid:** the collected images show as a clickable thumbnail grid
   right on the node (ComfyUI's own image viewer — click to enlarge, arrow
   through them). **Adding an image keeps you on the full grid** — a new

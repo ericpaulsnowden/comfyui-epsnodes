@@ -2038,6 +2038,77 @@ is the functional core WITHOUT the grid.
 
 ## §6.6 `EPSImageGrid` (display: "EPS Image Grid") — accumulate + fan out
 
+**"Collect only" — a third `mode` value (v0.98.0, owner ask: "let me
+collect without running the rest of the workflow every time").** `MODES`
+gains `"Collect only"` BETWEEN `"Collect"` and `"Emit"`
+(`nodes_image_grid.py`) — a pure ADDITION to the combo's option list, so
+every already-saved workflow's `"Collect"`/`"Emit"` value still means
+exactly what it always did (litegraph restores a combo by VALUE, never by
+index). `run()` appends to the buffer EXACTLY like `Collect` (same
+`ui.images` delta so the on-node thumbnail grid still updates; same
+always-changed `IS_CHANGED` sentinel, since appending is still a side
+effect) but always returns the silent `ExecutionBlocker` triple on all
+three outputs — wired or not, buffer empty or not — so everything
+downstream is skipped with no error, and, unlike plain `Collect`, with no
+"nothing wired" warning either (skipping downstream IS the point of this
+mode). The §6.10 estimator treats it exactly like a statically-all-off
+switcher or an empty-selection Checkpoint Switcher: `{count: 0, atLeast:
+false}` — the same NUMBER plain `Collect` already reported, but for a
+stronger reason (`Collect` is a policy floor that may still pass a real
+frame; `Collect only` genuinely never emits, regardless of wiring).
+  Frontend: while a grid sits in Collect only, `image_grid.js` draws its
+three output links (image/width/height) DIM — `rgba(128,128,128,0.25)`,
+the EPS Number Controller's "this row is off" look, but WITHOUT
+disconnecting anything (an IMAGE input has no fallback value the way a
+Number Controller's target does). Checked directly against this rig's
+bundled frontend source maps: `link.color` is NOT serialized by this
+ComfyUI frontend — `LLink.asSerialisable`/the deprecated array
+`serialize()` copy only `{id, origin_id, origin_slot, target_id,
+target_slot, type, parentId}`, and every load/undo/redo/tab-switch rebuilds
+links from scratch via `LLink.createFromArray`/`create`, which read that
+same fixed field set — so it is purely an in-memory, this-session
+annotation. `reconcileLinkDimming` re-derives it (never assumes it) from
+the mode widget's callback, the `onConfigure` wrap (load/undo/redo/tab-
+switch/a pasted node's own restore), and `onConnectionsChange` (a link
+freshly landing on, or leaving, a dimmed output), and restores each link's
+EXACT prior colour (usually `undefined`) the moment the mode leaves
+Collect only, the link disconnects, or the node is removed
+(`installLinkDimCleanup`'s `onRemoved` chain). Applies identically under
+Vue nodes ("New node design") — checked live against the bundled frontend:
+links are always drawn by the classic canvas renderer
+(`LGraphCanvas.drawConnections`/`renderLink`, which has no Vue-nodes
+awareness at all); only a node's BODY/widgets render through the separate
+Vue overlay (`LGraphNode.vue`, which contains no link-drawing code of its
+own).
+  A grid feeding `EPSDistributor`'s `image` input (§6.11) shares that exact
+same `LLink` object with distributor.js's own adopted-type colouring
+(mechanism 4 there) — resolved by a small, explicit, mirrored convention:
+a link `image_grid.js` is dimming carries a transient
+`link.__epsLinkColorOwner` tag that distributor.js's `syncSlotTypes` checks
+and skips over (still updating that slot's `.type`/`.label` as usual —
+only the disputed link's `.color` is left alone), and a node that owns
+dynamic link colouring of its own may expose a duck-typed
+`node.__epsResyncLinkColors()` (distributor.js does, in its own `attach()`)
+that `image_grid.js` calls once, directly, right after releasing a link —
+never a subscription or a poll, so there is no repaint ping-pong between
+the two files. `number_controller.js` is the only other file that writes
+`link.color` in this pack, and it only ever colours links leaving its OWN
+outputs (it has no input sockets of its own to share a link with a Grid's
+output), so no equivalent conflict exists there.
+  **Rig-verified (lead, 2026-09-18).** A real queue of LoadImage → Grid
+(`Collect only`) → PreviewImage finished `success`. The buffer grew by one,
+and the PreviewImage never executed. There were no node errors and no toast.
+  - **Emit restores.** The same graph in `Emit` restored the wire to its
+    default colour, and the PreviewImage ran.
+  - **Save and reload.** The saved JSON carried no link colour. Reloading a
+    workflow saved in `Collect only` re-derived the dim.
+  - **Grid → Distributor.** The link stayed dim through repeated repaints and
+    Distributor `onConnectionsChange` calls (no ping-pong). Leaving
+    `Collect only` returned it to the Distributor's adopted IMAGE colour
+    (`#64B5F6`).
+
+  The owner still has to eyeball the dim colour and Vue nodes mode.
+
 **A tab switch could silently un-focus a frame (§7.9, tab-switch sweep
 2026-08-31, rig-verified with injected LAN latency — does not reproduce on a
 fast local machine).** `writeFocusWidget`'s draw-time poll
@@ -2978,7 +3049,8 @@ label, so two chained Cross Products cannot express it.
     `comfyClass` — the four §6.4/§6.4b switchers (enabled-and-wired
     toggle count), §6.12 Checkpoint Switcher (`selection` length), §6.1
     Notebook (`entry` line count), §6.6 Image Grid (Emit ⇒ its buffer
-    count, Collect ⇒ 0), §6.8 LoRA Iterator (step math from its own
+    count, Collect ⇒ 0, v0.98.0 Collect only ⇒ 0 too — a true known-blocked
+    branch, not just a policy floor), §6.8 LoRA Iterator (step math from its own
     widgets; a `per_lora`-style dependence on stack length follows the
     stack wire — §6.13 Picker selection is countable, a §6.2 set file is
     not), §6.5 Resolution (v0.67.1, owner report: "an image grid run

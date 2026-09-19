@@ -776,6 +776,177 @@ out.basenames = [
   }
 }
 
+// ---- v0.98.0 "Collect only" link dimming (reconcileLinkDimming/outputLinkIds) ----
+{
+  const DIM = 'rgba(128,128,128,0.25)'
+  const OWNER_KEY = '__epsLinkColorOwner'
+  const RESYNC_HOOK = '__epsResyncLinkColors'
+
+  const makeLink = (id, targetId, color) => ({ id, target_id: targetId, color })
+  const makeGraph = (linksById, nodesById) => {
+    const g = {
+      links: linksById,
+      getNodeById: (id) => nodesById?.[id],
+      dirtyCount: 0
+    }
+    g.setDirtyCanvas = () => { g.dirtyCount++ }
+    return g
+  }
+  const makeGridNode = (modeValue, graph, outputs) => ({
+    widgets: [{ name: 'mode', value: modeValue }],
+    outputs,
+    graph
+  })
+
+  // -- outputLinkIds: pure collection over exactly the three named outputs --
+  {
+    const node = {
+      outputs: [
+        { name: 'image', links: [1, 2] },
+        { name: 'width', links: [3] },
+        { name: 'height', links: null }, // malformed -- tolerated, contributes nothing
+        { name: 'ignored_other', links: [99] } // not one of the three dimmable names
+      ]
+    }
+    out.dimIds = grid.outputLinkIds(node)
+  }
+
+  // -- dim, idempotent no-op, then restore EXACTLY (undefined AND a
+  // pre-existing colour, e.g. one distributor.js already painted) --
+  {
+    const linkA = makeLink(1, 100) // no prior colour -- "usually undefined"
+    const linkB = makeLink(2, 101, 'rgb(0,100,200)') // pre-coloured by someone else
+    const graph = makeGraph({ 1: linkA, 2: linkB }, {})
+    const node = makeGridNode('Collect only', graph, [
+      { name: 'image', links: [1] },
+      { name: 'width', links: [2] },
+      { name: 'height', links: [] }
+    ])
+
+    grid.reconcileLinkDimming(node)
+    const afterDim = {
+      aColor: linkA.color, aOwner: linkA[OWNER_KEY],
+      bColor: linkB.color, bOwner: linkB[OWNER_KEY],
+      dirtyAfterDim: graph.dirtyCount
+    }
+
+    grid.reconcileLinkDimming(node) // nothing changed -- must not re-dirty
+    const dirtyAfterNoop = graph.dirtyCount
+
+    node.widgets[0].value = 'Collect' // leave Collect only
+    grid.reconcileLinkDimming(node)
+
+    out.dimRoundTrip = {
+      dimmedBothToSameColor: afterDim.aColor === DIM && afterDim.bColor === DIM,
+      ownedByGridWhileDimmed: afterDim.aOwner === 'EPSImageGrid:collect-only' &&
+        afterDim.bOwner === 'EPSImageGrid:collect-only',
+      dirtiedOnceForTheDim: afterDim.dirtyAfterDim === 1,
+      noopDoesNotRedirty: dirtyAfterNoop === afterDim.dirtyAfterDim,
+      restoredUndefinedExactly: linkA.color === undefined,
+      restoredPriorColorExactly: linkB.color === 'rgb(0,100,200)',
+      ownerClearedOnRestore: !(OWNER_KEY in linkA) && !(OWNER_KEY in linkB)
+    }
+  }
+
+  // -- a link freshly connected to an output WHILE already in Collect only
+  // is dimmed on the very next reconcile (onConnectionsChange's job) --
+  {
+    const linkA = makeLink(10, 200)
+    const linkC = makeLink(11, 201) // "connected later"
+    const graph = makeGraph({ 10: linkA, 11: linkC }, {})
+    const outputImage = { name: 'image', links: [10] }
+    const node = makeGridNode('Collect only', graph, [
+      outputImage, { name: 'width', links: [] }, { name: 'height', links: [] }
+    ])
+    grid.reconcileLinkDimming(node)
+    const cUntouchedBeforeConnect = linkC.color === undefined
+    outputImage.links.push(11) // simulate the new connection landing
+    grid.reconcileLinkDimming(node)
+    out.dimNewConnection = {
+      cUntouchedBeforeConnect,
+      cDimmedAfterConnect: linkC.color === DIM,
+      aStillDimmed: linkA.color === DIM
+    }
+  }
+
+  // -- a link disconnected while dimmed is dropped from tracking; an
+  // untouched sibling is left alone --
+  {
+    const linkA = makeLink(20, 300)
+    const linkB = makeLink(21, 301)
+    const linksById = { 20: linkA, 21: linkB }
+    const graph = makeGraph(linksById, {})
+    const outputImage = { name: 'image', links: [20, 21] }
+    const node = makeGridNode('Collect only', graph, [
+      outputImage, { name: 'width', links: [] }, { name: 'height', links: [] }
+    ])
+    grid.reconcileLinkDimming(node)
+    // Disconnect link 21 -- litegraph removes it from BOTH the slot's
+    // `.links` array and the graph's own link table.
+    outputImage.links = [20]
+    delete linksById[21]
+    grid.reconcileLinkDimming(node)
+    out.dimDisconnect = {
+      aStillDimmed: linkA.color === DIM,
+      droppedFromTracking: !node.__epsGridDimmedLinkIds.has(21)
+    }
+  }
+
+  // -- forceUndim (the onRemoved path) restores regardless of what the
+  // widget still says -- the node is being torn down either way --
+  {
+    const linkA = makeLink(30, 400, 'green')
+    const graph = makeGraph({ 30: linkA }, {})
+    const node = makeGridNode('Collect only', graph, [
+      { name: 'image', links: [30] }, { name: 'width', links: [] }, { name: 'height', links: [] }
+    ])
+    grid.reconcileLinkDimming(node)
+    const dimmedFirst = linkA.color === DIM
+    grid.reconcileLinkDimming(node, { forceUndim: true })
+    out.dimForceUndim = {
+      dimmedFirst,
+      modeStillSaysCollectOnly: node.widgets[0].value === 'Collect only',
+      restoredAnyway: linkA.color === 'green',
+      ownerCleared: !(OWNER_KEY in linkA)
+    }
+  }
+
+  // -- distributor.js convention: the target's resync hook fires exactly
+  // once, only on restore, AFTER this file's own colour is put back --
+  {
+    let resyncCalls = 0
+    const targetNode = { [RESYNC_HOOK]: () => { resyncCalls++ } }
+    const linkA = makeLink(40, 500, 'orange')
+    const graph = makeGraph({ 40: linkA }, { 500: targetNode })
+    const node = makeGridNode('Collect only', graph, [
+      { name: 'image', links: [40] }, { name: 'width', links: [] }, { name: 'height', links: [] }
+    ])
+    grid.reconcileLinkDimming(node)
+    const callsWhileDimmed = resyncCalls
+    node.widgets[0].value = 'Emit'
+    grid.reconcileLinkDimming(node)
+    out.dimResyncHook = {
+      noCallWhileDimming: callsWhileDimmed === 0,
+      calledExactlyOnceOnRestore: resyncCalls === 1,
+      restoredColorFirst: linkA.color === 'orange'
+    }
+  }
+
+  // -- mode never Collect only: a pure no-op, nothing tracked, no repaint --
+  {
+    const linkA = makeLink(60, 700)
+    const graph = makeGraph({ 60: linkA }, {})
+    const node = makeGridNode('Collect', graph, [
+      { name: 'image', links: [60] }, { name: 'width', links: [] }, { name: 'height', links: [] }
+    ])
+    grid.reconcileLinkDimming(node)
+    out.dimNoopWhenNotCollectOnly = {
+      untouchedColor: linkA.color === undefined,
+      notDirtied: graph.dirtyCount === 0
+    }
+  }
+}
+
 process.stdout.write(JSON.stringify(out))
 """
 
@@ -1718,3 +1889,129 @@ def test_clipspace_copy_full_res_restores_in_a_finally() -> None:
 def test_init_installs_the_clipspace_copy_full_res_wrap() -> None:
     body = _function_body("export function init")
     assert "installClipspaceCopyFullRes()" in body
+
+
+# ---- v0.98.0 "Collect only" link dimming ----------------------------------
+
+
+def test_output_link_ids_collects_only_the_three_named_dimmable_outputs(
+    grid_api: dict,
+) -> None:
+    # image/width/height, in RETURN_NAMES order; `ignored_other` and the
+    # malformed `null` `.links` array both contribute nothing.
+    assert grid_api["dimIds"] == [1, 2, 3]
+
+
+def test_dim_paints_every_output_link_the_same_dim_grey(grid_api: dict) -> None:
+    result = grid_api["dimRoundTrip"]
+    assert result["dimmedBothToSameColor"] is True
+    assert result["ownedByGridWhileDimmed"] is True
+
+
+def test_dim_is_change_gated_a_noop_pass_never_redirties(grid_api: dict) -> None:
+    result = grid_api["dimRoundTrip"]
+    assert result["dirtiedOnceForTheDim"] is True
+    assert result["noopDoesNotRedirty"] is True
+
+
+def test_leaving_collect_only_restores_each_links_exact_prior_colour(
+    grid_api: dict,
+) -> None:
+    # item 2: "usually undefined" for a never-coloured link, but a link
+    # someone else (e.g. distributor.js) had already coloured comes back to
+    # EXACTLY that colour, not undefined and not the dim grey.
+    result = grid_api["dimRoundTrip"]
+    assert result["restoredUndefinedExactly"] is True
+    assert result["restoredPriorColorExactly"] is True
+    assert result["ownerClearedOnRestore"] is True
+
+
+def test_a_link_connected_while_already_in_collect_only_gets_dimmed(
+    grid_api: dict,
+) -> None:
+    result = grid_api["dimNewConnection"]
+    assert result["cUntouchedBeforeConnect"] is True
+    assert result["cDimmedAfterConnect"] is True
+    assert result["aStillDimmed"] is True  # untouched sibling unaffected
+
+
+def test_a_link_disconnected_while_dimmed_is_dropped_from_tracking(grid_api: dict) -> None:
+    result = grid_api["dimDisconnect"]
+    assert result["aStillDimmed"] is True
+    assert result["droppedFromTracking"] is True
+
+
+def test_force_undim_restores_even_though_the_widget_still_says_collect_only(
+    grid_api: dict,
+) -> None:
+    # The onRemoved path (installLinkDimCleanup): the node is being torn
+    # down, so there is nothing left to derive the mode FROM -- restore
+    # unconditionally rather than leaving a permanently grey orphaned link.
+    result = grid_api["dimForceUndim"]
+    assert result["dimmedFirst"] is True
+    assert result["modeStillSaysCollectOnly"] is True
+    assert result["restoredAnyway"] is True
+    assert result["ownerCleared"] is True
+
+
+def test_distributor_resync_hook_fires_once_only_on_restore_after_the_colour(
+    grid_api: dict,
+) -> None:
+    # The distributor.js convention: no ping-pong while dimmed (the hook is
+    # never called during dimming), and exactly one direct call -- never a
+    # subscription -- once this file lets go of the link.
+    result = grid_api["dimResyncHook"]
+    assert result["noCallWhileDimming"] is True
+    assert result["calledExactlyOnceOnRestore"] is True
+    assert result["restoredColorFirst"] is True
+
+
+def test_dim_is_a_pure_noop_outside_collect_only(grid_api: dict) -> None:
+    result = grid_api["dimNoopWhenNotCollectOnly"]
+    assert result["untouchedColor"] is True
+    assert result["notDirtied"] is True
+
+
+def test_dim_link_color_is_a_visibly_dim_low_alpha_grey() -> None:
+    assert "rgba(128,128,128,0.25)" in _SOURCE
+
+
+def test_attach_wires_all_three_collect_only_dim_installers() -> None:
+    assert "installModeDimSync(node)" in _SOURCE
+    assert "installLinkDimConnectionsSync(node)" in _SOURCE
+    assert "installLinkDimCleanup(node)" in _SOURCE
+
+
+def test_configure_refresh_also_rederives_link_dimming() -> None:
+    """The rebuild-survives-teardown law (FORMAT.md §7.9): a tab switch/
+    undo/redo/pasted-node restore must re-derive the dim from the
+    JUST-RESTORED `mode` widget value, not assume/inherit anything."""
+    body = _function_body("function installConfigureRefresh")
+    assert "reconcileLinkDimming(this)" in body
+
+
+def test_mode_widget_callback_chains_never_replaces_the_original() -> None:
+    body = _function_body("function installModeDimSync")
+    assert "originalCallback.apply(this, args)" in body
+    assert "reconcileLinkDimming(node)" in body
+
+
+def test_link_dim_connections_sync_chains_never_replaces_onconnectionschange() -> None:
+    body = _function_body("function installLinkDimConnectionsSync")
+    assert "original.apply(this, args)" in body
+    assert "reconcileLinkDimming(this)" in body
+
+
+def test_link_dim_cleanup_chains_never_replaces_onremoved() -> None:
+    body = _function_body("function installLinkDimCleanup")
+    assert "original.apply(this, args)" in body
+    assert "forceUndim: true" in body
+
+
+def test_mode_dim_sync_and_connections_sync_are_guarded_per_instance() -> None:
+    """Each installer guards on its OWN flag (never `attachedNodes`, which
+    only guards `attach()` itself) -- matches every other `install*` helper
+    in this file."""
+    assert "widget.__epsGridDimSyncInstalled" in _SOURCE
+    assert "node.__epsGridLinkDimConnectionsWrapped" in _SOURCE
+    assert "node.__epsGridLinkDimCleanupWrapped" in _SOURCE
