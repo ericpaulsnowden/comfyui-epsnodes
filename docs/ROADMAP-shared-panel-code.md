@@ -80,6 +80,17 @@ is *correct*.
 
 So the barrier is habit, not architecture.
 
+*Update (v0.99.0):* `web/eps_image/bypass.js` adds the first
+`eps_image` -> `eps_image` imports: its unplug/replug helpers
+(`collectOutputTargets`, `disconnectAllTargets`, `reconnectRememberedTargets`,
+`hideValuesWidget`, `installMinWidth`) come from `number_controller.js`, and
+its adopted-type rule and link-colour convention (`resolveAdoptedType`,
+`LINK_COLOR_OWNER_KEY`, `LINK_COLOR_RESYNC_HOOK`) from `distributor.js`
+(FORMAT.md section 6.18), all under their existing bare names. Each of those
+exports carries a comment naming `bypass.js` as its second caller. They are
+the obvious first residents of a neutral shared module when a milestone here
+next runs; until then the exports are the single implementation.
+
 ---
 
 ## Milestones

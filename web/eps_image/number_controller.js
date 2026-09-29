@@ -666,8 +666,14 @@ function toast(node, severity, detail) {
 
 // --- Node width floor -- self-contained copy, own guard flag (distributor.js's
 // identical-shape installMinWidth is the house pattern). ---
-
-function installMinWidth(node, minWidth) {
+//
+// EXPORTED (v0.99.0) so `bypass.js` (EPS Bypass, FORMAT.md section 6.18)
+// imports it rather than growing a tenth hand copy -- see ROADMAP-shared-
+// panel-code.md M0 for what that drift already cost. The guard flag name
+// below is number-controller-flavoured but is only ever a flag on the NODE
+// INSTANCE, so it is harmless on a Bypass node. A fix here reaches
+// bypass.js by construction; bypass.js is this function's second caller.
+export function installMinWidth(node, minWidth) {
   if (!node || node.__epsNumberControllerMinWidthInstalled) return
   node.__epsNumberControllerMinWidthInstalled = true
   const originalOnResize = node.onResize
@@ -692,8 +698,12 @@ function installMinWidth(node, minWidth) {
  * outright -- so without the second flag this internal widget would leak
  * into a Vue node as a raw editable text field. Canvas mode ignores
  * `options.hidden` right back, so setting both is safe everywhere.
+ *
+ * EXPORTED (v0.99.0): `bypass.js` hides its `links` memory widget through
+ * THIS function (imported, not copied) so the two-flag rule above cannot
+ * drift between the two nodes.
  */
-function hideValuesWidget(node, widget) {
+export function hideValuesWidget(node, widget) {
   widget.hidden = true
   widget.options = { ...(widget.options || {}), hidden: true }
   node.graph?.setDirtyCanvas(true, true)
@@ -794,8 +804,19 @@ function collectSlotLinkTypes(node, idx) {
  * previously-stored `links` list, so what gets remembered is always
  * whatever is ACTUALLY about to be removed. Tolerant of a missing graph/
  * links/target -- always returns an array, never throws.
+ *
+ * EXPORTED (v0.99.0) together with `disconnectAllTargets` and
+ * `reconnectRememberedTargets` below (and `normalizeRememberedLinks`,
+ * already exported): these four ARE the unplug/replug machinery, and EPS
+ * Bypass (`bypass.js`, FORMAT.md section 6.18) uses them verbatim through an
+ * import under these same bare names instead of a hand copy -- this pack's
+ * duplicated-helper fixes have missed siblings three times already
+ * (ROADMAP-shared-panel-code.md). A change to any of the four is a change to
+ * BOTH nodes: grep `web/` for the name and run tests/test_bypass_js.py.
+ * They take an output INDEX, never a row, so nothing about them is
+ * number-controller-specific.
  */
-function collectOutputTargets(node, idx) {
+export function collectOutputTargets(node, idx) {
   const targets = []
   try {
     const graph = node?.graph
@@ -826,7 +847,7 @@ function collectOutputTargets(node, idx) {
  * for-of. Never throws: one link failing to resolve does not block the
  * rest.
  */
-function disconnectAllTargets(node, idx) {
+export function disconnectAllTargets(node, idx) {
   try {
     const graph = node?.graph
     const output = node.outputs?.[idx]
@@ -855,7 +876,7 @@ function disconnectAllTargets(node, idx) {
  * reconnect, which it does by simply not connecting, not by touching
  * anything else).
  */
-function reconnectRememberedTargets(node, idx, remembered) {
+export function reconnectRememberedTargets(node, idx, remembered) {
   try {
     const graph = node?.graph
     if (typeof node.connect !== 'function') return

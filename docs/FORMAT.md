@@ -420,7 +420,8 @@ captured by §6.16's Universal State Controller. Shape:
 - **Registry validation on save** (`EPS_STATE_WIDGETS`, §6.16): a KNOWN
   class rejects undeclared/excluded widget keys loudly
   (`StateValidationError` naming `<class>.<widget>`) and type-checks every
-  value per kind. A class with NO registry entry (future pack, third-party,
+  value per kind (the closed set, §6.16 -- `boolean` joined it in v0.99.0:
+  `bool` only, never a `1`/`0`). A class with NO registry entry (future pack, third-party,
   not loaded here) is kept as-is and echoed in the save response's
   `foreign` list — save is tolerant-but-loud, load silently tolerant, so a
   state from a newer build survives a round trip through an older one.
@@ -492,7 +493,8 @@ Route paths are FROZEN once shipped (§8).
 v0.50.1 layout):** a node's `CATEGORY` is a browse-menu path and NOTHING
 else — saved workflows, search, and class ids are untouched by it, so
 category moves are always display-safe and need no migration. Every one of
-the pack's 20 registered nodes now sits in exactly one folder; `EPSNodes`
+the pack's 21 registered nodes now sits in exactly one folder (EPS Bypass joined
+`Utilities` in v0.99.0, §6.18); `EPSNodes`
 itself holds no loose nodes:
 
 | Folder | Nodes |
@@ -500,7 +502,7 @@ itself holds no loose nodes:
 | `EPSNodes/Images` | Image Grid, Save Image, Resolution, Frame Saver |
 | `EPSNodes/Prompts` | Prompt Notebook, Prompt Builder |
 | `EPSNodes/Controllers` | Number Controller, Universal State Controller (via `universal_controller.js`'s `NODE_CATEGORY`) |
-| `EPSNodes/Utilities` | Node Audit, Distributor, Run Multiplier |
+| `EPSNodes/Utilities` | Node Audit, Distributor, Bypass, Run Multiplier |
 | `EPSNodes/LoRA` | LoRA Picker, Apply LoRA Set, LoRA Iterator, Lora Loader State Controller (via `controller.js`'s `NODE_CATEGORY`) |
 | `EPSNodes/Switchers` | Image/Model/CLIP/VAE (the `nodes_switcher.py` factory's `"CATEGORY"` key), Checkpoint Switcher |
 
@@ -4095,7 +4097,13 @@ opt-ins, on the owner's word).
   state-bearing node class declares `EPS_STATE_WIDGETS` next to its own
   parser — a PURE declarative dict `{format, widgets: {name: {kind,
   ...}}, excluded: {name: reason}}` with a CLOSED kind set (string / int /
-  float / choice / lines / json_array / json_object+key_pattern).
+  float / choice / lines / boolean / json_array / json_object+key_pattern).
+  `boolean` is the newest (v0.99.0, for §6.18's `enabled`): a real `true`/
+  `false` only, validated identically in `universal_states_store._check_kind`
+  and the frontend's `validateStateValue` (a `1`, `0` or `"false"` is
+  rejected in both -- a stored `"false"` string would apply as ON). Adding a
+  kind means moving `_check_kind`, `validateStateValue` and
+  `tests/test_state_registry.py`'s `_CLOSED_KINDS` together.
   `GET /eps/state_registry` collects them (routes_list_flags' memo shape).
   Consumers validate through the registry instead of hand-parsing hidden
   JSON bridges; `tests/test_state_registry.py`'s completeness check forces
@@ -4557,6 +4565,213 @@ paste-a-path only takes server paths. So a remote viewer had no way in.
   free-text "Server launch" box: in Comfy-Org/ComfyUI #8690 flags typed there
   were split into single characters and Desktop would not start. Both
   messages say so.
+
+## §6.18 `EPSBypass` (display: "EPS Bypass", v0.99.0) — switch a wire off, and what it feeds sees nothing
+
+New in v0.99.0. Owner ask, verbatim: *"A node you can plug something into
+(like audio), switch it off, and it looks to the downstream node like
+nothing is connected."* Muting the source node had been tried and did not do
+it. Backend `eps_image/nodes_bypass.py`, frontend `web/eps_image/bypass.js`.
+Class id `EPSBypass` (FROZEN, §8), category `EPSNodes/Utilities`.
+
+- **Why it UNPLUGS instead of blocking (decided; do not redesign).** The
+  obvious backend answer is an `ExecutionBlocker` on the off path, and it is
+  wrong. Core's per-node dispatch (`execution.py`'s `process_inputs`) walks
+  EVERY resolved input of a node and skips the node outright the moment ANY
+  one is an `ExecutionBlocker` — required or optional, no distinction. A
+  blocked AUDIO branch into a video node's optional `audio` input would skip
+  the whole video node (and everything after it) instead of producing a
+  silent video. The only thing that makes a consumer run "as if nothing were
+  connected" is the link genuinely not existing in the submitted prompt, so
+  the FRONTEND removes it. That is legal exactly when the consumer's input is
+  OPTIONAL: an unconnected REQUIRED input fails validation with "Required
+  input is missing". Hence the required-input guard below.
+- **Contract.** `RETURN_TYPES = ("*",)`, `RETURN_NAMES = ("output",)`; one
+  OPTIONAL wildcard socket `value` (the `"*"` technique of §6.11 — core's
+  `validate_node_input` accepts `*` on either side of a link; the frontend
+  adopts the concrete type); no list flags, no lazy input, no `IS_CHANGED`.
+  Two widgets, in this order (a persistence contract, §8 — `widgets_values`
+  restores positionally, so hidden state goes last):
+
+  | # | Widget | Kind | Notes |
+  | --- | --- | --- | --- |
+  | 1 | `enabled` | BOOLEAN, default `true` | visible; `label_on` "on", `label_off` "off — sends nothing" (the toggle's own text in both renderers) |
+  | 2 | `links` | STRING, default `"{}"`, `hidden: true` | the frontend's private wire memory; the backend never reads it |
+
+  `value` is a socket and occupies no `widgets_values` slot. Input names are
+  frozen (inputs restore by name).
+- **Backend behaviour.** Enabled: `(value,)` — the very same object, no copy.
+  An unwired input arrives as `None` and is passed through as `None`: that
+  is what an optional consumer's own default already is, so a muted or
+  absent upstream still reads as "nothing" to it (a blocker there would skip
+  the consumer, the failure this node exists to avoid). Disabled but somehow
+  EXECUTED: the silent `ExecutionBlocker(None)`, never the value — **the
+  refused-unplug fallback path, not the normal one.** With the wire gone the
+  node has no consumer and is never run. It runs only when a wire is still
+  attached while the toggle says off (an API caller that never loaded the
+  frontend, a BOOLEAN wired into `enabled`, a hand-edited workflow, a
+  frontend that could not unplug), and there "off always means off": a
+  blocker skips the consumer rather than leaking the value through an off
+  switch; `None` for the message keeps it silent (a string would surface as
+  an error). Any falsy `enabled` other than an absent one is off.
+- **Toggle OFF (frontend).** Guard first, then remember, then unplug:
+  `collectOutputTargets` → `links` widget → `disconnectAllTargets`
+  (`target.disconnectInput(slot)` per link — the rig-verified call of §6.17).
+  **Toggle ON:** `reconnectRememberedTargets` — `node.connect(...)`, the same
+  validated path a manual drag uses — then the memory is forgotten.
+  All-or-nothing: if a wire survives the unplug, everything is put back and
+  the toggle returns to ON with a toast. Switching off with nothing wired
+  does nothing and leaves any existing memory alone.
+- **Shared code is IMPORTED, not copied** (`docs/ROADMAP-shared-panel-code.md`:
+  this pack's duplicated-helper fixes have missed siblings three times).
+  `bypass.js` imports number_controller.js's `collectOutputTargets`,
+  `disconnectAllTargets`, `reconnectRememberedTargets`,
+  `normalizeRememberedLinks`, `hideValuesWidget`, `installMinWidth`,
+  `isOutputConnected`, and distributor.js's `resolveAdoptedType`,
+  `LINK_COLOR_OWNER_KEY`, `LINK_COLOR_RESYNC_HOOK` — all under their existing
+  bare names (those files gained `export` and a comment naming `bypass.js`;
+  no behaviour changed). Only the trivial `nodeClassOf`/`findWidget`/
+  `linkById`/`toast` lookups are local copies. A change to any imported name
+  is a change to both nodes: grep `web/`, run `tests/test_bypass_js.py`.
+- **The required-input guard — refuse wholesale, never partially.** Before
+  anything is disconnected every live output link is classified
+  (`inputVerdict`), in this order:
+  1. a **widget-backed** input (`slot.widget`) is SAFE even though its
+     definition says `required` — unplugging returns the widget's own value,
+     which is always serialised (the mechanism §6.17's checkbox rests on;
+     e.g. a KSampler's `cfg`);
+  2. the target class's definition (`constructor.nodeData`, the frontend's
+     copy of `/object_info`): V1 `input.optional` / `input.required` by name,
+     then V2 `inputs[name].isOptional` (absent = required);
+  3. the slot's **hollow-circle shape** (`RenderShape.HollowCircle`, 7 — what
+     the frontend stamps on optional inputs) for a dynamic socket the
+     definition does not list (a Switcher's `image_N`);
+  4. anything else is `unknown` and treated as REQUIRED: an unplugged
+     required input fails the run, an unnecessary refusal only costs a
+     message.
+
+  A link the memory could not record (its target node is gone, a subgraph
+  output at `target_id` -20, or an input with no name — the legacy Reroute
+  NODE's) is `unrestorable`: `disconnectAllTargets` severs every link, so an
+  unrecorded one would be lost for good. If ANY link is unsafe, NOTHING is
+  unplugged, the toggle snaps back ON (set directly, never through its own
+  callback, and asserted again next tick so it wins even when the Vue
+  renderer writes its model after the callback), and a long-lived warn
+  toast names up to three offending inputs by node title, id and input name
+  and says why (`refusalMessage`; e.g. *Can't switch off: Save Audio #5
+  (audio) is a required input, so unplugging it would fail the run with
+  "Required input is missing". It stays on.*).
+
+  **Partial case, decided: a mix of optional and required targets refuses
+  wholesale.** Unplugging only the optional ones would leave the node
+  reading OFF with a wire still attached; the backend fallback would then
+  block that remaining consumer — a silently skipped node, exactly what this
+  feature exists to prevent. It is also one sentence to explain. The user's
+  fix is to feed the required node some other way.
+- **The memory** is `{"owner": <this node's id>, "links": [{"node": id,
+  "input": name}, ...]}` (an empty memory is `"{}"`, so a switched-on node
+  leaves no residue in its saved workflow). Targets are keyed `{node id,
+  input NAME}` — inputs restore by name (§8). **`owner` exists for
+  copy/paste:** a pasted OFF Bypass carries the original's memory, whose
+  targets are the ORIGINAL consumers with their inputs free, so switching
+  the copy on would wire it into them. A pasted node has a new id, so memory
+  whose `owner` is not the node's own id (or is missing) is stale and
+  ignored (`parseMemory`).
+- **Multi-target and stale-target rules.** Every link off the output is
+  remembered and restored (fan-out). Replug is ONE attempt and then the
+  memory is forgotten (§6.17's reasoning: otherwise a later manual unplug
+  would silently reconnect). Each remembered item fails soft: a node no
+  longer on the graph, an input no longer present by that name, a type the
+  socket now refuses, or a socket another wire has since claimed — **never
+  stomped** — is skipped without an exception, and a toast says how many
+  came back ("Reconnected 1 of 2 wires…"). A NEW wire dragged out of an OFF
+  node is unambiguous intent: it switches the node back ON and forgets the
+  memory (§6.17's `autoReenableNewlyWiredRows`), run only from the live
+  connection hook — never from the reconcile pass, where "stored off, still
+  wired" is indistinguishable from a state Apply that has not caught up — and
+  only for a connection event that fires OUTSIDE a whole-graph load
+  (`app.configuringGraph` is read at EVENT time; by the time the deferred
+  pass runs a synchronous load has already finished).
+- **§6.16 state registry.** `EPS_STATE_WIDGETS` declares `enabled` as kind
+  `boolean` (new with this node, §6.16) and EXCLUDES `links` with a reason:
+  a captured state that carried the memory could overwrite the live memory —
+  typically with an empty list, if captured while ON — while the node is
+  off, leaving nothing to reconnect on the next switch-on.
+  **An Apply reaches the wiring, not just the toggle.** The controller's
+  write loop does `widget.value = v; widget.callback?.(v, canvas, node)` per
+  node and then `announceWidgetsChangedExternally`. The toggle's callback is
+  wrapped (chained, never replaced), so the write itself runs the same
+  `onEnabledChanged` a click does; the announce subscription
+  (`__epsBypassReload`) is an idempotent second pass that also serves a
+  writer which sets the value WITHOUT the callback (stored OFF + still wired
+  → guard + unplug; stored ON + unwired + memory → replug; else a repaint).
+  Applying OFF onto a required target is refused and reverted like a click —
+  the controller's summary still counts that node as written, and the toast
+  says why.
+- **The re-render law (§7.9).** The two widgets are the only durable stores;
+  nothing is cached JS-side. `settle` (adopted type, labels, link colours) is
+  read-only with respect to every widget and idempotent, so a tab switch /
+  undo / redo / reload re-derives everything from the saved widgets and the
+  saved links (`onConfigure` settles once immediately and once more after the
+  whole graph is configured, when a peer's inputs are restored).
+  **Loading never rewires**: an OFF node that loads wired, or an ON node that
+  loads unwired with a memory, is left exactly as it is — only a user action,
+  a state Apply, or a wire dragged on changes the graph (the backend
+  fallback keeps "off" meaning off meanwhile).
+- **Type adoption** is §6.11's (one type per node, the input link first, then
+  the output links) minus the allowlist: any type may be carried. Both sockets
+  take the adopted `.type` and a `.label` of the type itself (`AUDIO`,
+  `IMAGE`) or `any`; once concrete, litegraph's own `isValidConnection`
+  refuses a mismatched later connection, so no veto hook is installed. Links
+  are recoloured to the adopted type honouring the v0.98.0 owner-tag
+  convention (`LINK_COLOR_OWNER_KEY`/`LINK_COLOR_RESYNC_HOOK`, imported from
+  distributor.js), so a Grid in Collect-only mode feeding this node keeps its
+  dimmed wire.
+- **"Off" is visible on the node, with nothing drawn on the canvas:** the
+  toggle's own text (`label_off`) reads "off — sends nothing" and the output
+  socket's label says the same. Nothing is hand-drawn, so §7.5's
+  `VUE_AFFECTED_CLASSES` gate does NOT apply and the node is not listed there.
+- **Known limits, stated rather than discovered.** Switching off
+  garbage-collects the wire's NATIVE link reroutes (core's `disconnectInput`
+  default), so switching on reconnects straight. A legacy Reroute NODE or a
+  subgraph output downstream refuses (above). A BOOLEAN wired into `enabled`
+  bypasses the callback entirely, so there is no unplug: the backend
+  fallback blocks the consumer. Muting or bypassing the Bypass node itself
+  is core's own mechanism and omits it from the prompt.
+- **Tests:** `tests/test_bypass.py` (passthrough, blocker fallback, wildcard
+  typing, widget order, registration, registry entry) and
+  `tests/test_bypass_js.py` (the real `attach()` driven against a fake
+  litegraph graph: round trip, fan-out, every guard verdict, refusal + Vue
+  ordering, rollback, stale/claimed targets, rebuild, load-never-rewires,
+  pasted copy, Universal State apply routes, auto re-enable, adoption,
+  colour ownership, plus source pins for the shared-import and
+  read-only-settle rules); the `boolean` kind in `tests/test_state_registry.py`,
+  `tests/test_universal_states_store.py`, `tests/test_universal_controller_js.py`.
+  Not covered by tests, verified on the rig: a real litegraph `connect`, the
+  Vue renderer, a real `/object_info`, and `graphToPrompt` omitting the input
+  (acceptance: LoadAudio → EPS Bypass → CreateVideo → SaveVideo with the
+  Bypass OFF must still run CreateVideo and save a silent video).
+
+**Rig-verified (lead, 2026-09-28, ComfyUI 0.36.0, frontend 1.52.7).**
+- **Acceptance.** LoadAudio → EPS Bypass → CreateVideo → SaveVideo, with
+  `ffprobe` on the saved files:
+  - ON: the video has h264 video and aac audio;
+  - OFF: CreateVideo still ran and saved h264 video with NO audio stream, and
+    the queued prompt carried no `audio` key;
+  - ON again: the wire returned to the same socket.
+- **Guard.** A second consumer, PreviewAudio (required `audio`), refused the
+  switch-off wholesale. The toggle snapped back ON and both wires stayed, with
+  the toast naming "Preview Audio #6 (audio)".
+- **Save and reload while OFF.** Stayed off, nothing rewired, and the memory
+  survived; switching ON after the reload reconnected.
+- **Real Universal State Controller.** A state captured OFF and applied while
+  ON unplugged the wire. A state captured ON and applied while OFF replugged it.
+- **Muting, for comparison.** Muting a LoadAudio wired DIRECTLY into
+  CreateVideo also yields a silent video on this frontend: the muted node and
+  the `audio` key are both omitted from the prompt. Muting falls short when
+  there is a node between the source and the optional input, when the source
+  also feeds other consumers, or when the state has to live in a Universal
+  State. Those are the cases this node is for.
 
 ## §7 Frontend surfaces
 

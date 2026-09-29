@@ -440,9 +440,15 @@ const HEADER_WIDGET_NAME = '__eps_distributor_toggle_all'
  * the one race a caller's own literal-restore can't (the adopted type
  * moving WHILE the link sat recoloured for someone else). A single direct
  * call, never polled or subscribed to, so there is no repaint ping-pong.
+ *
+ * v0.99.0: both constants are now EXPORTED and `bypass.js` (EPS Bypass,
+ * FORMAT.md section 6.18) imports them -- it is a second node that adopts a
+ * wired type and recolours the links it owns, so it must honour the same
+ * tag and expose the same hook. image_grid.js keeps its own mirrored copy of
+ * both strings: keep all three files in lockstep.
  */
-const LINK_COLOR_OWNER_KEY = '__epsLinkColorOwner'
-const LINK_COLOR_RESYNC_HOOK = '__epsResyncLinkColors'
+export const LINK_COLOR_OWNER_KEY = '__epsLinkColorOwner'
+export const LINK_COLOR_RESYNC_HOOK = '__epsResyncLinkColors'
 
 // --------------------------------------------------------- draw geometry
 // See file header's "Per-slot toggle draw + hit-test" section for the

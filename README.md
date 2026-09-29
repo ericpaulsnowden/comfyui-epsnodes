@@ -13,14 +13,14 @@ then pick a folder:
 | **Images** | Image Grid, Save Image, Resolution, Frame Saver |
 | **Prompts** | Prompt Notebook, Prompt Builder |
 | **Controllers** | Number Controller, Universal State Controller |
-| **Utilities** | Node Audit, Distributor, Run Multiplier |
+| **Utilities** | Node Audit, Distributor, Bypass, Run Multiplier |
 | **LoRA** | LoRA Picker, Apply LoRA Set, LoRA Iterator, Lora Loader State Controller |
 | **Switchers** | Image, Model, CLIP, VAE, and Checkpoint Switchers |
 
 Moving a node between folders only changes where it sits in that menu —
 workflows you've already saved are unaffected, and nothing needs updating.
 
-## The twenty nodes
+## The twenty-one nodes
 
 No third-party packs required — every node here runs on ComfyUI alone;
 the Lora Loader State Controller is built to extend rgthree-comfy, but only
@@ -42,6 +42,7 @@ section further down; this is the map.
 | [**EPS Image Switcher**](#eps-image-switcher-shipped) | Any number of image inputs, each independently on/off; the enabled ones fan out (N enabled → N runs). Disabled branches never execute. | Nothing — drag-and-drop with core nodes. |
 | [**EPS Model / CLIP / VAE Switcher**](#eps-model--clip--vae-switcher-shipped) | The image Switcher's exact mechanism for models, CLIPs, and VAEs: any number of inputs, each on/off, enabled ones fan out (N enabled → N runs), disabled branches — including their checkpoint loads — never execute. | Nothing — drag-and-drop with core nodes. |
 | [**EPS Distributor**](#eps-distributor-shipped) | The mirror of the Switcher: one image — or one text — in, up to sixteen branches out, each independently on/off. New outputs appear as you wire them up. Toggle a branch off and only that branch is skipped — everything happens in one run. | Nothing — drag-and-drop with core nodes. |
+| [**EPS Bypass**](#eps-bypass-shipped) | Plug anything into it — audio, an image, a model, a mask — and switch it off: whatever it feeds then behaves exactly as if nothing were connected, and the wire comes back when you switch it on. For inputs that are optional (a video node's audio, an optional mask); if what it feeds needs that input, the switch refuses and names the node. The Universal State Controller can save and recall the on/off state. *(v0.99.0)* | Nothing — drag-and-drop with core nodes. |
 | [**EPS Node Audit**](#eps-node-audit-shipped) | A plain-language look at what your other installed node packs can reach: their web routes, where they've called out to, and a scan of their code for a few patterns worth knowing about — green/yellow/red per pack, with a verbose toggle for the technical detail. | Nothing — reads whatever else is installed. |
 | [**EPS Number Controller**](#eps-number-controller-shipped) | Every number a workflow uses, kept in one place: named rows, each a plain number box. Wire one into a socket and it quietly becomes the right kind of number for it — whole or decimal. Untick a row and whatever it was plugged into goes back to its own value. The Universal State Controller can save and recall the whole set, including which rows are switched on. | Nothing — drag-and-drop with core nodes. |
 | [**EPS Checkpoint Switcher**](#eps-checkpoint-switcher-shipped) | Tick several checkpoint files in a list; one queue runs the workflow once per ticked checkpoint, with each run's model, CLIP, and VAE kept together and a label for save paths. | Your checkpoint files — drag-and-drop with core nodes. |
@@ -346,8 +347,9 @@ happen there — and the Builder assembles prompts *out of* it:
 `EPSNodes → EPS Universal State Controller`: the Lora State Controller's
 big sibling. One node that captures a named snapshot of **every EPS node's
 settings** in the workflow — which prompts are selected, which models are
-ticked, the picker's stack, resolution, distributor toggles, multiplier
-modes, save prefixes — and applies it back later, or in another session.
+ticked, the picker's stack, resolution, distributor toggles, bypass
+switches, multiplier modes, save prefixes — and applies it back later, or in
+another session.
 
 - **Looks and works like the Lora State Controller**: grouped states
   (`# name` makes a group), search, Save/Apply/Delete, instant-feel saves
@@ -374,9 +376,10 @@ modes, save prefixes — and applies it back later, or in another session.
   (a state can never corrupt a node), and every apply ends with a report —
   "Applied 7 of 9 · 1 not found · 1 skipped". Nothing partial ever happens
   silently.
-- Fourteen node types are covered; the grid's server buffer, provenance
-  pins and the solo token are deliberately excluded (each would corrupt or
-  surprise). The Lora State Controller keeps its specialized job — your
+- Sixteen node types are covered (EPS Bypass's on/off switch joined in
+  v0.99.0 — applying a state really unplugs and re-plugs its wire); the
+  grid's server buffer, provenance pins and the solo token are deliberately
+  excluded (each would corrupt or surprise). The Lora State Controller keeps its specialized job — your
   existing lora states are untouched.
 - Under the hood every EPS node now **declares its own state** in a small
   registry (`GET /eps/state_registry`) — the piece that lets this node (and
@@ -929,6 +932,60 @@ rewiring, no dragging bypass boxes around groups.
 - **A resized node now stays the size you dragged it to.** Drag a
   Distributor taller, switch to another open workflow tab and back — it used
   to silently snap back to its default height. It doesn't anymore.
+
+## EPS Bypass (shipped)
+
+`EPSNodes → Utilities → EPS Bypass` *(v0.99.0)*: **a pass-through you can switch
+off, so that whatever it feeds behaves as if nothing were connected.** Plug
+anything into it — audio, an image, a model, a mask — and wire its output where
+the original wire used to go. Switch it off and the wire to the node it feeds
+is taken out; switch it on and the wire comes back, to exactly the same place.
+
+The case it was made for: **Load Audio → EPS Bypass → Create Video → Save
+Video.** With the Bypass on, the video gets your audio. Switch it off and
+Create Video *still runs* — it just makes a silent video, the same as if you'd
+never connected any audio. (Create Video's `audio` input is optional, which is
+what makes that possible.)
+
+- **Why not just block it?** A node that blocks its output makes ComfyUI skip
+  everything that depends on it — the video node too, not just the sound. The
+  only way to make the next node run *without* an input is for the wire not to
+  be there, so that is what this node does: switching off unplugs it, switching
+  on plugs it back.
+- **It only works into optional inputs — and says so.** If something it feeds
+  needs the input to run (a Save Audio node, say), switching off is **refused**:
+  the switch snaps back on and a message names the node, so you never queue a
+  run that would fail with "Required input is missing". If several nodes hang
+  off it and even one needs the input, none of them are unplugged — a
+  half-switched-off node would just skip that one silently.
+- **Anything can go through it.** The input starts as `any` and becomes
+  `audio`, `image`, `model`… with the first thing you wire; after that only
+  matching wires connect. A wire to an input that has its own value (like a
+  KSampler's `cfg`) is fine too — switching off hands back that node's own
+  number.
+- **Several outputs are fine.** Everything the Bypass fed is remembered and
+  put back. If something has changed while it was off — a node deleted, an
+  input renamed, or you plugged something else into that socket yourself — that
+  one is skipped (your own wire is never replaced) and a message says how many
+  came back.
+- **You can see it's off.** The toggle reads *off — sends nothing* and so does
+  the output socket.
+- **Wiring something new onto an off Bypass turns it back on** — connecting it
+  is taken as meaning it.
+- **Saved states include the switch.** The Universal State Controller records
+  whether each Bypass is on, and applying a state really unplugs or re-plugs
+  the wire, exactly as clicking the toggle does (and the same refusal applies).
+- **Survives switching workflows, undo and reload.** Which wires were unplugged
+  is kept with the node, so tabbing away and back, undoing, or reopening the
+  workflow leaves an off Bypass off and still able to reconnect. Just opening a
+  workflow never rewires anything.
+- **Copy and paste is safe.** A pasted copy of an off Bypass doesn't remember
+  the original's wires, so switching the copy on can't reach into the nodes the
+  original was feeding.
+- **Not supported (it refuses rather than lose a wire):** an output wired to a
+  legacy Reroute *node* (its input has no name to remember it by) or to a
+  subgraph's own output. Switching off also removes any curved reroute points
+  you added on that wire, so switching on reconnects it straight.
 
 ## EPS Checkpoint Switcher (shipped)
 

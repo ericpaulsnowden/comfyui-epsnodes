@@ -26,6 +26,7 @@ import pytest
 from aiohttp import web
 
 from eps_image import routes_state_registry
+from eps_image.nodes_bypass import EPSBypass
 from eps_image.nodes_checkpoint_switcher import EPSCheckpointSwitcher
 from eps_image.nodes_cross_sweep import EPSCrossSweep
 from eps_image.nodes_distributor import EPSDistributor
@@ -82,12 +83,25 @@ _STATE_BEARING_SPECS: list[tuple[str, type, str]] = [
     ("EPSDistributor", EPSDistributor, "EPS Distributor"),
     ("EPSCheckpointSwitcher", EPSCheckpointSwitcher, "EPS Checkpoint Switcher"),
     ("EPSNumberController", EPSNumberController, "EPS Number Controller"),
+    ("EPSBypass", EPSBypass, "EPS Bypass"),
 ]
 
 #: The COMPLETE closed set of widget kinds (module docstring / §6.16) -- the
-#: frontend implements exactly one generic validator per kind, so a
-#: descriptor naming anything outside this set is a bug, not a new kind.
-_CLOSED_KINDS = {"string", "int", "float", "choice", "lines", "json_array", "json_object"}
+#: frontend implements exactly one generic validator per kind (and so does
+#: `universal_states_store._check_kind`), so a descriptor naming anything
+#: outside this set is a bug, not a new kind. `boolean` joined in v0.99.0 for
+#: EPS Bypass's BOOLEAN `enabled`; adding one means all three places move
+#: together: this set, the store's validator, `validateStateValue`.
+_CLOSED_KINDS = {
+    "string",
+    "int",
+    "float",
+    "choice",
+    "lines",
+    "boolean",
+    "json_array",
+    "json_object",
+}
 
 #: Mirrors `nodes_save_image._iter_widgets`'s exact kind test: a COMBO
 #: (Python list) or one of these four ComfyUI primitive types is a widget;

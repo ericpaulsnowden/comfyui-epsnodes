@@ -202,7 +202,9 @@ const NEW_GROUP_OPTION_LABEL = '＋ New group…'
 /**
  * ONE generic validator for every registry widget "kind" (the closed set:
  * string(max_len), int(min,max), float(min,max), choice(options?), lines,
- * json_array(items), json_object(key_pattern)). Used identically at CAPTURE
+ * boolean, json_array(items), json_object(key_pattern)). `boolean` (v0.99.0)
+ * is the newest: a BOOLEAN toggle's value is a real `true`/`false` and would
+ * fit none of the others -- EPS Bypass's `enabled` is the first user. Used identically at CAPTURE
  * time (registry-only `desc`, no `options`) and at APPLY time for `choice`
  * fields (the caller folds the LIVE widget's resolved options into `desc`
  * first -- see `applyPlan()`). Never throws; always returns `{ok: true}` or
@@ -249,6 +251,12 @@ export function validateStateValue(desc, value) {
       if (typeof desc.max === 'number' && value > desc.max) {
         return { ok: false, error: `above max ${desc.max}` }
       }
+      return { ok: true }
+    }
+    case 'boolean': {
+      // A real boolean only -- never a truthy string/number (`"false"` and
+      // `0` are both wrong here, and a stored `"false"` would apply as ON).
+      if (typeof value !== 'boolean') return { ok: false, error: 'expected a boolean' }
       return { ok: true }
     }
     case 'choice': {

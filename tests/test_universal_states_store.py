@@ -56,6 +56,7 @@ class _Resolution:
             "tags": {"kind": "json_array", "items": "string"},
             "per_loader": {"kind": "json_object", "key_pattern": r"loader_\d+"},
             "anything": {"kind": "json_object"},
+            "toggle": {"kind": "boolean"},
         },
         "excluded": {
             "pinned_state": "provenance from a baked image, not user intent",
@@ -253,6 +254,7 @@ class TestRegistryValidationKnownClass:
                         "tags": ["a", "b"],
                         "per_loader": {"loader_0": {"on": True}},
                         "anything": {"whatever": 1, "nested": [1, 2]},
+                        "toggle": False,
                     },
                 }
             ],
@@ -299,6 +301,24 @@ class TestRegistryValidationKnownClass:
         _register(fake_nodes, "EPSResolution", _Resolution)
         with pytest.raises(store.StateValidationError, match="strength"):
             store.normalize_state(_payload_with_widgets({"strength": False}))
+
+    @pytest.mark.parametrize("value", [True, False])
+    def test_boolean_accepts_a_real_bool_and_keeps_it_a_bool(self, fake_nodes, value) -> None:
+        # v0.99.0's new kind (EPS Bypass's `enabled`). `False` must survive
+        # as `False` -- not be coerced, dropped as "empty", or turned to 0.
+        _register(fake_nodes, "EPSResolution", _Resolution)
+        normalized, _ = store.normalize_state(_payload_with_widgets({"toggle": value}))
+        stored = normalized["nodes"][0]["widgets"]["toggle"]
+        assert stored is value
+
+    @pytest.mark.parametrize("value", [0, 1, "true", "false", None, [], {}])
+    def test_boolean_rejects_everything_that_is_not_a_bool(self, fake_nodes, value) -> None:
+        # A JSON 1 is not a `true` (and `true` is not a 1 -- the int/float
+        # kinds reject bool for the same reason). A stored "false" string
+        # would apply as a truthy ON.
+        _register(fake_nodes, "EPSResolution", _Resolution)
+        with pytest.raises(store.StateValidationError, match="toggle"):
+            store.normalize_state(_payload_with_widgets({"toggle": value}))
 
     def test_choice_accepts_any_string(self, fake_nodes) -> None:
         _register(fake_nodes, "EPSResolution", _Resolution)
@@ -390,6 +410,36 @@ def _payload_with_widgets(widgets: dict) -> dict:
         "name": "x",
         "nodes": [{"class": "EPSResolution", "id": "12", "widgets": widgets}],
     }
+
+
+class TestEPSBypassIsAcceptedByTheStore:
+    """The REAL EPSBypass descriptor, through the REAL validator (not a
+    stand-in): the whole point of adding the `boolean` kind was that this
+    node's `enabled` could be captured, so prove the store takes it -- and
+    keeps refusing the `links` memory, which a state must never carry."""
+
+    def test_enabled_false_round_trips_through_normalize_state(self, fake_nodes) -> None:
+        from eps_image.nodes_bypass import EPSBypass
+
+        _register(fake_nodes, "EPSBypass", EPSBypass)
+        payload = {
+            "name": "audio off",
+            "nodes": [{"class": "EPSBypass", "id": "5", "widgets": {"enabled": False}}],
+        }
+        normalized, foreign = store.normalize_state(payload)
+        assert foreign == []
+        assert normalized["nodes"][0]["widgets"] == {"enabled": False}
+
+    def test_the_links_memory_is_refused_by_name(self, fake_nodes) -> None:
+        from eps_image.nodes_bypass import EPSBypass
+
+        _register(fake_nodes, "EPSBypass", EPSBypass)
+        payload = {
+            "name": "x",
+            "nodes": [{"class": "EPSBypass", "id": "5", "widgets": {"links": "{}"}}],
+        }
+        with pytest.raises(store.StateValidationError, match=r"EPSBypass.*links"):
+            store.normalize_state(payload)
 
 
 class TestForeignClass:

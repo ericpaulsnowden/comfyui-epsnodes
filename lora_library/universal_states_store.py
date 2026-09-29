@@ -225,6 +225,10 @@ def _check_kind(label: str, spec: dict, value: object) -> object:
       widget's valid OPTIONS are machine-specific (installed loras,
       checkpoints, ...), so the registry can't enumerate them here; the
       APPLIER checks against the live widget's options at apply time.
+    - ``boolean`` (v0.99.0): a real ``bool``. Checked with ``isinstance(...,
+      bool)`` -- and ``int``/``float`` above reject ``bool`` explicitly, so
+      the two never blur (a JSON ``1`` is not a ``true``, and ``true`` is not
+      a ``1``). First user: EPS Bypass's ``enabled`` toggle.
     - ``int``/``float``: a non-bool number of the right kind (``bool`` is
       an ``int`` subclass in Python -- rejected explicitly, same guard
       ``sets_store._coerce_float`` uses), optionally bounded by
@@ -252,6 +256,10 @@ def _check_kind(label: str, spec: dict, value: object) -> object:
             raise StateValidationError(
                 f"{label} must be at most {max_len} characters — FORMAT.md §4.3"
             )
+        return value
+    if kind == "boolean":
+        if not isinstance(value, bool):
+            raise StateValidationError(f"{label} must be true or false — FORMAT.md §4.3")
         return value
     if kind == "int":
         if isinstance(value, bool) or not isinstance(value, int):

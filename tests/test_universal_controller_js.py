@@ -135,6 +135,55 @@ out.validateLines = {
   ok: m.validateStateValue({ kind: 'lines' }, 'a\nb\nc'),
   wrongType: m.validateStateValue({ kind: 'lines' }, 5)
 }
+// v0.99.0: the `boolean` kind (EPS Bypass's `enabled` toggle). A real
+// true/false only -- a truthy string/number is a wrong-typed value, not "on".
+out.validateBoolean = {
+  okTrue: m.validateStateValue({ kind: 'boolean' }, true),
+  okFalse: m.validateStateValue({ kind: 'boolean' }, false),
+  stringFalse: m.validateStateValue({ kind: 'boolean' }, 'false'),
+  zero: m.validateStateValue({ kind: 'boolean' }, 0),
+  one: m.validateStateValue({ kind: 'boolean' }, 1),
+  nullValue: m.validateStateValue({ kind: 'boolean' }, null)
+}
+{
+  // A captured `false` must SURVIVE capture (it is not "missing") and be
+  // written back as a real boolean on apply.
+  const boolRegistry = {
+    classes: { EPSBypass: { display: 'EPS Bypass', widgets: { enabled: { kind: 'boolean' } } } }
+  }
+  const captured = m.buildStatePayload(
+    [{ pathId: '7', class: 'EPSBypass', title: 'B', widgetValues: { enabled: false } }],
+    boolRegistry,
+    { nodes: {}, classes: {} }
+  )
+  const badCapture = m.buildStatePayload(
+    [{ pathId: '7', class: 'EPSBypass', title: 'B', widgetValues: { enabled: 'false' } }],
+    boolRegistry,
+    { nodes: {}, classes: {} }
+  )
+  const plan = m.applyPlan(
+    captured.nodes,
+    { '7': { class: 'EPSBypass', widgets: { enabled: { value: true, options: {} } } } },
+    boolRegistry,
+    { nodes: {}, classes: {} }
+  )
+  const badPlan = m.applyPlan(
+    [{ class: 'EPSBypass', id: '7', title: 'B', widgets: { enabled: 'nope' } }],
+    { '7': { class: 'EPSBypass', widgets: { enabled: { value: true, options: {} } } } },
+    boolRegistry,
+    { nodes: {}, classes: {} }
+  )
+  out.booleanRoundTrip = {
+    capturedWidgets: captured.nodes[0].widgets,
+    capturedWarnings: captured.warnings,
+    badCaptureWidgets: badCapture.nodes[0].widgets,
+    badCaptureWarnings: badCapture.warnings,
+    writes: plan.matched[0].writes,
+    invalid: plan.matched[0].invalid,
+    badWrites: badPlan.matched[0].writes,
+    badInvalid: badPlan.matched[0].invalid
+  }
+}
 out.validateJsonArray = {
   ok: m.validateStateValue({ kind: 'json_array', items: 'string' }, ['a', 'b']),
   badItem: m.validateStateValue({ kind: 'json_array', items: 'string' }, ['a', 1]),
@@ -656,6 +705,31 @@ class TestValidateStateValue:
         v = controller_api["validateLines"]
         assert v["ok"] == {"ok": True}
         assert v["wrongType"]["ok"] is False
+
+    def test_boolean_accepts_only_real_booleans(self, controller_api: dict) -> None:
+        """v0.99.0's new kind (EPS Bypass's ``enabled``): ``"false"``, ``0``,
+        ``1`` and ``null`` are all wrong-typed -- a stored ``"false"`` string
+        would otherwise apply as a truthy ON."""
+        v = controller_api["validateBoolean"]
+        assert v["okTrue"] == {"ok": True}
+        assert v["okFalse"] == {"ok": True}
+        for wrong in ("stringFalse", "zero", "one", "nullValue"):
+            assert v[wrong] == {"ok": False, "error": "expected a boolean"}, wrong
+
+    def test_boolean_false_survives_capture_and_applies_as_a_boolean(
+        self, controller_api: dict
+    ) -> None:
+        trip = controller_api["booleanRoundTrip"]
+        # `false` is a VALUE, not a missing widget: it must not be dropped.
+        assert trip["capturedWidgets"] == {"enabled": False}
+        assert trip["capturedWarnings"] == []
+        assert trip["writes"] == [{"name": "enabled", "value": False}]
+        assert trip["invalid"] == []
+        # A wrong-typed value is skipped with a reason, both directions.
+        assert trip["badCaptureWidgets"] == {}
+        assert any("expected a boolean" in w for w in trip["badCaptureWarnings"])
+        assert trip["badWrites"] == []
+        assert trip["badInvalid"] == [{"name": "enabled", "reason": "expected a boolean"}]
 
     def test_json_array_items(self, controller_api: dict) -> None:
         v = controller_api["validateJsonArray"]
