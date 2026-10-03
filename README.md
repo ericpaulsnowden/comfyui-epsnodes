@@ -13,14 +13,14 @@ then pick a folder:
 | **Images** | Image Grid, Save Image, Resolution, Frame Saver |
 | **Prompts** | Prompt Notebook, Prompt Builder |
 | **Controllers** | Number Controller, Universal State Controller |
-| **Utilities** | Node Audit, Distributor, Bypass, Run Multiplier |
+| **Utilities** | Node Audit, Distributor, Bypass, Splat Placement, Run Multiplier |
 | **LoRA** | LoRA Picker, Apply LoRA Set, LoRA Iterator, Lora Loader State Controller |
 | **Switchers** | Image, Model, CLIP, VAE, and Checkpoint Switchers |
 
 Moving a node between folders only changes where it sits in that menu —
 workflows you've already saved are unaffected, and nothing needs updating.
 
-## The twenty-one nodes
+## The twenty-two nodes
 
 No third-party packs required — every node here runs on ComfyUI alone;
 the Lora Loader State Controller is built to extend rgthree-comfy, but only
@@ -43,6 +43,7 @@ section further down; this is the map.
 | [**EPS Model / CLIP / VAE Switcher**](#eps-model--clip--vae-switcher-shipped) | The image Switcher's exact mechanism for models, CLIPs, and VAEs: any number of inputs, each on/off, enabled ones fan out (N enabled → N runs), disabled branches — including their checkpoint loads — never execute. | Nothing — drag-and-drop with core nodes. |
 | [**EPS Distributor**](#eps-distributor-shipped) | The mirror of the Switcher: one image — or one text — in, up to sixteen branches out, each independently on/off. New outputs appear as you wire them up. Toggle a branch off and only that branch is skipped — everything happens in one run. | Nothing — drag-and-drop with core nodes. |
 | [**EPS Bypass**](#eps-bypass-shipped) | Plug anything into it — audio, an image, a model, a mask — and switch it off: whatever it feeds then behaves exactly as if nothing were connected, and the wire comes back when you switch it on. For inputs that are optional (a video node's audio, an optional mask); if what it feeds needs that input, the switch refuses and names the node. The Universal State Controller can save and recall the on/off state. *(v0.99.0)* | Nothing — drag-and-drop with core nodes. |
+| [**EPS Splat Placement**](#eps-splat-placement-shipped) | Makes core **Render Splat** draw a gaussian splat exactly as the 3D viewer (Save Splat, Preview Splat, Load 3D) shows it, by moving, rotating and scaling the splat the way the viewer did. Without it, a splat you fitted to the viewer renders as a dot. *(v0.100.0)* | Core's Get Splat and Render Splat, plus the viewer node's `model_3d_info` and `camera_info`. |
 | [**EPS Node Audit**](#eps-node-audit-shipped) | A plain-language look at what your other installed node packs can reach: their web routes, where they've called out to, and a scan of their code for a few patterns worth knowing about — green/yellow/red per pack, with a verbose toggle for the technical detail. | Nothing — reads whatever else is installed. |
 | [**EPS Number Controller**](#eps-number-controller-shipped) | Every number a workflow uses, kept in one place: named rows, each a plain number box. Wire one into a socket and it quietly becomes the right kind of number for it — whole or decimal. Untick a row and whatever it was plugged into goes back to its own value. The Universal State Controller can save and recall the whole set, including which rows are switched on. | Nothing — drag-and-drop with core nodes. |
 | [**EPS Checkpoint Switcher**](#eps-checkpoint-switcher-shipped) | Tick several checkpoint files in a list; one queue runs the workflow once per ticked checkpoint, with each run's model, CLIP, and VAE kept together and a label for save paths. | Your checkpoint files — drag-and-drop with core nodes. |
@@ -986,6 +987,42 @@ what makes that possible.)
   legacy Reroute *node* (its input has no name to remember it by) or to a
   subgraph's own output. Switching off also removes any curved reroute points
   you added on that wire, so switching on reconnects it straight.
+
+## EPS Splat Placement (shipped)
+
+`EPSNodes → Utilities → EPS Splat Placement` *(v0.100.0)*: **get an image of a
+gaussian splat that matches the 3D preview, in the same run.** ComfyUI's own
+**Render Splat** node turns a splat into an image, and it can take the camera
+from **Save Splat**, **Preview Splat** or **Load 3D** — but on its own the
+result can come out as a tiny dot in the middle of the frame.
+
+**Why the dot happens.** The 3D viewer's **Fit to viewer** button (and the
+move/rotate/scale handles) don't move the camera — they enlarge and move the
+*model*, then frame the camera on the enlarged model. Render Splat gets that
+camera, but draws the splat at its original size. On the test rig, Fit to
+viewer scaled a splat 15×, and Render Splat alone drew it as a few pixels.
+
+**The wiring:**
+
+1. Your splat → **Save Splat** (as before).
+2. Save Splat's `model_3d` → core **Get Splat** → **EPS Splat Placement** → core **Render Splat**'s `splat`.
+3. Save Splat's `model_3d_info` → EPS Splat Placement's `model_3d_info`.
+4. Save Splat's `camera_info`, `width` and `height` → Render Splat.
+
+EPS Splat Placement applies the viewer's move, rotation and scale to the splat
+itself, so Render Splat's camera and the splat agree again. Everything Render
+Splat offers still works — turntable `frames`, clay/depth/normal styles,
+background, mask.
+
+- **It reads the viewer as it is when you press Run.** Set up the preview the
+  way you want it, then run.
+- **It's a re-render, not a screenshot.** Render Splat draws on the server, so
+  the look can differ slightly from the browser preview (its `sharpen` default
+  of 2.0 is crisper than the viewer; 1.0 is closer). Position, size and angle
+  match: on the rig, each part of a test splat overlapped the viewer's own
+  capture by 85–92%, within 4 pixels of 512.
+- **Safe to leave in.** With nothing wired into `model_3d_info`, or a preview
+  that hasn't been moved, the splat passes straight through.
 
 ## EPS Checkpoint Switcher (shipped)
 

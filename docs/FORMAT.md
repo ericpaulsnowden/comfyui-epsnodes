@@ -493,8 +493,8 @@ Route paths are FROZEN once shipped (§8).
 v0.50.1 layout):** a node's `CATEGORY` is a browse-menu path and NOTHING
 else — saved workflows, search, and class ids are untouched by it, so
 category moves are always display-safe and need no migration. Every one of
-the pack's 21 registered nodes now sits in exactly one folder (EPS Bypass joined
-`Utilities` in v0.99.0, §6.18); `EPSNodes`
+the pack's 22 registered nodes now sits in exactly one folder (EPS Bypass joined
+`Utilities` in v0.99.0, §6.18; EPS Splat Placement in v0.100.0, §6.19); `EPSNodes`
 itself holds no loose nodes:
 
 | Folder | Nodes |
@@ -502,7 +502,7 @@ itself holds no loose nodes:
 | `EPSNodes/Images` | Image Grid, Save Image, Resolution, Frame Saver |
 | `EPSNodes/Prompts` | Prompt Notebook, Prompt Builder |
 | `EPSNodes/Controllers` | Number Controller, Universal State Controller (via `universal_controller.js`'s `NODE_CATEGORY`) |
-| `EPSNodes/Utilities` | Node Audit, Distributor, Bypass, Run Multiplier |
+| `EPSNodes/Utilities` | Node Audit, Distributor, Bypass, Splat Placement, Run Multiplier |
 | `EPSNodes/LoRA` | LoRA Picker, Apply LoRA Set, LoRA Iterator, Lora Loader State Controller (via `controller.js`'s `NODE_CATEGORY`) |
 | `EPSNodes/Switchers` | Image/Model/CLIP/VAE (the `nodes_switcher.py` factory's `"CATEGORY"` key), Checkpoint Switcher |
 
@@ -4772,6 +4772,67 @@ Class id `EPSBypass` (FROZEN, §8), category `EPSNodes/Utilities`.
   there is a node between the source and the optional input, when the source
   also feeds other consumers, or when the state has to live in a Universal
   State. Those are the cases this node is for.
+
+## §6.19 `EPSSplatPlacement` (display: "EPS Splat Placement", v0.100.0) — make Render Splat match the 3D preview
+
+**Owner report (2026-10-02).** Save Splat → Get Splat → core Render Splat,
+with Save Splat's `camera_info` feeding Render Splat, worked, but the splat
+"is very small in the center of the image ... almost a dot".
+
+**Cause (frontend 1.52.7 sources, confirmed on the rig).**
+- `SplatModelAdapter.capabilities` sets `fitToViewer: true` and
+  `fitTargetSize: 20`.
+- `SceneModelManager.fitToViewer` (the viewer's Fit to viewer button) and the
+  gizmo transform the MODEL group: it is scaled to a 20-unit box and
+  re-centred, then the camera is reframed on the enlarged model.
+- `load3dSerialize.snapshotLoad3dState` reports both halves at Run time:
+  `camera_info`, and `model_3d_info` (the group's position, quaternion and
+  scale).
+- Core Render Splat reads only the camera, so it draws the raw-sized splat
+  through a camera framed for a model ~20× larger.
+- On the rig, Fit to viewer took the test splat to scale 15.29 at position
+  (-37.05, 11.02, 1.95); Render Splat alone drew it as a 15×15 px speck at
+  512².
+
+**The node.** Required input `splat` (`SPLAT`), optional `model_3d_info`
+(`LOAD3D_MODEL_INFO`), one `SPLAT` output; CATEGORY `EPSNodes/Utilities`.
+Backend only, with no frontend file and no widgets. torch is imported lazily
+(module import stays torch-free, which a test pins).
+
+**Coordinates.**
+- The viewer places the splat as world = T + R S (F p), with F =
+  diag(1, -1, -1). `SplatModelAdapter` turns the splat 180° about X
+  (`splatMesh.quaternion.set(1,0,0,0)`) because splat files are 3DGS Y-down,
+  and the group transform is `model_3d_info`.
+- Render Splat reads world w as splat point F w (`_camera_basis`).
+- So the splat Render Splat needs is p' = F T + (F R F) S p. As a
+  quaternion, F R F is just (w, x, -y, -z).
+- Uniform scale multiplies the gaussian scales and composes the quaternions.
+  Non-uniform scale transforms each covariance by A = (F R F) S and
+  re-decomposes it, the same method as core Transform Splat.
+- Core Transform Splat could not be reused: it takes no `model_3d_info`, and
+  it applies scale AFTER rotation (diag(D) R), while the viewer applies it
+  before (R S).
+- SH colour is not rotated, the same choice as core Transform Splat.
+
+**Passthrough.** An unwired, empty or identity `model_3d_info` returns the
+same splat object. A list takes its first model (a splat viewer holds one).
+Garbled fields fall back to the identity component, and a zero quaternion is
+the identity.
+
+**Verified on the rig (2026-10-02, ComfyUI 0.36.0, frontend 1.52.7).**
+- Setup: Load 3D with an off-origin, axis-coloured test splat, Fit to viewer
+  invoked, and Load 3D's own captured image as the browser ground truth.
+- Render Splat after this node matched the viewer: per-axis colour masks had
+  IoU 0.919 / 0.911 / 0.849, and centroids within 4 px of 512.
+- Render Splat without it: IoU 0.002 (the dot).
+- What remains is the two renderers differing (Spark in the browser, EWA on
+  the server), not placement.
+
+**Tests** (`tests/test_splat_placement.py`) check positions and covariances
+against an independent statement of the viewer model above, for uniform,
+the rig's real fit, and non-uniform. With the F flip removed, all three cases
+fail.
 
 ## §7 Frontend surfaces
 

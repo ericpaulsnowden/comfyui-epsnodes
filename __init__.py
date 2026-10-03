@@ -152,6 +152,7 @@ _NODE_SPECS = [
     ("eps_image.nodes_checkpoint_switcher", "EPSCheckpointSwitcher", "EPS Checkpoint Switcher"),
     ("eps_image.nodes_number_controller", "EPSNumberController", "EPS Number Controller"),
     ("eps_image.nodes_bypass", "EPSBypass", "EPS Bypass"),
+    ("eps_image.nodes_splat_placement", "EPSSplatPlacement", "EPS Splat Placement"),
     ("eps_audit.nodes_audit", "EPSNodeAudit", "EPS Node Audit"),
 ]
 
