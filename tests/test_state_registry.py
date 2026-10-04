@@ -253,6 +253,30 @@ class TestSwitcherPatterns:
         assert len(patterns) == 4
 
 
+# ------------------------------------------------------- EPS Save Image
+
+
+class TestSaveImagePreviewOnly:
+    """v1.0.0: EPS Save Image's `preview_only` toggle is state-capturable via
+    the registry's `boolean` kind (v0.99.0), so one saved state can flip every
+    EPS Save Image between saving and previewing."""
+
+    def test_declares_filename_prefix_and_preview_only(self) -> None:
+        widgets = EPSSaveImage.EPS_STATE_WIDGETS["widgets"]
+        assert set(widgets) == {"filename_prefix", "preview_only"}
+        assert widgets["preview_only"] == {"kind": "boolean"}
+
+    def test_nothing_is_excluded_because_nothing_is_left_over(self) -> None:
+        # images is a socket and run_info is forceInput: both are outside the
+        # completeness universe, so no `excluded` block is needed.
+        assert "excluded" not in EPSSaveImage.EPS_STATE_WIDGETS
+        assert _widget_bearing_inputs(EPSSaveImage) == {"filename_prefix", "preview_only"}
+
+    def test_the_registry_route_collects_the_boolean(self) -> None:
+        registry = collect_state_registry({"EPSSaveImage": EPSSaveImage})
+        assert registry["EPSSaveImage"]["widgets"]["preview_only"] == {"kind": "boolean"}
+
+
 # -------------------------------------------------- out-of-scope nodes
 
 

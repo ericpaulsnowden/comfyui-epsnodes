@@ -29,6 +29,14 @@ TOKEN_CASES = [
     ("pair_01_m1_v2_p1_00003_.png", "m1_v2_p1"),
     ("Neon City_i2_t1_00001_.png", "i2_t1"),
     ("Alpha_t1_00001_.webp", "t1"),
+    # v1.0.0 preview_only: core Preview Image's `_temp_xxxxx` sits between the
+    # token and the counter and must not hide the token.
+    ("Portrait_m2_i1_t3_temp_abcde_00001_.png", "m2_i1_t3"),
+    ("pair_01_m1_v2_p1_temp_qwert_00003_.png", "m1_v2_p1"),
+    ("Alpha_t1_temp_zzzzz_00001_.webp", "t1"),
+    ("plain_temp_abcde_00001_.png", None),  # preview without a token: still none
+    ("Portrait_m2_i1_t3_temp_abc_00001_.png", None),  # not five letters: not ours
+    ("Portrait_m2_i1_t3_temp_ABCDE_00001_.png", None),  # core draws lowercase only
     ("plain_00001_.png", None),
     ("ComfyUI_00001_.png", None),
     ("m2_i1_t3.png", None),  # no counter: not a Save Image file name

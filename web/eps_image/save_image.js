@@ -26,8 +26,15 @@ const SOLO_WIDGET = 'solo_run'
 
 /** The M1 token grammar (nodes_cross_sweep.py `_run_token`): optional
  * `m{N}` (+`_v{M}`), then `p{N}` | `i{N}_t{N}` | `t{N}` -- taken only from
- * the END of the stem, right before Save Image's `_NNNNN_` counter. */
-const TOKEN_AT_END_RE = /(?:^|_)((?:m\d+(?:_v\d+)?_)?(?:p\d+|i\d+_t\d+|t\d+))_\d{5}_?$/
+ * the END of the stem, right before Save Image's `_NNNNN_` counter.
+ *
+ * v1.0.0: a file made with EPS Save Image's `preview_only` switch on carries
+ * core Preview Image's `_temp_xxxxx` (five lowercase letters) between the
+ * token and the counter (`Portrait_m2_i1_t3_temp_abcde_00001_.png`), so that
+ * one optional segment is skipped -- otherwise a dragged-out preview would
+ * silently lose its run token. */
+const TOKEN_AT_END_RE =
+  /(?:^|_)((?:m\d+(?:_v\d+)?_)?(?:p\d+|i\d+_t\d+|t\d+))(?:_temp_[a-z]{5})?_\d{5}_?$/
 
 /**
  * The run token carried by a saved file's name, or null.

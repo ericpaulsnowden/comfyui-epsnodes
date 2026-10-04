@@ -38,6 +38,24 @@ pinning never fails the queue. The ``eps_run`` chunk lists the pinned node
 ids. The lora_library modules are imported lazily inside ``save`` (never at
 module scope, never torch).
 
+**Preview only (v1.0.0, owner request 2026-10-03: "modify the save node so
+it has a preview toggle and can operate like a preview-only node without
+needing to swap nodes").** A BOOLEAN ``preview_only`` widget (default off =
+today's behaviour, byte for byte) turns this node into core's
+``PreviewImage``: it writes to ``folder_paths.get_temp_directory()``,
+reports ``"type": "temp"`` in ``ui.images``, appends ``_temp_`` + five
+random lowercase letters to the prefix and compresses at level 1 -- exactly
+what ``PreviewImage.__init__`` sets (read from the rig's ``nodes.py``). It
+is a TAIL widget (after ``filename_prefix``, FORMAT.md §8), so ``["EPS"]``
+from an older workflow loads with preview off and ``["EPS", true]`` from a
+newer one loads on an older EPS build (a trailing extra value is ignored).
+Everything else is deliberately UNCHANGED in preview mode: the prefix stays
+the base (subfolders and the run token in the file name survive -- the
+drop-fallback in ``web/eps_image/save_image.js`` reads tokens from file
+names), and the provenance bake + PNG metadata still run, so a dropped
+preview recreates its run just like a saved file (core ``PreviewImage``
+embeds metadata too, unless ``--disable-metadata``).
+
 Signature and on-disk behavior otherwise mirror core ``SaveImage``
 (``images`` + ``filename_prefix``, counter naming via
 ``folder_paths.get_save_image_path``, ``OUTPUT_NODE``, ``ui.images``), so
@@ -52,6 +70,8 @@ import copy
 import json
 import logging
 import os
+import random
+import string
 from collections.abc import Iterator
 from datetime import datetime, timezone
 from typing import Any, ClassVar, NamedTuple
@@ -76,6 +96,21 @@ MULTIPLIER_CLASS = "EPSCrossSweep"
 SOLO_WIDGET = "solo_run"
 
 _WIDGET_KINDS = ("STRING", "INT", "FLOAT", "BOOLEAN")
+
+#: The preview toggle (v1.0.0, FORMAT.md §6.14) and the three things core's
+#: ``PreviewImage`` changes relative to ``SaveImage`` (rig ``nodes.py``:
+#: ``output_dir = get_temp_directory()``, ``type = "temp"``,
+#: ``compress_level = 1`` vs Save's 4). Named so a test can pin each.
+PREVIEW_WIDGET = "preview_only"
+OUTPUT_TYPE = "output"
+PREVIEW_TYPE = "temp"
+SAVE_COMPRESS_LEVEL = 4
+PREVIEW_COMPRESS_LEVEL = 1
+#: Strings a hand-built /prompt could carry for a true BOOLEAN. The frontend
+#: always sends a real bool; anything outside this set (and outside bool/int/
+#: float) reads as FALSE = save, because the failure that loses nothing is
+#: the right one (a stray preview would silently not keep the user's file).
+_TRUE_STRINGS = frozenset({"true", "1", "yes", "on"})
 
 
 class PinnedWidget(NamedTuple):
@@ -112,6 +147,37 @@ def parse_run_info(raw: Any) -> dict[str, Any] | None:
     if not isinstance(data, dict) or not isinstance(data.get("token"), str):
         return None
     return data
+
+
+def parse_preview_only(raw: Any) -> bool:
+    """The ``preview_only`` widget as a plain bool. Tolerates the 1-element
+    list a list-taking node would see (:func:`_unwrap`, the same idiom the
+    hidden inputs use -- the boolean may arrive wrapped), a real bool, a
+    number, and the strings in :data:`_TRUE_STRINGS` (a hand-built
+    /prompt). ``None`` (the input is absent in an older or hand-built API
+    prompt -- it is a tail widget in ``optional``) and anything
+    unrecognised mean ``False``: save, never silently preview."""
+    raw = _unwrap(raw)
+    if raw is None:
+        return False
+    if isinstance(raw, bool):
+        return raw
+    if isinstance(raw, (int, float)):
+        return raw != 0
+    if isinstance(raw, str):
+        return raw.strip().lower() in _TRUE_STRINGS
+    logger.warning(
+        "EPS Save Image: %s is %r, not a boolean; saving normally", PREVIEW_WIDGET, raw
+    )
+    return False
+
+
+def _temp_suffix() -> str:
+    """``"_temp_"`` + five random lowercase letters -- core ``PreviewImage``'s
+    ``prefix_append``. Core draws from a hand-typed alphabet that happens
+    to omit ``w``; a plain a-z is what the owner asked for and nothing
+    reads the letters back."""
+    return "_temp_" + "".join(random.choice(string.ascii_lowercase) for _ in range(5))
 
 
 # ------------------------------------------------------------ widget index
@@ -568,7 +634,10 @@ class EPSSaveImage:
     OUTPUT_NODE = True
     RETURN_TYPES = ("IMAGE",)
     RETURN_NAMES = ("images",)
-    OUTPUT_TOOLTIPS = ("The saved images, passed through unchanged (like Save Image).",)
+    OUTPUT_TOOLTIPS = (
+        "The images, passed through unchanged (like Save Image) -- whether "
+        "they were saved or only previewed.",
+    )
     DESCRIPTION = (
         "Save Image with provenance baked in. Wire images and filename_prefix "
         "exactly like the core Save Image node -- and wire EPS Run Multiplier's "
@@ -577,19 +646,35 @@ class EPSSaveImage:
         "Notebook text and Apply LoRA Set rows pinned to the values used: "
         "drop the image onto the canvas and the whole workflow loads ready to "
         "recreate just that one image, exactly, even after the library was "
-        "edited. With run_info unwired it behaves exactly like Save Image."
+        "edited. With run_info unwired it behaves exactly like Save Image. "
+        "Switch preview_only on and it becomes a Preview Image instead: "
+        "nothing goes to your output folder, the images just show on the "
+        "node, so you never have to swap nodes to stop saving."
     )
 
     #: §6.16 state registry (v0.83.0): the widgets a Universal State
     #: Controller may capture/apply, declared next to the parser that owns
     #: their shape. ``images`` is a socket and ``run_info`` is wire-only
-    #: (forceInput); neither appears here.
+    #: (forceInput); neither appears here. ``preview_only`` (v1.0.0) is the
+    #: registry's ``boolean`` kind (v0.99.0, first used by EPS Bypass), so a
+    #: saved state can flip every EPS Save Image between saving and
+    #: previewing at once -- e.g. a "draft" state that previews and a
+    #: "final" state that saves.
     EPS_STATE_WIDGETS: ClassVar[dict[str, Any]] = {
         "format": 1,
         "widgets": {
             "filename_prefix": {"kind": "string", "max_len": 10000},
+            PREVIEW_WIDGET: {"kind": "boolean"},
         },
     }
+
+    #: Core ``PreviewImage`` picks its five random letters ONCE per node
+    #: instance (``__init__``), and ComfyUI keeps one instance per node id,
+    #: so every run of a given node lands in the same ``_temp_xxxxx`` files
+    #: and ``get_save_image_path``'s counter keeps counting up. Created
+    #: lazily (and only for a node that ever previews) so tests and callers
+    #: that skip ``__init__`` still work.
+    _preview_suffix: str | None = None
 
     @classmethod
     def INPUT_TYPES(cls) -> dict[str, Any]:
@@ -624,6 +709,36 @@ class EPSSaveImage:
                         ),
                     },
                 ),
+                # v1.0.0 TAIL widget (FORMAT.md §8: widgets_values restores
+                # POSITIONALLY, so a widget is only ever appended -- here
+                # after filename_prefix, the node's only other widget;
+                # run_info is a forceInput socket and holds no slot).
+                # `optional`, like every tail widget this pack has added
+                # (solo_run, pair_mode, ...): a hand-built API /prompt that
+                # predates the toggle still validates (a missing REQUIRED
+                # input is a hard error) and save() defaults it to False.
+                # `label_on`/`label_off` are the toggle's own text in BOTH
+                # renderers -- the canvas draws them on the toggle, Nodes
+                # 2.0 draws them as the two segments -- so they are short
+                # on purpose, and no frontend code is needed.
+                PREVIEW_WIDGET: (
+                    "BOOLEAN",
+                    {
+                        "default": False,
+                        "label_on": "preview only",
+                        "label_off": "save",
+                        "tooltip": (
+                            "Off (save): write the images to your output "
+                            "folder, exactly like Save Image. On (preview "
+                            "only): don't save -- just show them on the node, "
+                            "like Preview Image. Previews go to ComfyUI's "
+                            "temporary folder, which it empties when it "
+                            "restarts. The workflow is still embedded in the "
+                            "image, so saving one from the preview and "
+                            "dropping it on the canvas still recreates the run."
+                        ),
+                    },
+                ),
             },
             "hidden": {"prompt": "PROMPT", "extra_pnginfo": "EXTRA_PNGINFO"},
         }
@@ -635,6 +750,7 @@ class EPSSaveImage:
         run_info: Any = None,
         prompt: Any = None,
         extra_pnginfo: Any = None,
+        preview_only: Any = False,
     ) -> dict[str, Any]:
         import folder_paths  # ComfyUI's own module; only importable inside ComfyUI
         import numpy as np
@@ -649,6 +765,24 @@ class EPSSaveImage:
             disable_metadata = False
 
         prefix = str(_unwrap(filename_prefix) or "EPS")
+        # v1.0.0: preview_only turns the three things core's PreviewImage
+        # changes relative to SaveImage (rig nodes.py) -- where the file goes
+        # (temp dir), what the frontend is told (type "temp") and how hard it
+        # compresses (level 1) -- plus its `_temp_xxxxx` prefix_append.
+        # NOTHING else forks: the bake, the pins and the PNG chunks below run
+        # identically either way, so a preview stays a faithful provenance
+        # carrier (and the filename keeps `filename_prefix` as its base, so
+        # subfolders and the run token survive).
+        preview = parse_preview_only(preview_only)
+        if preview:
+            if self._preview_suffix is None:
+                self._preview_suffix = _temp_suffix()
+            prefix += self._preview_suffix
+            result_type = PREVIEW_TYPE
+            compress_level = PREVIEW_COMPRESS_LEVEL
+        else:
+            result_type = OUTPUT_TYPE
+            compress_level = SAVE_COMPRESS_LEVEL
         # v0.80.0: every provenance write below is recorded here and
         # reversed in the finally -- the hidden extra_pnginfo objects are
         # shared across all of this queue's mapped save() calls and must
@@ -683,7 +817,12 @@ class EPSSaveImage:
                         info.get("node"),
                     )
 
-            output_dir = folder_paths.get_output_directory()
+            # Resolved here, not above: save mode must never touch
+            # get_temp_directory() (and preview never get_output_directory()).
+            if preview:
+                output_dir = folder_paths.get_temp_directory()
+            else:
+                output_dir = folder_paths.get_output_directory()
             first = images[0]
             full_output_folder, filename, counter, subfolder, _prefix = (
                 folder_paths.get_save_image_path(prefix, output_dir, first.shape[1], first.shape[0])
@@ -707,8 +846,12 @@ class EPSSaveImage:
                             ),
                         )
                 file = f"{filename.replace('%batch_num%', str(batch_number))}_{counter:05}_.png"
-                img.save(os.path.join(full_output_folder, file), pnginfo=metadata, compress_level=4)
-                results.append({"filename": file, "subfolder": subfolder, "type": "output"})
+                img.save(
+                    os.path.join(full_output_folder, file),
+                    pnginfo=metadata,
+                    compress_level=compress_level,
+                )
+                results.append({"filename": file, "subfolder": subfolder, "type": result_type})
                 counter += 1
             return {"ui": {"images": results}, "result": (images,)}
         finally:

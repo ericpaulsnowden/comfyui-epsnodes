@@ -442,6 +442,45 @@ class TestEPSBypassIsAcceptedByTheStore:
             store.normalize_state(payload)
 
 
+class TestEPSSaveImagePreviewIsAcceptedByTheStore:
+    """v1.0.0: the REAL EPSSaveImage descriptor through the REAL validator --
+    `preview_only` is the second user of the `boolean` kind (after EPS
+    Bypass), and a state may only carry a real bool for it."""
+
+    def test_preview_only_true_round_trips_through_normalize_state(self, fake_nodes) -> None:
+        from eps_image.nodes_save_image import EPSSaveImage
+
+        _register(fake_nodes, "EPSSaveImage", EPSSaveImage)
+        payload = {
+            "name": "drafts",
+            "nodes": [
+                {
+                    "class": "EPSSaveImage",
+                    "id": "8",
+                    "widgets": {"filename_prefix": "EPS", "preview_only": True},
+                }
+            ],
+        }
+        normalized, foreign = store.normalize_state(payload)
+        assert foreign == []
+        assert normalized["nodes"][0]["widgets"] == {
+            "filename_prefix": "EPS",
+            "preview_only": True,
+        }
+
+    @pytest.mark.parametrize("bad", [1, 0, "true", None, [True]])
+    def test_a_non_bool_preview_only_is_refused(self, fake_nodes, bad) -> None:
+        from eps_image.nodes_save_image import EPSSaveImage
+
+        _register(fake_nodes, "EPSSaveImage", EPSSaveImage)
+        payload = {
+            "name": "x",
+            "nodes": [{"class": "EPSSaveImage", "id": "8", "widgets": {"preview_only": bad}}],
+        }
+        with pytest.raises(store.StateValidationError, match=r"EPSSaveImage.*preview_only"):
+            store.normalize_state(payload)
+
+
 class TestForeignClass:
     """FORMAT.md §4.3: a class with no registry entry (a future EPSNodes
     build, a third-party pack, or simply not loaded in THIS process) is

@@ -3932,6 +3932,47 @@ onto comfyui and recreate just that image"). Shipped v0.70.0.
   `folder_paths.get_save_image_path`. With `run_info` UNWIRED it IS Save
   Image: the standard `prompt` + `workflow` chunks, nothing baked — a
   drop-in replacement.
+- **Preview only (v1.0.0, owner request 2026-10-03: "modify the save node
+  so it has a preview toggle and can operate like a preview-only node without
+  needing to swap nodes").** A BOOLEAN widget **`preview_only`** (default
+  `false` = every bullet above, unchanged; `label_on` "preview only",
+  `label_off` "save" — short on purpose, Nodes 2.0 draws BOTH as the two
+  halves of one control; no frontend code, the backend widget renders as-is in
+  both renderers). On, the node IS core's `PreviewImage` (its `__init__`,
+  read from the rig's `nodes.py`): the file is written under
+  `folder_paths.get_temp_directory()` (ComfyUI empties it at startup),
+  `ui.images` entries say `"type": "temp"` (so the frontend's `/view` reads
+  the temp dir), `"_temp_" + five random lowercase letters` is appended to the
+  prefix, and PNG `compress_level` is **1** (Save: 4). The five letters are
+  drawn once per node INSTANCE like core — ComfyUI keeps one instance per node
+  id, so every run of a node shares them and the counter keeps counting. The
+  pass-through `images` output is returned in both modes.
+  **Deliberately NOT forked in preview mode:** `filename_prefix` stays the BASE
+  (`shoot/Portrait_m2_i1_t3` → subfolder `shoot` in the temp dir, file
+  `Portrait_m2_i1_t3_temp_abcde_00001_.png` — subfolders and the run token
+  survive, and the §6.14 filename fallback's `TOKEN_AT_END_RE` skips one
+  optional `_temp_[a-z]{5}` before the counter so the token is still read),
+  and the provenance bake, the M3 pins and the PNG metadata (`prompt`,
+  `workflow`, `eps_run`; still honouring `--disable-metadata`) all run
+  exactly as in save mode — core `PreviewImage` embeds metadata too, and a
+  dropped preview must recreate its run just like a saved file. The in-place
+  bake + undo contract holds in both modes.
+  **Compatibility (§8, tail-append law).** `preview_only` is the LAST widget
+  — `widgets_values` = `[filename_prefix, preview_only]`; `run_info` is a
+  forceInput socket and holds no slot — and is declared in `optional`, like
+  every tail widget this pack has added: a hand-built API `/prompt` that
+  predates it still validates (a missing REQUIRED input is a hard error) and
+  `save()` defaults it to `false`. An old workflow `["EPS"]` loads with
+  preview off; a new `["EPS", true]` loads on an older EPS build, whose
+  frontend ignores the trailing extra value. `parse_preview_only` tolerates a
+  1-element list (the `_unwrap` idiom — the boolean may arrive wrapped), a
+  bool, a number and `"true"/"1"/"yes"/"on"`; absent or anything else means
+  SAVE (the failure that loses nothing). `save()` asks for the temp directory
+  only in preview mode and the output directory only in save mode.
+  **§6.16 state registry:** `preview_only` is declared as kind `boolean`
+  (the kind added for §6.18's `enabled`), so one saved Universal State can
+  flip every EPS Save Image between saving and previewing (a "draft" state and
+  a "final" state).
 - **`run_info` (STRING, optional, forceInput)** — the Run Multiplier's new
   tail output (§6.10 v0.70.0): one JSON per run, index-aligned with
   `save_prefix`; core maps this node per run so each file gets ITS run's
@@ -3963,7 +4004,8 @@ onto comfyui and recreate just that image"). Shipped v0.70.0.
   ONCE (§7.5: chained, never replaced); after the frontend has loaded an
   IMAGE file's workflow, `tokenFromFileName` reads the trailing
   `<token>_NNNNN_` grammar (`m{N}` (+`_v{M}`) then `p{N}` | `i{N}_t{N}` |
-  `t{N}`) and `decideFilenameSolo` picks: `baked` (a multiplier already
+  `t{N}`; since v1.0.0 with an optional `_temp_xxxxx` between the token and
+  the counter — a file made with `preview_only` on) and `decideFilenameSolo` picks: `baked` (a multiplier already
   carries that token — leave it), `apply` (exactly one multiplier with an
   empty `solo_run` — set it via value + callback so the readout recomputes,
   toast), `ambiguous` (several unsoloed — toast the token to paste by hand,
@@ -3994,7 +4036,14 @@ onto comfyui and recreate just that image"). Shipped v0.70.0.
   lookup through definitions, baking both chunks, a real PNG round trip
   reading the chunks back, plain-save parity, missing multiplier →
   `baked: false`), `tests/test_save_image_js.py` (token grammar, verdicts,
-  the chained `handleFile` wrap).
+  the chained `handleFile` wrap). v1.0.0 preview: the temp-dir / `type:
+  "temp"` / prefix-suffix / compress-level / list-wrapped-boolean / metadata +
+  bake cases in `tests/test_save_image.py`, the positional-compatibility cases
+  (`["EPS"]` → off, `["EPS", true]` on an older build, short-array padding)
+  there too, the pins-still-bake case in `tests/test_m3_pinning.py`, the
+  `_temp_xxxxx` token cases in `tests/test_save_image_js.py`, and the
+  `boolean` declaration in `tests/test_state_registry.py` +
+  `tests/test_universal_states_store.py`.
 
 ## §6.15 `EPSPromptBuilder` (display: "EPS Prompt Builder") — compose from the Notebook
 
@@ -4098,7 +4147,8 @@ opt-ins, on the owner's word).
   parser — a PURE declarative dict `{format, widgets: {name: {kind,
   ...}}, excluded: {name: reason}}` with a CLOSED kind set (string / int /
   float / choice / lines / boolean / json_array / json_object+key_pattern).
-  `boolean` is the newest (v0.99.0, for §6.18's `enabled`): a real `true`/
+  `boolean` is the newest (v0.99.0, for §6.18's `enabled`; second user
+  v1.0.0, §6.14's `preview_only`): a real `true`/
   `false` only, validated identically in `universal_states_store._check_kind`
   and the frontend's `validateStateValue` (a `1`, `0` or `"false"` is
   rejected in both -- a stored `"false"` string would apply as ON). Adding a

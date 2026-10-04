@@ -183,9 +183,11 @@ class TestWidgetIndex:
         assert m._multiplier_widget_defaults() == m.widget_defaults(EPSCrossSweep)
 
     def test_sockets_and_force_inputs_are_skipped_and_missing_raises(self) -> None:
-        # images = socket, run_info = forceInput -> only filename_prefix serializes
+        # images = socket, run_info = forceInput -> only filename_prefix and the
+        # v1.0.0 tail toggle preview_only serialize
         assert m.widget_index(m.EPSSaveImage, "filename_prefix") == 0
-        assert m.widget_defaults(m.EPSSaveImage) == ["EPS"]
+        assert m.widget_index(m.EPSSaveImage, "preview_only") == 1
+        assert m.widget_defaults(m.EPSSaveImage) == ["EPS", False]
         with pytest.raises(RuntimeError, match="nope"):
             m.widget_index(LoraLibraryNotebook, "nope")
 
@@ -621,6 +623,56 @@ class TestSaveRoundTrip:
         ) == (["portrait text"], ["Portrait"])
         *_, loras_text = LoraLibraryApplySet().apply(set=slug, pinned_state=as_values[3])
         assert loras_text == "detailer_0.8 film_grain_0.4_0.6"
+
+    def test_preview_only_still_bakes_solo_and_pins(
+        self, fake_folder_paths: Path, tmp_path: Path, context: LibraryContext, notebook: Path
+    ) -> None:
+        # v1.0.0: preview_only changes WHERE the file goes (the temp dir, type
+        # "temp"), never what is in it -- a dropped preview recreates its run
+        # byte-faithfully, pins included, exactly like a saved file.
+        temp = tmp_path / "temp"
+        temp.mkdir()
+        sys.modules["folder_paths"].get_temp_directory = lambda: str(temp)
+        slug = _save_set(context)
+        workflow = {
+            "nodes": [
+                {"id": 5, "type": "EPSCrossSweep", "widgets_values": ["shoot", "multiply"]},
+                {
+                    "id": 7,
+                    "type": "LoraLibraryNotebook",
+                    "widgets_values": ["loras.md", "Neg\nPortrait"],
+                },
+                {"id": 9, "type": "LoraLibraryApplySet", "widgets_values": [slug, 1.0, 0, ""]},
+            ]
+        }
+        prompt = {
+            "5": {"class_type": "EPSCrossSweep", "inputs": {"solo_run": ""}},
+            "7": _notebook_prompt(),
+            "9": _apply_set_prompt(slug),
+        }
+        result = m.EPSSaveImage().save(
+            [_image()],
+            filename_prefix="shoot/Portrait_m2_i1_t3",
+            run_info=json.dumps(RUN),
+            prompt=prompt,
+            extra_pnginfo={"workflow": workflow},
+            preview_only=True,
+        )
+        saved = result["ui"]["images"][0]
+        assert saved["type"] == "temp"
+        assert list(fake_folder_paths.iterdir()) == []  # nothing in the output folder
+        png = Image.open(temp / saved["subfolder"] / saved["filename"])
+        baked_wf = json.loads(png.text["workflow"])
+        solo_values = baked_wf["nodes"][0]["widgets_values"]
+        assert solo_values == ["shoot", "multiply", "multiply", "m2_i1_t3"]
+        nb_pin = json.loads(baked_wf["nodes"][1]["widgets_values"][2])
+        assert nb_pin["entries"] == [{"name": "Portrait", "text": "portrait text"}]
+        assert json.loads(baked_wf["nodes"][2]["widgets_values"][3])["slug"] == slug
+        run = json.loads(png.text[m.EPS_RUN_CHUNK])
+        assert run["baked"] is True and run["pinned"] == ["7", "9"]
+        # the caller's shared dicts came out untouched
+        assert prompt["7"]["inputs"]["pinned"] == ""
+        assert prompt["9"]["inputs"]["pinned_state"] == ""
 
     def test_resaving_a_recreated_run_keeps_the_original_pin(
         self, fake_folder_paths: Path, notebook: Path

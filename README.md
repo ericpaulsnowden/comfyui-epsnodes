@@ -50,7 +50,7 @@ section further down; this is the map.
 | [**EPS Resolution**](#eps-resolution-shipped) | Image-first resize + size in one node: target size (with a drag pad), four resize modes, and the original image + both sets of dimensions passed through. Named size presets are shared across your machines — tick several and one Run resizes once per preset. Wire in extra images and they all come out at the same target size in one Run. | Nothing — drag-and-drop with core nodes. |
 | [**EPS Image Grid**](#eps-image-grid-shipped) | Collects images across separate Runs into a buffer that survives restarts, shows them as a thumbnail grid, and fans the whole set out on demand. Add whole batches at once — a multiselect picker, a folder importer, or one big drag. | Nothing — drag-and-drop with core nodes. |
 | [**EPS Run Multiplier**](#eps-run-multiplier-shipped) | Multiplies whatever you wire in: a sweep group (LoRA Iterator, or Checkpoint Switcher with its VAEs) × images × texts, in one node — or just images × texts with no sweep at all — with per-run save paths so big runs land in tidy folders. | Any of: EPS LoRA Iterator / EPS Checkpoint Switcher / EPS Model + VAE Switchers (`models`→`model`, `models_low`→`model_low`, `vaes`→`vae`) on the sweep side; an Image Grid or Image Switcher plus a multi-select Prompt Notebook on the pair side. |
-| [**EPS Save Image**](#eps-save-image-shipped) | Save Image with provenance baked in: wire the Run Multiplier's `run_info` and every saved file carries a workflow already soloed to the run that made it — drop the image onto the canvas to recreate just that one. Without `run_info` it is exactly Save Image. | Nothing — a drop-in for the core Save Image node; `run_info` from EPS Run Multiplier unlocks the recreate-one-image drop. |
+| [**EPS Save Image**](#eps-save-image-shipped) | Save Image with provenance baked in: wire the Run Multiplier's `run_info` and every saved file carries a workflow already soloed to the run that made it — drop the image onto the canvas to recreate just that one. Without `run_info` it is exactly Save Image. A **preview_only** switch (v1.0.0) turns it into a Preview Image — nothing saved — without swapping nodes. | Nothing — a drop-in for the core Save Image node; `run_info` from EPS Run Multiplier unlocks the recreate-one-image drop. |
 | [**EPS Frame Saver**](#eps-frame-saver-shipped) | Loads a video by path — or takes one from a wire — lets you scrub or play to a frame, and outputs that frame as an image. | A video file on the ComfyUI machine, or any `VIDEO` output in the workflow. |
 
 > **Status: pre-release.** Contracts live in
@@ -1404,6 +1404,28 @@ readout reads `Solo m2_i1_t3 — 1 of 24 runs`, and queueing recreates
 exactly that one image (the multiplier is found even inside a subgraph).
 Leave `run_info` unwired and it behaves exactly like Save Image.
 
+**Preview without saving — no node swap (v1.0.0).** Flip the **preview_only**
+switch (the last row on the node: it reads **save** by default, **preview
+only** when on; in the new Nodes 2.0 look it is two buttons) and EPS Save
+Image stops writing to your output folder and just shows the images on the
+node, exactly like the core **Preview Image** node. Flip it back and it saves
+again — same node, same wires, no swapping.
+- **Nothing else changes.** Same inputs, same pass-through `images` output,
+  and the file names still start from your `filename_prefix` (subfolders and
+  the run token included) — with the little `_temp_xxxxx` tag Preview Image
+  adds. The workflow is still embedded in the image, so a preview you
+  right-click and save, then drop on the canvas, recreates its run just like a
+  saved file does.
+- **Where previews live.** In ComfyUI's temporary folder, which ComfyUI empties
+  every time it starts — they are for looking, not keeping. To keep one, flip
+  the switch to **save** and run again.
+- **One switch for every saver.** The switch is part of the Universal State
+  Controller's capture, so a "draft" state with previews on and a "final"
+  state with previews off flip every EPS Save Image in the workflow at once.
+- **Old and new workflows.** A workflow saved before this switch existed loads
+  with it on **save** — nothing about your existing graphs changes. A workflow
+  saved with the switch on still opens on an older EPSNodes, which just ignores
+  the switch and saves as before.
 
 **Recreate one image — exactly (v0.72.0).** Beyond the solo, EPS Save Image
 now pins the **Prompt Notebook text** and the **Apply LoRA Set rows** at
