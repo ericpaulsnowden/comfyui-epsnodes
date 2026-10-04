@@ -28,7 +28,7 @@ const SOLO_WIDGET = 'solo_run'
  * `m{N}` (+`_v{M}`), then `p{N}` | `i{N}_t{N}` | `t{N}` -- taken only from
  * the END of the stem, right before Save Image's `_NNNNN_` counter.
  *
- * v1.0.0: a file made with EPS Save Image's `preview_only` switch on carries
+ * v1.1.0: a file made with EPS Save Image's `preview_only` switch on carries
  * core Preview Image's `_temp_xxxxx` (five lowercase letters) between the
  * token and the counter (`Portrait_m2_i1_t3_temp_abcde_00001_.png`), so that
  * one optional segment is skipped -- otherwise a dragged-out preview would

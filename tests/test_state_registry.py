@@ -257,7 +257,7 @@ class TestSwitcherPatterns:
 
 
 class TestSaveImagePreviewOnly:
-    """v1.0.0: EPS Save Image's `preview_only` toggle is state-capturable via
+    """v1.1.0: EPS Save Image's `preview_only` toggle is state-capturable via
     the registry's `boolean` kind (v0.99.0), so one saved state can flip every
     EPS Save Image between saving and previewing."""
 

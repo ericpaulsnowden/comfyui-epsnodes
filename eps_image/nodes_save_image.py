@@ -38,7 +38,7 @@ pinning never fails the queue. The ``eps_run`` chunk lists the pinned node
 ids. The lora_library modules are imported lazily inside ``save`` (never at
 module scope, never torch).
 
-**Preview only (v1.0.0, owner request 2026-10-03: "modify the save node so
+**Preview only (v1.1.0, owner request 2026-10-03: "modify the save node so
 it has a preview toggle and can operate like a preview-only node without
 needing to swap nodes").** A BOOLEAN ``preview_only`` widget (default off =
 today's behaviour, byte for byte) turns this node into core's
@@ -97,7 +97,7 @@ SOLO_WIDGET = "solo_run"
 
 _WIDGET_KINDS = ("STRING", "INT", "FLOAT", "BOOLEAN")
 
-#: The preview toggle (v1.0.0, FORMAT.md §6.14) and the three things core's
+#: The preview toggle (v1.1.0, FORMAT.md §6.14) and the three things core's
 #: ``PreviewImage`` changes relative to ``SaveImage`` (rig ``nodes.py``:
 #: ``output_dir = get_temp_directory()``, ``type = "temp"``,
 #: ``compress_level = 1`` vs Save's 4). Named so a test can pin each.
@@ -655,7 +655,7 @@ class EPSSaveImage:
     #: §6.16 state registry (v0.83.0): the widgets a Universal State
     #: Controller may capture/apply, declared next to the parser that owns
     #: their shape. ``images`` is a socket and ``run_info`` is wire-only
-    #: (forceInput); neither appears here. ``preview_only`` (v1.0.0) is the
+    #: (forceInput); neither appears here. ``preview_only`` (v1.1.0) is the
     #: registry's ``boolean`` kind (v0.99.0, first used by EPS Bypass), so a
     #: saved state can flip every EPS Save Image between saving and
     #: previewing at once -- e.g. a "draft" state that previews and a
@@ -709,7 +709,7 @@ class EPSSaveImage:
                         ),
                     },
                 ),
-                # v1.0.0 TAIL widget (FORMAT.md §8: widgets_values restores
+                # v1.1.0 TAIL widget (FORMAT.md §8: widgets_values restores
                 # POSITIONALLY, so a widget is only ever appended -- here
                 # after filename_prefix, the node's only other widget;
                 # run_info is a forceInput socket and holds no slot).
@@ -717,16 +717,17 @@ class EPSSaveImage:
                 # (solo_run, pair_mode, ...): a hand-built API /prompt that
                 # predates the toggle still validates (a missing REQUIRED
                 # input is a hard error) and save() defaults it to False.
-                # `label_on`/`label_off` are the toggle's own text in BOTH
-                # renderers -- the canvas draws them on the toggle, Nodes
-                # 2.0 draws them as the two segments -- so they are short
-                # on purpose, and no frontend code is needed.
+                # NO `label_on`/`label_off` (rig 2026-10-03, Nodes 2.0 on
+                # frontend 1.52.7): with labels, Nodes 2.0 draws a two-
+                # segment control whose halves are 69 px at the default
+                # node width (px-5 padding) -- "preview only" needs 88 and
+                # even "preview" needs 75, so it rendered truncated. Without
+                # labels it is a plain on/off switch next to the name
+                # `preview_only`, which reads correctly in both renderers.
                 PREVIEW_WIDGET: (
                     "BOOLEAN",
                     {
                         "default": False,
-                        "label_on": "preview only",
-                        "label_off": "save",
                         "tooltip": (
                             "Off (save): write the images to your output "
                             "folder, exactly like Save Image. On (preview "
@@ -765,7 +766,7 @@ class EPSSaveImage:
             disable_metadata = False
 
         prefix = str(_unwrap(filename_prefix) or "EPS")
-        # v1.0.0: preview_only turns the three things core's PreviewImage
+        # v1.1.0: preview_only turns the three things core's PreviewImage
         # changes relative to SaveImage (rig nodes.py) -- where the file goes
         # (temp dir), what the frontend is told (type "temp") and how hard it
         # compresses (level 1) -- plus its `_temp_xxxxx` prefix_append.

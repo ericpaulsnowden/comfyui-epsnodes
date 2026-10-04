@@ -443,7 +443,7 @@ class TestEPSBypassIsAcceptedByTheStore:
 
 
 class TestEPSSaveImagePreviewIsAcceptedByTheStore:
-    """v1.0.0: the REAL EPSSaveImage descriptor through the REAL validator --
+    """v1.1.0: the REAL EPSSaveImage descriptor through the REAL validator --
     `preview_only` is the second user of the `boolean` kind (after EPS
     Bypass), and a state may only carry a real bool for it."""
 

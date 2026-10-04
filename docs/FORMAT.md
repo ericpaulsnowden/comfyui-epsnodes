@@ -3932,13 +3932,14 @@ onto comfyui and recreate just that image"). Shipped v0.70.0.
   `folder_paths.get_save_image_path`. With `run_info` UNWIRED it IS Save
   Image: the standard `prompt` + `workflow` chunks, nothing baked — a
   drop-in replacement.
-- **Preview only (v1.0.0, owner request 2026-10-03: "modify the save node
+- **Preview only (v1.1.0, owner request 2026-10-03: "modify the save node
   so it has a preview toggle and can operate like a preview-only node without
   needing to swap nodes").** A BOOLEAN widget **`preview_only`** (default
-  `false` = every bullet above, unchanged; `label_on` "preview only",
-  `label_off` "save" — short on purpose, Nodes 2.0 draws BOTH as the two
-  halves of one control; no frontend code, the backend widget renders as-is in
-  both renderers). On, the node IS core's `PreviewImage` (its `__init__`,
+  `false` = every bullet above, unchanged; deliberately NO `label_on`/
+  `label_off`: with labels Nodes 2.0 draws a two-segment control whose 69 px
+  halves truncated "preview only" at the default node width (rig, 2026-10-03),
+  so it is a plain on/off switch named `preview_only` in both renderers; no
+  frontend code). On, the node IS core's `PreviewImage` (its `__init__`,
   read from the rig's `nodes.py`): the file is written under
   `folder_paths.get_temp_directory()` (ComfyUI empties it at startup),
   `ui.images` entries say `"type": "temp"` (so the frontend's `/view` reads
@@ -4004,7 +4005,7 @@ onto comfyui and recreate just that image"). Shipped v0.70.0.
   ONCE (§7.5: chained, never replaced); after the frontend has loaded an
   IMAGE file's workflow, `tokenFromFileName` reads the trailing
   `<token>_NNNNN_` grammar (`m{N}` (+`_v{M}`) then `p{N}` | `i{N}_t{N}` |
-  `t{N}`; since v1.0.0 with an optional `_temp_xxxxx` between the token and
+  `t{N}`; since v1.1.0 with an optional `_temp_xxxxx` between the token and
   the counter — a file made with `preview_only` on) and `decideFilenameSolo` picks: `baked` (a multiplier already
   carries that token — leave it), `apply` (exactly one multiplier with an
   empty `solo_run` — set it via value + callback so the readout recomputes,
@@ -4036,7 +4037,7 @@ onto comfyui and recreate just that image"). Shipped v0.70.0.
   lookup through definitions, baking both chunks, a real PNG round trip
   reading the chunks back, plain-save parity, missing multiplier →
   `baked: false`), `tests/test_save_image_js.py` (token grammar, verdicts,
-  the chained `handleFile` wrap). v1.0.0 preview: the temp-dir / `type:
+  the chained `handleFile` wrap). v1.1.0 preview: the temp-dir / `type:
   "temp"` / prefix-suffix / compress-level / list-wrapped-boolean / metadata +
   bake cases in `tests/test_save_image.py`, the positional-compatibility cases
   (`["EPS"]` → off, `["EPS", true]` on an older build, short-array padding)
@@ -4148,7 +4149,7 @@ opt-ins, on the owner's word).
   ...}}, excluded: {name: reason}}` with a CLOSED kind set (string / int /
   float / choice / lines / boolean / json_array / json_object+key_pattern).
   `boolean` is the newest (v0.99.0, for §6.18's `enabled`; second user
-  v1.0.0, §6.14's `preview_only`): a real `true`/
+  v1.1.0, §6.14's `preview_only`): a real `true`/
   `false` only, validated identically in `universal_states_store._check_kind`
   and the frontend's `validateStateValue` (a `1`, `0` or `"false"` is
   rejected in both -- a stored `"false"` string would apply as ON). Adding a

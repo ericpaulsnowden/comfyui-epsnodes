@@ -222,7 +222,7 @@ class TestSaveRoundTrip:
     def test_class_shape(self) -> None:
         spec = m.EPSSaveImage.INPUT_TYPES()
         assert list(spec["required"]) == ["images", "filename_prefix"]
-        # v1.0.0: preview_only is a TAIL widget, in `optional` like every tail
+        # v1.1.0: preview_only is a TAIL widget, in `optional` like every tail
         # widget this pack has added (a hand-built API prompt that predates it
         # must still validate). run_info is a forceInput socket: no widget slot.
         assert list(spec["optional"]) == ["run_info", "preview_only"]
@@ -234,7 +234,7 @@ class TestSaveRoundTrip:
 
 # ------------------------------------------------------------ preview only
 #
-# v1.0.0 (owner request 2026-10-03, FORMAT.md §6.14): the `preview_only`
+# v1.1.0 (owner request 2026-10-03, FORMAT.md §6.14): the `preview_only`
 # toggle turns EPS Save Image into core's PreviewImage. What "behaves like
 # PreviewImage" means is read from the rig's ComfyUI `nodes.py`:
 #   output_dir = folder_paths.get_temp_directory()
@@ -503,15 +503,16 @@ class TestPreviewOnly:
 
 
 class TestPreviewOnlyWidgetShape:
-    def test_boolean_default_off_with_short_labels(self) -> None:
+    def test_boolean_default_off_with_no_custom_labels(self) -> None:
         kind, options = m.EPSSaveImage.INPUT_TYPES()["optional"]["preview_only"]
         assert kind == "BOOLEAN"
         assert options["default"] is False
-        assert options["label_on"] == "preview only"
-        assert options["label_off"] == "save"
-        # Nodes 2.0 draws BOTH labels as the two halves of one control: keep
-        # them short enough to fit a default-width node.
-        assert max(len(options["label_on"]), len(options["label_off"])) <= 14
+        # Rig 2026-10-03: with label_on/label_off Nodes 2.0 draws a two-
+        # segment control whose 69 px halves truncate "preview only" (88 px)
+        # at the default node width -- a plain switch named preview_only is
+        # what stays readable in both renderers.
+        assert "label_on" not in options
+        assert "label_off" not in options
         assert "preview" in options["tooltip"].lower()
 
     def test_is_the_tail_widget_after_filename_prefix(self) -> None:

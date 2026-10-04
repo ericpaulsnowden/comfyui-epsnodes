@@ -184,7 +184,7 @@ class TestWidgetIndex:
 
     def test_sockets_and_force_inputs_are_skipped_and_missing_raises(self) -> None:
         # images = socket, run_info = forceInput -> only filename_prefix and the
-        # v1.0.0 tail toggle preview_only serialize
+        # v1.1.0 tail toggle preview_only serialize
         assert m.widget_index(m.EPSSaveImage, "filename_prefix") == 0
         assert m.widget_index(m.EPSSaveImage, "preview_only") == 1
         assert m.widget_defaults(m.EPSSaveImage) == ["EPS", False]
@@ -627,7 +627,7 @@ class TestSaveRoundTrip:
     def test_preview_only_still_bakes_solo_and_pins(
         self, fake_folder_paths: Path, tmp_path: Path, context: LibraryContext, notebook: Path
     ) -> None:
-        # v1.0.0: preview_only changes WHERE the file goes (the temp dir, type
+        # v1.1.0: preview_only changes WHERE the file goes (the temp dir, type
         # "temp"), never what is in it -- a dropped preview recreates its run
         # byte-faithfully, pins included, exactly like a saved file.
         temp = tmp_path / "temp"
