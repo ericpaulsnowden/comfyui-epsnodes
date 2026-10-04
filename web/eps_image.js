@@ -1,7 +1,7 @@
 /**
  * @file Entry point for the EPSNodes image-utility frontend (EPS Image Switcher §6.4,
  * EPS Resolution §6.5, EPS Image Grid §6.6, EPS Frame Saver §6.7, EPS
- * Run Multiplier run-count §6.10, EPS Distributor §6.11, EPS Bypass §6.18). ComfyUI auto-imports every
+ * Run Multiplier run-count + broadcast §6.10, EPS Distributor §6.11, EPS Bypass §6.18). ComfyUI auto-imports every
  * top-level `.js` under `WEB_DIRECTORY` (`./web`); this is a SECOND
  * extension alongside `lora_library.js`, so the image nodes' frontend is
  * cleanly separated from the lora family. Each sub-feature is wrapped so one
@@ -19,6 +19,7 @@ import * as crossSweep from './eps_image/cross_sweep.js'
 import * as saveImage from './eps_image/save_image.js'
 import * as numberController from './eps_image/number_controller.js'
 import * as bypass from './eps_image/bypass.js'
+import * as broadcast from './eps_image/broadcast.js'
 
 const PREFIX = '[eps_image]'
 const REPO_URL = 'https://github.com/ericpaulsnowden/comfyui-epsnodes'
@@ -111,6 +112,28 @@ app.registerExtension({
   name: 'eps_image.EPSImageNodes',
   aboutPageBadges: [{ label: 'EPSNodes (image)', url: REPO_URL, icon: 'pi pi-github' }],
 
+  /** Settings > EPSNodes: the Run Multiplier's broadcast switch for
+   * text/image/label (FORMAT.md §6.10 "Broadcast (v1)"; id naming follows
+   * lora_library/settings.js's `EPSNodes.HealModelPaths`). */
+  settings: broadcast.SETTINGS,
+
+  /** Legacy right-click fallback for frontends without `getNodeMenuItems`
+   * (the Photoshop pack's cpsb.js pattern); a no-op on modern frontends. */
+  beforeRegisterNodeDef(nodeType, nodeData) {
+    safely('broadcast.installLegacyMenuFallback', () => broadcast.installLegacyMenuFallback(nodeType, nodeData))
+  },
+
+  /** Modern, Nodes 2.0-safe context-menu hook: "Broadcast: wire now…",
+   * "…remove broadcast wires", "…keep wired" on the Run Multiplier. */
+  getNodeMenuItems(node) {
+    try {
+      return broadcast.getNodeMenuItems(node)
+    } catch (error) {
+      console.warn(PREFIX, 'broadcast.getNodeMenuItems failed', error)
+      return []
+    }
+  },
+
   /** Frontend-only registrations that must run before nodes are created. */
   init() {
     safely('switcher.init', () => switcher.init?.())
@@ -123,6 +146,7 @@ app.registerExtension({
     safely('saveImage.init', () => saveImage.init?.()) // §6.14: filename-token solo on drop
     safely('numberController.init', () => numberController.init?.())
     safely('bypass.init', () => bypass.init?.())
+    safely('broadcast.init', () => broadcast.init?.()) // §6.10: the one canvas after-change listener
   },
 
   /** Fires once per node instance; each attach is a no-op for other types. */

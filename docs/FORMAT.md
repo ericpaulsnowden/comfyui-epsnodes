@@ -3277,6 +3277,325 @@ input, so the real queue may still fail there. A promoted `solo_run`/mode
 widget on a SubgraphNode keeps its value in the frontend's widget store; the
 estimator reads the inner node's own widget.
 
+#### §6.10 Broadcast (v1) — real wires from the multiplier into matching empty inputs
+
+Owner ask 2026-10-03: *"This node broadcasts values across a workflow so you
+don't have to manually hook up nodes over and over again ... build into the
+nodes we have, specifically as an option for the EPS Run Multiplier."* Plan:
+`research/roadmap-eps-broadcast.md` (§1-§4 are the spec; the decisions below
+were made after it and override it). Inspiration, and the lessons taken, are
+in `research/eps-broadcast/use-everywhere-research.md` §10 (ideas only, no
+code).
+
+**Owner decisions (2026-10-03), in force:**
+
+- **Real wires, not virtual links.** Every connection is an ordinary link made
+  with core `node.connect` (and, inside a subgraph, core
+  `SubgraphInput.connect`). Execution, save, undo, the run-count readout,
+  Bypass, Image Grid Collect-only, the Distributor and Save Image's baked
+  workflow need no changes, and a workflow opened without EPS simply has
+  wires.
+- **`text`, `image`, `label`** connect only to inputs with exactly the same
+  NAME and TYPE, behind ONE ComfyUI setting that is OFF by default (below).
+- **Negative-prompt guard: ON.** A `text` input whose node's output feeds
+  (directly) an input named `negative` is never fed. It is enforced
+  CONTINUOUSLY (v1.3.0 rig finding): the planner can only see a `negative`
+  link that exists, and Keep wired feeds a freshly added encoder before the
+  user wires it -- so every real pass also runs `negativeFedTextKeys` over the
+  RECORDED `text` entries and `enforceNegativeGuard` withdraws any whose
+  target now feeds `negative`, adds their keys to `skip` and toasts. Not its
+  own undo step: it rides the user's own edit, so one Ctrl+Z restores both.
+- **WAN pairs:** `model_low` goes to the MODEL input of a node whose TITLE
+  contains "low" (case-insensitive); `model` then skips those; none found =
+  skip with a reason, never a guess. "low" must be a WORD (v1.3.0 review):
+  any non-letter is a boundary, so "KSampler (low noise)", "low_noise" and
+  "sampler-low" match while "Flow Match", "Slow" and "Lowpass" do not -- a
+  plain substring test caught every "Flow ..." node.
+- **`save_prefix`** goes to any STRING input named exactly `filename_prefix`;
+  **`run_info`** to any STRING input named exactly `run_info` (neither is
+  behind the setting; widget-backed or optional is fine for both).
+- **Nested reach (overrides the plan's "one graph only"):** targets inside
+  subgraphs, at any depth below the multiplier's graph.
+
+**Layering (a fix lands in the right file; pins in `tests/`):**
+
+| File | Role | Test file |
+|---|---|---|
+| `web/eps_image/broadcast_plan.js` | PURE planner + record normalise/reconcile + link-index builder. Imports nothing. | `tests/test_broadcast_plan_js.py` |
+| `web/eps_image/broadcast_graph.js` | LIVE: snapshot adapter, apply, remove, withdraw/restore, reconcile, undo wrapper, link-index API. Imports `inputVerdict` from `bypass.js` (never copied) and `walkGraphs`/`walkLiveNodes` from `lora_library/api.js` (unchanged). | `tests/test_broadcast_graph_js.py` |
+| `web/eps_image/broadcast_ui.js` | DOM: the row, the ⋯ popover, the preview dialog + pure helpers. | `tests/test_broadcast_js.py` |
+| `web/eps_image/broadcast.js` | Node glue: row mount, menu, setting, Keep-wired watch, Use Everywhere veto. | `tests/test_broadcast_js.py` |
+| `web/eps_image/cross_sweep.js` | Calls `broadcast.attach(node, state)` / `broadcast.ensureWatch(node)`; sizes the readout box with `state.extraHeight`. | `tests/test_cross_sweep_js.py` |
+| `web/eps_image.js` | Registers `settings`, `getNodeMenuItems`, `beforeRegisterNodeDef` (legacy fallback), `init()`. | `tests/test_broadcast_js.py` |
+
+Tests that load `cross_sweep.js` need the whole reachable module set;
+`tests/served_layout.py` copies it (`CROSS_SWEEP_MODULES`).
+
+**Where it lives in the UI -- NOT a widget.** A compact `📡 Broadcast` row
+(`[Wire now]`, `[⋯]`) is appended INSIDE the existing run-count readout's DOM
+element. No widget is added, so §8's positional `widgets_values` contract and
+the downgrade hazard are untouched. The readout's `addDOMWidget` options now
+carry `hideInPanel: true` (Nodes 2.0's Properties panel lists every widget
+without it). The row's height is `state.extraHeight` (24px; `0` when no row is
+mounted) and `cross_sweep.js`'s `sizeToContent`/`computeSize`/element height
+add it, so nothing is cropped. The `[⋯]` popover and the preview dialog are
+portaled to `document.body`, positioned with `getBoundingClientRect`, dismissed
+on Esc / an outside pointerdown, and while open a capture-phase `document`
+`keydown` listener swallows every key (bare keys otherwise fire ComfyUI's
+global shortcuts from non-text elements; Esc closes). Scroll regions carry
+`data-capture-wheel="true"`. Nothing depends on right-click > Properties, and
+nothing is drawn on the canvas.
+
+**Menu.** `getNodeMenuItems(node)` (extension hook, closures over the node, no
+event/position): `Broadcast: wire now…`, `Broadcast: remove broadcast wires`,
+`Broadcast: keep wired` (`✓` suffix when on). On frontends without the hook
+(`app.collectNodeMenuItems` absent) a `getExtraMenuOptions` fallback is
+installed per node type from `beforeRegisterNodeDef` -- the Photoshop pack's
+`cpsb/menu.js` pattern; the modern frontend invokes BOTH, so exactly one is ever
+active.
+
+**The setting.** `EPSNodes.BroadcastSameNameInputs` (boolean, default `false`),
+category `EPSNodes › Run Multiplier › Broadcast`, name *"Run Multiplier
+broadcast: also connect text, image and label to inputs with the same name"*,
+registered through the extension's `settings` array (`web/eps_image.js`),
+id naming as `EPSNodes.HealModelPaths` (`path_heal.js`). Read fresh on every
+plan (`readSettings()`); a missing store reads `false`; only a real `true`
+enables it. It changes only what is PROPOSED -- the wires are ordinary wires.
+Saved per ComfyUI user, so it is a per-machine switch.
+
+**Records -- `node.properties['Broadcast']`.** Stamped ONLY on the multiplier
+(Use Everywhere stamps every node: research §10 lesson 12). Absent until the
+feature is used; an all-default config REMOVES the property, so a multiplier
+that never used broadcast saves byte-identically. Versioned; an unknown NEWER
+`v` reads as empty rather than being guessed at.
+
+```json
+{
+  "v": 1,
+  "outputs": { "vae": false },          // per-output toggles; absent = ON (default)
+  "keep": false,                        // Keep wired
+  "scope": "graph",                     // placeholder: group scope is a later stage
+  "look": "tucked",                     // placeholder for the rendering stage: tucked | dim | normal
+  "skip": ["model|11|model"],           // "leave alone" keys
+  "wired": [
+    {
+      "key": "model|def:5f1c...|new",   // proposal key (below)
+      "out": "model",                   // output name
+      "kind": "via-new-subgraph-input", // direct | via-existing-subgraph-input | via-new-subgraph-input
+      "to": "3", "input": "model_1",    // landing pathId + input (display / reconcile)
+      "links": [                        // every link this entry made, in creation order
+        { "g": "root",   "n": "3", "i": "model_1", "o": { "m": "model" } },
+        { "g": "5f1c...", "n": "5", "i": "model",   "o": { "s": "<subgraph input uuid>" } }
+      ],
+      "made": [ { "g": "5f1c...", "id": "<subgraph input uuid>", "name": "model_1", "type": "MODEL" } ],
+      "withdrawn": true                 // only while live-output tracking has paused the outer wires
+    }
+  ]
+}
+```
+
+- `g` = graph key: `"root"`, or a subgraph DEFINITION's uuid (so a record
+  survives deleting/adding instances).
+- `n` / `i` = target node id (within graph `g`) and input NAME.
+- `o` = origin: `{"m": <output name>}` = the multiplier (leaves its output
+  slot, which is `RETURN_NAMES.index(name)`), or `{"s": <definition input
+  uuid>}` = an inner link from a subgraph's own input panel (origin id `-10`).
+- Link IDS are never stored (they are not stable); a record is VERIFIED against
+  the live graph (`verifyLinkRecord`): the link must exist, come from the
+  recorded origin, and land on the recorded input.
+- **Proposal keys** (also the `skip` entries): `out|<pathId>|<inputName>` for a
+  direct wire or an existing-subgraph-input landing; `out|def:<definitionId>|new`
+  for a new-subgraph-input proposal (keyed by the DEFINITION).
+- **Reconcile** (`reconcileConfig`) runs on the first pass after a load / paste /
+  undo / tab switch with `manual: false`: a record whose wire no longer comes
+  from this multiplier is DROPPED quietly. In session (`manual: true`) a wire
+  the USER removed or replaced becomes "leave alone" instead; a deleted target
+  node drops the record (nothing to leave alone); a `withdrawn` entry is kept
+  while its targets exist; `made` records pointing at a definition input that
+  no longer exists are dropped. A pasted multiplier's records name the
+  ORIGINAL's targets, whose wires come from the original -- they fail
+  verification and are dropped.
+
+**Planner -- `planBroadcast(snapshot, multiplierPathId, config, settings)`.** Pure
+over a plain snapshot of the root graph + every subgraph DEFINITION (header of
+`broadcast_plan.js` documents the shape; `broadcast_graph.js`'s
+`snapshotFromRoot` builds it, folding `inputVerdict().why` into each input).
+Returns `{multiplier, proposals, skips, conflicts, outputs, error}`.
+
+- **Outputs table** (`BROADCAST_OUTPUTS`, pinned against the backend's
+  `RETURN_NAMES`/`RETURN_TYPES` positionally -- a saved link records the output
+  INDEX): model 0, clip 1, image 2, text 3, save_prefix 4, label 5, vae 6,
+  model_low 7, run_info 8.
+- **Rules:** fill only EMPTY inputs; type-matched outputs go only to REQUIRED,
+  non-widget inputs of exactly that type (`inputVerdict`: `required`; `optional`,
+  `shape` -> skipped as optional; `unknown` -> skipped, never guessed); exact-name
+  outputs match NAME and TYPE and may be widget-backed/optional; never the
+  multiplier or an ANCESTOR (a BFS over the FLATTENED links, across subgraph
+  boundaries both ways: an origin that is a SubgraphNode is entered through its
+  definition's output panel, an origin that is the definition's input panel
+  climbs out through the instance's input); only LIVE outputs (an output is live
+  when its backing input is wired -- model/clip/image/label/vae/model_low -- and
+  text/save_prefix/run_info are always live); two multipliers that could feed
+  the same input -> neither (`conflicts`); never another multiplier's inputs;
+  muted/bypassed nodes ARE linked (cheap and harmless; Use Everywhere's default).
+  A multiplier does not claim an input for an output that is switched off or not
+  live, so one output toggle resolves a conflict.
+- **Skip codes** (`SKIP_CODES`, stable strings): `output-off`, `setting-off`,
+  `output-dead`, `already-wired`, `loop`, `optional`, `unknown-required`,
+  `other-multiplier`, `negative-guard`, `wan-low`, `wan-ambiguous`,
+  `wan-unresolved`, `left-alone` (carries the full `proposal` so the dialog can
+  offer it again), `subgraph-shared`, `subgraph-mixed`, `subgraph-too-deep`,
+  `double-claim`. Rules that make an input "not a candidate at all" (wrong
+  type/name, a widget when a socket was required, a `*` input) stay SILENT so
+  the preview only lists what the user could reasonably have expected.
+- **Proposal** -- `{key, output, outputIndex, kind, targetPathId, inputName,
+  targetTitle, targetClass, reaches[], reachKeys[], instances[], definition,
+  definitions[], newInputName, reuse, steps[]}`. `reaches` = the final inner
+  targets (each with `pathId`, `pathIds` -- one per flattened instance --,
+  `title`, `input`); `reachKeys` = `pathId|input` for every flattened target
+  (the conflict rule's currency).
+- **Steps** (the applier's whole vocabulary): `{op:'add-input', graph, name,
+  valueType, ref}` and `{op:'link', graph, from, to:{node, input}}` where `from`
+  is `{m: output}` (the multiplier), `{ref}` (an input added earlier in THIS
+  proposal) or `{sub: uuid}` (an existing definition input, reuse). Steps are in
+  dependency order: an input exists before anything links from it.
+
+**Nested delivery (owner requirement 2026-10-03).**
+
+- **Tier 1 (preferred, no definition change)** -- `via-existing-subgraph-input`:
+  an EMPTY input on a SubgraphNode instance whose definition input already feeds
+  inner targets (followed through further existing chains). ONE wire, from the
+  multiplier into the instance's input. Fails closed (`subgraph-mixed`) when
+  that input also feeds anything broadcast must not fill.
+- **Tier 2 (definition change)** -- `via-new-subgraph-input`: add an input of
+  the output's type to the definition (named after the output, `_1`/`_2`... when
+  the name is taken -- a user input is never touched), link it to every valid
+  inner target, wire EVERY instance. **Fail closed:** only when EVERY instance of
+  that definition in the whole workflow lives in ONE graph, and that graph is the
+  multiplier's own graph or a definition that is itself being fed. Otherwise
+  `subgraph-shared` ("subgraph used elsewhere -- wire by hand"). Recurses for
+  deeper nesting: each level chains through its SubgraphNode instance (the new
+  input of the parent definition feeds the child instance's new input). One
+  proposal per (definition, output); all-or-nothing for that definition. Mixed
+  routes (an existing input at one level feeding a NEW input deeper) are
+  deliberately not planned.
+- **Reuse:** when a previous broadcast already made an input on that definition
+  for that output (recorded in `made` and still present) new inner targets are
+  linked from IT instead of adding `model_1`, `model_2`...
+- Limits: nesting depth `MAX_NEST_DEPTH` (8), flattened contexts `MAX_CONTEXTS`
+  (256), instances per definition `MAX_ENTRIES` (64), other multipliers
+  considered for conflicts `MAX_OTHER_MULTIPLIERS` (16).
+- Not planned (documented limit): a multiplier that lives INSIDE a subgraph
+  definition used more than once is planned and loop-checked for the instance it
+  was clicked from.
+
+**Apply (`applyProposals`).** One undo step for the whole batch. Each proposal
+is applied step by step; every `link` step re-checks the target input is STILL
+EMPTY (core `connect` would silently REPLACE an occupied input -- the user's wire
+always wins) and VERIFIES the made link (origin and landing); a veto
+(`onConnectInput`), a type refusal, a foreign node that redirected the slot, or
+a taken subgraph-input name rolls THAT proposal back completely (links
+disconnected, added inputs removed) and reports it; the rest still apply. A
+subgraph input is removed only after its inner links are severed one by one:
+core `SubgraphSlot.disconnect()` iterates `linkIds` while each removal splices
+it (skipping every other link). Node ids are compared as STRINGS (1.52.7's
+`NodeId` is a branded string; the subgraph input node is `'-10'`; older
+frontends used the number). The own-change guard `isApplying()` is up for the
+whole batch: the graph watch and the connection hooks ignore our own connects
+and disconnects, which is what keeps them from reading as a manual unplug.
+
+**Undo -- what the 1.52.7 change tracker really does (UNCONFIRMED on the rig).**
+`scripts/changeTracker.ts` is SNAPSHOT based: `captureCanvasState()` serialises
+the whole root graph and pushes the previous state when they differ; undo is
+`app.loadGraphData(previousState)`. It runs on mouseup / keyup / `promptQueued` /
+canvas pointer-up, and NOT from `node.connect`: `LGraph.beforeChange()/
+afterChange()` only call the optional `canvas.onBeforeChange/onAfterChange`
+hooks, which core never assigns, so a programmatic batch would be captured at
+the NEXT user event and folded into whatever that was. The transaction the
+canvas itself uses is `canvas.emitBeforeChange()/emitAfterChange()`, which
+dispatch `litegraph:canvas`; the tracker's document listener turns them into
+`changeCount++` / `--changeCount || captureCanvasState()` (capture is suppressed
+while `changeCount > 0`). `runAsOneUndoStep` therefore does: commit pending
+state (`app.extensionManager.workflow.activeWorkflow.changeTracker.
+captureCanvasState()`), open a transaction, run, close it (ONE capture); it
+falls back to explicit captures before/after when the transaction API is absent.
+The records (`node.properties.Broadcast`) and subgraph DEFINITIONS are part of
+the serialised state, so one Ctrl+Z reverts wires, added subgraph inputs and
+records together -- and after the reload nothing re-wires (below).
+
+**Keep wired (S3).** Per multiplier, default OFF. The graph watch installs
+`onNodeAdded` / `onNodeRemoved` / `onAfterChange` wrappers on EVERY graph
+(`walkGraphs`; subgraph events fire on the subgraph, never the root) as
+STORED-AND-RE-VERIFIED hooks (core restores `graph.onNodeAdded/onNodeRemoved` on
+every subgraph enter/exit and drops a later wrapper -- cross_sweep.js v0.68.1;
+never a one-shot flag), re-verified from `cross_sweep.js`'s recompute and each
+pass. Plus ONE capture-phase `document` listener for `litegraph:canvas`
+`after-change` (a user's link edit goes through the canvas pointer handlers;
+`onAfterChange` does not fire for disconnects -- rig-probed 2026-08-14). Every
+trigger coalesces into ONE pass after a 150 ms debounce; no polling. A pass:
+(1) reconciles (first pass after a rebuild = load semantics, only BASELINES: it
+records which nodes exist and wires nothing; later passes mark a wire the user
+removed/replaced as "leave alone" and toast it); (2) live-output tracking:
+unwiring the multiplier's `vae` input withdraws its vae wires (outer wires only,
+marked `withdrawn`, toast), rewiring restores them (never stomping an input wired
+by hand -- that record is dropped); (3) plans and applies only proposals whose
+landing is a node that did NOT exist at the previous pass, and only `direct` or
+`via-existing-subgraph-input` ones -- a `via-new-subgraph-input` proposal is
+REPORTED (toast "N target(s) inside a subgraph") and never automatic. A pass
+never runs while `app.configuringGraph`, nor while the module is mutating the
+graph. A conflict on a fresh node is toasted once. This is why undo / reload /
+tab switch / paste never fight the user: they recreate nodes, the first pass
+baselines.
+
+**Link index -- the seam for the rendering stage.** Exported from
+`broadcast_graph.js` (and re-exported by `broadcast.js`):
+
+- `broadcastLinkIndex(rootGraph) -> Map<graphKey, Set<linkId>>` -- graphKey is
+  `"root"` or the subgraph definition's uuid; covers the multiplier's outer links
+  in its graph AND the inner links created inside definitions; only links that
+  still VERIFY against their record are included, so a user's own wire onto the
+  same input is never mislabelled. Cached per root graph.
+- `isBroadcastLink(graph, linkId)` -- O(1) once cached; safe per link per frame.
+- `bumpBroadcastEpoch()` -- invalidates the cache. Called after every apply /
+  remove / withdraw / restore / reconcile, on a multiplier's `onConfigure` /
+  `onRemoved`, and on every graph `onNodeRemoved`; the rendering stage may call
+  it too. Link ids are monotonic (never reused), so a stale cache entry is
+  benign.
+- The buildable pure form is `buildLinkIndex(snapshot)` (`broadcast_plan.js`).
+- The records' `look` (`tucked`/`dim`/`normal`) and `scope` are placeholders this
+  stage only stores. Drawing (tucking, dimming, 📡 stubs) and group scope are the
+  next stage; it must use the link-colour owner convention
+  (`LINK_COLOR_OWNER_KEY` / `LINK_COLOR_RESYNC_HOOK`, `distributor.js`) -- this
+  stage never writes `link.color`.
+
+**Use Everywhere good citizen (plan M4).** `node.reject_ue_connection(input)` --
+UE's documented per-node veto hook (research §3.5) -- returns true for the
+multiplier's optional sweep inputs `model`, `clip`, `vae`, `label`, `model_low`.
+Without it a UE broadcaster silently feeds an image x text multiplier's empty
+`model` input at queue time, turning the sweep side on; the readout cannot see it
+because UE's wires exist only during the queue. Our wires are real, so UE sees
+them as connected and leaves those inputs alone.
+
+**Compatibility.** Opt-in: nothing wires on load, paste, undo or a tab switch.
+Old workflows load and save byte-identically (no property until used).
+Workflows saved with broadcast load on older EPS as ordinary wires plus an
+unused property; the subgraph inputs it added are ordinary subgraph inputs. No
+new serialised widget. No version bump in this stage.
+
+**UNCONFIRMED (needs the live rig -- nothing here could be proven from source
+or the fake litegraph in the tests):** that `app.extensionManager.workflow.
+activeWorkflow.changeTracker` is reachable and that one `Ctrl+Z` really reverts
+the whole batch including a definition change; that `Subgraph.addInput` +
+`SubgraphInput.connect` from an extension behave as in the source (instances grow
+the input, the inner link renders and executes -- `graphToPrompt` flattening a
+link into a NEW promoted-widget input especially); that linking a wire into a
+promoted-widget instance input executes with the wire's value; that removing a
+definition input from an extension leaves no stale instance slot; that a manual
+disconnect always emits `litegraph:canvas` `after-change` (the debounced pass
+otherwise catches it on the next event); the row's layout and the popover/dialog
+positioning in BOTH renderers; and `app.rootGraph` being the object `walkGraphs`
+walks on a tab switch.
+
 ### §6.11 `EPSDistributor` (display: "EPS Distributor") — one in, N gated out
 
 **A manual resize was discarded on the next tab switch (§7.9, tab-switch

@@ -302,7 +302,11 @@ class EPSCrossSweep:
         "re-run exactly that one image out of the whole set -- clear it "
         "to run everything again. Wire run_info into EPS Save Image and "
         "every saved file carries its own pre-soloed workflow: drop the "
-        "image onto the canvas to recreate just that one."
+        "image onto the canvas to recreate just that one. "
+        "Broadcast (the Broadcast row on the node, or right-click): previews, "
+        "then connects this node's live outputs into the matching empty "
+        "inputs across the workflow, including inside subgraphs -- real "
+        "wires, one undo step, and nothing happens until you use it."
     )
 
     #: §6.16 state registry (v0.83.0): the widgets a Universal State

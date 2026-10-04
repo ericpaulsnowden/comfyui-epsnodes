@@ -1438,6 +1438,106 @@ multipliers inside subgraphs (and sees outside a subgraph from within one),
 refreshes when anything changes in any subgraph, and shows a `≥` floor with a
 note when a subgraph used several times gets different counts.
 
+### Broadcast (v1) — stop wiring the same outputs over and over
+
+The Run Multiplier can wire itself into your workflow. Its outputs
+(`model`, `clip`, `vae`, `save_prefix`, `run_info`, and `model_low` for WAN
+pairs) are the ones you used to drag by hand into every sampler, text
+encoder, VAE decode and save node — and again whenever you added another.
+**Broadcast** makes those connections for you, as **ordinary, real wires**:
+exactly the wires you would have dragged, so everything else keeps working
+(the run-count readout, EPS Bypass, Save Image provenance, saving and sharing
+the workflow, an API export). **It does nothing until you ask** — an old
+workflow loads exactly as it did, and nothing is ever wired by loading,
+pasting, undoing or switching tabs.
+
+- **Wire now.** Press **Wire now** on the new 📡 row at the bottom of the
+  node (or right-click → *Broadcast: wire now…*). A preview lists every
+  connection it would make, grouped by output (`model → KSampler #12`,
+  `vae → VAE Decode #20`, `save_prefix → Save Image #22`), plus everything it
+  skipped and why. Untick anything you don't want and press **Connect**.
+  **One Ctrl+Z undoes the whole batch.** Unticked rows are remembered as
+  "leave alone" (you can tick them again later from the same preview).
+- **What it will and won't connect.**
+  - It only ever fills **empty** inputs. Your own wires always win; it never
+    replaces one.
+  - `model`, `clip`, `vae` (and `model_low`) go only to **required** inputs of
+    that type. An optional input is a deliberate "use it if you want" — and
+    nodes that grow a new empty slot for every wire (the Switchers, Compose)
+    would otherwise grow forever — so optional inputs are listed as skipped,
+    never filled.
+  - `save_prefix` goes to any text input named exactly `filename_prefix` (Save
+    Image, EPS Save Image, video savers); `run_info` goes to any text input named
+    exactly `run_info` (EPS Save Image).
+  - It never feeds the multiplier itself or anything **upstream** of it (that
+    would be a loop), and never another Run Multiplier's inputs.
+  - An output only broadcasts while it is **live**: `vae` needs the
+    multiplier's `vae` input wired, `model` needs `model`, and so on. A wire
+    from an output with nothing behind it would fail the run (the v0.51.0 check),
+    so it is never made.
+  - Two multipliers that could feed the same input means **neither does** —
+    shown in the preview as a conflict. Switch an output off on one of them
+    (⋯ menu) or wire it by hand.
+  - **WAN high/low pairs:** with `model_low` wired, `model_low` goes to the
+    model input of a node whose **title has the word "low"** in it (any case,
+    e.g. *KSampler (low noise)* or *low_noise* — but not *Flow* or *Slow*), and
+    `model` skips those. If no node is titled that way it tells you and
+    connects nothing — it never guesses which sampler is which. Titles are the
+    whole rule, so give your low-noise sampler a title with "low" in it.
+- **`text`, `image` and `label` — off by default.** These three connect only to
+  an input with **exactly the same name and type** (a CLIP Text Encode's
+  `text` box, an Image Scale's `image`), and only when you turn on **Settings →
+  EPSNodes → Run Multiplier → Broadcast: "Run Multiplier broadcast: also
+  connect text, image and label to inputs with the same name"**. With it on they
+  behave like the others (they appear in the preview and Keep wired feeds
+  them). `text` also never feeds a text box whose encoder goes to a sampler's
+  `negative` input — a plain CLIP Text Encode names its positive and negative
+  boxes the same, so without that guard it would overwrite your negative
+  prompt. The guard keeps watching, too: if `text` was wired into a fresh
+  encoder (Keep wired does this the moment you add one) and you then wire that
+  encoder into a `negative` input, the multiplier takes its text back off with
+  a toast and leaves that box alone from then on. The setting is saved per ComfyUI user, so turn it on once on each
+  machine; it only changes what gets *proposed* — the wires it makes are
+  ordinary wires and behave the same on a machine with it off.
+- **Keep wired** (⋯ menu or right-click, off by default, per multiplier). New
+  and pasted nodes get wired as you add them — a toast names what was
+  connected ("EPS Run Multiplier wired KSampler #31 (model, vae)"). **A wire you
+  unplug stays unplugged**; your own wires are never replaced. Only nodes
+  added *after* you turned it on are touched (inputs that were already empty
+  are **Wire now**'s job), and undo, reload or switching tabs never re-wires
+  anything. If you unwire the multiplier's `vae` input, its `vae` broadcast
+  wires are paused with a toast (they would fail the run), and they come
+  back when you rewire it.
+- **Remove broadcast wires** (⋯ menu or right-click) deletes only the wires the
+  multiplier made and that still run from it — never yours — and the subgraph
+  inputs it added, if nothing else uses them. One Ctrl+Z brings them back.
+- **Inside subgraphs.** Broadcast reaches targets inside subgraphs, at any depth
+  below the multiplier's graph. If a subgraph already has an empty input that
+  feeds a valid target, the multiplier simply wires to that input (nothing in
+  the subgraph changes). Otherwise it can **add an input** to the subgraph
+  (named after the output, e.g. `model`) and wire every copy of the subgraph —
+  but only when *every* use of that subgraph in the workflow sits in the
+  multiplier's own graph (or in a subgraph it is also feeding); otherwise the
+  preview says "subgraph used elsewhere — wire by hand" and does nothing, because
+  a copy left without the new input would fail its run. Adding an input to a
+  subgraph is never automatic: Keep wired will wire a new copy of a subgraph
+  through an input that already exists, but anything that changes a subgraph is
+  only done from **Wire now**, behind the preview.
+- **If you also have Use Everywhere installed.** The Run Multiplier asks Use
+  Everywhere not to feed its optional `model`, `clip`, `vae`, `label` and
+  `model_low` inputs (Use Everywhere's documented opt-out), so a broadcaster
+  elsewhere can't silently switch the sweep side on at queue time. Our wires
+  are real, so Use Everywhere sees them as connected and leaves those inputs
+  alone.
+- **Limits worth knowing.** Whole-workflow scope only (a group-scope option and
+  a way to hide the wires are planned). The preview and the toasts are the
+  record of what was wired; the node keeps a small record of its wires in its
+  own properties (`Broadcast`) so it can remove them later. A workflow saved with
+  broadcast opens fine on an older EPS — the wires are ordinary wires and the
+  record is ignored. If you have a multiplier inside a subgraph that is used
+  more than once, the loop check is made for the copy you clicked from.
+
+
 ## EPS Save Image (shipped)
 
 `EPSNodes → EPS Save Image`: a drop-in for the core **Save Image** node —

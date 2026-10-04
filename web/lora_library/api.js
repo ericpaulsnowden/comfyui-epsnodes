@@ -265,6 +265,16 @@ function nodesOf(graph) {
   return graph?._nodes || graph?.nodes || []
 }
 
+/** ONE graph's own nodes (`_nodes`, or `nodes` on a frontend that renames
+ * it) -- exported (v1.3.0) ONLY for per-graph loops that are themselves
+ * driven by `walkGraphs` (e.g. broadcast_graph.js's snapshot, which keys
+ * every graph separately), so the "never enumerate one graph by hand" guard
+ * (tests/test_nested_reach_guard.py) keeps a single sanctioned accessor. A
+ * whole-workflow node walk must still use `walkLiveNodes`. */
+export function nodesOfGraph(graph) {
+  return nodesOf(graph)
+}
+
 /** True for a SubgraphNode instance (it carries its definition on `.subgraph`,
  * the same test the three walkers use). */
 export function isSubgraphNode(node) {

@@ -41,6 +41,13 @@ def build_layout(
     ``root/scripts`` and return *root* (the cwd to run a probe from).
     *eps_image* / *lora_library* are bare module file names to copy."""
     ext = root / "extensions" / "comfyui-epsnodes"
+    if "cross_sweep.js" in eps_image:
+        # v1.3.0: cross_sweep.js imports broadcast.js, which reaches the
+        # planner/adapter/UI, bypass.js, number_controller.js and
+        # distributor.js -- the set tests/served_layout.py maintains.
+        from served_layout import CROSS_SWEEP_MODULES
+
+        eps_image = tuple(dict.fromkeys((*eps_image, *CROSS_SWEEP_MODULES)))
     for sub, names in (("eps_image", eps_image), ("lora_library", lora_library)):
         (ext / sub).mkdir(parents=True, exist_ok=True)
         for name in names:

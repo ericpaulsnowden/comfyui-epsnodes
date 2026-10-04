@@ -45,6 +45,7 @@ from pathlib import Path
 
 import pytest
 from nested_layout import build_layout, run_probe
+from served_layout import build_served_layout
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 CROSS_SWEEP_JS = REPO_ROOT / "web" / "eps_image" / "cross_sweep.js"
@@ -1690,28 +1691,14 @@ def cross_sweep_api(tmp_path_factory: pytest.TempPathFactory) -> dict:
     dir (see module docstring) and returns its JSON output."""
     layout = tmp_path_factory.mktemp("web_root")
 
-    module_dir = layout / "extensions" / "comfyui-epsnodes" / "eps_image"
-    module_dir.mkdir(parents=True)
-    shutil.copyfile(CROSS_SWEEP_JS, module_dir / "cross_sweep.js")
-    # v1.2.0 nested reach: cross_sweep.js imports the shared boundary
-    # helpers from `../lora_library/api.js` (which pulls `./version.js`), so
-    # a fixture that byte-copies only the one module no longer resolves.
-    library_dir = layout / "extensions" / "comfyui-epsnodes" / "lora_library"
-    library_dir.mkdir(parents=True)
-    for shared in ("api.js", "version.js"):
-        shutil.copyfile(REPO_ROOT / "web" / "lora_library" / shared, library_dir / shared)
-
-    # cross_sweep.js's two imports -- `../../../scripts/api.js` and
-    # `../../../scripts/app.js` -- stubbed exactly as test_picker_js.py
-    # stubs them. Only the pure helpers run here, so no-op stubs suffice;
-    # the relative DEPTH is the load-bearing part.
-    scripts = layout / "scripts"
-    scripts.mkdir(parents=True, exist_ok=True)
-    (scripts / "api.js").write_text(
-        "export const api = { fetchApi: () => {}, addEventListener: () => {} }\n",
-        encoding="utf-8",
-    )
-    (scripts / "app.js").write_text("export const app = {}\n", encoding="utf-8")
+    # cross_sweep.js's two frontend imports -- `../../../scripts/api.js` and
+    # `../../../scripts/app.js` -- are stubbed exactly as test_picker_js.py
+    # stubs them. Only the pure helpers run here, so no-op stubs suffice; the
+    # relative DEPTH is the load-bearing part. Since v1.3.0 cross_sweep.js also
+    # imports the broadcast modules (and, through them, bypass.js / the
+    # lora_library api, which v1.2.0's nested reach imports too):
+    # tests/served_layout.py copies the whole reachable set.
+    build_served_layout(layout)
 
     probe = layout / "probe.mjs"
     probe.write_text(
@@ -3106,7 +3093,11 @@ class MultNode extends FakeNode {
   get readoutClass() { return this.domEl?.children?.[0]?.className ?? null }
 }
 const tick = () => new Promise((resolve) => setTimeout(resolve, 5))
-const marked = (graph, hook) => !!graph[hook]?.__epsRcNodeWatch
+// v1.3.0: the broadcast watch rides the same hooks through the shared
+// api.watchGraphHooks, whose wrappers carry every owner key beneath them
+// (`__epsWatchKeys`) -- so 'ours' means our key is anywhere in the chain top.
+const marked = (graph, hook) =>
+  !!(graph[hook]?.__epsRcNodeWatch || graph[hook]?.__epsWatchKeys?.has('__epsRcNodeWatch'))
 
 // ---- A. multiplier at the ROOT, the change happens INSIDE a subgraph ----------
 {

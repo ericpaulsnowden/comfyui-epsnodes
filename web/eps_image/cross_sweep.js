@@ -32,6 +32,13 @@
  *    count, nested or not). No polling timers of this file's own, no window
  *    listeners (§7.5).
  *
+ * **Broadcast row (v1.3.0, FORMAT.md §6.10 "Broadcast (v1)").** A compact
+ * "📡 Broadcast" row (broadcast.js / broadcast_ui.js) lives INSIDE this same
+ * DOM element -- NOT a new widget, so the positional `widgets_values`
+ * contract is untouched. It adds `state.extraHeight` to every height this
+ * file reports (sizeToContent, computeSize, the element's own height); with
+ * no row mounted `extraHeight` is 0 and every number is exactly what it was.
+ *
  * 2. **Execution toast (the TRUTH).** `run()` `send_sync`s
  *    `eps-run-multiplier-count` `{node, steps, pairs, total}` the moment it
  *    executes -- topologically the first seconds of a queue -- and `init()`
@@ -144,6 +151,7 @@ import {
   walkLiveNodes,
   watchAllGraphs
 } from '../lora_library/api.js'
+import * as broadcast from './broadcast.js'
 
 /** Frozen once shipped -- mirrors the Python node's class id (§6.10/§8). */
 export const CLASS_ID = 'EPSCrossSweep'
@@ -1609,6 +1617,13 @@ function recompute(state, pass) {
   // this is also what arms a SUBGRAPH's own graph (null at nodeCreated).
   // Since v1.2.0 it covers EVERY graph of the workflow in one call.
   if (!pass) installGraphNodeWatch(root)
+  // The broadcast graph-watch (v1.3.0) is re-verified on the same cadence and
+  // for the same reason (core restores the graph hooks on subgraph enter/exit).
+  try {
+    broadcast.ensureWatch(state.node)
+  } catch (error) {
+    console.warn(PREFIX, 'broadcast watch failed', error)
+  }
   const view = readoutViewFor(state, root, pass?.snapshot || snapshotFromGraph(root))
   if (view.text === state.lastText && view.cls === state.lastCls) {
     // Unchanged text can still owe a size pass: the last one may have run
@@ -1676,12 +1691,14 @@ function sizeToContent(state) {
   const needed = Math.max(READOUT_HEIGHT, Math.min(scrollH + 6, READOUT_MAX_HEIGHT))
   if (needed === state.textHeight) return
   const margin = typeof domWidget.margin === 'number' ? domWidget.margin : DOM_WIDGET_MARGIN_FALLBACK
-  const previousOuter = state.textHeight + 2 * margin
+  // `extraHeight` = the broadcast row below the text (0 when it is not mounted).
+  const extra = state.extraHeight || 0
+  const previousOuter = state.textHeight + extra + 2 * margin
   const wasBaselined = state.heightBaselined
   state.heightBaselined = true
   state.textHeight = needed
-  state.outerHeight = needed + 2 * margin
-  state.rootEl.style.height = `${needed}px`
+  state.outerHeight = needed + extra + 2 * margin
+  state.rootEl.style.height = `${needed + extra}px`
   domWidget.computedHeight = state.outerHeight
   if (node?.size && typeof node.setSize === 'function') {
     const floor = typeof node.computeSize === 'function' ? node.computeSize()[1] : 0
@@ -1933,6 +1950,9 @@ export function attach(node) {
       // this object was just seeded with) never does delta math against a
       // baseline it cannot possibly know.
       heightBaselined: false,
+      // The broadcast row's height inside the box (broadcast.js sets it when
+      // the row mounts; 0 = no row, every height below is unchanged).
+      extraHeight: 0,
       lastStamp: 0,
       lastText: null,
       lastCls: null
@@ -1943,6 +1963,9 @@ export function attach(node) {
     installGraphNodeWatch(rootGraphOf(node.graph) || app.graph)
     const domWidget = node.addDOMWidget(READOUT_WIDGET_NAME, READOUT_WIDGET_TYPE, root, {
       hideOnZoom: true,
+      // Nodes 2.0: the right-hand Properties panel lists every widget not
+      // flagged hideInPanel (frontend-contract §2.2 / audit-epsnodes V-10).
+      hideInPanel: true,
       serialize: false, // excludes from the API prompt (utils/executionUtil.ts)
       getMinHeight: () => state.outerHeight,
       getMaxHeight: () => state.outerHeight
@@ -1976,6 +1999,15 @@ export function attach(node) {
       if (widget) widget.callback = wrapWithRecompute(widget.callback, state)
     }
     wireModeVisibility(node)
+
+    // Broadcast (v1.3.0): the row inside this element, the menu-less glue and
+    // the Use Everywhere veto. Its own try/catch: a failure there must leave
+    // the readout (this file's whole job) untouched.
+    try {
+      broadcast.attach(node, state)
+    } catch (error) {
+      console.warn(PREFIX, 'broadcast attach failed', error)
+    }
 
     // First paint now rather than on the first redraw -- a restored
     // workflow's widgets land before nodeCreated returns control, and the
