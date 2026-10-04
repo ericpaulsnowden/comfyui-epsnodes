@@ -1511,6 +1511,36 @@ pasting, undoing or switching tabs.
 - **Remove broadcast wires** (⋯ menu or right-click) deletes only the wires the
   multiplier made and that still run from it — never yours — and the subgraph
   inputs it added, if nothing else uses them. One Ctrl+Z brings them back.
+- **Tucked wires — a clean canvas.** Broadcast wires are real, but a workflow
+  with a dozen samplers and savers would be buried in spaghetti, so by default
+  they are **tucked**: the wire itself is not drawn. Each input the multiplier
+  feeds shows a short stub with a small 📡 instead, so you can still see *which*
+  inputs are fed. A tucked wire comes back — drawn like any other wire — when
+  you **select the multiplier**, when you **select a node it feeds**, or when you
+  right-click empty canvas and choose **Broadcast: show all wires** (a switch for
+  this browser session only; it is not saved, and a fresh page tucks again). The
+  wires are still there the whole time, so nothing about running, saving, undoing
+  or sharing the workflow changes — only what is drawn. Choose **Wires** in the ⋯
+  menu: **Tucked** (the default), **Dim** (drawn very faintly, and at full
+  strength when you select the multiplier or a node it feeds), or **Normal**
+  (exactly as before). It works the same in ComfyUI's classic canvas and in the
+  new node design. A tucked wire is not clickable where it used to be. If your
+  ComfyUI is ever too different for the hide to install, the wires simply show —
+  the canvas gets busy, nothing breaks.
+- **Reach — whole workflow or just my group.** In the ⋯ menu, **Reach** decides
+  which nodes the multiplier may feed. **Whole workflow** (the default) is what
+  broadcast has always done. **Only my group** feeds only nodes inside a *group*
+  (a coloured box on the canvas — select nodes and press Ctrl+G) that also
+  contains the multiplier, and it is judged by where the middle of each node sits
+  — what you see. Put two multipliers in two groups and each one wires only its
+  own pipeline, with no "two multipliers" conflict. A node inside a subgraph
+  counts if the *subgraph node* sits in the group; a subgraph that is used both
+  inside and outside the group is listed as "wire by hand" rather than half-wired.
+  If the multiplier is not in a group at all, Wire now says "not inside a group"
+  and connects nothing. Changing Reach never removes a wire that already exists
+  (use **Remove broadcast wires** for that), and dragging a node into or out of a
+  group changes nothing by itself — press **Wire now** to see what the groups now
+  allow.
 - **Inside subgraphs.** Broadcast reaches targets inside subgraphs, at any depth
   below the multiplier's graph. If a subgraph already has an empty input that
   feeds a valid target, the multiplier simply wires to that input (nothing in
@@ -1529,8 +1559,7 @@ pasting, undoing or switching tabs.
   elsewhere can't silently switch the sweep side on at queue time. Our wires
   are real, so Use Everywhere sees them as connected and leaves those inputs
   alone.
-- **Limits worth knowing.** Whole-workflow scope only (a group-scope option and
-  a way to hide the wires are planned). The preview and the toasts are the
+- **Limits worth knowing.** The preview and the toasts are the
   record of what was wired; the node keeps a small record of its wires in its
   own properties (`Broadcast`) so it can remove them later. A workflow saved with
   broadcast opens fine on an older EPS — the wires are ordinary wires and the

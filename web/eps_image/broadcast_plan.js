@@ -27,9 +27,9 @@
  * **Snapshot shape** (every id a STRING; the adapter stringifies):
  *   {
  *     graphs: {
- *       root: { id: 'root', nodes: {id: Node}, inputs: [], outputs: [] },
+ *       root: { id: 'root', nodes: {id: Node}, inputs: [], outputs: [], groups: [{key, title}] },
  *       '<subgraph uuid>': {
- *         id, name, nodes: {id: Node},
+ *         id, name, nodes: {id: Node}, groups: [{key, title}],
  *         inputs:  [{id: '<slot uuid>', name, type}],            // definition inputs
  *         outputs: [{name, type, origin: {originId, originSlot} | null}]
  *       }
@@ -38,6 +38,7 @@
  *   Node = {
  *     id, classType, title, mode,
  *     subgraphId: null | '<uuid>',          // set on a SubgraphNode INSTANCE
+ *     groups: [groupKey],                   // which of ITS graph's groups hold the node
  *     broadcast: null | <config>,           // multiplier nodes only
  *     inputs:  [{name, type, widget, verdict, defIndex?,
  *                link: null | {id, originId, originSlot}}],
@@ -83,6 +84,12 @@
  *      with a reason, never a guess.
  *   9. Muted/bypassed nodes are linked like any other (cheap, harmless;
  *      Use Everywhere's default).
+ *  10. Reach (FORMAT.md §6.10 "Reach", owner plan M3 2026-10-03): with
+ *      `config.scope === 'group'` a multiplier only claims targets inside a
+ *      GROUP that contains it, in its own graph; a target inside a subgraph is
+ *      decided by the SubgraphNode instance's membership in the multiplier's
+ *      graph. Pure over `node.groups` (the live adapter computes membership
+ *      with core's own centre-containment rule), so it needs no litegraph.
  *
  * **Nested delivery (owner requirement 2026-10-03, overriding the plan's
  * "one graph only").** Targets inside subgraphs at any depth below the
@@ -126,6 +133,15 @@ export const RECORD_VERSION = 1
 
 /** Graph key of the root graph in snapshots and records. */
 export const ROOT_GRAPH_ID = 'root'
+
+/** `config.scope` (FORMAT.md §6.10 "Reach"): 'graph' = the whole workflow
+ * (the default, what v1.3.0 always did), 'group' = only targets inside a group
+ * that contains the multiplier. */
+export const SCOPES = Object.freeze(['graph', 'group'])
+
+/** `config.look` (FORMAT.md §6.10 "Tucked wires"): how broadcast wires are
+ * DRAWN. Read by the rendering stage (broadcast_draw.js), never by the planner. */
+export const LOOKS = Object.freeze(['tucked', 'dim', 'normal'])
 
 /** litegraph's `SUBGRAPH_INPUT_ID` / `SUBGRAPH_OUTPUT_ID` (constants.ts),
  * stringified: the "node ids" of a definition's own input / output panels. */
@@ -184,7 +200,9 @@ export const SKIP_CODES = Object.freeze({
   SUBGRAPH_SHARED: 'subgraph-shared',
   SUBGRAPH_MIXED: 'subgraph-mixed',
   SUBGRAPH_TOO_DEEP: 'subgraph-too-deep',
-  DOUBLE_CLAIM: 'double-claim'
+  DOUBLE_CLAIM: 'double-claim',
+  NO_GROUP: 'no-group',
+  SCOPE_PARTIAL: 'scope-partial'
 })
 
 /** Proposal kinds (the spec's names, verbatim). */
@@ -198,9 +216,8 @@ export const KINDS = Object.freeze({
 // Records (`node.properties.Broadcast`) -- pure normalise / serialise
 // ---------------------------------------------------------------------------
 
-/** A fresh, empty config. `look` is a placeholder the rendering stage reads
- * ('tucked' | 'dim' | 'normal'); `scope` is 'graph' until the group-scope
- * stage lands. */
+/** A fresh, empty config. `look` ('tucked' | 'dim' | 'normal') is read by the
+ * rendering stage; `scope` ('graph' | 'group') by the planner. */
 export function defaultConfig() {
   return { v: RECORD_VERSION, outputs: {}, keep: false, scope: 'graph', look: 'tucked', wired: [], skip: [] }
 }
@@ -268,8 +285,8 @@ export function normalizeConfig(raw) {
     }
   }
   cfg.keep = raw.keep === true
-  if (raw.scope === 'graph') cfg.scope = 'graph'
-  if (['tucked', 'dim', 'normal'].includes(raw.look)) cfg.look = raw.look
+  if (SCOPES.includes(raw.scope)) cfg.scope = raw.scope
+  if (LOOKS.includes(raw.look)) cfg.look = raw.look
   if (Array.isArray(raw.wired)) cfg.wired = raw.wired.map(cleanWiredEntry).filter(Boolean)
   if (Array.isArray(raw.skip)) {
     cfg.skip = [...new Set(raw.skip.filter((k) => typeof k === 'string' && k !== ''))]
@@ -287,7 +304,8 @@ export function serializeConfig(cfg) {
     !clean.keep &&
     clean.wired.length === 0 &&
     clean.skip.length === 0 &&
-    clean.look === 'tucked'
+    clean.look === 'tucked' &&
+    clean.scope === 'graph'
   return isDefault ? null : clean
 }
 
@@ -491,6 +509,49 @@ export function feedsNegative(node) {
 }
 
 // ---------------------------------------------------------------------------
+// Reach (FORMAT.md §6.10 "Reach")
+// ---------------------------------------------------------------------------
+
+/**
+ * The multiplier's Reach for *cfg*: `{mode, inGroup, groups, keys}`. In 'graph'
+ * mode `keys` is null (no filter at all -- exactly the v1.3.0 behaviour). In
+ * 'group' mode `keys` is the Set of group keys, in the multiplier's OWN graph,
+ * that hold the multiplier (`node.groups`, computed by the live adapter from
+ * core's own centre-containment rule); `inGroup` is false when that set is
+ * empty ("not inside a group").
+ */
+export function scopeOf(snapshot, loc, cfg) {
+  if (cfg?.scope !== 'group') return { mode: 'graph', inGroup: true, groups: [], keys: null }
+  const keys = new Set((Array.isArray(loc.node.groups) ? loc.node.groups : []).map(String))
+  const titles = new Map((snapshot.graphs[loc.gid]?.groups || []).map((g) => [String(g.key), g.title || '']))
+  return {
+    mode: 'group',
+    inGroup: keys.size > 0,
+    groups: [...keys].map((key) => ({ key, title: titles.get(key) ?? '' })),
+    keys
+  }
+}
+
+/**
+ * Whether the node at flattened *pathId* is inside the multiplier's Reach: the
+ * decision is made by the node in the MULTIPLIER'S OWN graph that the path
+ * leads through -- the target itself when it lives there, the SubgraphNode
+ * INSTANCE when it is nested (FORMAT.md §6.10: "the instance's membership in
+ * the multiplier's graph decides"). A path that does not run under the
+ * multiplier's context is never in scope.
+ */
+function pathInReach(snapshot, loc, keys, pathId) {
+  let rest = pathId
+  if (loc.prefix) {
+    if (!pathId.startsWith(`${loc.prefix}:`)) return false
+    rest = pathId.slice(loc.prefix.length + 1)
+  }
+  const top = rest.split(':')[0]
+  const holder = snapshot.graphs[loc.gid]?.nodes?.[top]
+  return (holder?.groups || []).some((key) => keys.has(String(key)))
+}
+
+// ---------------------------------------------------------------------------
 // The planner
 // ---------------------------------------------------------------------------
 
@@ -517,6 +578,7 @@ function collectRaw(snapshot, loc, cfgIn, settings) {
   const madeRecords = cfg.wired.flatMap((entry) => entry.made.map((made) => ({ ...made, out: entry.out })))
 
   const result = { proposals: [], skips: [], outputs: [] }
+  const scope = scopeOf(snapshot, loc, cfg)
   /** Names handed out for NEW subgraph inputs this plan, per definition, so
    * two outputs never collide on one definition. */
   const assignedNames = new Map()
@@ -590,6 +652,18 @@ function collectRaw(snapshot, loc, cfgIn, settings) {
   }
 
   // ---------------------------------------------------------------- outputs
+  // Reach 'group' with the multiplier in NO group: nothing is in scope, so say
+  // so once (the dialog shows it as a note) instead of silently planning
+  // nothing -- and claim nothing, so it never blocks another multiplier.
+  if (scope.keys && !scope.inGroup) {
+    pushSkip(
+      SKIP_CODES.NO_GROUP,
+      'Reach is "only my group" but this multiplier is not inside a group — put it (and the nodes it ' +
+        'should feed) in a group, or switch Reach back to the whole workflow'
+    )
+    for (const spec of BROADCAST_OUTPUTS) result.outputs.push({ output: spec.name, state: 'no-group', reason: 'not inside a group' })
+    return { result, loc, cfg, ancestors, scope }
+  }
   for (const spec of BROADCAST_OUTPUTS) {
     const status = { output: spec.name, state: 'on', reason: '' }
     result.outputs.push(status)
@@ -641,9 +715,17 @@ function collectRaw(snapshot, loc, cfgIn, settings) {
       if (input.type !== spec.type) return SILENT
       if (spec.rule === 'exact' && input.name !== spec.exactName) return SILENT
       const paths = entries.map((entry) => joinSegments(entry, suffix, node.id))
+      // Reach (group scope): EVERY flattened copy of the target must be inside
+      // the multiplier's group(s) -- a definition's new input is wired on all
+      // of its instances, so a half-inside subgraph can't be fed (below).
+      let reach = 'in'
+      if (scope.keys) {
+        const inside = paths.filter((path) => pathInReach(snapshot, loc, scope.keys, path)).length
+        reach = inside === paths.length ? 'in' : inside === 0 ? 'out' : 'partial'
+      }
       // 2. other multipliers' inputs are never touched
       if (node.classType === MULTIPLIER_CLASS_ID) {
-        if (paths.includes(loc.pathId)) return SILENT
+        if (paths.includes(loc.pathId) || reach === 'out') return SILENT
         return skipOutcome(
           SKIP_CODES.OTHER_MULTIPLIER,
           'another EPS Run Multiplier — broadcast never feeds a multiplier'
@@ -653,8 +735,12 @@ function collectRaw(snapshot, loc, cfgIn, settings) {
       const low = titleIsLow(node.title) || titles.some(titleIsLow)
       if (spec.name === 'model_low') {
         if (!low) return SILENT
-        lowSeen = true
+        lowSeen = true // seen even when outside the group: "no low sampler exists" would be a lie
       }
+      // 3b. outside the group: not a candidate at all -> SILENT, so a
+      // group-scoped preview lists only what the user could expect (the
+      // plan's `scope` carries the one explanatory line).
+      if (reach === 'out') return SILENT
       // 4. only EMPTY inputs; the user's wire always wins
       const typeRule = spec.rule !== 'exact'
       const verdict = input.verdict
@@ -675,6 +761,15 @@ function collectRaw(snapshot, loc, cfgIn, settings) {
         if (verdict !== 'required') {
           return skipOutcome(SKIP_CODES.UNKNOWN_REQUIRED, "can't tell whether this input is required")
         }
+      }
+      // 5b. half inside the group: only worth saying for an input that would
+      // otherwise be fed (an already-wired / optional one was reported above).
+      if (reach === 'partial') {
+        return skipOutcome(
+          SKIP_CODES.SCOPE_PARTIAL,
+          'this subgraph is used both inside and outside the group — broadcasting into it would also feed ' +
+            'the copy outside, so wire it by hand'
+        )
       }
       // 6. ancestors: feeding one closes a cycle
       if (paths.some((path) => ancestors.has(path))) {
@@ -1043,7 +1138,7 @@ function collectRaw(snapshot, loc, cfgIn, settings) {
     }
   }
 
-  return { result, loc, cfg, ancestors }
+  return { result, loc, cfg, ancestors, scope }
 }
 
 /**
@@ -1058,17 +1153,32 @@ function collectRaw(snapshot, loc, cfgIn, settings) {
  * @returns {{
  *   multiplier: string,
  *   proposals: object[], skips: object[], conflicts: object[], outputs: object[],
+ *   scope: {mode: 'graph'|'group', inGroup: boolean, groups: Array<{key: string, title: string}>},
  *   error: string|null
  * }}
  */
 export function planBroadcast(snapshot, multiplierPathId, config, settings) {
-  const empty = { multiplier: String(multiplierPathId), proposals: [], skips: [], conflicts: [], outputs: [], error: null }
+  const empty = {
+    multiplier: String(multiplierPathId),
+    proposals: [],
+    skips: [],
+    conflicts: [],
+    outputs: [],
+    scope: { mode: 'graph', inGroup: true, groups: [] },
+    error: null
+  }
   const loc = locate(snapshot, multiplierPathId)
   if (!loc || loc.node.classType !== MULTIPLIER_CLASS_ID) {
     return { ...empty, error: `node ${multiplierPathId} is not an ${MULTIPLIER_CLASS_ID} in this snapshot` }
   }
   const raw = collectRaw(snapshot, loc, config, settings)
-  const plan = { ...empty, proposals: raw.result.proposals, skips: raw.result.skips, outputs: raw.result.outputs }
+  const plan = {
+    ...empty,
+    proposals: raw.result.proposals,
+    skips: raw.result.skips,
+    outputs: raw.result.outputs,
+    scope: { mode: raw.scope.mode, inGroup: raw.scope.inGroup, groups: raw.scope.groups }
+  }
 
   // ---- the two-multiplier rule: neither feeds an input both could feed
   const claims = new Map() // reachKey -> [otherMultiplierPathId]
@@ -1231,14 +1341,6 @@ export function reconcileConfig(snapshot, multiplierPathId, cfgIn, { manual = fa
 }
 
 /**
- * The broadcast link index for the rendering stage (FORMAT.md §6.10):
- * `Map<graphKey, Set<linkId>>` over EVERY multiplier in the snapshot -- the
- * outer links in the multiplier's graph AND the inner links this feature
- * created inside subgraph definitions (graphKey 'root' or the definition's
- * uuid). Only links that still verify against their record are included, so
- * a user's own wire onto the same input is never mislabelled.
- */
-/**
  * The negative-prompt guard, enforced CONTINUOUSLY (v1.3.0 rig finding,
  * 2026-10-03): the guard can only see a `negative` link that EXISTS, and a
  * freshly added CLIP Text Encode has none yet -- so Keep wired (or Wire now,
@@ -1259,13 +1361,27 @@ export function negativeFedTextKeys(snapshot, config) {
   return keys
 }
 
-export function buildLinkIndex(snapshot) {
-  const index = new Map()
-  const add = (gid, linkId) => {
+/**
+ * The broadcast link OWNERS for the rendering stage (FORMAT.md §6.10 "Tucked
+ * wires"): `Map<graphKey, Map<linkId, {ownerId, ownerGraph, look, linkGraph}>>` over
+ * EVERY multiplier in the snapshot -- the outer links in the multiplier's graph AND
+ * the inner links this feature created inside subgraph definitions (graphKey
+ * 'root' or the definition's uuid). `ownerId` is the multiplier's node id in
+ * ITS graph `ownerGraph` (a node id is only unique per graph, so the renderer
+ * must compare both before treating "the multiplier is selected" as true);
+ * `look` is that multiplier's `look` (tucked | dim | normal); `linkGraph` is
+ * the key the link itself lives under (so a renderer can tell whether the
+ * multiplier sits in the graph it is drawing without re-deriving the key). Only links that
+ * still verify against their record are included, so a user's own wire onto
+ * the same input is never mislabelled. Withdrawn entries have no outer wire.
+ */
+export function buildLinkOwners(snapshot) {
+  const owners = new Map()
+  const add = (gid, linkId, owner) => {
     if (linkId == null) return
-    const set = index.get(gid) || new Set()
-    set.add(linkId)
-    index.set(gid, set)
+    const map = owners.get(gid) || new Map()
+    map.set(linkId, owner)
+    owners.set(gid, map)
   }
   for (const ctx of allContexts(snapshot)) {
     for (const node of nodesOf(snapshot.graphs[ctx.gid])) {
@@ -1277,10 +1393,28 @@ export function buildLinkIndex(snapshot) {
         if (entry.withdrawn) continue
         for (const record of entry.links) {
           const check = verifyLinkRecord(snapshot, mloc, record, entry.out)
-          if (check.ok) add(record.g, check.linkId)
+          if (check.ok) {
+            add(record.g, check.linkId, {
+              ownerId: String(node.id),
+              ownerGraph: ctx.gid,
+              look: cfg.look,
+              linkGraph: record.g
+            })
+          }
         }
       }
     }
   }
+  return owners
+}
+
+/**
+ * The broadcast link index (FORMAT.md §6.10): `Map<graphKey, Set<linkId>>`,
+ * the id-only view of `buildLinkOwners` (the shape `isBroadcastLink` and the
+ * v1.3.0 consumers already use).
+ */
+export function buildLinkIndex(snapshot) {
+  const index = new Map()
+  for (const [gid, map] of buildLinkOwners(snapshot)) index.set(gid, new Set(map.keys()))
   return index
 }

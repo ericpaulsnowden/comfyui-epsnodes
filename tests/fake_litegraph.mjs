@@ -276,3 +276,137 @@ export const wiredFrom = (node, name) => {
 }
 export const props = (m) => m.properties.Broadcast ?? null
 
+
+// ---------------------------------------------------------------------------
+// Canvas + 2D-context fakes for the LINK-DRAWING stage (broadcast_draw.js,
+// tests/test_broadcast_draw_js.py). They mimic exactly what the stage depends
+// on in 1.52.7 (lib/litegraph/src/LGraphCanvas.ts):
+//  - `renderLink(ctx, a, b, link, skip_border, flow, color, start_dir, end_dir,
+//    {reroute...})` is a PROTOTYPE method; its real body writes the hit-test
+//    state (`link._pos` = the centre marker, `link.path`) on the segment it draws
+//    (`extras.reroute ?? link`) -- the fake does the same, so a tucked (skipped)
+//    wire visibly keeps a stale click target unless the module cleans it;
+//  - `_renderAllLinkSegments` adds EVERY visited link to `renderedPaths`, drawn
+//    or not, and `processMouseDown` hit-tests `renderedPaths` through
+//    `isInRectangle(x, y, _pos[0]-4, _pos[1]-4, 8, 8)` (`hitTest` below);
+//  - selection is `selected_nodes` (id -> node) plus the per-node `selected`
+//    flag, mutated by `select` / `deselect` / `deselectAll` (deselectAll
+//    REPLACES the dictionary, exactly like the real one); a group-child
+//    selection sets only the flag (`selectViaGroup`); `setDirty(fg, bg)` only
+//    records the request;
+//  - link ids are numbers; node ids are strings (1.52.7) or numbers (LEGACY).
+// ---------------------------------------------------------------------------
+
+/** A 2D context that records its drawing calls and honours save/restore of the
+ * state the stage touches. `failOn` makes the named call throw (fail-safe tests). */
+export class FakeCtx {
+  constructor() {
+    this.calls = []
+    this.globalAlpha = 1
+    this.strokeStyle = '#000'
+    this.fillStyle = '#000'
+    this.lineWidth = 1
+    this.lineCap = 'butt'
+    this.font = ''
+    this.textAlign = 'start'
+    this.textBaseline = 'alphabetic'
+    this.failOn = null
+    this.stack = []
+  }
+  rec(name, ...args) {
+    if (this.failOn === name) throw new Error(`ctx.${name} failed on purpose`)
+    this.calls.push([name, ...args])
+  }
+  save() {
+    this.rec('save')
+    this.stack.push({
+      globalAlpha: this.globalAlpha, strokeStyle: this.strokeStyle, fillStyle: this.fillStyle,
+      lineWidth: this.lineWidth, lineCap: this.lineCap, font: this.font, textAlign: this.textAlign, textBaseline: this.textBaseline
+    })
+  }
+  restore() {
+    this.rec('restore')
+    Object.assign(this, this.stack.pop())
+  }
+  beginPath() { this.rec('beginPath') }
+  moveTo(x, y) { this.rec('moveTo', x, y) }
+  lineTo(x, y) { this.rec('lineTo', x, y) }
+  stroke() { this.rec('stroke', this.strokeStyle, this.lineWidth, this.globalAlpha) }
+  fill() { this.rec('fill', this.fillStyle) }
+  arc(x, y, r) { this.rec('arc', x, y, r) }
+  fillText(text, x, y) { this.rec('fillText', text, x, y, this.font) }
+  /** the calls of one kind, e.g. `ctx.of('fillText')` */
+  of(name) { return this.calls.filter((c) => c[0] === name) }
+}
+
+export class FakeCanvas {
+  static link_type_colors = { MODEL: '#B39DDB', VAE: '#FF6E6E', STRING: '#77ccaa' }
+  constructor(graph = null) {
+    this.graph = graph
+    this.selected_nodes = {}
+    this.renderedPaths = new Set()
+    this.low_quality = false
+    this.connections_width = 3
+    this.default_link_color = '#9A9'
+    this.dirtyCalls = []
+    this.drawn = [] // every ORIGINAL renderLink call that really drew
+  }
+  setDirty(fg, bg) { this.dirtyCalls.push([Boolean(fg), Boolean(bg)]) }
+  /** The original: records the call (with the context alpha AT call time) and
+   * writes the hit-test state the way renderLinkDirect does. */
+  renderLink(ctx, a, b, link, skipBorder, flow, color, startDir, endDir, extras = {}) {
+    this.drawn.push({
+      id: link?.id ?? null, alpha: ctx.globalAlpha, flow: flow || 0, reroute: extras.reroute?.id ?? null,
+      a: [...a], b: [...b], startDir, endDir
+    })
+    const segment = extras.reroute ?? link
+    if (segment) {
+      segment._pos = segment._pos || [0, 0]
+      segment._pos[0] = (a[0] + b[0]) / 2
+      segment._pos[1] = (a[1] + b[1]) / 2
+      segment.path = `path:${segment.id}`
+    }
+    return 'drawn'
+  }
+  select(node) { node.selected = true; this.selected_nodes[node.id] = node }
+  deselect(node) { node.selected = false; delete this.selected_nodes[node.id] }
+  deselectAll() {
+    for (const node of Object.values(this.selected_nodes)) node.selected = false
+    this.selected_nodes = {}
+  }
+  /** Selecting a GROUP with "select children" on: the child NODES get `selected = true`
+   * (and join `selectedItems`) but are NOT written into `selected_nodes` (1.52.7 `select()`). */
+  selectViaGroup(node) { node.selected = true }
+  /** `drawConnections`: one renderLink per linked input (input end = `b`), and
+   * every visited link goes into `renderedPaths` whether or not it was drawn. */
+  drawConnections(ctx, graph = this.graph) {
+    this.graph = graph
+    this.renderedPaths.clear()
+    for (const node of graph._nodes) {
+      for (const [i, input] of node.inputs.entries()) {
+        if (input.link == null) continue
+        const link = graph._links.get(input.link)
+        if (!link) continue
+        const origin = graph.getNodeById(link.origin_id)
+        const a = origin ? [origin.pos[0] + 200, origin.pos[1] + 10] : [0, 0]
+        const b = [node.pos[0], node.pos[1] + 10 + 20 * i]
+        this.renderLink(ctx, a, b, link, false, 0, null, 4, 3)
+        this.renderedPaths.add(link)
+      }
+    }
+  }
+  /** `processMouseDown`'s centre-marker test over `renderedPaths`. */
+  hitTest(x, y) {
+    for (const segment of this.renderedPaths) {
+      const centre = segment._pos
+      if (!centre) continue
+      if (x > centre[0] - 4 && x < centre[0] + 4 && y > centre[1] - 4 && y < centre[1] + 4) return segment
+    }
+    return null
+  }
+}
+
+/** Gives every node of *graph* a position (the draw fakes need `pos`). */
+export function layout(graph, step = 300) {
+  graph._nodes.forEach((node, i) => { node.pos = [(i % 4) * step, Math.floor(i / 4) * 200] })
+}

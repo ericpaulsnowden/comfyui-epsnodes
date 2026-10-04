@@ -44,6 +44,15 @@
  * the canvas pointer handlers, which emit it, while `onAfterChange` is
  * unreliable for disconnects (rig-probed 2026-08-14).
  *
+ * **Tucked wires + Reach (plan M3, FORMAT.md §6.10).** The drawing hook lives
+ * in `broadcast_draw.js` (link-level, installed here from `init` / `setup` /
+ * `attach` / every pass -- all idempotent); this file owns the per-multiplier
+ * `look` and `scope` setters, the canvas right-click item "Broadcast: show all
+ * wires" (`getCanvasMenuItems`, with a `getCanvasMenuOptions` fallback for
+ * frontends without the hook) and re-exports the draw module's session switch.
+ * Reach ('group') is a planner decision: `planFor` already hands it the
+ * snapshot with group membership folded in.
+ *
  * **Use Everywhere good citizen (S4, plan M4).** `reject_ue_connection` is
  * UE's documented per-node veto hook (research §3.5). The multiplier's
  * optional sweep inputs return true, so a UE broadcaster can't silently turn
@@ -57,7 +66,9 @@ import { walkGraphs, watchGraphHooks } from '../lora_library/api.js'
 import {
   BROADCAST_OUTPUTS,
   KINDS,
+  LOOKS,
   MULTIPLIER_CLASS_ID,
+  SCOPES,
   allNodePaths,
   outputEnabled,
   planBroadcast
@@ -65,9 +76,12 @@ import {
 import {
   applyProposals,
   broadcastLinkIndex,
+  broadcastLinkOwner,
+  broadcastLinkOwners,
   bumpBroadcastEpoch,
   enforceNegativeGuard,
   findMultipliers,
+  groupsHolding,
   isApplying,
   isBroadcastLink,
   pathIdOf,
@@ -82,6 +96,7 @@ import {
   withdrawOutputWires,
   writeConfig
 } from './broadcast_graph.js'
+import { ensureDrawHooks, getShowAllWires, setShowAllWires } from './broadcast_draw.js'
 import {
   BROADCAST_ROW_HEIGHT,
   buildBroadcastRow,
@@ -99,9 +114,10 @@ const NODE_TITLE = 'EPS Run Multiplier'
 
 /** Re-exported for the rendering stage (FORMAT.md §6.10 "Broadcast link
  * index"): `broadcastLinkIndex(rootGraph)` -> `Map<graphKey, Set<linkId>>`,
- * `isBroadcastLink(graph, linkId)`, and `bumpBroadcastEpoch()` to invalidate
- * the cache. */
-export { broadcastLinkIndex, bumpBroadcastEpoch, isBroadcastLink }
+ * `isBroadcastLink(graph, linkId)`, `broadcastLinkOwner(graph, linkId)` (tucked-wires stage:
+ * the owning multiplier + its `look`) and `bumpBroadcastEpoch()` to invalidate
+ * the cache -- plus the draw module's session switch. */
+export { broadcastLinkIndex, broadcastLinkOwner, bumpBroadcastEpoch, getShowAllWires, isBroadcastLink, setShowAllWires }
 
 /** The ONE ComfyUI setting (owner decision 2026-10-03): text, image and label
  * connect only to inputs with exactly the same NAME and TYPE, and only when
@@ -238,7 +254,8 @@ export function refreshRow(node) {
       live: liveOutputNames(node, cfg, readSettings()),
       wired: cfg.wired.filter((entry) => !entry.withdrawn).length,
       paused: cfg.wired.filter((entry) => entry.withdrawn).length,
-      keep: cfg.keep
+      keep: cfg.keep,
+      scope: cfg.scope
     })
     if (text === state.lastRowText) return
     state.lastRowText = text
@@ -389,6 +406,76 @@ export function setKeep(node, on) {
   )
 }
 
+/** Repaints the link layer (the canvas, not just this node: the wires are
+ * drawn on the background layer). */
+function repaintCanvas(node) {
+  try {
+    const canvas = app.canvas
+    if (typeof canvas?.setDirty === 'function') canvas.setDirty(true, true)
+    else node.graph?.setDirtyCanvas?.(true, true)
+  } catch (error) {
+    console.warn(PREFIX, 'repaint failed', error)
+  }
+}
+
+/**
+ * How broadcast wires are DRAWN (FORMAT.md §6.10 "Tucked wires"): `tucked`
+ * (default: not drawn, a stub + 📡 at each fed input), `dim` or `normal`. One
+ * undo step; the default stores nothing (an all-default config removes the
+ * property). The link index caches each wire's owner AND its look, so the cache
+ * is invalidated here -- without it the old look would keep drawing.
+ */
+export function setLook(node, look) {
+  if (!LOOKS.includes(look)) return
+  runAsOneUndoStep(() => {
+    const cfg = readConfig(node)
+    cfg.look = look
+    writeConfig(node, cfg)
+  })
+  bumpBroadcastEpoch()
+  ensureDrawHooks()
+  refreshRow(node)
+  repaintCanvas(node)
+}
+
+/**
+ * Reach (FORMAT.md §6.10 "Reach"): `graph` (the whole workflow, default) or
+ * `group` (only nodes inside a group that contains this multiplier). One undo
+ * step. Wires already made are NEVER removed by changing Reach -- "Remove
+ * broadcast wires" is the tool for that -- so a switch is always safe; it only
+ * changes what Wire now / Keep wired will propose next. Toasts when "only my
+ * group" has nothing in reach yet.
+ */
+export function setScope(node, scope) {
+  if (!SCOPES.includes(scope)) return
+  runAsOneUndoStep(() => {
+    const cfg = readConfig(node)
+    cfg.scope = scope
+    writeConfig(node, cfg)
+  })
+  refreshRow(node)
+  if (scope !== 'group') return
+  const holding = groupsHolding(node)
+  if (holding.length === 0) {
+    toast(
+      node,
+      'warn',
+      `${NODE_TITLE}: not inside a group`,
+      'Reach is “only my group”, but this multiplier is not in a group, so nothing is in reach yet. ' +
+        'Select it and the nodes it should feed and press Ctrl+G, or switch Reach back to the whole workflow.',
+      9000
+    )
+  } else {
+    toast(
+      node,
+      'info',
+      `${NODE_TITLE}: reach is “only my group”`,
+      `Broadcast now feeds only nodes inside ${holding.map((g) => `“${g.title || 'untitled group'}”`).join(', ')}. ` +
+        'Wires already made stay. Wire now previews what would be added.'
+    )
+  }
+}
+
 function openOptions(node, anchorEl) {
   if (isPopoverOpenFor(anchorEl)) {
     closePopover() // the ⋯ button toggles
@@ -407,8 +494,12 @@ function openOptions(node, anchorEl) {
       settingOn: settings.exactNames
     })),
     keep: cfg.keep,
+    look: cfg.look,
+    scope: cfg.scope,
     onToggleOutput: (name, on) => setOutputEnabled(node, name, on),
     onToggleKeep: (on) => setKeep(node, on),
+    onSetLook: (look) => setLook(node, look),
+    onSetScope: (scope) => setScope(node, scope),
     onWire: () => wireNow(node),
     onRemove: () => removeWires(node)
   })
@@ -455,6 +546,77 @@ export function installLegacyMenuFallback(nodeType, nodeData) {
     }
     return result
   }
+}
+
+// ---------------------------------------------------------------------------
+// Canvas context menu: "Broadcast: show all wires" (session-only)
+// ---------------------------------------------------------------------------
+
+/** The root graph the editor shows right now, or null. */
+function currentRoot() {
+  try {
+    return app.rootGraph ?? app.graph?.rootGraph ?? app.graph ?? null
+  } catch {
+    return null
+  }
+}
+
+/**
+ * The canvas right-click item (extension hook `getCanvasMenuItems(canvas)`,
+ * the Nodes 2.0-safe route: no event, no position, closures only). One item,
+ * "Broadcast: show all wires" (`✓` suffix while on): the SESSION-ONLY switch
+ * that draws every tucked wire (FORMAT.md §6.10 "Tucked wires"; never saved --
+ * a fresh page tucks again). It is offered only while there is something to
+ * show (a workflow with broadcast wires), or while the switch is already on,
+ * so it can always be turned off again; every other canvas menu stays clean.
+ * @param {object} [_canvas] the canvas the menu opened on (unused)
+ */
+export function getCanvasMenuItems(_canvas) {
+  const on = getShowAllWires()
+  const root = currentRoot()
+  if (!on && !(root && broadcastLinkOwners(root).size > 0)) return []
+  return [
+    {
+      content: on ? 'Broadcast: show all wires ✓' : 'Broadcast: show all wires',
+      callback: () => setShowAllWires(!getShowAllWires())
+    }
+  ]
+}
+
+const LEGACY_CANVAS_PATCH_FLAG = '__epsBroadcastCanvasMenuPatched'
+
+/**
+ * Fallback for frontends WITHOUT the declarative `getCanvasMenuItems` hook --
+ * the same pattern as `installLegacyMenuFallback` above and the Photoshop
+ * pack's cpsb/menu.js: wrap `LGraphCanvas.prototype.getCanvasMenuOptions`.
+ * `app.collectCanvasMenuItems` exists only on frontends that support the hook
+ * (1.52.7's `useContextMenuTranslation` calls it AND the legacy wrapper, so
+ * registering both would duplicate the item), which is the gate. Idempotent.
+ * @param {Function} [canvasClass] defaults to the global `LGraphCanvas`
+ * @returns {boolean} whether the wrapper is installed after the call
+ */
+export function installLegacyCanvasMenuFallback(canvasClass) {
+  if (typeof app.collectCanvasMenuItems === 'function') return false
+  const cls = canvasClass ?? (typeof LGraphCanvas === 'undefined' ? undefined : LGraphCanvas)
+  const proto = cls?.prototype
+  if (!proto || typeof proto.getCanvasMenuOptions !== 'function') return false
+  if (proto[LEGACY_CANVAS_PATCH_FLAG]) return true
+  proto[LEGACY_CANVAS_PATCH_FLAG] = true
+  const original = proto.getCanvasMenuOptions
+  proto.getCanvasMenuOptions = function () {
+    const options = original.apply(this, arguments)
+    try {
+      const items = getCanvasMenuItems(this)
+      if (items.length && Array.isArray(options)) {
+        if (options.length) options.push(null)
+        options.push(...items)
+      }
+    } catch (error) {
+      console.warn(PREFIX, 'canvas menu item failed', error)
+    }
+    return options
+  }
+  return true
 }
 
 // ---------------------------------------------------------------------------
@@ -550,6 +712,7 @@ function isCurrentRoot(root) {
 function runPass() {
   if (isApplying()) return
   if (app.configuringGraph) return // a load / undo / tab switch: attach() schedules its own baseline
+  ensureDrawHooks() // re-verify (the selection callback can be replaced by another extension)
   for (const node of [...multipliers]) {
     if (!node.graph || !isCurrentRoot(rootGraphOf(node))) {
       multipliers.delete(node)
@@ -690,6 +853,11 @@ let initialised = false
 
 /** One-time, page-level: the single canvas after-change listener. */
 export function init() {
+  // Idempotent and cheap, so it also runs when init() itself is called again:
+  // the canvas may not have existed the first time (older frontends create it
+  // after `init`), and `setup()` / every multiplier's `attach` call it too.
+  ensureDrawHooks()
+  installLegacyCanvasMenuFallback()
   if (initialised) return
   initialised = true
   if (typeof document === 'undefined') return
@@ -703,6 +871,33 @@ export function init() {
     },
     true
   )
+}
+
+/** Extension `setup()` (the canvas certainly exists): (re)installs the link
+ * drawing hooks and the legacy canvas-menu fallback. Idempotent. */
+export function setup() {
+  ensureDrawHooks()
+  installLegacyCanvasMenuFallback()
+}
+
+/**
+ * Extension `afterConfigureGraph()`: a whole workflow was just loaded (open,
+ * undo/redo, tab switch, drop). The link index is cached per ROOT graph object,
+ * and ComfyUI re-configures the SAME root graph for a new workflow while link
+ * ids restart at 1 -- so a workflow with no multiplier at all (nothing here
+ * would otherwise be told) must still drop the previous workflow's cached
+ * records, or a stale "link 7 is a broadcast wire" would TUCK an innocent wire
+ * of the new workflow. A multiplier's own `onConfigure` already bumps; this
+ * covers the graphs that have none.
+ */
+export function afterConfigure() {
+  bumpBroadcastEpoch()
+  ensureDrawHooks()
+  try {
+    app.canvas?.setDirty?.(true, true)
+  } catch (error) {
+    console.warn(PREFIX, 'repaint failed', error)
+  }
 }
 
 /**
@@ -735,6 +930,7 @@ export function attach(node, readout) {
     }
 
     multipliers.add(node)
+    ensureDrawHooks() // a multiplier exists: the canvas does too
     if (readout?.rootEl) mountRow(state, readout)
 
     const originalConnections = node.onConnectionsChange

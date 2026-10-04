@@ -1,7 +1,7 @@
 /**
  * @file Entry point for the EPSNodes image-utility frontend (EPS Image Switcher §6.4,
  * EPS Resolution §6.5, EPS Image Grid §6.6, EPS Frame Saver §6.7, EPS
- * Run Multiplier run-count + broadcast §6.10, EPS Distributor §6.11, EPS Bypass §6.18). ComfyUI auto-imports every
+ * Run Multiplier run-count + broadcast §6.10 (incl. tucked wires + reach), EPS Distributor §6.11, EPS Bypass §6.18). ComfyUI auto-imports every
  * top-level `.js` under `WEB_DIRECTORY` (`./web`); this is a SECOND
  * extension alongside `lora_library.js`, so the image nodes' frontend is
  * cleanly separated from the lora family. Each sub-feature is wrapped so one
@@ -132,6 +132,30 @@ app.registerExtension({
       console.warn(PREFIX, 'broadcast.getNodeMenuItems failed', error)
       return []
     }
+  },
+
+  /** Modern, Nodes 2.0-safe CANVAS context-menu hook: "Broadcast: show all
+   * wires" (session-only; FORMAT.md §6.10 "Tucked wires"). Frontends without
+   * it get the `getCanvasMenuOptions` fallback `broadcast.init()` installs. */
+  getCanvasMenuItems(canvas) {
+    try {
+      return broadcast.getCanvasMenuItems(canvas)
+    } catch (error) {
+      console.warn(PREFIX, 'broadcast.getCanvasMenuItems failed', error)
+      return []
+    }
+  },
+
+  /** The canvas exists by now: (re)install broadcast's link-drawing hooks
+   * (idempotent; `init()` and every multiplier's attach do the same). */
+  setup() {
+    safely('broadcast.setup', () => broadcast.setup?.())
+  },
+
+  /** A whole workflow was just (re)loaded onto the same root graph: drop
+   * broadcast's cached link index, whose ids belong to the previous one. */
+  afterConfigureGraph() {
+    safely('broadcast.afterConfigure', () => broadcast.afterConfigure?.())
   },
 
   /** Frontend-only registrations that must run before nodes are created. */

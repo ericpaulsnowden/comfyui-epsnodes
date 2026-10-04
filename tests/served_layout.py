@@ -9,7 +9,8 @@ frontend scripts -- so a wrong import depth is as fatal in the test as it
 would be in the browser.
 
 ``cross_sweep.js`` imports ``broadcast.js`` (v1.3.0), which pulls in the
-planner, the live adapter, the UI, ``bypass.js`` (for ``inputVerdict`` -- the
+planner, the live adapter, the UI, the link-drawing stage (``broadcast_draw.js``,
+the tucked-wires stage), ``bypass.js`` (for ``inputVerdict`` -- the
 broadcast adapter IMPORTS it, never copies it) and, through bypass.js,
 ``number_controller.js``, ``distributor.js`` and ``lora_library/api.js``. Any
 test that loads ``cross_sweep.js`` therefore needs all of them.
@@ -29,6 +30,7 @@ CROSS_SWEEP_MODULES = (
     "broadcast.js",
     "broadcast_plan.js",
     "broadcast_graph.js",
+    "broadcast_draw.js",
     "broadcast_ui.js",
     "bypass.js",
     "number_controller.js",

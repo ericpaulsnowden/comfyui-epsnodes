@@ -25,6 +25,18 @@
  * stays litegraph-free. The graph walkers (`walkGraphs`, `walkLiveNodes`) are
  * lora_library/api.js's, unchanged.
  *
+ * **Group membership (FORMAT.md §6.10 "Reach").** The planner is pure, so THIS
+ * adapter decides which of a graph's groups hold each node and folds the
+ * answer into the snapshot (`node.groups`). The rule is core's own
+ * `LGraphGroup.recomputeInsideNodes` test -- the node's `boundingRect` CENTRE
+ * inside the group's `_bounding` (`containsCentre`) -- computed here as pure
+ * geometry rather than by calling `recomputeInsideNodes` or reading
+ * `group._children`: that method mutates `graph._groups` (it re-sorts them) and
+ * refreshes a cache only when a group is selected or dragged, so a stale
+ * `_children` would miss a node dropped in by hand. The geometry is always
+ * current and is what the user SEES (a node whose middle is inside the
+ * rectangle).
+ *
  * **Undo (rig-UNCONFIRMED; derived from the 1.52.7 source and bundle).**
  * `scripts/changeTracker.ts` is SNAPSHOT based: `captureCanvasState()`
  * serialises the whole root graph and pushes the previous state when it
@@ -52,7 +64,7 @@ import {
   PROPERTY_KEY,
   ROOT_GRAPH_ID,
   SUBGRAPH_INPUT_ID,
-  buildLinkIndex,
+  buildLinkOwners,
   negativeFedTextKeys,
   normalizeConfig,
   planBroadcast,
@@ -168,7 +180,87 @@ export function writeConfig(node, cfg) {
 // Snapshot adapter (the planner's only bridge to litegraph)
 // ---------------------------------------------------------------------------
 
-function snapshotNode(graph, node) {
+// ---------------------------------------------------------------------------
+// Group membership (FORMAT.md §6.10 "Reach") -- see the file header
+// ---------------------------------------------------------------------------
+
+/** The groups of ONE graph (`LGraph._groups`; `groups` is a getter over the
+ * same array on 1.52.7, the only name on a frontend that renames it). */
+function groupsOfGraph(graph) {
+  const groups = graph?._groups || graph?.groups
+  return Array.isArray(groups) ? groups : []
+}
+
+const isRect = (rect) =>
+  rect !== null &&
+  rect !== undefined &&
+  rect.length >= 4 &&
+  [rect[0], rect[1], rect[2], rect[3]].every((n) => Number.isFinite(n))
+
+/** A group's `[x, y, w, h]`: `_bounding` (1.52.7's Rectangle), else
+ * `boundingRect`/`getBounding()`, else `pos` + `size`. Null when unusable. */
+function groupRect(group) {
+  for (const candidate of [group?._bounding, group?.boundingRect, group?.getBounding?.()]) {
+    if (isRect(candidate)) return [candidate[0], candidate[1], candidate[2], candidate[3]]
+  }
+  const { pos, size } = group || {}
+  if (pos && size && isRect([pos[0], pos[1], size[0], size[1]])) return [pos[0], pos[1], size[0], size[1]]
+  return null
+}
+
+/** The centre of a node's bounding box (title bar included -- core's
+ * `boundingRect`), falling back to `pos`/`size` with the default 30px title. */
+function nodeCentre(node) {
+  if (isRect(node?.boundingRect)) {
+    const rect = node.boundingRect
+    return [rect[0] + rect[2] * 0.5, rect[1] + rect[3] * 0.5]
+  }
+  const { pos, size } = node || {}
+  if (pos && size && isRect([pos[0], pos[1], size[0], size[1]])) {
+    const title = Number.isFinite(globalThis.LiteGraph?.NODE_TITLE_HEIGHT) ? globalThis.LiteGraph.NODE_TITLE_HEIGHT : 30
+    return [pos[0] + size[0] * 0.5, pos[1] - title + (size[1] + title) * 0.5]
+  }
+  return null
+}
+
+/** `isInRect` (measure.ts): left/top inclusive, right/bottom exclusive. */
+function rectHolds(rect, x, y) {
+  return x >= rect[0] && x < rect[0] + rect[2] && y >= rect[1] && y < rect[1] + rect[3]
+}
+
+/** `[{key, rect, title}]` for one graph. `key` is the array index: a group's
+ * `id` is -1 until it is added to a graph and ids are not guaranteed unique
+ * across hand-edited files, while the index is unique by construction. */
+function groupBoxes(graph) {
+  const boxes = []
+  groupsOfGraph(graph).forEach((group, index) => {
+    const rect = groupRect(group)
+    if (rect) boxes.push({ key: `g${index}`, rect, title: typeof group.title === 'string' ? group.title : '' })
+  })
+  return boxes
+}
+
+/** The keys of every group in *boxes* whose rectangle holds *node*'s centre. */
+function groupKeysHolding(boxes, node) {
+  if (boxes.length === 0) return []
+  const centre = nodeCentre(node)
+  if (!centre) return []
+  return boxes.filter((box) => rectHolds(box.rect, centre[0], centre[1])).map((box) => box.key)
+}
+
+/**
+ * The groups of *node*'s own graph that hold it, `[{key, title}]` -- the same
+ * answer the snapshot gives the planner (Reach: only my group), for the glue's
+ * "is this multiplier inside a group?" toast. Empty when it is in none.
+ * @param {object} node @returns {Array<{key: string, title: string}>}
+ */
+export function groupsHolding(node) {
+  const boxes = groupBoxes(node?.graph)
+  const keys = new Set(groupKeysHolding(boxes, node))
+  return boxes.filter((box) => keys.has(box.key)).map(({ key, title }) => ({ key, title }))
+}
+
+function snapshotNode(graph, node, boxes = []) {
   const classType = nodeClassOf(node) || node.type || ''
   const instance = isSubgraphInstance(node)
   const inputs = (node.inputs || []).map((input, index) => {
@@ -208,6 +300,8 @@ function snapshotNode(graph, node) {
     title: node.title || '',
     mode: node.mode ?? 0,
     subgraphId: instance ? String(node.subgraph.id) : null,
+    // Which of THIS graph's groups hold the node (Reach: only my group).
+    groups: groupKeysHolding(boxes, node),
     broadcast: classType === MULTIPLIER_CLASS_ID ? (node.properties?.[PROPERTY_KEY] ?? null) : null,
     inputs,
     outputs
@@ -217,13 +311,21 @@ function snapshotNode(graph, node) {
 function snapshotGraph(rootGraph, graph) {
   const key = graphKeyOf(rootGraph, graph)
   const nodes = {}
+  const boxes = groupBoxes(graph)
   // Per graph, driven by walkGraphs (snapshot keys each graph separately):
   // api.nodesOfGraph is the one sanctioned single-graph accessor (v1.3.0).
   for (const node of nodesOfGraph(graph)) {
     if (!node || node.id == null) continue
-    nodes[String(node.id)] = snapshotNode(graph, node)
+    nodes[String(node.id)] = snapshotNode(graph, node, boxes)
   }
-  const out = { id: key, name: graph.name || '', nodes, inputs: [], outputs: [] }
+  const out = {
+    id: key,
+    name: graph.name || '',
+    nodes,
+    inputs: [],
+    outputs: [],
+    groups: boxes.map(({ key: groupKey, title }) => ({ key: groupKey, title }))
+  }
   if (graph !== rootGraph) {
     out.inputs = (graph.inputs || []).map((slot) => ({
       id: String(slot.id),
@@ -329,9 +431,55 @@ const indexCache = new WeakMap()
 
 /** Invalidates the cached link index. Called by this module after every
  * apply / remove / withdraw / restore / reconcile, by broadcast.js on
- * configure and node removal; the rendering stage may call it too. */
+ * configure, node removal and every `look` change; the rendering stage
+ * (broadcast_draw.js) never needs to call it. */
 export function bumpBroadcastEpoch() {
   indexEpoch += 1
+}
+
+/** Whether any multiplier under *rootGraph* has recorded wires -- the cheap
+ * pre-check (one node walk, no snapshot) that keeps an ordinary workflow, the
+ * overwhelming majority, from ever paying for a full snapshot just to learn
+ * the link index is empty. Reads the RAW property: `normalizeConfig` would
+ * allocate for every multiplier on every epoch. */
+function hasRecordedWires(rootGraph) {
+  for (const { node } of walkLiveNodes(rootGraph)) {
+    if (nodeClassOf(node) !== MULTIPLIER_CLASS_ID) continue
+    const wired = node.properties?.[PROPERTY_KEY]?.wired
+    if (Array.isArray(wired) && wired.length > 0) return true
+  }
+  return false
+}
+
+const NO_OWNERS = new Map()
+
+/**
+ * `Map<graphKey, Map<linkId, {ownerId, ownerGraph, look, linkGraph}>>` -- the
+ * OWNER view of the link index (FORMAT.md §6.10 "Tucked wires"): every
+ * broadcast wire that STILL verifies against its record, with the multiplier
+ * that owns it (`ownerId` is its node id in its own graph `ownerGraph`, so a
+ * caller never mistakes a same-numbered node of another graph for the
+ * multiplier) and that multiplier's `look`. Cached per root graph until
+ * `bumpBroadcastEpoch()`; both views (this and `broadcastLinkIndex`) come from
+ * ONE build. The returned records are shared -- never mutate them.
+ * @param {object} rootGraph
+ * @returns {Map<string, Map<number, {ownerId: string, ownerGraph: string, look: string, linkGraph: string}>>}
+ */
+export function broadcastLinkOwners(rootGraph) {
+  if (!rootGraph) return NO_OWNERS
+  const cached = indexCache.get(rootGraph)
+  if (cached && cached.epoch === indexEpoch) return cached.owners
+  let owners
+  try {
+    owners = hasRecordedWires(rootGraph) ? buildLinkOwners(snapshotFromRoot(rootGraph)) : NO_OWNERS
+  } catch (error) {
+    console.warn(PREFIX, 'link index failed', error)
+    owners = NO_OWNERS
+  }
+  const index = new Map()
+  for (const [gid, map] of owners) index.set(gid, new Set(map.keys()))
+  indexCache.set(rootGraph, { epoch: indexEpoch, owners, index })
+  return owners
 }
 
 /**
@@ -344,25 +492,33 @@ export function bumpBroadcastEpoch() {
  */
 export function broadcastLinkIndex(rootGraph) {
   if (!rootGraph) return new Map()
-  const cached = indexCache.get(rootGraph)
-  if (cached && cached.epoch === indexEpoch) return cached.index
-  let index
-  try {
-    index = buildLinkIndex(snapshotFromRoot(rootGraph))
-  } catch (error) {
-    console.warn(PREFIX, 'link index failed', error)
-    index = new Map()
-  }
-  indexCache.set(rootGraph, { epoch: indexEpoch, index })
-  return index
+  broadcastLinkOwners(rootGraph) // (re)builds both views when stale
+  return indexCache.get(rootGraph)?.index ?? new Map()
 }
 
 /** Whether link *linkId* of *graph* (root or subgraph) is a broadcast wire.
  * O(1) once the index is cached -- safe to call per link per frame. */
 export function isBroadcastLink(graph, linkId) {
-  if (!graph || linkId == null) return false
+  return broadcastLinkOwner(graph, linkId) !== null
+}
+
+/**
+ * The owner record of link *linkId* of *graph* (root or subgraph), or null when
+ * it is not a broadcast wire: `{ownerId, ownerGraph, look, linkGraph}` (see
+ * `broadcastLinkOwners`; `ownerGraph === linkGraph` means the multiplier lives
+ * in the very graph the link is drawn in). O(1) once the index is cached: the
+ * renderer calls this per link per frame (broadcast_draw.js), so it allocates
+ * nothing and does no walk until `bumpBroadcastEpoch()` is called. The record
+ * is shared -- never mutate it.
+ * @param {object} graph @param {number|string|null|undefined} linkId
+ * @returns {{ownerId: string, ownerGraph: string, look: string, linkGraph: string}|null}
+ */
+export function broadcastLinkOwner(graph, linkId) {
+  if (!graph || linkId == null) return null
   const root = graph.rootGraph || graph
-  return broadcastLinkIndex(root).get(graphKeyOf(root, graph))?.has(linkId) === true
+  const owners = broadcastLinkOwners(root)
+  if (owners === NO_OWNERS) return null
+  return owners.get(graphKeyOf(root, graph))?.get(linkId) ?? null
 }
 
 // ---------------------------------------------------------------------------

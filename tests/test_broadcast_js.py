@@ -57,7 +57,7 @@ const store = {}
 app.configuringGraph = false
 app.canvas = { emitBeforeChange() {}, emitAfterChange() {} }
 app.extensionManager = {
-  toast: { add(t) { toasts.push(t.summary) } },
+  toast: { add(t) { toasts.push(t.summary); (globalThis.__toastSeverities ??= []).push(t.severity); (globalThis.__toastDetails ??= []).push(t.detail) } },
   setting: { get: (id) => store[id] },
   workflow: { activeWorkflow: { changeTracker: { captureCanvasState() {} } } }
 }
@@ -493,6 +493,232 @@ out.ui = {
   )
 }
 
+// ======================= 15. tucked wires + reach: the popover's two choices
+{
+  const { root, m } = build()
+  const k10 = ksampler(root, 10)
+  const ro = mkReadout(m)
+  bc.attach(m, ro)
+  await settle()
+  bc.wireNow(m)
+  fd.fire(fd.findAll(dialogEl(), (e) => e.tag === 'button' && /^Connect/.test(e.textContent))[0], 'click')
+  await sleep(20)
+  const linkId = k10.inputs[0].link
+  const more = fd.byText(ro.rootEl, '⋯')[0]
+  fd.fire(more, 'click')
+  const pop = popEl()
+  const selects = fd.findAll(pop, (e) => e.tag === 'select')
+  const labels = fd.byClass(pop, 'eps-bc-field').map((f) => f.children[0].textContent)
+  const field = {
+    count: selects.length, labels,
+    looks: selects[0].children.map((o) => [o.attrs.value, o.textContent]), look: selects[0].value,
+    scopes: selects[1].children.map((o) => [o.attrs.value, o.textContent]), scope: selects[1].value,
+    aria: selects.map((e) => e.attrs['aria-label']),
+    // the output checkboxes are untouched by the new fields
+    checks: fd.byClass(pop, 'eps-bc-check').length
+  }
+  const before = bc.broadcastLinkOwner(root, linkId)
+  // choose "Dim": stored, and the cached owner's look follows (the epoch was bumped)
+  selects[0].value = 'dim'
+  fd.fire(selects[0], 'change')
+  const dim = { look: props(m).look, owner: bc.broadcastLinkOwner(root, linkId)?.look }
+  selects[0].value = 'normal'
+  fd.fire(selects[0], 'change')
+  const normal = { look: props(m).look, owner: bc.broadcastLinkOwner(root, linkId)?.look }
+  // back to the default: stored as nothing (the wires keep the property alive, `look` is absent)
+  selects[0].value = 'tucked'
+  fd.fire(selects[0], 'change')
+  const tucked = { look: props(m).look, hasProperty: props(m) !== null, owner: bc.broadcastLinkOwner(root, linkId)?.look }
+  // a junk value is refused
+  bc.setLook(m, 'sparkly')
+  bc.setScope(m, 'planet')
+  const junk = { look: props(m).look, scope: props(m).scope }
+  // Reach: no group yet -> a warning toast, the row says "group only"
+  resetToasts()
+  selects[1].value = 'group'
+  fd.fire(selects[1], 'change')
+  const noGroup = {
+    scope: props(m).scope, summary: fd.byClass(ro.rootEl, 'eps-bc-summary')[0].textContent,
+    toasts: [...toasts], severity: (globalThis.__toastSeverities ?? []).slice(-1)
+  }
+  // the multiplier is now put INSIDE a group -> an info toast names it
+  m.pos = [100, 100]
+  root._groups = [{ title: 'Pipeline A', _bounding: [0, 0, 600, 600] }]
+  resetToasts()
+  bc.setScope(m, 'graph')
+  bc.setScope(m, 'group')
+  const inGroup = { toasts: [...toasts], detail: (globalThis.__toastDetails ?? []).slice(-1)[0] }
+  // back to the default: nothing stored for scope
+  bc.setScope(m, 'graph')
+  const back = { scope: props(m).scope }
+  fd.fireDocument('keydown', { key: 'Escape' })
+  // Remove + defaults: a multiplier that is all-default saves with NO property
+  bc.removeWires(m)
+  const clean = { property: props(m) }
+  out.lookScope = { field, before, dim, normal, tucked, junk, noGroup, inGroup, back, clean }
+  await settle()
+}
+
+// ================== 16. canvas menu: "Broadcast: show all wires" (session-only)
+{
+  const { root, m } = build()
+  const k10 = ksampler(root, 10)
+  const ro = mkReadout(m)
+  bc.attach(m, ro)
+  app.rootGraph = root
+  const emptyMenu = bc.getCanvasMenuItems({})
+  bc.wireNow(m)
+  fd.fire(fd.findAll(dialogEl(), (e) => e.tag === 'button' && /^Connect/.test(e.textContent))[0], 'click')
+  await sleep(20)
+  const items = bc.getCanvasMenuItems({})
+  const off = { count: items.length, content: items[0]?.content, cb: typeof items[0]?.callback, on: bc.getShowAllWires() }
+  items[0].callback()
+  const on = { on: bc.getShowAllWires(), content: bc.getCanvasMenuItems({})[0]?.content }
+  items[0].callback()
+  const offAgain = { on: bc.getShowAllWires(), content: bc.getCanvasMenuItems({})[0]?.content }
+  // the switch is offered while ON even with no wires, so it can always be turned off
+  bc.setShowAllWires(true)
+  bc.removeWires(m)
+  const stuck = bc.getCanvasMenuItems({}).map((i) => i.content)
+  bc.setShowAllWires(false)
+  const none = bc.getCanvasMenuItems({}).length
+  const noRoot = (() => { app.rootGraph = null; app.graph = null; return bc.getCanvasMenuItems({}).length })()
+  app.rootGraph = root
+  out.canvasMenu = { emptyMenu, off, on, offAgain, stuck, none, noRoot }
+  app.rootGraph = undefined
+  await settle()
+}
+
+// ================== 17. the legacy canvas-menu fallback (no declarative hook)
+{
+  const { root, m } = build()
+  ksampler(root, 10)
+  bc.attach(m, mkReadout(m))
+  app.rootGraph = root
+  bc.wireNow(m)
+  fd.fire(fd.findAll(dialogEl(), (e) => e.tag === 'button' && /^Connect/.test(e.textContent))[0], 'click')
+  await sleep(20)
+  class OldCanvas { getCanvasMenuOptions() { return [{ content: 'orig' }] } }
+  class ModernCanvas { getCanvasMenuOptions() { return [] } }
+  class NoMethod {}
+  delete app.collectCanvasMenuItems
+  const first = bc.installLegacyCanvasMenuFallback(OldCanvas)
+  const second = bc.installLegacyCanvasMenuFallback(OldCanvas) // never double-patched
+  const wrapped = OldCanvas.prototype.getCanvasMenuOptions
+  const withWires = wrapped.call({}).map((o) => (o === null ? '---' : o.content))
+  bc.removeWires(m)
+  const without = wrapped.call({}).map((o) => (o === null ? '---' : o.content))
+  app.collectCanvasMenuItems = () => []
+  const modern = bc.installLegacyCanvasMenuFallback(ModernCanvas)
+  delete app.collectCanvasMenuItems
+  out.legacyCanvas = {
+    first, second, withWires, without, modern,
+    modernUntouched: !ModernCanvas.prototype.__epsBroadcastCanvasMenuPatched,
+    noMethod: bc.installLegacyCanvasMenuFallback(NoMethod), noClass: bc.installLegacyCanvasMenuFallback(undefined)
+  }
+  app.rootGraph = undefined
+  await settle()
+}
+
+// =============== 18. setup()/init() install the drawing hooks on the canvas class
+{
+  class FakeCanvasClass {
+    renderLink() { return 'orig' }
+    select() {} deselect() {} deselectAll() {}
+    getCanvasMenuOptions() { return [] }
+  }
+  globalThis.LGraphCanvas = FakeCanvasClass
+  delete app.collectCanvasMenuItems
+  bc.setup()
+  const wrapped = FakeCanvasClass.prototype.renderLink
+  bc.setup()
+  bc.init()
+  out.setup = {
+    renderLink: wrapped.__epsBcRenderLink === true, stable: FakeCanvasClass.prototype.renderLink === wrapped,
+    select: FakeCanvasClass.prototype.select.__epsBcSelectionRepaint === true,
+    deselectAll: FakeCanvasClass.prototype.deselectAll.__epsBcSelectionRepaint === true,
+    canvasMenu: FakeCanvasClass.prototype.__epsBroadcastCanvasMenuPatched === true,
+    originalStillReturns: new FakeCanvasClass().renderLink({}, [0, 0], [1, 1], null, false, 0, null, 4, 3)
+  }
+  delete globalThis.LGraphCanvas
+}
+
+// ====== 19. Wire now under Reach: the preview names the group / the problem
+{
+  const { root, m } = build()
+  const k10 = ksampler(root, 10)
+  const k11 = ksampler(root, 11, 'KSampler outside')
+  m.pos = [50, 100]
+  k10.pos = [250, 100]
+  k11.pos = [1500, 100]
+  root._groups = [{ title: 'Pipeline A', _bounding: [0, 0, 800, 600] }]
+  bc.attach(m, mkReadout(m))
+  await settle()
+  bc.setScope(m, 'group')
+  bc.wireNow(m)
+  let dlg = dialogEl()
+  const inGroup = {
+    notes: fd.byClass(dlg, 'eps-bc-note').map((e) => e.textContent),
+    rows: fd.byClass(dlg, 'eps-bc-item').map((e) => e.title),
+    heads: fd.byClass(dlg, 'eps-bc-group-head').map((e) => e.textContent)
+  }
+  fd.fireDocument('keydown', { key: 'Escape' })
+  // the multiplier leaves the group: nothing is in reach, and the preview says why
+  m.pos = [3000, 3000]
+  bc.wireNow(m)
+  dlg = dialogEl()
+  const connect = fd.findAll(dlg, (e) => e.tag === 'button' && /^Connect|^Nothing/.test(e.textContent))[0]
+  const outside = {
+    notes: fd.byClass(dlg, 'eps-bc-note').map((e) => e.textContent),
+    rows: fd.byClass(dlg, 'eps-bc-item').length, connectText: connect.textContent
+  }
+  fd.fireDocument('keydown', { key: 'Escape' })
+  // Keep wired under Reach: a node added OUTSIDE the group is left alone
+  m.pos = [50, 100]
+  bc.setKeep(m, true)
+  await settle()
+  const kIn = ksampler(root, 20, 'in group'); kIn.pos = [300, 300]
+  const kOut = ksampler(root, 21, 'out of group'); kOut.pos = [2500, 300]
+  await settle()
+  out.reachDialog = { inGroup, outside, keep: { kIn: wiredFrom(kIn, 'model'), kOut: wiredFrom(kOut, 'model') } }
+}
+
+// ======= 19b. a workflow loaded onto the SAME root graph drops the cached index
+{
+  const { root, m } = build()
+  const k10 = ksampler(root, 10)
+  bc.attach(m, mkReadout(m))
+  bc.wireNow(m)
+  fd.fire(fd.findAll(dialogEl(), (e) => e.tag === 'button' && /^Connect/.test(e.textContent))[0], 'click')
+  await sleep(20)
+  const linkId = k10.inputs[0].link
+  const before = bc.broadcastLinkOwner(root, linkId)?.ownerId ?? null
+  // the "new workflow": no multiplier records at all, link ids restart -- same root object
+  delete m.properties.Broadcast
+  const stale = bc.broadcastLinkOwner(root, linkId)?.ownerId ?? null
+  const dirty = []
+  const savedCanvas = app.canvas
+  app.canvas = { setDirty(fg, bgc) { dirty.push([fg, bgc]) } }
+  bc.afterConfigure()
+  app.canvas = savedCanvas
+  out.afterConfigure = { before, stale, after: bc.broadcastLinkOwner(root, linkId), repaint: dirty }
+  await settle()
+}
+
+// ===================================== 20. pure UI helpers added for the new row/popover
+out.ui2 = {
+  rowGroup: ui.rowSummary({ live: ['vae'], wired: 2, paused: 0, keep: false, scope: 'group' }),
+  rowGraph: ui.rowSummary({ live: ['vae'], wired: 2, paused: 0, keep: false, scope: 'graph' }),
+  looks: ui.LOOK_CHOICES, scopes: ui.SCOPE_CHOICES,
+  reach: [
+    ui.reachNote({ mode: 'group', inGroup: true, groups: [{ key: 'g0', title: 'A' }, { key: 'g1', title: '' }] }),
+    ui.reachNote({ mode: 'group', inGroup: false, groups: [] }),
+    ui.reachNote({ mode: 'graph', inGroup: true, groups: [] }),
+    ui.reachNote(undefined)
+  ],
+  noGroupNote: ui.groupSkips([{ code: 'no-group', reason: 'nope' }, { code: 'scope-partial', reason: 'half', targetPathId: '3' }])
+}
+
 process.stdout.write(JSON.stringify(out))
 """
 
@@ -789,8 +1015,127 @@ def test_exports_for_the_rendering_stage(probe: dict) -> None:
         "UE_REJECTED_INPUTS",
         "wireNow",
         "removeWires",
+        # tucked wires + reach (the stage after v1.3.0)
+        "broadcastLinkOwner",
+        "getShowAllWires",
+        "setShowAllWires",
+        "setLook",
+        "setScope",
+        "getCanvasMenuItems",
+        "installLegacyCanvasMenuFallback",
+        "setup",
+        "afterConfigure",
     ):
         assert name in probe["exports"], name
+
+
+def test_popover_has_the_wires_and_reach_choices(probe: dict) -> None:
+    f = probe["lookScope"]["field"]
+    assert f["count"] == 2 and f["labels"] == ["Wires", "Reach"]
+    assert f["looks"] == [["tucked", "Tucked (default)"], ["dim", "Dim"], ["normal", "Normal"]]
+    assert f["scopes"] == [["graph", "Whole workflow (default)"], ["group", "Only my group"]]
+    assert f["look"] == "tucked" and f["scope"] == "graph"  # both start at the stored default
+    assert all(f["aria"])
+    assert f["checks"] == 10  # the nine output checkboxes + Keep wired: untouched by the new fields
+
+
+def test_choosing_a_look_is_stored_and_reaches_the_renderers_cached_owner(probe: dict) -> None:
+    """The link index caches each wire's owner AND its look, so setLook must
+    bump the epoch -- without it the old look would keep drawing."""
+    ls = probe["lookScope"]
+    assert ls["before"] == {"ownerId": "1", "ownerGraph": "root", "look": "tucked", "linkGraph": "root"}
+    assert ls["dim"] == {"look": "dim", "owner": "dim"}
+    assert ls["normal"] == {"look": "normal", "owner": "normal"}
+    assert ls["tucked"]["look"] == "tucked" and ls["tucked"]["owner"] == "tucked"
+    # a value that is not a look / scope is refused, never stored
+    assert ls["junk"] == {"look": "tucked", "scope": "graph"}
+
+
+def test_reach_group_toasts_when_nothing_is_in_reach_and_names_the_group_otherwise(
+    probe: dict,
+) -> None:
+    ls = probe["lookScope"]
+    assert ls["noGroup"]["scope"] == "group"
+    assert ls["noGroup"]["toasts"] == ["EPS Run Multiplier: not inside a group"]
+    assert ls["noGroup"]["severity"] == ["warn"]
+    assert ls["noGroup"]["summary"].endswith("group only")  # the row shows the config
+    assert ls["inGroup"]["toasts"] == ["EPS Run Multiplier: reach is “only my group”"]
+    assert "“Pipeline A”" in ls["inGroup"]["detail"] and "Wires already made stay" in ls["inGroup"]["detail"]
+    assert ls["back"]["scope"] == "graph"
+    # all-default again (no wires, tucked, whole workflow) -> no property at all
+    assert ls["clean"]["property"] is None
+
+
+def test_the_canvas_menu_item_is_only_offered_when_there_is_something_to_show(
+    probe: dict,
+) -> None:
+    c = probe["canvasMenu"]
+    assert c["emptyMenu"] == []  # no broadcast wires: every other canvas menu stays clean
+    assert c["off"] == {
+        "count": 1,
+        "content": "Broadcast: show all wires",
+        "cb": "function",
+        "on": False,
+    }
+    assert c["on"] == {"on": True, "content": "Broadcast: show all wires ✓"}
+    assert c["offAgain"] == {"on": False, "content": "Broadcast: show all wires"}
+    # ON stays offered even with no wires left, so it can always be turned off
+    assert c["stuck"] == ["Broadcast: show all wires ✓"]
+    assert c["none"] == 0 and c["noRoot"] == 0
+
+
+def test_legacy_canvas_menu_fallback_only_on_frontends_without_the_hook(probe: dict) -> None:
+    lc = probe["legacyCanvas"]
+    assert lc["first"] is True and lc["second"] is True  # idempotent
+    assert lc["withWires"] == ["orig", "---", "Broadcast: show all wires"]
+    assert lc["without"] == ["orig"]
+    # the modern frontend invokes BOTH getCanvasMenuItems and the legacy wrapper: never both
+    assert lc["modern"] is False and lc["modernUntouched"] is True
+    assert lc["noMethod"] is False and lc["noClass"] is False
+
+
+def test_setup_and_init_install_the_drawing_hooks_idempotently(probe: dict) -> None:
+    s = probe["setup"]
+    assert s["renderLink"] is True and s["stable"] is True
+    assert s["select"] is True and s["deselectAll"] is True
+    assert s["canvasMenu"] is True
+    assert s["originalStillReturns"] == "orig"
+
+
+def test_wire_now_preview_names_the_group_and_explains_an_empty_reach(probe: dict) -> None:
+    r = probe["reachDialog"]
+    ing = r["inGroup"]
+    assert ing["notes"][0] == "Reach: only my group (“Pipeline A”) — inputs outside it are not considered."
+    assert ing["rows"] == ["model → KSampler #10 (model)"]  # the outside sampler is not even listed
+    out = r["outside"]
+    assert out["connectText"] == "Nothing to connect" and out["rows"] == 0
+    assert any("not inside a group" in n for n in out["notes"])
+    # Keep wired under Reach feeds a new node in the group and leaves the outside one alone
+    assert r["keep"]["kIn"] == {"origin": "1", "slot": 0} and r["keep"]["kOut"] is None
+
+
+def test_a_reload_onto_the_same_root_graph_drops_the_cached_link_index(probe: dict) -> None:
+    """Link ids restart at 1 in a new workflow and ComfyUI re-configures the
+    SAME root graph object: a stale cached "link N is a broadcast wire" would
+    tuck an innocent wire, so afterConfigureGraph invalidates the cache."""
+    a = probe["afterConfigure"]
+    assert a["before"] == "1"
+    assert a["stale"] == "1"  # why the hook exists: nothing else told the cache
+    assert a["after"] is None
+    assert a["repaint"] == [[True, True]]
+
+
+def test_new_pure_ui_helpers(probe: dict) -> None:
+    u = probe["ui2"]
+    assert u["rowGroup"] == "vae · 2 wired · group only" and u["rowGraph"] == "vae · 2 wired"
+    assert u["reach"] == [
+        "Reach: only my group (“A”, “untitled group”) — inputs outside it are not considered.",
+        "",
+        "",
+        "",
+    ]
+    assert [n["code"] for n in u["noGroupNote"]["notes"]] == ["no-group"]
+    assert [g["code"] for g in u["noGroupNote"]["groups"]] == ["scope-partial"]
 
 
 # --------------------------------------------------------- source structure
@@ -904,6 +1249,28 @@ def test_nodes_2_0_rules_no_canvas_drawing_no_node_mouse_hooks(source: str, ui_s
     assert "data-capture-wheel" in ui_source
     assert "document.addEventListener('keydown', handler, true)" in ui_source
     assert "position: fixed" in ui_source and ".eps-bc-pop {" in ui_source
+
+
+def test_tucked_wires_wiring_is_idempotent_feature_detected_and_nodes_2_0_safe(
+    source: str, ui_source: str
+) -> None:
+    entry = ENTRY_JS.read_text(encoding="utf-8")
+    # the CANVAS menu goes through the declarative hook, with the legacy fallback beside it
+    assert "getCanvasMenuItems(canvas) {" in entry and "broadcast.getCanvasMenuItems(canvas)" in entry
+    assert "typeof app.collectCanvasMenuItems === 'function'" in source
+    assert "LEGACY_CANVAS_PATCH_FLAG" in source and "proto.getCanvasMenuOptions" in source
+    assert "setup() {" in entry and "broadcast.setup" in entry
+    assert "afterConfigureGraph() {" in entry and "broadcast.afterConfigure" in entry
+    # the drawing lives in its own module, imported and installed from here
+    assert "from './broadcast_draw.js'" in source
+    assert source.count("ensureDrawHooks()") >= 4  # init, setup, attach, every pass
+    # the look change invalidates the cached owner record
+    body = source[source.index("export function setLook(") :]
+    body = body[: body.index("\n}\n")]
+    assert body.index("writeConfig(node, cfg)") < body.index("bumpBroadcastEpoch()")
+    # both new choices are plain DOM selects portaled with the popover; no node mouse hooks
+    assert "choiceField('Wires'" in ui_source and "choiceField('Reach'" in ui_source
+    assert "'select'" in ui_source
 
 
 def test_ids_and_class_ids_match_the_backend() -> None:

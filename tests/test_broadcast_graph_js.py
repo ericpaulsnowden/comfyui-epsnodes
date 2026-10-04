@@ -397,6 +397,126 @@ function buildSubgraphScenario() {
   }
 }
 
+// ======= P. Reach: group membership comes from core's centre-containment rule
+{
+  const { root, m } = build()
+  const k10 = ksampler(root, 10, 'inside')
+  const k11 = ksampler(root, 11, 'edge-inside-centre-outside')
+  const k12 = ksampler(root, 12, 'far away')
+  const k13 = ksampler(root, 13, 'boundingRect wins')
+  const k14 = ksampler(root, 14, 'centre exactly on the left edge')
+  const k15 = ksampler(root, 15, 'centre exactly on the right edge')
+  const k16 = ksampler(root, 16, 'no position at all')
+  m.pos = [50, 100] // size [200, 100]: centre (150, 135) with the 30px title
+  k10.pos = [300, 100] // centre (400, 135)
+  k11.pos = [590, 100] // its LEFT edge is inside group A, its centre (690) is not
+  k12.pos = [2000, 100]
+  k13.pos = [9000, 9000]; k13.boundingRect = [300, 700, 100, 100] // centre (350, 750): group B
+  k14.boundingRect = [-50, 300, 100, 100] // centre x = 0: group A's left edge is INCLUSIVE
+  k15.boundingRect = [550, 300, 100, 100] // centre x = 600: the right edge is EXCLUSIVE
+  root._groups = [
+    { title: 'A', _bounding: [0, 0, 600, 600] },
+    { title: 'B', _bounding: [0, 650, 800, 300] },
+    { title: 'unusable', _bounding: [NaN, 0, 10, 10] }
+  ]
+  const snap = bg.snapshotFromRoot(root)
+  const nodes = snap.graphs.root.nodes
+  const groupsOf = (id) => nodes[id].groups
+  // the plan under "only my group"
+  const cfg = bg.readConfig(m); cfg.scope = 'group'; bg.writeConfig(m, cfg)
+  const { plan: grouped } = planOf(m)
+  const holding = bg.groupsHolding(m)
+  // other group shapes: pos + size only (an older fork), and a `groups` getter without `_groups`
+  const alt = new FakeGraph('alt')
+  alt.groups = [{ title: 'by pos/size', pos: [0, 0], size: [400, 400] }]
+  const a1 = ksampler(alt, 1); a1.pos = [100, 100]
+  const alt2 = new FakeGraph('alt2')
+  const a2 = ksampler(alt2, 1); a2.pos = [100, 100]
+  out.groups = {
+    graphGroups: snap.graphs.root.groups,
+    m: groupsOf('1'), k10: groupsOf('10'), k11: groupsOf('11'), k12: groupsOf('12'), k13: groupsOf('13'),
+    k14: groupsOf('14'), k15: groupsOf('15'), k16: groupsOf('16'), loader: groupsOf('900'),
+    holding,
+    groupedKeys: grouped.proposals.map((x) => x.key).sort(), scope: grouped.scope,
+    altGroups: bg.groupsHolding(a1), noGroupsAtAll: bg.groupsHolding(a2), nullNode: bg.groupsHolding(null)
+  }
+  // the snapshot is plain data: it survives a JSON round trip (the planner is pure)
+  out.groups.plain = JSON.stringify(snap) === JSON.stringify(JSON.parse(JSON.stringify(snap)))
+}
+
+// ============= Q. Reach inside a subgraph definition uses ITS OWN groups
+{
+  const { root, m } = build(['model'])
+  const defB = new FakeSubgraph(root, 'sg-b', 'Group host')
+  const kIn = ksampler(defB, 6, 'inner in group')
+  const kOut = ksampler(defB, 7, 'inner outside')
+  const inst = root.add(new FakeSubgraphNode(4, 'Group host', defB))
+  m.pos = [0, 0]
+  inst.pos = [100, 100]
+  kIn.pos = [-90, 0]; kOut.pos = [900, 900] // kIn's centre is (10, 35): inside the 100x100 definition group
+  root._groups = [{ title: 'Root group', _bounding: [0, 0, 500, 500] }]
+  defB._groups = [{ title: 'Inner group', _bounding: [0, 0, 100, 100] }]
+  const snap = bg.snapshotFromRoot(root)
+  const cfg = bg.readConfig(m); cfg.scope = 'group'; bg.writeConfig(m, cfg)
+  const { plan } = planOf(m)
+  out.defGroups = {
+    rootGroups: snap.graphs.root.groups, defGroups: snap.graphs['sg-b'].groups,
+    instGroups: snap.graphs.root.nodes['4'].groups,
+    kIn: snap.graphs['sg-b'].nodes['6'].groups, kOut: snap.graphs['sg-b'].nodes['7'].groups,
+    // the instance (in the multiplier's group) decides: BOTH inner samplers are reached
+    proposals: plan.proposals.map((x) => [x.kind, x.targetPathId, x.reaches.map((r) => r.pathId).sort()])
+  }
+}
+
+// ================== R. the owner index: shape, fast path, consistency
+{
+  const { root, m, loader } = build()
+  const k10 = ksampler(root, 10)
+  const d13 = decode(root, 13)
+  // a plain workflow (no records): the index is empty and NO snapshot is taken
+  let reads = 0
+  for (const node of root._nodes) {
+    const inputs = node.inputs
+    Object.defineProperty(node, 'inputs', { get() { reads += 1; return inputs }, configurable: true })
+  }
+  bg.bumpBroadcastEpoch()
+  const emptyOwners = bg.broadcastLinkOwners(root)
+  const plainReads = reads
+  out.owners = {
+    plain: { size: emptyOwners.size, reads: plainReads, link: bg.broadcastLinkOwner(root, 1), isBroadcast: bg.isBroadcastLink(root, 1) },
+    nullRoot: bg.broadcastLinkOwners(null).size, nullGraph: bg.broadcastLinkOwner(null, 1), nullId: bg.broadcastLinkOwner(root, null),
+    indexNull: bg.broadcastLinkIndex(null).size
+  }
+  for (const node of root._nodes) Object.defineProperty(node, 'inputs', { value: node.inputs, writable: true, configurable: true })
+  const { plan: p } = planOf(m)
+  bg.applyProposals(root, m, p.proposals)
+  const linkK = k10.inputs[0].link
+  const linkD = d13.inputs[1].link
+  const userLink = m.inputs.find((i) => i.name === 'model').link
+  const firstLook = bg.broadcastLinkOwner(root, linkK).look // builds + caches the index
+  const cfg = bg.readConfig(m); cfg.look = 'dim'; bg.writeConfig(m, cfg)
+  const staleLook = bg.broadcastLinkOwner(root, linkK).look // cached: the property alone changes nothing
+  bg.bumpBroadcastEpoch()
+  const owners = bg.broadcastLinkOwners(root)
+  const same = bg.broadcastLinkOwners(root) === owners // cached until the epoch moves
+  out.owners.recorded = {
+    firstLook, staleLook, freshLook: bg.broadcastLinkOwner(root, linkK).look,
+    owner: { ...bg.broadcastLinkOwner(root, linkK) }, user: bg.broadcastLinkOwner(root, userLink),
+    isBroadcast: [bg.isBroadcastLink(root, linkK), bg.isBroadcastLink(root, linkD), bg.isBroadcastLink(root, userLink)],
+    cached: same,
+    ids: [...owners.get('root').keys()].sort((a, b) => a - b), linkIds: [linkK, linkD].sort((a, b) => a - b),
+    indexIds: [...bg.broadcastLinkIndex(root).get('root')].sort((a, b) => a - b),
+    sameRecord: bg.broadcastLinkOwner(root, linkK) === bg.broadcastLinkOwner(root, linkK)
+  }
+  // a user's own wire REPLACING a broadcast wire is not a broadcast wire (new link id)
+  loader.connect(0, k10, 0)
+  bg.bumpBroadcastEpoch()
+  out.owners.replaced = { owner: bg.broadcastLinkOwner(root, k10.inputs[0].link), oldGone: bg.broadcastLinkOwner(root, linkK) }
+  // remove: the owner index follows (the applier bumps the epoch itself)
+  bg.removeBroadcastWires(root, m)
+  out.owners.afterRemove = { size: bg.broadcastLinkOwners(root).size, d13: bg.broadcastLinkOwner(root, linkD) }
+}
+
 process.stdout.write(JSON.stringify(out))
 """
 
@@ -670,8 +790,82 @@ def test_snapshot_adapter_shape(probe: dict) -> None:
         "graphByKey",
         "graphKeyOf",
         "findMultipliers",
+        # tucked wires + reach (the stage after v1.3.0)
+        "broadcastLinkOwner",
+        "broadcastLinkOwners",
+        "groupsHolding",
     ):
         assert name in s["exports"], name
+
+
+def test_group_membership_is_the_cores_centre_containment_rule(probe: dict) -> None:
+    g = probe["groups"]
+    assert g["graphGroups"] == [{"key": "g0", "title": "A"}, {"key": "g1", "title": "B"}]  # unusable rect skipped
+    assert g["m"] == ["g0"] and g["k10"] == ["g0"]
+    # a node whose EDGE is inside but whose CENTRE is outside is not in the group
+    assert g["k11"] == [] and g["k12"] == []
+    # boundingRect is preferred over pos/size; the centre decides
+    assert g["k13"] == ["g1"]
+    # core's isInRect: left edge inclusive, right edge exclusive
+    assert g["k14"] == ["g0"] and g["k15"] == []
+    assert g["k16"] == [] and g["loader"] == []  # no geometry -> in no group, never a crash
+    assert g["holding"] == [{"key": "g0", "title": "A"}]
+    # k10 and k14 (centre exactly on the left edge) share group A with the multiplier
+    assert g["groupedKeys"] == ["model|10|model", "model|14|model"]
+    assert g["scope"] == {
+        "mode": "group",
+        "inGroup": True,
+        "groups": [{"key": "g0", "title": "A"}],
+    }
+    assert g["plain"] is True
+
+
+def test_group_membership_tolerates_other_group_shapes(probe: dict) -> None:
+    g = probe["groups"]
+    assert g["altGroups"] == [{"key": "g0", "title": "by pos/size"}]
+    assert g["noGroupsAtAll"] == [] and g["nullNode"] == []
+
+
+def test_a_definitions_groups_belong_to_the_definition_and_the_instance_decides(
+    probe: dict,
+) -> None:
+    d = probe["defGroups"]
+    assert d["rootGroups"] == [{"key": "g0", "title": "Root group"}]
+    assert d["defGroups"] == [{"key": "g0", "title": "Inner group"}]  # same key, different graph
+    assert d["instGroups"] == ["g0"]
+    assert d["kIn"] == ["g0"] and d["kOut"] == []
+    # the instance sits in the multiplier's group, so BOTH inner samplers (one of them
+    # outside the definition's own group) are reached through it
+    assert d["proposals"] == [["via-new-subgraph-input", "4", ["4:6", "4:7"]]]
+
+
+def test_owner_index_shape_and_the_no_records_fast_path(probe: dict) -> None:
+    o = probe["owners"]
+    plain = o["plain"]
+    assert plain["size"] == 0 and plain["link"] is None and plain["isBroadcast"] is False
+    # an ordinary workflow never pays for a full snapshot: not one node's inputs were read
+    assert plain["reads"] == 0
+    assert o["nullRoot"] == 0 and o["nullGraph"] is None and o["nullId"] is None
+    assert o["indexNull"] == 0
+
+
+def test_owner_records_carry_the_multiplier_and_follow_the_epoch(probe: dict) -> None:
+    r = probe["owners"]["recorded"]
+    assert r["owner"] == {"ownerId": "1", "ownerGraph": "root", "look": "dim", "linkGraph": "root"}
+    # the look is cached per epoch: writing the property alone changes nothing
+    assert r["firstLook"] == r["staleLook"] == "tucked" and r["freshLook"] == "dim"
+    assert r["user"] is None  # the user's own wire into the multiplier is never a broadcast wire
+    assert r["isBroadcast"] == [True, True, False]
+    assert r["cached"] is True and r["sameRecord"] is True  # no allocation per lookup
+    assert r["ids"] == r["linkIds"] == r["indexIds"]  # both views come from one build
+
+
+def test_a_user_wire_replacing_a_broadcast_wire_is_not_tucked_and_remove_clears_the_index(
+    probe: dict,
+) -> None:
+    o = probe["owners"]
+    assert o["replaced"]["owner"] is None and o["replaced"]["oldGone"] is None
+    assert o["afterRemove"] == {"size": 0, "d13": None}
 
 
 # --------------------------------------------------------- source structure

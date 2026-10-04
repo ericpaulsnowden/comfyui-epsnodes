@@ -88,6 +88,7 @@ def node(
     subgraph: str | None = None,
     broadcast: dict | None = None,
     mode: int = 0,
+    groups: list[str] | None = None,
 ) -> dict:
     return {
         "id": str(nid),
@@ -95,6 +96,7 @@ def node(
         "title": title or cls,
         "mode": mode,
         "subgraphId": subgraph,
+        "groups": groups or [],
         "broadcast": broadcast,
         "inputs": inputs or [],
         "outputs": outputs or [],
@@ -121,6 +123,7 @@ def multiplier(
     *,
     broadcast: dict | None = None,
     title: str = "EPS Run Multiplier",
+    groups: list[str] | None = None,
 ) -> dict:
     """An EPS Run Multiplier with the named sweep inputs wired from node 900
     (a stand-in loader); `text` is always wired (required)."""
@@ -151,6 +154,7 @@ def multiplier(
         inputs,
         [out(n, t) for n, t in M_OUTPUTS],
         broadcast=broadcast,
+        groups=groups,
     )
 
 
@@ -192,18 +196,24 @@ def encoder(nid, title="CLIP Text Encode", *, to=None) -> dict:
     )
 
 
-def graph(nodes: list[dict], *, gid="root", name="", inputs=None, outputs=None) -> dict:
+def graph(
+    nodes: list[dict], *, gid="root", name="", inputs=None, outputs=None, groups=None
+) -> dict:
     return {
         "id": gid,
         "name": name,
         "nodes": {n["id"]: n for n in nodes},
         "inputs": inputs or [],
         "outputs": outputs or [],
+        "groups": [{"key": k, "title": t} for k, t in (groups or {}).items()],
     }
 
 
-def snapshot(root: list[dict], defs: dict[str, dict] | None = None) -> dict:
-    graphs = {"root": graph(root)}
+def snapshot(
+    root: list[dict], defs: dict[str, dict] | None = None, groups: dict[str, str] | None = None
+) -> dict:
+    """`groups` = the ROOT graph's `{key: title}`; a definition passes its own to `sub_def`."""
+    graphs = {"root": graph(root, groups=groups)}
     graphs.update(defs or {})
     return {"graphs": graphs}
 
@@ -212,8 +222,10 @@ def sub_instance(nid, definition: str, title: str, inputs: list[dict]) -> dict:
     return node(nid, "Subgraph", title, inputs, [], subgraph=definition)
 
 
-def sub_def(gid: str, name: str, nodes: list[dict], inputs: list[dict], outputs=None) -> dict:
-    return graph(nodes, gid=gid, name=name, inputs=inputs, outputs=outputs)
+def sub_def(
+    gid: str, name: str, nodes: list[dict], inputs: list[dict], outputs=None, groups=None
+) -> dict:
+    return graph(nodes, gid=gid, name=name, inputs=inputs, outputs=outputs, groups=groups)
 
 
 def def_input(uuid: str, name: str, type_: str) -> dict:
@@ -247,6 +259,17 @@ out.misc.index = misc.index.map((c) => {
   const idx = plan.buildLinkIndex(c.snapshot)
   return Object.fromEntries([...idx.entries()].map(([k, v]) => [k, [...v].sort((a, b) => a - b)]))
 })
+out.misc.owners = misc.index.map((c) => {
+  const owners = plan.buildLinkOwners(c.snapshot)
+  const byId = (map) => Object.fromEntries([...map.entries()].sort((a, b) => a[0] - b[0]))
+  return Object.fromEntries([...owners.entries()].map(([k, v]) => [k, byId(v)]))
+})
+out.misc.scopeOf = misc.scopeOf.map((c) => {
+  const loc = plan.locate(c.snapshot, c.mpath)
+  const info = plan.scopeOf(c.snapshot, loc, c.config)
+  const keys = info.keys ? [...info.keys] : null
+  return { mode: info.mode, inGroup: info.inGroup, groups: info.groups, keys }
+})
 out.misc.describe = plans_describe(out.plans)
 function plans_describe(plans) {
   return plans.map((p) => p.proposals.map((x) => plan.describeProposal(x)))
@@ -256,6 +279,7 @@ process.stdout.write(JSON.stringify(out))
 
 _CASES: list[dict] = []
 _MISC: dict = {
+    "scopeOf": [],
     "normalize": [],
     "serialize": [],
     "low": [],
@@ -1079,6 +1103,214 @@ ROOT_AS_TARGET_OF_ITSELF = case(
 NOT_A_MULTIPLIER = case("not a multiplier", snapshot([multiplier(1), ksampler(10)]), mpath="10")
 MISSING_PATH = case("missing path", snapshot([multiplier(1)]), mpath="99:5")
 
+
+# --- Reach: group scope (FORMAT.md §6.10 "Reach", plan M3) -------------------
+
+GROUP = {"scope": "group"}
+GROUPS_AB = {"g0": "Pipeline A", "g1": "Pipeline B"}
+
+
+def _reach_basic() -> dict:
+    """m(1) in group A; k10 in A; k11 outside every group; d13 in B only; s14 in A."""
+    root = [
+        multiplier(1, wired=("model", "vae"), groups=["g0"]),
+        ksampler(10) | {"groups": ["g0"]},
+        ksampler(11, "KSampler outside"),
+        vae_decode(13) | {"groups": ["g1"]},
+        save_image(14) | {"groups": ["g0"]},
+    ]
+    return snapshot(root, groups=GROUPS_AB)
+
+
+REACH_BASIC = case("reach: inside / outside / other group", _reach_basic(), config=GROUP)
+REACH_OFF = case("reach: whole workflow ignores groups", _reach_basic(), config={"scope": "graph"})
+REACH_DEFAULT = case("reach: no config at all is the whole workflow", _reach_basic())
+
+
+def _reach_overlap() -> dict:
+    """The multiplier sits in A and B (nested groups): a target in EITHER counts."""
+    root = [
+        multiplier(1, wired=("model",), groups=["g0", "g1"]),
+        ksampler(10) | {"groups": ["g0"]},
+        ksampler(11) | {"groups": ["g1"]},
+        ksampler(12) | {"groups": ["g2"]},
+        ksampler(13),
+    ]
+    return snapshot(root, groups={**GROUPS_AB, "g2": "Pipeline C"})
+
+
+REACH_OVERLAP = case("reach: nested groups", _reach_overlap(), config=GROUP)
+
+REACH_NO_GROUP = case(
+    "reach: multiplier in no group",
+    snapshot(
+        [multiplier(1, wired=("model",)), ksampler(10) | {"groups": ["g0"]}], groups=GROUPS_AB
+    ),
+    config=GROUP,
+)
+
+
+def _reach_wan() -> dict:
+    """model_low wired; the only `low` sampler is OUTSIDE the group: seen, so no
+    'title one sampler low' complaint -- and nothing proposed for it."""
+    root = [
+        multiplier(1, wired=("model", "model_low"), groups=["g0"]),
+        ksampler(10, "KSampler high") | {"groups": ["g0"]},
+        ksampler(11, "KSampler (low noise)"),
+    ]
+    return snapshot(root, groups=GROUPS_AB)
+
+
+REACH_WAN_OUTSIDE = case("reach: low sampler outside the group", _reach_wan(), config=GROUP)
+
+
+def _reach_other_multiplier(m2_groups: list[str], m2_scope: dict | None) -> dict:
+    root = [
+        multiplier(1, wired=("model",), groups=["g0"]),
+        multiplier(
+            2, wired=("model",), groups=m2_groups, title="Other multiplier", broadcast=m2_scope
+        ),
+        ksampler(10) | {"groups": ["g0"]},
+    ]
+    return snapshot(root, groups=GROUPS_AB)
+
+
+REACH_OTHER_OUTSIDE = case(
+    "reach: another multiplier outside the group is silent",
+    _reach_other_multiplier(["g1"], GROUP),
+    config=GROUP,
+)
+REACH_OTHER_INSIDE = case(
+    "reach: another multiplier inside the group is still never fed",
+    _reach_other_multiplier(["g0"], GROUP),
+    config=GROUP,
+)
+
+
+def _reach_nested() -> dict:
+    """Subgraph instances in the multiplier's graph:
+    3 -> def sg-1 (EXISTING empty `model` input), inside group A;
+    4 -> def sg-1 again, OUTSIDE (a per-instance Tier-1 landing decided by ITS own group);
+    5 -> def sg-2 (Tier 2, needs a NEW input) inside A and ALSO 6 -> sg-2 outside A: partial;
+    7 -> def sg-3 (Tier 2), the only instance, inside A;
+    8 -> def sg-4 (Tier 2), the only instance, outside."""
+
+    def inner(gid, name):
+        return sub_def(
+            gid,
+            name,
+            [node(5, "KSampler", f"Inner {name}", [inp("model", "MODEL", verdict="required")])],
+            inputs=[def_input(f"u-{gid}", "unrelated", "LATENT")],
+        )
+
+    sg1 = sub_def(
+        "sg-1",
+        "Existing",
+        [
+            node(
+                5,
+                "KSampler",
+                "Inner existing",
+                [inp("model", "MODEL", link=lk(-10, 0), verdict="required")],
+            )
+        ],
+        inputs=[def_input("u-model", "model", "MODEL")],
+    )
+    root = [
+        multiplier(1, wired=("model",), groups=["g0"]),
+        sub_instance(3, "sg-1", "Existing in A", [inp("model", "MODEL", def_index=0)])
+        | {"groups": ["g0"]},
+        sub_instance(4, "sg-1", "Existing outside", [inp("model", "MODEL", def_index=0)]),
+        sub_instance(5, "sg-2", "Shared inside", [inp("unrelated", "LATENT", def_index=0)])
+        | {"groups": ["g0"]},
+        sub_instance(6, "sg-2", "Shared outside", [inp("unrelated", "LATENT", def_index=0)]),
+        sub_instance(7, "sg-3", "Solo inside", [inp("unrelated", "LATENT", def_index=0)])
+        | {"groups": ["g0"]},
+        sub_instance(8, "sg-4", "Solo outside", [inp("unrelated", "LATENT", def_index=0)]),
+    ]
+    defs = {
+        "sg-1": sg1,
+        "sg-2": inner("sg-2", "Shared"),
+        "sg-3": inner("sg-3", "Solo in"),
+        "sg-4": inner("sg-4", "Solo out"),
+    }
+    return snapshot(root, defs, groups=GROUPS_AB)
+
+
+REACH_NESTED = case("reach: nested instances", _reach_nested(), config=GROUP)
+REACH_NESTED_OFF = case("reach: nested instances, whole workflow", _reach_nested())
+
+
+def _reach_inside_definition() -> dict:
+    """The multiplier lives INSIDE definition sg-9 (instance 7): its OWN graph's
+    groups apply, and a target in the same definition outside its group is not reached."""
+    definition = sub_def(
+        "sg-9",
+        "Holder",
+        [
+            multiplier(12, wired=("model",), groups=["d0"]),
+            node(
+                5,
+                "KSampler",
+                "Inner in group",
+                [inp("model", "MODEL", verdict="required")],
+                groups=["d0"],
+            ),
+            node(6, "KSampler", "Inner outside", [inp("model", "MODEL", verdict="required")]),
+        ],
+        inputs=[],
+        groups={"d0": "Inner group"},
+    )
+    root = [
+        multiplier(900, wired=(), title="Root multiplier"),
+        sub_instance(7, "sg-9", "Holder", []),
+        # a root node that SHARES the key 'd0' by coincidence must never count: keys are per graph
+        ksampler(30) | {"groups": ["d0"]},
+    ]
+    return snapshot(root, {"sg-9": definition})
+
+
+REACH_INSIDE_DEF = case(
+    "reach: multiplier inside a definition", _reach_inside_definition(), mpath="7:12", config=GROUP
+)
+
+
+# --- two multipliers: a multiplier only claims targets in its scope --------
+
+
+def _two(scope1: dict | None, scope2: dict | None, g1: list[str], g2: list[str]) -> dict:
+    root = [
+        multiplier(1, wired=("model",), groups=g1, broadcast=scope1),
+        multiplier(2, wired=("model",), groups=g2, broadcast=scope2, title="Second multiplier"),
+        ksampler(10) | {"groups": ["g0"]},
+        ksampler(11) | {"groups": ["g1"]},
+    ]
+    return snapshot(root, groups=GROUPS_AB)
+
+
+TWO_SEPARATE_1 = case(
+    "two multipliers, two groups (m1)", _two(GROUP, GROUP, ["g0"], ["g1"]), mpath="1", config=GROUP
+)
+TWO_SEPARATE_2 = case(
+    "two multipliers, two groups (m2)", _two(GROUP, GROUP, ["g0"], ["g1"]), mpath="2", config=GROUP
+)
+TWO_SAME_GROUP = case(
+    "two multipliers, ONE group", _two(GROUP, GROUP, ["g0"], ["g0"]), mpath="1", config=GROUP
+)
+TWO_MIXED_1 = case(
+    "m1 whole workflow, m2 in group B (m1)", _two(None, GROUP, ["g0"], ["g1"]), mpath="1"
+)
+TWO_MIXED_2 = case(
+    "m1 whole workflow, m2 in group B (m2)",
+    _two(None, GROUP, ["g0"], ["g1"]),
+    mpath="2",
+    config=GROUP,
+)
+TWO_NO_GROUP = case(
+    "m2 has no group: it claims nothing", _two(GROUP, GROUP, ["g0"], []), mpath="1", config=GROUP
+)
+
+
 # ---- misc probe inputs ------------------------------------------------------
 
 NORMALIZE_CASES = [
@@ -1113,7 +1345,11 @@ NORMALIZE_CASES = [
             }
         ]
     },
+    {"scope": "group", "look": "normal"},
+    {"scope": "planet", "look": "sparkly"},
+    {"scope": 7},
 ]
+
 SERIALIZE_CASES = [
     None,
     {},
@@ -1122,6 +1358,10 @@ SERIALIZE_CASES = [
     {"outputs": {"vae": False}},
     {"skip": ["x|1|y"]},
     {"look": "dim"},
+    {"scope": "group"},
+    {"scope": "graph"},
+    {"scope": "graph", "look": "tucked"},
+    {"scope": "planet"},
 ]
 LOW_CASES = [
     ("KSampler (low noise)", True),
@@ -1142,6 +1382,7 @@ LOW_CASES = [
 _MISC["normalize"] = NORMALIZE_CASES
 _MISC["serialize"] = SERIALIZE_CASES
 _MISC["low"] = [t for t, _ in LOW_CASES]
+
 
 def _text_entry(target: int) -> dict:
     return {
@@ -1278,6 +1519,13 @@ def _index_snapshot():
 
 
 _MISC["index"] = [{"snapshot": _index_snapshot()}]
+_MISC["scopeOf"] = [
+    {"snapshot": _reach_basic(), "mpath": "1", "config": {"scope": "group"}},
+    {"snapshot": _reach_basic(), "mpath": "1", "config": {"scope": "graph"}},
+    {"snapshot": _reach_overlap(), "mpath": "1", "config": {"scope": "group"}},
+    {"snapshot": _reach_inside_definition(), "mpath": "7:12", "config": {"scope": "group"}},
+    {"snapshot": _reach_basic(), "mpath": "1", "config": None},
+]
 
 
 @pytest.fixture(scope="module")
@@ -1385,6 +1633,11 @@ def test_constants_and_exports(probe: dict) -> None:
         "titleIsLow",
         "outputEnabled",
         "verifyLinkRecord",
+        # tucked wires + reach (the stage after v1.3.0)
+        "buildLinkOwners",
+        "scopeOf",
+        "SCOPES",
+        "LOOKS",
     ):
         assert name in probe["misc"]["exports"], name
 
@@ -2013,6 +2266,183 @@ def test_link_index_covers_root_links_and_inner_subgraph_links(probe: dict) -> N
     registered on node 5's input; the outer wires are 21 and 22)."""
     index = probe["misc"]["index"][0]
     assert index == {"root": [21, 22], "sg-2": [31]}
+
+
+# ------------------------------------------------- Reach: group scope (tucked-wires stage)
+
+
+def test_reach_group_feeds_only_targets_inside_a_group_that_holds_the_multiplier(
+    probe: dict,
+) -> None:
+    plan = probe["plans"][REACH_BASIC]
+    # k10 and s14 are in group A with the multiplier; k11 is in no group and d13 only in B
+    assert _pairs(plan) == {("model", "10", "model"), ("save_prefix", "14", "filename_prefix")}
+    # outside targets are not candidates at all: nothing is listed for them
+    assert [s["code"] for s in plan["skips"] if s.get("targetPathId") in {"11", "13"}] == []
+    assert plan["scope"] == {
+        "mode": "group",
+        "inGroup": True,
+        "groups": [{"key": "g0", "title": "Pipeline A"}],
+    }
+
+
+def test_reach_whole_workflow_is_unchanged_and_the_default(probe: dict) -> None:
+    everything = {
+        ("model", "10", "model"),
+        ("model", "11", "model"),
+        ("vae", "13", "vae"),
+        ("save_prefix", "14", "filename_prefix"),
+    }
+    assert _pairs(probe["plans"][REACH_OFF]) == everything
+    assert _pairs(probe["plans"][REACH_DEFAULT]) == everything  # no config at all
+    assert probe["plans"][REACH_OFF]["scope"] == {"mode": "graph", "inGroup": True, "groups": []}
+
+
+def test_reach_a_target_in_any_group_that_holds_the_multiplier_counts(probe: dict) -> None:
+    plan = probe["plans"][REACH_OVERLAP]
+    assert _pairs(plan) == {("model", "10", "model"), ("model", "11", "model")}
+    assert [g["key"] for g in plan["scope"]["groups"]] == ["g0", "g1"]
+
+
+def test_reach_a_multiplier_in_no_group_reaches_nothing_and_says_so(probe: dict) -> None:
+    plan = probe["plans"][REACH_NO_GROUP]
+    assert plan["proposals"] == [] and plan["error"] is None
+    assert [s["code"] for s in plan["skips"]] == ["no-group"]
+    assert "not inside a group" in plan["skips"][0]["reason"]
+    assert plan["scope"] == {"mode": "group", "inGroup": False, "groups": []}
+    assert {o["state"] for o in plan["outputs"]} == {"no-group"}
+
+
+def test_reach_a_low_sampler_outside_the_group_is_seen_not_missing(probe: dict) -> None:
+    plan = probe["plans"][REACH_WAN_OUTSIDE]
+    assert _pairs(plan) == {("model", "10", "model")}
+    # it exists (outside the group), so "title one sampler low" would be a lie
+    assert _skips(plan, "wan-unresolved") == []
+    assert _only(plan, "model_low") == []
+
+
+def test_reach_another_multiplier_is_silent_outside_the_group_and_listed_inside(
+    probe: dict,
+) -> None:
+    outside = probe["plans"][REACH_OTHER_OUTSIDE]
+    assert _pairs(outside) == {("model", "10", "model")}
+    assert _skips(outside, "other-multiplier") == [] and outside["conflicts"] == []
+    inside = probe["plans"][REACH_OTHER_INSIDE]
+    assert _skips(inside, "other-multiplier")  # never fed, and reported
+    assert [c["claimants"] for c in inside["conflicts"]] == [["2"]]  # same group: a conflict
+
+
+def test_reach_nested_targets_are_decided_by_the_instance_in_the_multiplier_graph(
+    probe: dict,
+) -> None:
+    plan = probe["plans"][REACH_NESTED]
+    got = {(p["kind"], p["targetPathId"]) for p in plan["proposals"]}
+    # instance 3 (inside): its existing input is wired; instance 4 (outside): not even listed
+    assert ("via-existing-subgraph-input", "3") in got
+    assert not any(path == "4" for _kind, path in got)
+    # a definition used only inside gets its NEW input; one used only outside is left alone
+    assert ("via-new-subgraph-input", "7") in got
+    assert not any(path == "8" for _kind, path in got)
+    assert len(got) == 2
+    # a definition used both inside AND outside the group cannot be fed (the new input is
+    # wired on every instance): reported, with a reason, never a half-wire
+    partial = _skips(plan, "scope-partial")
+    assert len(partial) == 1 and partial[0]["targetPathId"] == "5:5"
+    assert "both inside and outside the group" in partial[0]["reason"]
+    # (an already-wired inner input of the inside instance stays the ordinary 'already wired')
+    assert not any(s["targetPathId"] == "3:5" for s in partial)
+
+
+def test_reach_nested_whole_workflow_is_unchanged(probe: dict) -> None:
+    plan = probe["plans"][REACH_NESTED_OFF]
+    got = {(p["kind"], p["targetPathId"]) for p in plan["proposals"]}
+    assert got == {
+        ("via-existing-subgraph-input", "3"),
+        ("via-existing-subgraph-input", "4"),
+        ("via-new-subgraph-input", "5"),
+        ("via-new-subgraph-input", "7"),
+        ("via-new-subgraph-input", "8"),
+    }
+    assert _skips(plan, "scope-partial") == []
+
+
+def test_reach_a_multiplier_inside_a_definition_uses_that_graphs_own_groups(probe: dict) -> None:
+    plan = probe["plans"][REACH_INSIDE_DEF]
+    assert _pairs(plan) == {("model", "7:5", "model")}  # "Inner outside" (7:6) is not in its group
+    assert plan["scope"]["groups"] == [{"key": "d0", "title": "Inner group"}]
+
+
+def test_reach_two_multipliers_in_two_groups_each_claim_only_their_own(probe: dict) -> None:
+    one = probe["plans"][TWO_SEPARATE_1]
+    two = probe["plans"][TWO_SEPARATE_2]
+    assert _pairs(one) == {("model", "10", "model")} and one["conflicts"] == []
+    assert _pairs(two) == {("model", "11", "model")} and two["conflicts"] == []
+
+
+def test_reach_two_multipliers_in_the_same_group_still_conflict(probe: dict) -> None:
+    plan = probe["plans"][TWO_SAME_GROUP]
+    assert plan["proposals"] == []
+    assert [(c["targetPathId"], c["claimants"]) for c in plan["conflicts"]] == [("10", ["2"])]
+
+
+def test_reach_a_whole_workflow_multiplier_claims_everything_so_it_conflicts_in_the_others_group(
+    probe: dict,
+) -> None:
+    """A multiplier only claims targets in ITS scope: m1 (whole workflow) and m2
+    (group B) overlap on k11 only, so only k11 is contested."""
+    m1 = probe["plans"][TWO_MIXED_1]
+    m2 = probe["plans"][TWO_MIXED_2]
+    assert _pairs(m1) == {("model", "10", "model")}
+    assert [(c["targetPathId"], c["claimants"]) for c in m1["conflicts"]] == [("11", ["2"])]
+    assert m2["proposals"] == []
+    assert [(c["targetPathId"], c["claimants"]) for c in m2["conflicts"]] == [("11", ["1"])]
+
+
+def test_reach_a_multiplier_with_no_group_claims_nothing(probe: dict) -> None:
+    plan = probe["plans"][TWO_NO_GROUP]
+    assert _pairs(plan) == {("model", "10", "model")} and plan["conflicts"] == []
+
+
+def test_scope_of_is_the_documented_pure_helper(probe: dict) -> None:
+    got = probe["misc"]["scopeOf"]
+    assert got[0] == {
+        "mode": "group",
+        "inGroup": True,
+        "groups": [{"key": "g0", "title": "Pipeline A"}],
+        "keys": ["g0"],
+    }
+    assert got[1] == got[4] == {"mode": "graph", "inGroup": True, "groups": [], "keys": None}
+    assert got[2]["keys"] == ["g0", "g1"]
+    assert got[3]["keys"] == ["d0"]
+
+
+def test_scope_and_look_round_trip_through_the_record(probe: dict) -> None:
+    got = probe["misc"]["normalize"]
+    assert got[-3]["scope"] == "group" and got[-3]["look"] == "normal"
+    # junk reads as the defaults, never guessed
+    assert got[-2]["scope"] == "graph" and got[-2]["look"] == "tucked"
+    assert got[-1]["scope"] == "graph"
+    ser = probe["misc"]["serialize"]
+    assert ser[7]["scope"] == "group"  # a non-default Reach is stored...
+    assert ser[8] is None and ser[9] is None  # ...the default ('graph' + 'tucked') stores nothing
+    assert ser[10] is None  # an unknown scope normalises to the default
+
+
+def test_link_owners_carry_the_multiplier_its_graph_and_its_look(probe: dict) -> None:
+    """The renderer's seam: for every still-verified wire, which multiplier owns
+    it (node id in ITS graph, so a same-numbered node of another graph is never
+    mistaken for it), the graph the link lives in, and that multiplier's look."""
+    owners = probe["misc"]["owners"][0]
+    assert owners["root"]["21"] == {
+        "ownerId": "1",
+        "ownerGraph": "root",
+        "look": "tucked",
+        "linkGraph": "root",
+    }
+    assert owners["sg-2"]["31"]["ownerGraph"] == "root"  # the multiplier lives OUTSIDE the subgraph
+    assert owners["sg-2"]["31"]["linkGraph"] == "sg-2"
+    # the id-only view is derived from the same build
+    assert {g: sorted(map(int, ids)) for g, ids in owners.items()} == probe["misc"]["index"][0]
 
 
 # --------------------------------------------------------- source structure

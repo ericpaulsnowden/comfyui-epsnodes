@@ -12,6 +12,7 @@
  *  - No canvas drawing and no node mouse hooks: the row is plain DOM inside
  *    the readout's DOM widget (`hideInPanel` is set where that widget is
  *    created, cross_sweep.js), so it is the same element in both renderers.
+ *    (The tucked-wire drawing is LINK-level and lives in broadcast_draw.js.)
  *  - The popover and the dialog are portaled to `document.body`, positioned
  *    with `getBoundingClientRect()` (popover) or centred (dialog), at a high
  *    z-index, and dismissed on Esc / an outside pointerdown. Never
@@ -58,6 +59,7 @@ export const SKIP_SECTIONS = Object.freeze([
   [SKIP_CODES.SUBGRAPH_SHARED, 'Subgraph used elsewhere — wire by hand'],
   [SKIP_CODES.SUBGRAPH_MIXED, 'Subgraph input also feeds something else — wire by hand'],
   [SKIP_CODES.SUBGRAPH_TOO_DEEP, 'Subgraphs nested too deeply'],
+  [SKIP_CODES.SCOPE_PARTIAL, 'Subgraph used inside and outside the group — wire by hand'],
   [SKIP_CODES.UNKNOWN_REQUIRED, "Can't tell whether the input is required"],
   [SKIP_CODES.OPTIONAL, 'Optional input (never filled automatically)'],
   [SKIP_CODES.DOUBLE_CLAIM, 'Already fed by another output'],
@@ -68,7 +70,8 @@ const NOTE_CODES = new Set([
   SKIP_CODES.OUTPUT_OFF,
   SKIP_CODES.SETTING_OFF,
   SKIP_CODES.OUTPUT_DEAD,
-  SKIP_CODES.WAN_UNRESOLVED
+  SKIP_CODES.WAN_UNRESOLVED,
+  SKIP_CODES.NO_GROUP
 ])
 
 /**
@@ -129,8 +132,10 @@ export function groupByOutput(proposals) {
 /**
  * The row's text: which outputs are broadcasting (enabled AND live) and how
  * many wires are recorded. `live` = names of enabled+live outputs; `wired` =
- * recorded entries that are connected; `paused` = withdrawn entries.
- * @param {{live: string[], wired: number, paused: number, keep: boolean}} info
+ * recorded entries that are connected; `paused` = withdrawn entries; `scope` =
+ * 'group' adds "group only" (Reach, FORMAT.md §6.10) -- the config, not a
+ * membership check, so the text never goes stale when a node is dragged.
+ * @param {{live: string[], wired: number, paused: number, keep: boolean, scope?: string}} info
  */
 export function rowSummary(info) {
   const names = info.live.length ? info.live.join(' · ') : 'nothing live'
@@ -138,7 +143,28 @@ export function rowSummary(info) {
   if (info.wired > 0) parts.push(`${info.wired} wired`)
   if (info.paused > 0) parts.push(`${info.paused} paused`)
   if (info.keep) parts.push('keep ✓')
+  if (info.scope === 'group') parts.push('group only')
   return parts.join(' · ')
+}
+
+/** Choices of the ⋯ popover's "Wires" and "Reach" selects: `[value, label]`,
+ * the stored default first (FORMAT.md §6.10 "Tucked wires" / "Reach"). */
+export const LOOK_CHOICES = Object.freeze([
+  ['tucked', 'Tucked (default)'],
+  ['dim', 'Dim'],
+  ['normal', 'Normal']
+])
+export const SCOPE_CHOICES = Object.freeze([
+  ['graph', 'Whole workflow (default)'],
+  ['group', 'Only my group']
+])
+
+/** The one line the preview shows under its lead when Reach is "only my
+ * group" and the multiplier IS in a group; '' otherwise. Pure. */
+export function reachNote(scope) {
+  if (!scope || scope.mode !== 'group' || !scope.inGroup) return ''
+  const names = (scope.groups || []).map((g) => `“${g.title || 'untitled group'}”`).join(', ')
+  return `Reach: only my group (${names}) — inputs outside it are not considered.`
 }
 
 /** "KSampler #31 (model, vae); Save Image #22 (save_prefix)" for a toast,
@@ -173,12 +199,15 @@ const CSS_TEXT = `
 .eps-bc-btn:focus-visible { outline: 2px solid var(--p-primary-color, #6aa0ff); outline-offset: 1px; }
 .eps-bc-btn[disabled] { opacity: 0.5; cursor: default; }
 .eps-bc-btn.primary { background: var(--p-primary-color, #3b82f6); border-color: transparent; color: #fff; }
-.eps-bc-pop { position: fixed; z-index: ${Z_POPOVER}; min-width: 280px; max-width: 360px; box-sizing: border-box; padding: 10px; border-radius: 8px; border: 1px solid var(--border-color, #4e4e4e); background: var(--comfy-menu-bg, #202020); color: var(--input-text, #ddd); font-size: 12px; box-shadow: 0 8px 24px rgba(0,0,0,0.45); }
+.eps-bc-pop { position: fixed; z-index: ${Z_POPOVER}; min-width: 280px; max-width: 360px; max-height: calc(100vh - 16px); overflow-y: auto; box-sizing: border-box; padding: 10px; border-radius: 8px; border: 1px solid var(--border-color, #4e4e4e); background: var(--comfy-menu-bg, #202020); color: var(--input-text, #ddd); font-size: 12px; box-shadow: 0 8px 24px rgba(0,0,0,0.45); }
 .eps-bc-pop h3 { margin: 0 0 6px; font-size: 12px; font-weight: 600; }
 .eps-bc-pop .eps-bc-check { display: flex; align-items: center; gap: 6px; padding: 2px 0; cursor: pointer; }
 .eps-bc-pop .eps-bc-check input { margin: 0; }
 .eps-bc-badge { margin-left: auto; font-size: 10px; padding: 0 5px; border-radius: 8px; border: 1px solid var(--border-color, #4e4e4e); opacity: 0.85; }
 .eps-bc-badge.dead { color: var(--warning-text, #e6a23c); border-color: var(--warning-text, #e6a23c); }
+.eps-bc-field { display: flex; align-items: center; gap: 8px; padding: 2px 0; }
+.eps-bc-field > span { flex: 0 0 52px; font-weight: 600; }
+.eps-bc-select { flex: 1 1 auto; min-width: 0; font: inherit; font-size: 12px; padding: 2px 4px; border-radius: 4px; border: 1px solid var(--border-color, #4e4e4e); background: var(--comfy-input-bg, #2a2a2a); color: var(--input-text, #ddd); }
 .eps-bc-hint { margin: 2px 0 6px; opacity: 0.7; font-size: 11px; line-height: 1.35; }
 .eps-bc-sep { height: 1px; background: var(--border-color, #4e4e4e); margin: 8px 0; opacity: 0.6; }
 .eps-bc-actions { display: flex; flex-wrap: wrap; gap: 6px; }
@@ -319,8 +348,11 @@ export function isPopoverOpenFor(anchorEl) {
  *   anchorEl: HTMLElement,
  *   outputs: Array<{name: string, enabled: boolean, live: boolean, gated: boolean, settingOn: boolean}>,
  *   keep: boolean,
+ *   look?: string, scope?: string,
  *   onToggleOutput: (name: string, on: boolean) => void,
  *   onToggleKeep: (on: boolean) => void,
+ *   onSetLook?: (look: string) => void,
+ *   onSetScope?: (scope: string) => void,
  *   onWire: () => void,
  *   onRemove: () => void
  * }} options
@@ -346,13 +378,33 @@ export function openPopover(options) {
   keepBox.checked = options.keep
   keepBox.addEventListener('change', () => options.onToggleKeep(keepBox.checked))
 
-  const pop = el('div', { class: 'eps-bc-pop', role: 'dialog', 'aria-label': 'Broadcast options', tabindex: '-1' }, [
+  /** A labelled `<select>` (look / reach). The value is assigned AFTER the
+   * options are in, so the right one shows as chosen. */
+  const choiceField = (label, choices, current, onChange, ariaLabel) => {
+    const select = el(
+      'select',
+      { class: 'eps-bc-select', 'aria-label': ariaLabel },
+      choices.map(([value, text]) => el('option', { value, text }))
+    )
+    select.value = current
+    select.addEventListener('change', () => onChange(select.value))
+    return el('label', { class: 'eps-bc-field' }, [el('span', { text: label }), select])
+  }
+
+  // `data-capture-wheel`: the popover now has enough rows to scroll on a short
+  // window, and a wheel over it must scroll it, not zoom the canvas behind.
+  const pop = el('div', { class: 'eps-bc-pop', role: 'dialog', 'aria-label': 'Broadcast options', tabindex: '-1', 'data-capture-wheel': 'true' }, [
     el('h3', { text: 'Broadcast these outputs' }),
     ...checks,
     el('div', { class: 'eps-bc-hint', text: 'text, image and label only connect to inputs with exactly the same name, and only when the ComfyUI setting is on (Settings › EPSNodes).' }),
     el('div', { class: 'eps-bc-sep' }),
     el('label', { class: 'eps-bc-check' }, [keepBox, 'Keep wired']),
     el('div', { class: 'eps-bc-hint', text: 'New and pasted nodes get wired as you add them. A wire you unplug stays unplugged.' }),
+    el('div', { class: 'eps-bc-sep' }),
+    choiceField('Wires', LOOK_CHOICES, options.look || 'tucked', (value) => options.onSetLook?.(value), 'How broadcast wires are drawn'),
+    el('div', { class: 'eps-bc-hint', text: 'Tucked hides broadcast wires (a 📡 stub marks each fed input) until you select this multiplier or a node it feeds. Right-click the canvas → “Broadcast: show all wires” shows every one. Dim draws them faintly.' }),
+    choiceField('Reach', SCOPE_CHOICES, options.scope || 'graph', (value) => options.onSetScope?.(value), 'Which nodes broadcast may feed'),
+    el('div', { class: 'eps-bc-hint', text: '“Only my group” feeds just the nodes inside a group that contains this multiplier. Wires already made stay; Wire now previews what would be added.' }),
     el('div', { class: 'eps-bc-sep' }),
     el('div', { class: 'eps-bc-actions' }, [
       el('button', { class: 'eps-bc-btn', type: 'button', text: 'Wire now…', onclick: () => { close(); options.onWire() } }),
@@ -471,6 +523,8 @@ export function openPreviewDialog(options) {
 
   const body = el('div', { class: 'eps-bc-body', tabindex: '0', 'data-capture-wheel': 'true' })
   if (plan.error) body.appendChild(el('p', { class: 'eps-bc-note', text: plan.error }))
+  const reach = reachNote(plan.scope)
+  if (reach) body.appendChild(el('p', { class: 'eps-bc-note', text: reach }))
 
   for (const group of groupByOutput(plan.proposals)) {
     const groupBox = el('input', { type: 'checkbox' })
@@ -519,7 +573,9 @@ export function openPreviewDialog(options) {
   }
 
   const skippedBits = []
-  for (const note of grouped.notes) skippedBits.push(el('div', { class: 'eps-bc-note', text: `${note.output}: ${note.reason}` }))
+  for (const note of grouped.notes) {
+    skippedBits.push(el('div', { class: 'eps-bc-note', text: note.output ? `${note.output}: ${note.reason}` : note.reason }))
+  }
   for (const group of grouped.groups) {
     skippedBits.push(
       el('details', { class: 'eps-bc-skipped' }, [

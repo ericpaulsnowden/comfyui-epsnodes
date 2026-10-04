@@ -3322,11 +3322,12 @@ code).
 | File | Role | Test file |
 |---|---|---|
 | `web/eps_image/broadcast_plan.js` | PURE planner + record normalise/reconcile + link-index builder. Imports nothing. | `tests/test_broadcast_plan_js.py` |
-| `web/eps_image/broadcast_graph.js` | LIVE: snapshot adapter, apply, remove, withdraw/restore, reconcile, undo wrapper, link-index API. Imports `inputVerdict` from `bypass.js` (never copied) and `walkGraphs`/`walkLiveNodes` from `lora_library/api.js` (unchanged). | `tests/test_broadcast_graph_js.py` |
-| `web/eps_image/broadcast_ui.js` | DOM: the row, the ⋯ popover, the preview dialog + pure helpers. | `tests/test_broadcast_js.py` |
-| `web/eps_image/broadcast.js` | Node glue: row mount, menu, setting, Keep-wired watch, Use Everywhere veto. | `tests/test_broadcast_js.py` |
+| `web/eps_image/broadcast_graph.js` | LIVE: snapshot adapter (incl. group membership), apply, remove, withdraw/restore, reconcile, undo wrapper, link-index + link-owner API. Imports `inputVerdict` from `bypass.js` (never copied) and `walkGraphs`/`walkLiveNodes`/`nodesOfGraph` from `lora_library/api.js` (unchanged). | `tests/test_broadcast_graph_js.py` |
+| `web/eps_image/broadcast_draw.js` | LINK-level drawing (tucked wires): the `renderLink` wrapper, the reveal rules, the stub, the selection repaint, the session "show all" switch. Imports only `broadcastLinkOwner(s)` from `broadcast_graph.js`. The ONLY file that draws. | `tests/test_broadcast_draw_js.py` |
+| `web/eps_image/broadcast_ui.js` | DOM: the row, the ⋯ popover (outputs, Keep wired, Wires, Reach), the preview dialog + pure helpers. | `tests/test_broadcast_js.py` |
+| `web/eps_image/broadcast.js` | Node glue: row mount, node + canvas menus, setting, Keep-wired watch, look/scope setters, Use Everywhere veto. | `tests/test_broadcast_js.py` |
 | `web/eps_image/cross_sweep.js` | Calls `broadcast.attach(node, state)` / `broadcast.ensureWatch(node)`; sizes the readout box with `state.extraHeight`. | `tests/test_cross_sweep_js.py` |
-| `web/eps_image.js` | Registers `settings`, `getNodeMenuItems`, `beforeRegisterNodeDef` (legacy fallback), `init()`. | `tests/test_broadcast_js.py` |
+| `web/eps_image.js` | Registers `settings`, `getNodeMenuItems`, `getCanvasMenuItems`, `beforeRegisterNodeDef` (legacy node-menu fallback), `init()`, `setup()`, `afterConfigureGraph()`. | `tests/test_broadcast_js.py` |
 
 Tests that load `cross_sweep.js` need the whole reachable module set;
 `tests/served_layout.py` copies it (`CROSS_SWEEP_MODULES`).
@@ -3344,7 +3345,12 @@ on Esc / an outside pointerdown, and while open a capture-phase `document`
 `keydown` listener swallows every key (bare keys otherwise fire ComfyUI's
 global shortcuts from non-text elements; Esc closes). Scroll regions carry
 `data-capture-wheel="true"`. Nothing depends on right-click > Properties, and
-nothing is drawn on the canvas.
+nothing in the row, popover or dialog is drawn on the canvas -- the only canvas
+drawing is the LINK-level hook described under "Tucked wires" below (its own
+file, so the pin tests can keep every other broadcast file free of drawing).
+The ⋯ popover also carries two `<select>` choices, **Wires** (Tucked / Dim /
+Normal) and **Reach** (Whole workflow / Only my group): plain DOM, stored in
+`look` / `scope`, each one undo step.
 
 **Menu.** `getNodeMenuItems(node)` (extension hook, closures over the node, no
 event/position): `Broadcast: wire now…`, `Broadcast: remove broadcast wires`,
@@ -3352,7 +3358,13 @@ event/position): `Broadcast: wire now…`, `Broadcast: remove broadcast wires`,
 (`app.collectNodeMenuItems` absent) a `getExtraMenuOptions` fallback is
 installed per node type from `beforeRegisterNodeDef` -- the Photoshop pack's
 `cpsb/menu.js` pattern; the modern frontend invokes BOTH, so exactly one is ever
-active.
+active. The CANVAS menu works the same way: the extension hook
+`getCanvasMenuItems(canvas)` returns the one item `Broadcast: show all wires`
+(`✓` suffix while on; session-only, see "Tucked wires"), offered only while the
+workflow has broadcast wires or the switch is already on; frontends without
+`app.collectCanvasMenuItems` get a `LGraphCanvas.prototype.getCanvasMenuOptions`
+wrapper instead (installed from `init()` / `setup()`, idempotent, gated on the
+same absence so a modern frontend never shows it twice).
 
 **The setting.** `EPSNodes.BroadcastSameNameInputs` (boolean, default `false`),
 category `EPSNodes › Run Multiplier › Broadcast`, name *"Run Multiplier
@@ -3365,8 +3377,9 @@ Saved per ComfyUI user, so it is a per-machine switch.
 
 **Records -- `node.properties['Broadcast']`.** Stamped ONLY on the multiplier
 (Use Everywhere stamps every node: research §10 lesson 12). Absent until the
-feature is used; an all-default config REMOVES the property, so a multiplier
-that never used broadcast saves byte-identically. Versioned; an unknown NEWER
+feature is used; an all-default config (no wires, no skips, no toggles, `keep`
+off, `look` tucked, `scope` graph) REMOVES the property, so a multiplier that
+never used broadcast saves byte-identically. Versioned; an unknown NEWER
 `v` reads as empty rather than being guessed at.
 
 ```json
@@ -3374,8 +3387,8 @@ that never used broadcast saves byte-identically. Versioned; an unknown NEWER
   "v": 1,
   "outputs": { "vae": false },          // per-output toggles; absent = ON (default)
   "keep": false,                        // Keep wired
-  "scope": "graph",                     // placeholder: group scope is a later stage
-  "look": "tucked",                     // placeholder for the rendering stage: tucked | dim | normal
+  "scope": "graph",                     // Reach: graph (whole workflow, default) | group (only my group)
+  "look": "tucked",                     // wire drawing: tucked (default) | dim | normal
   "skip": ["model|11|model"],           // "leave alone" keys
   "wired": [
     {
@@ -3420,7 +3433,8 @@ that never used broadcast saves byte-identically. Versioned; an unknown NEWER
 over a plain snapshot of the root graph + every subgraph DEFINITION (header of
 `broadcast_plan.js` documents the shape; `broadcast_graph.js`'s
 `snapshotFromRoot` builds it, folding `inputVerdict().why` into each input).
-Returns `{multiplier, proposals, skips, conflicts, outputs, error}`.
+Returns `{multiplier, proposals, skips, conflicts, outputs, scope, error}`
+(`scope` = `{mode: 'graph'|'group', inGroup, groups: [{key, title}]}`).
 
 - **Outputs table** (`BROADCAST_OUTPUTS`, pinned against the backend's
   `RETURN_NAMES`/`RETURN_TYPES` positionally -- a saved link records the output
@@ -3439,13 +3453,15 @@ Returns `{multiplier, proposals, skips, conflicts, outputs, error}`.
   the same input -> neither (`conflicts`); never another multiplier's inputs;
   muted/bypassed nodes ARE linked (cheap and harmless; Use Everywhere's default).
   A multiplier does not claim an input for an output that is switched off or not
-  live, so one output toggle resolves a conflict.
+  live, so one output toggle resolves a conflict. **Reach** (below) narrows what
+  a multiplier claims the same way: a multiplier only claims targets in its own
+  scope, so the conflict check respects it.
 - **Skip codes** (`SKIP_CODES`, stable strings): `output-off`, `setting-off`,
   `output-dead`, `already-wired`, `loop`, `optional`, `unknown-required`,
   `other-multiplier`, `negative-guard`, `wan-low`, `wan-ambiguous`,
   `wan-unresolved`, `left-alone` (carries the full `proposal` so the dialog can
   offer it again), `subgraph-shared`, `subgraph-mixed`, `subgraph-too-deep`,
-  `double-claim`. Rules that make an input "not a candidate at all" (wrong
+  `double-claim`, `no-group`, `scope-partial` (both Reach, below). Rules that make an input "not a candidate at all" (wrong
   type/name, a widget when a socket was required, a `*` input) stay SILENT so
   the preview only lists what the user could reasonably have expected.
 - **Proposal** -- `{key, output, outputIndex, kind, targetPathId, inputName,
@@ -3556,17 +3572,173 @@ baselines.
   still VERIFY against their record are included, so a user's own wire onto the
   same input is never mislabelled. Cached per root graph.
 - `isBroadcastLink(graph, linkId)` -- O(1) once cached; safe per link per frame.
-- `bumpBroadcastEpoch()` -- invalidates the cache. Called after every apply /
-  remove / withdraw / restore / reconcile, on a multiplier's `onConfigure` /
-  `onRemoved`, and on every graph `onNodeRemoved`; the rendering stage may call
-  it too. Link ids are monotonic (never reused), so a stale cache entry is
-  benign.
-- The buildable pure form is `buildLinkIndex(snapshot)` (`broadcast_plan.js`).
-- The records' `look` (`tucked`/`dim`/`normal`) and `scope` are placeholders this
-  stage only stores. Drawing (tucking, dimming, 📡 stubs) and group scope are the
-  next stage; it must use the link-colour owner convention
-  (`LINK_COLOR_OWNER_KEY` / `LINK_COLOR_RESYNC_HOOK`, `distributor.js`) -- this
-  stage never writes `link.color`.
+- `bumpBroadcastEpoch()` -- invalidates the cache (when it is called: below).
+  Within one loaded workflow link ids are monotonic (never reused), so a stale
+  entry for a REMOVED link is benign; across a workflow LOAD they restart, which
+  is why `afterConfigureGraph` bumps too.
+- `broadcastLinkOwners(rootGraph) -> Map<graphKey, Map<linkId, {ownerId,
+  ownerGraph, look, linkGraph}>>` and `broadcastLinkOwner(graph, linkId)` (the
+  tucked-wires stage): the OWNER view of the same index. `ownerId` is the
+  multiplier's node id in ITS graph `ownerGraph` (node ids are unique per graph
+  only, so `ownerGraph === linkGraph` is the test for "the multiplier is in the
+  graph being drawn"), `look` is that multiplier's `look`. The records are
+  shared objects (never mutate them) and a lookup allocates nothing. Both views
+  come from ONE build, cached per root graph until `bumpBroadcastEpoch()`.
+  A workflow in which no multiplier has recorded wires short-circuits to a
+  shared empty index after one node walk, WITHOUT taking a snapshot.
+- The epoch is bumped by every apply / remove / withdraw / restore / reconcile,
+  on a multiplier's `onConfigure` / `onRemoved`, on every graph `onNodeRemoved`,
+  on every `look` change (the cached owner record carries the look), and from
+  the extension's `afterConfigureGraph` hook -- ComfyUI re-configures the SAME
+  root graph for a new workflow while link ids restart at 1, so a workflow with
+  no multiplier would otherwise keep the previous workflow's cache and a stale
+  "link 7 is a broadcast wire" would tuck an innocent wire.
+- The buildable pure forms are `buildLinkOwners(snapshot)` and
+  `buildLinkIndex(snapshot)` (`broadcast_plan.js`).
+
+**Tucked wires (the rendering stage; owner ask 2026-10-03 "get rid of the
+spaghetti", plan `research/roadmap-eps-broadcast.md` §1a and M3).** Real wires,
+drawn only when they help. All of it is in `web/eps_image/broadcast_draw.js`.
+
+- *Why it is Nodes 2.0-safe.* Nodes 2.0 replaces how NODES are drawn; links are
+  still drawn by the classic canvas in BOTH renderers (`LGraphCanvas.
+  drawConnections` -> `_renderAllLinkSegments` -> `renderLink`; the Vue
+  `LinkOverlayCanvas` is only the drag-preview layer -- frontend-contract §1,
+  §2.4). The one thing hooked is therefore the LINK-level
+  `LGraphCanvas.prototype.renderLink`: no `onDrawForeground`, no node mouse hook,
+  no per-node DOM listener, no right-click > Properties. `renderLink(ctx, a, b,
+  link, skip_border, flow, color, start_dir, end_dir, {startControl, endControl,
+  reroute, num_sublines, disabled})` is identical in frontends 1.52.7, 1.53.10 and
+  1.54.12 (source-checked) and has had the same first four parameters since
+  litegraph.js; the hook reads `link` (and `b`, `flow`, `end_dir`, `reroute` for
+  the stub).
+- *The three looks* (`look`, per multiplier, stored in the records, default
+  `tucked`, chosen in the ⋯ popover under **Wires**):
+  - `tucked` -- the wire is NOT drawn (every segment of it, including the
+    segments through reroutes and the "event flash" overlay). At its INPUT end
+    -- point `b`, the input-side point core already computed, so no slot-position
+    API is needed -- a stub of 18 graph px (`STUB_LENGTH`) runs back along
+    `end_dir` (LEFT for an ordinary input; CENTER/NONE/unknown behave as LEFT,
+    exactly as core's `end_dir || LEFT`) in the link's colour, with a small 📡
+    at its end. Zoomed far out (`canvas.low_quality`) the glyph becomes a dot.
+    The stub is drawn once, on the final non-flow call, and is decoration only.
+  - `dim` -- drawn normally with `ctx.globalAlpha` scaled by `0.25`
+    (`DIM_ALPHA`) around the original call and restored in a `finally`; no stub.
+  - `normal` -- the hook is out of the way entirely.
+  - `link.color` is NEVER written (it is not serialized, and Distributor, Image
+    Grid and Bypass own it through `LINK_COLOR_OWNER_KEY` /
+    `LINK_COLOR_RESYNC_HOOK`); the stub only READS it, falling back to
+    `LGraphCanvas.link_type_colors[link.type]` then `default_link_color`.
+- *Reveal* -- a tucked or dim wire is drawn exactly like any other wire when
+  (a) its owning multiplier is selected AND lives in the graph being drawn,
+  (b) its TARGET node is selected, or (c) the session-only **Show all broadcast
+  wires** switch is on (canvas right-click, never saved: a fresh page tucks
+  again). Selection is `canvas.selected_nodes` (id -> node). Verified in the
+  1.52.7 source that Vue-mode selection is mirrored there: the Vue node handlers
+  (`useNodeEventHandlers.ts`) call `canvas.select(node)` / `deselect(node)` /
+  `deselectAll()`, and `select`/`deselect` write `selected_nodes[item.id]`. One
+  gap found in the same read: selecting a GROUP with "select group children" on
+  marks the child NODES `selected = true` (and adds them to `selectedItems`)
+  without writing them into `selected_nodes`, so the per-node `selected` flag is
+  read as well (`getNodeById(id).selected === true`, O(1)).
+  Inside a subgraph the multiplier is not in the graph being drawn, so only (b)
+  and (c) apply there, and a same-numbered inner node never reads as "the
+  multiplier is selected". The outer wire into a SubgraphNode is revealed by the
+  multiplier or by the instance.
+- *Repaint on selection, without polling.* The wires are drawn on the BACKGROUND
+  canvas and a node click only marks the foreground dirty (`processSelect` ->
+  `setDirty(true)`), so a revealed wire would not appear until something else
+  repainted. `onSelectionChange` alone is NOT enough on 1.52.7's Vue mode
+  (source-reading, rig-UNCONFIRMED): `handleNodeSelect` calls `deselectAll()`
+  then `select(node)`; `deselectAll()` returns early -- no `onSelectionChange` --
+  when nothing was selected, and `select()`/`deselect()` never fire it (the Vue
+  handlers call the Pinia store's `updateSelectedItems()` instead, which an
+  extension cannot reach). So `installSelectionRepaint` wraps the three canvas
+  methods that mutate the selection -- `select`, `deselect`, `deselectAll` --
+  (feature-detected per method, idempotent, the original runs FIRST and its
+  result is returned unchanged), and `installSelectionCallback` chains
+  `canvas.onSelectionChange` (re-verified on every pass) for frontends without
+  those names. Both only call `setDirty(true, true)` -- two flags; the draw
+  happens on the next frame, after the whole click has settled -- and only when
+  the workflow has broadcast wires and "show all" is off.
+- *Hit-testing stays sane.* The canvas hit-tests a link through
+  `canvas.renderedPaths` (every link `_renderAllLinkSegments` visited, drawn or
+  not) using `link._pos` (the centre marker: opens the link menu, starts a
+  drag) and `link.path` (the `isPointInStroke` fallback of shift/alt-click).
+  Skipping the draw would leave both stale -- and a link never drawn since load
+  still has the constructor's `_pos = [0, 0]`, a click target at graph (0, 0).
+  So a tucked wire's `_pos` is set to NaN in place (every `isInRectangle`
+  against NaN is false, and the array stays a valid `Point`, unlike
+  `undefined`) and its `path` cleared -- on the SEGMENT core would have written
+  (`extras.reroute ?? link`); the next real draw rewrites both. 1.52.7 builds
+  its link renderer with `LitegraphLinkAdapter(false)`, so the layout store holds
+  no link layouts that could go stale. The stub is never added to
+  `renderedPaths`, so normal links' hit-testing is untouched. (Known edge: a
+  reroute SHARED between a tucked wire and an ordinary wire is drawn once, by
+  whichever link core visits first; if that is the tucked one, that reroute
+  segment is skipped.)
+- *Per link per frame is O(1).* Two Map lookups against the cached index
+  (`broadcastLinkOwner`) and a property lookup on `selected_nodes`; no walk, no
+  polling, no timer, no per-frame allocation on the non-broadcast path. A
+  workflow without recorded wires pays a shared empty index.
+- *Fail safe.* The hook installs once (`installRenderLinkHook`: a flag on our
+  wrapper plus a WeakSet of prototypes, so another extension wrapping on top
+  never makes it stack) and only when `renderLink` exists and is a function --
+  a frontend that renames it simply shows the wires. Everything of ours inside
+  the wrapper is caught, warned about ONCE per cause, and falls through to the
+  original call (an unknown `look` also draws the wire); core's own drawing
+  errors are not swallowed (the dim path restores the alpha in a `finally`).
+  Drag-preview calls (`link === null`) and any link without an owner record
+  pass straight through. A look change bumps the epoch (the cached owner record
+  carries it), so it applies on the next frame.
+- *Future native route (hook point only, deliberately NOT implemented).* Core's
+  own hidden-link badges (frontend >= 1.55.9) do natively what tucked does.
+  They are not in this repo's rig (1.52.7) nor in 1.53.10 / 1.54.12.
+  `nativeHiddenLinksAvailable()` in `broadcast_draw.js` (returns `false`) is the
+  one commented hook: when a frontend with the feature is on the bench, detect
+  it there; `installRenderLinkHook` then stands down, and the multiplier sets
+  core's hidden flag from its records instead of wrapping `renderLink`.
+
+**Reach (group scope; plan M3).** The ⋯ popover's **Reach** choice, stored as
+`scope`: `graph` (the whole workflow, the default and exactly the v1.3.0
+behaviour) or `group`.
+
+- With `group` a multiplier only claims targets inside a group (`LGraphGroup`)
+  that contains the multiplier, in the multiplier's OWN graph (a multiplier
+  inside a subgraph definition uses that definition's groups). Overlapping or
+  nested groups: the target need only share ANY group with the multiplier. A
+  target in a subgraph is decided by the SubgraphNode INSTANCE's membership in
+  the multiplier's graph (the instance leads there; the definition's own groups
+  are never consulted for it). A definition used both inside and outside the
+  group cannot be fed (the new input is wired on every instance): skip
+  `scope-partial`. A per-instance Tier-1 landing is decided by its own instance.
+- *Membership is geometry, computed by the adapter* (`snapshotFromRoot`; the
+  planner is pure and reads `node.groups` / `graph.groups` from the snapshot):
+  the node's `boundingRect` CENTRE inside the group's `_bounding` -- core's own
+  `containsCentre`/`isInRect` rule (left/top inclusive, right/bottom exclusive),
+  with `pos`/`size` fallbacks for a fork without those fields. It does NOT call
+  `LGraphGroup.recomputeInsideNodes()` or read `group._children`: that method
+  re-sorts `graph._groups` as a side effect and refreshes its cache only when a
+  group is selected or dragged, so a stale `_children` would miss a node dropped
+  in by hand. The geometry is always current and is what the user sees. A group
+  with an unusable rectangle is ignored; a node with no geometry is in no group.
+  Group keys are array indexes (`g0`, `g1`..): ids are `-1` until added and are
+  unique per graph only.
+- *Quiet by design.* Targets outside the group are not candidates at all: the
+  preview does not list them. The preview shows one line instead ("Reach: only
+  my group (“A”) — inputs outside it are not considered."). A multiplier in NO
+  group with `group` scope plans nothing and reports skip `no-group` ("not
+  inside a group", shown as a note; setting Reach to `group` on such a multiplier
+  also toasts). A WAN low-noise sampler outside the group still counts as
+  "seen" (no "title one sampler low" complaint).
+- *Two multipliers.* Each claims only targets in its own scope, so two
+  multipliers in two different groups both wire (no conflict); the same group, or
+  one whole-workflow multiplier beside a group-scoped one, still conflicts on the
+  overlap -- neither wires it.
+- *What Reach does not do.* Changing Reach never removes a wire that already
+  exists ("Remove broadcast wires" does), and moving a node into or out of a
+  group triggers nothing (Keep wired only wires NEW nodes); Wire now previews
+  what the current geometry would add.
 
 **Use Everywhere good citizen (plan M4).** `node.reject_ue_connection(input)` --
 UE's documented per-node veto hook (research §3.5) -- returns true for the
@@ -3579,8 +3751,13 @@ them as connected and leaves those inputs alone.
 **Compatibility.** Opt-in: nothing wires on load, paste, undo or a tab switch.
 Old workflows load and save byte-identically (no property until used).
 Workflows saved with broadcast load on older EPS as ordinary wires plus an
-unused property; the subgraph inputs it added are ordinary subgraph inputs. No
-new serialised widget. No version bump in this stage.
+unused property; the subgraph inputs it added are ordinary subgraph inputs. The
+tucked-wires stage adds NO new serialised widget and no new property: `look` and
+`scope` were already in the record (`look: 'tucked'` and `scope: 'graph'` are the
+defaults, so nothing changes for a workflow that never touched them -- a
+multiplier with broadcast wires now simply DRAWS them tucked, which is purely
+visual). An older EPS reads a saved `scope: 'group'` as `'graph'` (it only knew
+the one value) and shows the wires normally. No version bump in this stage.
 
 **UNCONFIRMED (needs the live rig -- nothing here could be proven from source
 or the fake litegraph in the tests):** that `app.extensionManager.workflow.
@@ -3595,6 +3772,19 @@ disconnect always emits `litegraph:canvas` `after-change` (the debounced pass
 otherwise catches it on the next event); the row's layout and the popover/dialog
 positioning in BOTH renderers; and `app.rootGraph` being the object `walkGraphs`
 walks on a tab switch.
+
+Also UNCONFIRMED for the tucked-wires stage (source-derived, fake-litegraph
+tested): that `LGraphCanvas.prototype.renderLink` really is the function
+`_renderAllLinkSegments` calls in BOTH classic and Nodes 2.0 mode on 1.52.7 (and
+1.53.10 / 1.54.12); that a tucked wire disappears and its 📡 stub looks right at
+every zoom (the glyph/dot switch at `low_quality`) on each OS; that clicking a
+node in Vue mode reaches the wrapped `select`/`deselect`/`deselectAll` and the
+revealed wire paints on that very click; that a tucked wire is not clickable
+at its old midpoint (centre marker) and shift/alt-click on its old path does
+nothing; that the canvas right-click menu shows `Broadcast: show all wires` in
+both renderers; that `afterConfigureGraph` fires on undo/redo and tab switches;
+and that group membership (`boundingRect` centre in `_bounding`) matches what
+the user sees in Nodes 2.0, where node geometry is synced from the layout store.
 
 ### §6.11 `EPSDistributor` (display: "EPS Distributor") — one in, N gated out
 
