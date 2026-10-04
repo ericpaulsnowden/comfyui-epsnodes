@@ -80,6 +80,40 @@
  * unconditionally on every pass rather than only from a detected external
  * write.
  *
+ * **Nested subgraphs (v1.2.0, owner ask 2026-10-03: "Make sure all of the
+ * nodes that can control other nodes also looks into nested nodes"; FORMAT.md
+ * section 7.10 nested reach).** Two shapes of wire cross a subgraph boundary
+ * and the unplug/replug machinery covers both:
+ *   (a) a wire INTO a SubgraphNode's input is an ordinary link, in this node's
+ *       own graph, to an ordinary node (the SubgraphNode), so
+ *       `disconnectInput`/`connect` always worked on it, and the type the row
+ *       adopts is that SubgraphNode input's own declared type
+ *       (`collectSlotLinkTypes` reads `target.inputs[slot].type`, INT/FLOAT
+ *       for a promoted `steps`/`cfg`);
+ *   (b) THIS node sitting INSIDE a subgraph with an output wired to that
+ *       subgraph's OUTPUT node (link `target_id` -20 -- `SUBGRAPH_OUTPUT_ID`,
+ *       a pseudo-node that `getNodeById` never returns). It used to be
+ *       skipped silently by all three helpers, so a row switched off still
+ *       carried the number out of the subgraph. Now `collectOutputTargets`
+ *       remembers it as `{node: -20, input: <the subgraph output's NAME>}`
+ *       (the name, never the index or the label: core's `renameOutput` only
+ *       rewrites `label`, and `nextUniqueName` keeps names unique, so the name
+ *       is the stable identity -- the "inputs restore by name" law again);
+ *       `disconnectAllTargets` unplugs it with `SubgraphOutput.disconnect()`,
+ *       the call core's own `removeOutput` uses, which also clears the IO
+ *       slot's `linkIds` (a bare link-table delete would leave the slot
+ *       claiming a link that is gone); `reconnectRememberedTargets` replugs it
+ *       with `subgraph.outputs[i].connect(output, node)`, SKIPPING a slot that
+ *       already holds a link because core's `connect` REPLACES an existing one
+ *       (never stomp). The flattened prompt then has no link for the outer
+ *       consumers -- the "downstream uses its own value" meaning the checkbox
+ *       promises -- and everything happens inside this node's own graph, so
+ *       there is no instance ambiguity however many SubgraphNodes share the
+ *       definition. A graph that is not a Subgraph (no `outputs` array, or a
+ *       slot without `connect`/`disconnect`) degrades to the old behaviour:
+ *       such a link is neither remembered nor touched
+ *       (`subgraphOutputSlotOf`).
+ *
  * **No canvas drawing, by construction.** Every other hand-drawn EPS
  * control (Switcher's/Distributor's per-row toggles) has to carry a
  * `warnIfVueNodesMode` entry in `web/eps_image.js` because
@@ -257,7 +291,7 @@
  */
 
 import { app } from '../../../scripts/app.js'
-import { subscribeWidgetsChangedExternally } from '../lora_library/api.js'
+import { SUBGRAPH_OUTPUT_ID, subscribeWidgetsChangedExternally } from '../lora_library/api.js'
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -294,6 +328,11 @@ export function slotName(n) {
 }
 
 const OUTPUT_NAME_RE = /^num_(\d+)$/
+
+/** litegraph's `NodeSlotType.OUTPUT` -- the `type` argument of an output-side
+ * `onConnectionsChange` (a plain number here: the enum is not a stable
+ * public import, bypass.js's `HOLLOW_CIRCLE_SHAPE` precedent). */
+const NODE_SLOT_OUTPUT = 2
 
 /** Inverse of slotName(): the slot number for a name matching `num_<N>`, or
  * null for anything else. Exported for tests. */
@@ -424,7 +463,11 @@ export function isRowEnabled(entry) {
  * name, module docstring) and a `node` id that is a number or string
  * (litegraph node ids are numeric, but a hand-edited/foreign workflow could
  * plausibly stringify one); anything else is dropped, one bad item never
- * poisoning its neighbours. Exported for tests.
+ * poisoning its neighbours. `-20` (`SUBGRAPH_OUTPUT_ID`, v1.2.0) is an
+ * ordinary number here: a wire to the owning subgraph's output node is
+ * remembered as `{node: -20, input: <subgraph output name>}` (module
+ * docstring, nested paragraph) and sanitises like any other target.
+ * Exported for tests.
  */
 export function normalizeRememberedLinks(raw) {
   if (!Array.isArray(raw)) return []
@@ -774,6 +817,14 @@ function highestWiredSlot(node) {
  * restore AFTER this node -- distributor.js's identical restore-ordering
  * caveat). Tolerant of a missing graph/links throughout -- always returns
  * an array, never throws.
+ *
+ * Nested (v1.2.0, owner ask 2026-10-03): a SubgraphNode input target is an
+ * ordinary node input, so it adopts its declared type; a link into the owning
+ * subgraph's OUTPUT node (`target_id` -20) has no node behind it
+ * (`getNodeById` is null, `targetInput` undefined), so only the link's own
+ * recorded `.type` is pushed -- a row wired straight to a subgraph output stays
+ * `*` unless that recorded type is concrete, which the backend renders as a
+ * plain int-or-float number (`_coerce_slot`). Degrades, never throws.
  */
 function collectSlotLinkTypes(node, idx) {
   const types = []
@@ -798,12 +849,61 @@ function collectSlotLinkTypes(node, idx) {
 }
 
 /**
+ * Whether *link* ends at its own graph's subgraph OUTPUT pseudo-node
+ * (`target_id` -20, litegraph's `SUBGRAPH_OUTPUT_ID`). Ids compare as strings:
+ * newer frontends brand node ids, and a hand-edited workflow can stringify
+ * one. EXPORTED (v1.2.0) for `bypass.js`, which classifies the consumers on
+ * the far side of such a wire. Pure; never throws.
+ */
+export function isSubgraphOutputLink(link) {
+  return link != null && String(link.target_id) === String(SUBGRAPH_OUTPUT_ID)
+}
+
+/**
+ * The subgraph OUTPUT slot a link into the subgraph output node enters, as
+ * `{slot, index}`, or null (owner ask 2026-10-03, module docstring's nested
+ * paragraph). Null for every case this file cannot actually unplug and
+ * replug, so all three shared helpers below degrade the SAME way: not a
+ * `-20` link, *graph* is not a Subgraph (no `outputs` array -- a root LGraph,
+ * or an old litegraph's object-shaped `outputs`), the slot is missing or has
+ * no usable name, or it lacks the `connect`/`disconnect` methods core's
+ * `SubgraphOutput` has (verified in `subgraph/SubgraphOutput.ts`). `index` is
+ * the link's `target_slot` -- index-aligned with `graph.outputs`. EXPORTED for
+ * `bypass.js`. Never throws.
+ */
+export function subgraphOutputSlotOf(graph, link) {
+  if (!isSubgraphOutputLink(link)) return null
+  const slots = graph?.outputs
+  if (!Array.isArray(slots)) return null
+  const index = Number(link.target_slot)
+  const slot = slots[index]
+  if (!slot || typeof slot.name !== 'string' || slot.name === '') return null
+  if (typeof slot.connect !== 'function' || typeof slot.disconnect !== 'function') return null
+  return { slot, index }
+}
+
+/** Whether subgraph output *slot* already holds a live link -- core's own
+ * stomp condition (`SubgraphOutput.connect` replaces `getLinks().at(0)`), so
+ * a replug that respects it can never evict somebody else's wire. */
+function subgraphOutputIsTaken(slot) {
+  if (typeof slot.getLinks === 'function') return slot.getLinks().length > 0
+  return Array.isArray(slot.linkIds) && slot.linkIds.length > 0
+}
+
+/**
  * Every current target of output *idx*, as `{node: id, input: name}` pairs
  * -- what a checkbox-off row needs to remember before detaching (module
  * docstring's checkbox paragraph). Read live from the graph, never from a
  * previously-stored `links` list, so what gets remembered is always
  * whatever is ACTUALLY about to be removed. Tolerant of a missing graph/
  * links/target -- always returns an array, never throws.
+ *
+ * A link into the owning subgraph's OUTPUT node (v1.2.0, owner ask
+ * 2026-10-03) has no target node, so it is remembered as `{node: -20, input:
+ * <the subgraph output's name>}` -- the id the serialized link itself carries
+ * (`SUBGRAPH_OUTPUT_ID`), the output's NAME rather than its index/label (see
+ * the module docstring's nested paragraph for why). Anything
+ * `subgraphOutputSlotOf` cannot vouch for is skipped, as before.
  *
  * EXPORTED (v0.99.0) together with `disconnectAllTargets` and
  * `reconnectRememberedTargets` below (and `normalizeRememberedLinks`,
@@ -828,7 +928,12 @@ export function collectOutputTargets(node, idx) {
         if (!link) continue
         const target = graph?.getNodeById?.(link.target_id)
         const targetInput = target?.inputs?.[link.target_slot]
-        if (target && targetInput?.name) targets.push({ node: link.target_id, input: targetInput.name })
+        if (target && targetInput?.name) {
+          targets.push({ node: link.target_id, input: targetInput.name })
+          continue
+        }
+        const sub = target ? null : subgraphOutputSlotOf(graph, link)
+        if (sub) targets.push({ node: SUBGRAPH_OUTPUT_ID, input: sub.slot.name })
       }
     }
   } catch (error) {
@@ -845,7 +950,17 @@ export function collectOutputTargets(node, idx) {
  * widget value is still 42"). Snapshots `output.links` before iterating --
  * disconnecting mutates that same live array out from under a direct
  * for-of. Never throws: one link failing to resolve does not block the
- * rest.
+ * rest (each link has its own guard).
+ *
+ * A link into the owning subgraph's OUTPUT node (v1.2.0) has no target node
+ * to call `disconnectInput` on: it is unplugged with the subgraph output
+ * slot's own `disconnect()` -- what core's `removeOutput` calls, and the one
+ * method that removes the inner link AND clears the slot's `linkIds` AND
+ * fires the origin node's `onConnectionsChange` (note it passes the
+ * SubgraphOutput, not this node's output, as the slot argument -- the hooks
+ * that listen for it key on type + index as well). Afterwards the output
+ * reads unconnected (`isOutputConnected`), which is what keeps a row's/the
+ * Bypass toggle's ON/OFF agreeing with the wiring.
  */
 export function disconnectAllTargets(node, idx) {
   try {
@@ -853,15 +968,45 @@ export function disconnectAllTargets(node, idx) {
     const output = node.outputs?.[idx]
     const links = Array.isArray(output?.links) ? [...output.links] : []
     for (const linkId of links) {
-      const link = linkById(graph, linkId)
-      if (!link) continue
-      const target = graph?.getNodeById?.(link.target_id)
-      if (!target || typeof target.disconnectInput !== 'function') continue
-      target.disconnectInput(link.target_slot)
+      try {
+        const link = linkById(graph, linkId)
+        if (!link) continue
+        const target = graph?.getNodeById?.(link.target_id)
+        if (!target) {
+          subgraphOutputSlotOf(graph, link)?.slot.disconnect()
+          continue
+        }
+        if (typeof target.disconnectInput !== 'function') continue
+        target.disconnectInput(link.target_slot)
+      } catch (error) {
+        console.warn(PREFIX, 'disconnectAllTargets: one link failed', error)
+      }
     }
   } catch (error) {
     console.warn(PREFIX, 'disconnectAllTargets failed', error)
   }
+}
+
+/**
+ * Replugs one remembered `{node: -20, input: name}` item onto the subgraph
+ * OUTPUT slot of the same name -- `reconnectRememberedTargets`' branch for the
+ * pseudo-node target (v1.2.0). Looked up by NAME, like every other remembered
+ * target; skips quietly when this graph is not a Subgraph, the output is gone
+ * or renamed-away, this node's output index is gone, or the slot already
+ * holds a link (core's `SubgraphOutput.connect` REPLACES an existing link, so
+ * the skip is what makes "never stomp" true here too). `connect` itself still
+ * refuses a type mismatch and runs this node's `onConnectOutput` veto
+ * (`wireTypeVeto`), exactly like a manual drag onto the subgraph output.
+ */
+function reconnectToSubgraphOutput(node, idx, item) {
+  const slots = node.graph?.outputs
+  if (!Array.isArray(slots)) return
+  const slot = slots.find((s) => s && s.name === item?.input)
+  if (!slot || typeof slot.connect !== 'function') return // output gone -- skip quietly
+  if (subgraphOutputIsTaken(slot)) return // already taken -- never stomp
+  const output = node.outputs?.[idx]
+  if (!output) return // this node's output index is gone -- skip quietly
+  slot.connect(output, node)
 }
 
 /**
@@ -874,19 +1019,31 @@ export function disconnectAllTargets(node, idx) {
  * each skipped quietly -- this function never throws and never disconnects
  * anything on its own (only `node.connect`'s own veto can decline a
  * reconnect, which it does by simply not connecting, not by touching
- * anything else).
+ * anything else). Each item has its own guard, so one bad item cannot
+ * block its neighbours.
+ *
+ * An item whose `node` is -20 (`SUBGRAPH_OUTPUT_ID`, v1.2.0) is the owning
+ * subgraph's output node and is replugged by `reconnectToSubgraphOutput`.
  */
 export function reconnectRememberedTargets(node, idx, remembered) {
   try {
     const graph = node?.graph
     if (typeof node.connect !== 'function') return
     for (const item of remembered || []) {
-      const target = graph?.getNodeById?.(item?.node)
-      if (!target) continue // target node no longer exists -- skip quietly
-      const targetSlot = (target.inputs || []).findIndex((inp) => inp?.name === item?.input)
-      if (targetSlot === -1) continue // input no longer exists -- skip quietly
-      if (target.inputs[targetSlot].link != null) continue // already taken -- never stomp
-      node.connect(idx, target, targetSlot)
+      try {
+        if (String(item?.node) === String(SUBGRAPH_OUTPUT_ID)) {
+          reconnectToSubgraphOutput(node, idx, item)
+          continue
+        }
+        const target = graph?.getNodeById?.(item?.node)
+        if (!target) continue // target node no longer exists -- skip quietly
+        const targetSlot = (target.inputs || []).findIndex((inp) => inp?.name === item?.input)
+        if (targetSlot === -1) continue // input no longer exists -- skip quietly
+        if (target.inputs[targetSlot].link != null) continue // already taken -- never stomp
+        node.connect(idx, target, targetSlot)
+      } catch (error) {
+        console.warn(PREFIX, 'reconnectRememberedTargets: one item failed', error)
+      }
     }
   } catch (error) {
     console.warn(PREFIX, 'reconnectRememberedTargets failed', error)
@@ -1723,8 +1880,17 @@ function wireRowSync(state) {
     // loop passes it hardcoded `true` even for a slot with no link, and
     // `highestWiredSlot`/`slotCarriesContent` both recompute wiring/content
     // from the slots and the map themselves, so a stale argument can never
-    // misdrive this.
-    if (!hook.restoring && OUTPUT_NAME_RE.test(slot?.name || '')) schedule(this)
+    // misdrive this. A subgraph output's own `disconnect()` (v1.2.0, nested
+    // paragraph) reports the SubgraphOutput -- whose name the user may have
+    // changed -- as `slot` but still passes THIS node's output index, so
+    // the output-kind event is also matched by that index's name.
+    const ownOutputName = type === NODE_SLOT_OUTPUT ? this.outputs?.[index]?.name : ''
+    if (
+      !hook.restoring &&
+      (OUTPUT_NAME_RE.test(slot?.name || '') || OUTPUT_NAME_RE.test(ownOutputName || ''))
+    ) {
+      schedule(this)
+    }
     return result
   }
 }

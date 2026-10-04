@@ -338,7 +338,13 @@ function basenameOf(path) {
  * Every discovered `LoraLibraryNotebook` node, reduced to the selector's
  * `<option>` list: `label = "<node title> — <file basename>"`,
  * `value = <file string>`, de-duplicated by `file` (first title wins).
- * @param {{title: string, file: string}[]} entries
+ * A Notebook INSIDE a subgraph carries `where` (its containing subgraphs'
+ * names, outermost first, joined with " › " -- `api.describePath`'s trail)
+ * and its label becomes `"<where> › <node title> — <file basename>"`
+ * (v1.2.0, owner ask 2026-10-03, FORMAT.md §7.10: two same-titled Notebooks
+ * in different subgraphs must read apart). A root Notebook has no `where`
+ * and its label is exactly what it always was.
+ * @param {{title: string, file: string, where?: string}[]} entries
  * @returns {{label: string, value: string}[]}
  */
 export function notebookOptionsOf(entries) {
@@ -349,7 +355,8 @@ export function notebookOptionsOf(entries) {
     if (seen.has(entry.file)) continue
     seen.add(entry.file)
     const title = typeof entry.title === 'string' && entry.title ? entry.title : 'Notebook'
-    out.push({ label: `${title} — ${basenameOf(entry.file)}`, value: entry.file })
+    const where = typeof entry.where === 'string' && entry.where ? `${entry.where} › ` : ''
+    out.push({ label: `${where}${title} — ${basenameOf(entry.file)}`, value: entry.file })
   }
   return out
 }
@@ -1079,7 +1086,7 @@ function onPollTick(state) {
 function discoverNotebookCandidates() {
   if (!app.graph) return []
   const out = []
-  for (const { node } of walkLiveNodes(app.graph)) {
+  for (const { node, pathId } of walkLiveNodes(app.graph)) {
     if (!isNotebookCanvasNode(node)) continue
     const fw = findWidget(node, 'file')
     // Unsaved-edit drafts (owner report 2026-09-02): riding the SAME
@@ -1091,7 +1098,10 @@ function discoverNotebookCandidates() {
     out.push({
       title: node.title || node.type || 'Notebook',
       file: typeof fw?.value === 'string' ? fw.value : '',
-      draftsRaw: typeof dw?.value === 'string' ? dw.value : null
+      draftsRaw: typeof dw?.value === 'string' ? dw.value : null,
+      // v1.2.0 nested reach: which subgraph(s) hold this Notebook ('' at the
+      // root) -- the selector label names them (notebookOptionsOf).
+      where: api.describePath(app.graph, pathId).trail.join(' › ')
     })
   }
   return out

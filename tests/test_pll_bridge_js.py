@@ -35,6 +35,7 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 BRIDGE_JS = REPO_ROOT / "web" / "lora_library" / "pll_bridge.js"
+API_JS = REPO_ROOT / "web" / "lora_library" / "api.js"
 CONTROLLER_JS = REPO_ROOT / "web" / "lora_library" / "controller.js"
 
 NODE = shutil.which("node")
@@ -124,6 +125,14 @@ const high = fakePll(7)
 const low = fakePll(3)
 app.graph = { _nodes: [high, low, { id: 5, type: 'SomeOtherNode' }] }
 out.findPllOrder = m.findPllNodes().map((node) => node.id)
+// v1.2.0 nested reach: loaders INSIDE a subgraph (own id space, so the inner
+// id deliberately collides with a root id) are found too, ordered by PATH id.
+const nestedA = fakePll(3) // collides with root `low` (id 3)
+const nestedB = fakePll(2)
+const sub = { id: 9, type: 'Sub', subgraph: { _nodes: [nestedA, nestedB] } }
+app.graph = { _nodes: [high, low, sub] }
+const tag = (node) => `${node.id}${node === nestedA || node === nestedB ? 'n' : ''}`
+out.findPllNested = m.findPllNodes().map(tag)
 out.probeNullWithCandidates = m.probePll(null)
 out.probeOk = m.probePll(low)
 out.probeMissingApi = m.probePll({ id: 9, type: PLL, widgets: [] })
@@ -191,9 +200,15 @@ def bridge_api(tmp_path_factory: pytest.TempPathFactory) -> dict:
     shutil.copyfile(BRIDGE_JS, module_dir / "pll_bridge.js")
     # pll_bridge.js imports only `../../../scripts/app.js` -- stub it exactly
     # as test_picker_js.py does; the probe mutates `app.graph` per scenario.
+    # v1.2.0 (FORMAT.md §7.10): the root-only finder now imports the shared
+    # `walkLiveNodes`/`comparePathIds` from `./api.js`, whose own imports
+    # (`scripts/api.js`, `scripts/app.js`, `./version.js`) need serving too.
+    shutil.copyfile(API_JS, module_dir / "api.js")
+    shutil.copyfile(API_JS.parent / "version.js", module_dir / "version.js")
     scripts = layout / "scripts"
     scripts.mkdir(parents=True, exist_ok=True)
     (scripts / "app.js").write_text("export const app = {}\n", encoding="utf-8")
+    (scripts / "api.js").write_text("export const api = {}\n", encoding="utf-8")
 
     probe = layout / "probe.mjs"
     probe.write_text(PROBE_JS, encoding="utf-8")
@@ -308,6 +323,14 @@ def test_find_pll_nodes_sorted_ascending_and_type_filtered(bridge_api: dict) -> 
     """Graph order was [7, 3, non-PLL]; the combo order is ascending id with
     the non-PLL dropped (§6.13 M2)."""
     assert bridge_api["findPllOrder"] == [3, 7]
+
+
+def test_find_pll_nodes_reaches_into_subgraphs_ordered_by_path_id(bridge_api: dict) -> None:
+    """v1.2.0 nested reach (owner ask 2026-10-03, FORMAT.md §7.10): the
+    finder used to read `app.graph._nodes` only. Loaders inside a SubgraphNode
+    are found too (an inner id may collide with a root id -- 3 here), ordered
+    by execution PATH id: root 3, root 7, then "9:2", "9:3"."""
+    assert bridge_api["findPllNested"] == ["3", "7", "2n", "3n"]
 
 
 # ----------------------------------------------------------------- rowsForPll
@@ -425,8 +448,12 @@ def test_attribution_comment_and_no_controller_import(source: str) -> None:
     assert "controller.js" in source
     assert "deliberately duplicated, not imported" in source
     assert "from './controller.js'" not in source
+    # v1.2.0 (FORMAT.md §7.10): the root-only finder imports the SHARED
+    # traversal helpers (not controller.js -- the duplication rule is about
+    # that owner-validated code), so api.js is the one other import allowed.
     assert re.findall(r"^import .*$", source, flags=re.MULTILINE) == [
-        "import { app } from '../../../scripts/app.js'"
+        "import { app } from '../../../scripts/app.js'",
+        "import { walkLiveNodes, comparePathIds } from './api.js'",
     ]
 
 
@@ -441,7 +468,10 @@ class TestPickerTargetFamilyV0640:
     ) -> None:
         body = _function_body(controller_source, "findTargetCandidates()")
         assert "api.walkLiveNodes(app.graph)" in body
-        assert "if (!familyOf(node)) continue" in body
+        # v1.2.0 (FORMAT.md §7.10): one entry per NODE -- a loader inside a
+        # shared subgraph definition is one object reported once per instance
+        # path, and listing it per path double-counted "All loaders (N)".
+        assert "if (!familyOf(node) || seen.has(node)) continue" in body
         assert "label: `${node.title || node.type} #${pathId}`" in body
         # ...and label resolution round-trips through the path-aware finder.
         resolve = _function_body(controller_source, "resolveTargetNode(label)")
@@ -498,8 +528,12 @@ class TestPickerTargetFamilyV0640:
         body = _function_body(controller_source, "findApplySetNodes()")
         assert "walkLiveNodes(app.graph)" in body
         # Path ids order segment-numerically for All-capture and composites.
+        # v1.2.0: the ordering itself moved to api.js (one shared definition,
+        # FORMAT.md §7.10); controller.js keeps a delegating alias.
         cmp_body = _function_body(controller_source, "comparePathIds(a, b)")
-        assert "split(':').map(Number)" in cmp_body
+        assert "return api.comparePathIds(a, b)" in cmp_body
+        api_source = (REPO_ROOT / "web" / "lora_library" / "api.js").read_text(encoding="utf-8")
+        assert "split(':').map(Number)" in _function_body(api_source, "comparePathIds(a, b)")
         assert "comparePathIds(a.id, b.id)" in _function_body(
             controller_source, "pllAscendingIndex(node)"
         )
@@ -884,7 +918,6 @@ def test_new_group_is_announced_with_toasts(controller_source: str) -> None:
 # FOLDER (`<library>/sets`), still the pack's default LOCAL folder on his
 # machines; "Surface it just like for the prompt library." FORMAT.md §6.3.
 
-API_JS = REPO_ROOT / "web" / "lora_library" / "api.js"
 VERSION_JS = REPO_ROOT / "web" / "lora_library" / "version.js"
 # Browse… round (2026-08-22): controller.js now imports the Notebook's folder
 # picker (`pickServerFolder`) and the Settings dialog's library-folder POST

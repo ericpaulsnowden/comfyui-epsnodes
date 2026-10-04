@@ -19,10 +19,19 @@ the connection hook", read-only ``settle`` -- are pinned as source assertions
 (``tests/test_frame_saver_paste_js.py``'s convention for code with no browser
 harness).
 
+v1.2.0 nested reach (owner ask 2026-10-03): the same real ``attach()`` is also
+driven against NESTED graphs -- a wire into a SubgraphNode input, and the node
+inside a subgraph wired to the subgraph's own output (``target_id`` -20) --
+using ``tests/nested_subgraph_io.mjs`` (core's ``SubgraphOutput.connect`` /
+``disconnect`` / ``SubgraphInput``) and the REAL ``api.js`` nested walkers.
+
 Skips cleanly when Node isn't installed. What this CANNOT cover, and the rig
 must: a real litegraph ``connect``/``isValidConnection`` type refusal, the Vue
 renderer writing its model around the toggle callback, real ``nodeData`` off a
-real ``/object_info``, and ``graphToPrompt`` actually omitting the input.
+real ``/object_info``, and ``graphToPrompt`` actually omitting the input -- for
+a nested wire, that the flattened prompt really drops the outer consumers'
+input once the inner link into the subgraph output (or the outer wire into the
+SubgraphNode) is gone, and that a promoted widget's value takes over.
 """
 
 from __future__ import annotations
@@ -40,6 +49,10 @@ WEB = REPO_ROOT / "web"
 BYPASS_JS = WEB / "eps_image" / "bypass.js"
 NUMBER_CONTROLLER_JS = WEB / "eps_image" / "number_controller.js"
 DISTRIBUTOR_JS = WEB / "eps_image" / "distributor.js"
+#: This file's own fake Subgraph slots (SubgraphOutput.connect/disconnect and
+#: SubgraphInput, modelled on lib/litegraph/src/subgraph/*) -- shared with
+#: tests/test_number_controller_js.py.
+NESTED_SUBGRAPH_IO_MJS = Path(__file__).resolve().parent / "nested_subgraph_io.mjs"
 
 NODE = shutil.which("node")
 
@@ -73,6 +86,24 @@ PARSE_MEMORY_CASES = [
     ('"a string"', 10, []),
     ('{"owner": 10}', 10, []),
     ('{"owner": 10, "links": "nope"}', 10, []),
+    # v1.2.0 nested reach: a wire into the owning subgraph's OUTPUT is
+    # remembered as {node: -20, input: <subgraph output name>} -- the id the
+    # serialized link carries. It sanitises like any other target, and a
+    # stringified id (hand edit / foreign tool) survives untouched.
+    (
+        '{"owner": 10, "links": [{"node": -20, "input": "out"}, {"node": 5, "input": "audio"}]}',
+        10,
+        [{"node": -20, "input": "out"}, {"node": 5, "input": "audio"}],
+    ),
+    (
+        '{"owner": 10, "links": [{"node": "-20", "input": "out"}]}',
+        10,
+        [{"node": "-20", "input": "out"}],
+    ),
+    # ...a foreign owner's -20 memory is as ignored as any other (copy/paste).
+    ('{"owner": 10, "links": [{"node": -20, "input": "out"}]}', 11, []),
+    # ...and a -20 item with no output name is dropped like any nameless target.
+    ('{"owner": 10, "links": [{"node": -20, "input": ""}, {"node": -20}]}', 10, []),
     # One bad item never poisons its neighbours (normalizeRememberedLinks).
     (
         '{"owner": 10, "links": [{"node": 1, "input": "a"}, "junk", {"node": 2, "input": ""},'
@@ -89,6 +120,7 @@ SERIALIZE_MEMORY_CASES = [
     (10, "nope", "{}"),
     (10, [{"node": 1, "input": ""}], "{}"),  # wholly invalid -> no residue
     (10, [{"node": 5, "input": "audio"}], '{"owner":10,"links":[{"node":5,"input":"audio"}]}'),
+    (10, [{"node": -20, "input": "out"}], '{"owner":10,"links":[{"node":-20,"input":"out"}]}'),
     (
         10,
         [{"node": 5, "input": "audio"}, "junk", {"node": 6, "input": "mask"}],
@@ -123,6 +155,12 @@ SAME_TARGET_CASES = [
     ({"node": 5, "input": "audio"}, {"node": "5", "input": "audio"}, True),
     ({"node": 5, "input": "audio"}, {"node": 6, "input": "audio"}, False),
     ({"node": 5, "input": "audio"}, {"node": 5, "input": "mask"}, False),
+    # the subgraph output pseudo-node (-20): same id compares as a string,
+    # and the OUTPUT NAME is what tells two subgraph outputs apart.
+    ({"node": -20, "input": "out"}, {"node": -20, "input": "out"}, True),
+    ({"node": -20, "input": "out"}, {"node": "-20", "input": "out"}, True),
+    ({"node": -20, "input": "out"}, {"node": -20, "input": "out2"}, False),
+    ({"node": -20, "input": "audio"}, {"node": 5, "input": "audio"}, False),
 ]
 
 #: (label, target class nodeData JS, slot JS, expected {safe, why}) for
@@ -203,11 +241,27 @@ VERDICT_CASES = [
     ("no slot", "{ input: {} }", "null", {"safe": False, "why": "unknown"}),
 ]
 
+#: (SubgraphNode input slot JS, expected hasPromotedWidget()). The prompt
+#: flattening (ExecutableNodeDTO.resolveInput, ComfyUI 1.52.7) reads
+#: `widgetId`; `_widget`/`widget` are stamped with it and cover builds that
+#: keep only one of them. A field that is absent reads as NOT promoted (the
+#: refusing side).
+PROMOTED_CASES = [
+    ("{ name: 'steps', type: 'INT', link: null, widgetId: 'root:3:steps' }", True),
+    ("{ name: 'steps', type: 'INT', link: null, _widget: { value: 20 } }", True),
+    ("{ name: 'steps', type: 'INT', link: null, widget: { name: 'steps' } }", True),
+    ("{ name: 'audio', type: 'AUDIO', link: null }", False),
+    ("{ name: 'audio', type: 'AUDIO', link: 4, widgetId: '' }", False),
+    ("null", False),
+    ("undefined", False),
+]
+
 PROBE_JS = r"""
 import * as bp from './extensions/comfyui-epsnodes/eps_image/bypass.js'
 import * as nc from './extensions/comfyui-epsnodes/eps_image/number_controller.js'
 import * as dist from './extensions/comfyui-epsnodes/eps_image/distributor.js'
 import { app } from './scripts/app.js'
+import * as io from './nested_subgraph_io.mjs'
 
 const out = { pure: {}, g: {} }
 const tick = () => new Promise((resolve) => setTimeout(resolve, 5))
@@ -239,6 +293,7 @@ __VERDICT_CASES__
   class T { static nodeData = nodeData }
   return bp.inputVerdict(new T(), slot)
 })
+out.pure.promoted = __PROMOTED_CASES__.map(([slot]) => bp.hasPromotedWidget(slot))
 out.pure.refusal = {
   required1: bp.refusalMessage([{ label: 'Save Audio #5 (audio)', why: 'required' }]),
   required2: bp.refusalMessage([
@@ -250,7 +305,8 @@ out.pure.refusal = {
   unrestorable: bp.refusalMessage([{ label: 'Reroute #9', why: 'unrestorable' }]),
   unknown1: bp.refusalMessage([{ label: 'X #1 (y)', why: 'unknown' }]),
   unknown2: bp.refusalMessage([{ label: 'X', why: 'unknown' }, { label: 'Y', why: 'unknown' }]),
-  empty: bp.refusalMessage([])
+  empty: bp.refusalMessage([]),
+  nested: bp.refusalMessage([{ label: 'Audio Stage \u203a Save Audio (audio)', why: 'required' }])
 }
 
 // -------------------------------------------------- a small fake litegraph
@@ -267,6 +323,8 @@ function makeGraph() {
     links: new Map(),
     dirty: 0,
     getNodeById(id) { return this.nodesById.get(id) ?? null },
+    // the pack's nested walkers (api.js) read `_nodes`
+    get _nodes() { return [...this.nodesById.values()] },
     add(node) { this.nodesById.set(node.id, node); node.graph = this; return node },
     setDirtyCanvas() { this.dirty += 1 }
   }
@@ -998,6 +1056,582 @@ out.g.subscriptionInstalled = typeof globalThis.__externalHandler
   out.g.callbackChain = { calls, ret }
 }
 
+
+// ================== Q: NESTED SUBGRAPHS (v1.2.0, owner ask 2026-10-03) ==================
+// The fake Subgraph slots come from tests/nested_subgraph_io.mjs (core's
+// SubgraphOutput.connect/disconnect and SubgraphInput, no more); the node and
+// graph shapes are THIS harness's own (`FakeNode`, `makeGraph`, `wireLinks`).
+
+/** A SubgraphNode: an ordinary node with NO `constructor.nodeData` (like
+ * core's) that carries its definition on `.subgraph`. Pass *definition* to
+ * make a second INSTANCE of an existing definition. */
+function makeSubgraphNode(graph, title, spec, definition) {
+  class SG extends FakeNode {}
+  const node = new SG(undefined, title)
+  node.inputs = (spec.inputs || []).map((i) => ({ link: null, ...i }))
+  node.outputs = (spec.outputs || []).map((o) => ({ links: null, ...o }))
+  node.subgraph = definition ?? io.asSubgraph(makeGraph(), {
+    name: `${title} definition`, rootGraph: graph.rootGraph || graph,
+    inputs: (spec.inputs || []).map(({ name, type }) => ({ name, type })),
+    outputs: (spec.outputs || []).map(({ name, type }) => ({ name, type }))
+  })
+  graph.add(node)
+  return node
+}
+
+const audioSlot = (node) => node.inputs.findIndex((i) => i.name === 'audio')
+const leafTitleDetail = () => toasts[toasts.length - 1]?.detail ?? ''
+
+/** Case A: Load Audio -> bypass(10) -> SubgraphNode.audio, with *inside*
+ * building whatever reads that subgraph input. */
+async function buildInto(inside, { widgetId, title = 'Sub A' } = {}) {
+  const graph = makeGraph()
+  const origin = makeOrigin(graph)
+  const node = makeBypass(graph, 10)
+  bp.attach(node)
+  const S = makeSubgraphNode(graph, title, {
+    inputs: [{ name: 'audio', type: 'AUDIO', ...(widgetId ? { widgetId } : {}) }]
+  })
+  const inner = inside(S.subgraph, S)
+  origin.connect(0, node, 1)
+  node.connect(0, S, 0)
+  await tick()
+  resetToasts()
+  return { graph, origin, node, S, sub: S.subgraph, inner }
+}
+
+/** An inner consumer fed by subgraph input 0. */
+const innerVideo = (sub) => {
+  const v = makeVideo(sub, 'Inner Video')
+  io.wireFromSubgraphInput(sub, 0, v, 1)
+  return v
+}
+const innerSave = (sub) => {
+  const v = makeSaveAudio(sub)
+  v.title = 'Inner Save'
+  io.wireFromSubgraphInput(sub, 0, v, 0)
+  return v
+}
+
+// ---- Q1: off/on through a SubgraphNode input with an OPTIONAL inner consumer
+{
+  const { graph, node, S, sub, inner: video } = await buildInto(innerVideo)
+  const innerLink = video.inputs[1].link
+  clickToggle(node)
+  await tick()
+  const off = {
+    enabled: widgetOf(node, 'enabled').value, outerWired: S.inputs[0].link != null,
+    memory: memoryOf(node).links, bypassOutLinks: (node.outputs[0].links || []).length,
+    innerKept: video.inputs[1].link === innerLink && sub.links.has(innerLink),
+    toasts: toasts.length, outputLabel: node.outputs[0].label
+  }
+  clickToggle(node)
+  await tick()
+  const link = graph.links.get(S.inputs[0].link)
+  out.g.nestedIntoOptional = {
+    sId: S.id, off,
+    on: {
+      enabled: widgetOf(node, 'enabled').value, outerWired: S.inputs[0].link != null,
+      originId: link?.origin_id, targetId: link?.target_id,
+      memoryRaw: widgetOf(node, 'links').value,
+      innerKept: video.inputs[1].link === innerLink, toasts: toasts.length
+    }
+  }
+}
+
+// ---- Q2: a REQUIRED inner consumer refuses, naming where it is
+{
+  const { node, S, inner } = await buildInto(innerSave)
+  const linkBefore = S.inputs[0].link
+  clickToggle(node)
+  await tick()
+  out.g.nestedIntoRequired = {
+    enabled: widgetOf(node, 'enabled').value, sameLink: S.inputs[0].link === linkBefore,
+    memoryRaw: widgetOf(node, 'links').value, detail: leafTitleDetail(),
+    toasts: toasts.map((t) => t.severity), innerId: inner.id
+  }
+}
+
+// ---- Q3: a PROMOTED widget on the SubgraphNode input is safe (its own value
+// takes over), even over a required inner consumer; the guard never looks inside.
+{
+  const { node, S } = await buildInto(innerSave, { widgetId: 'w1' })
+  clickToggle(node)
+  await tick()
+  const off = {
+    enabled: widgetOf(node, 'enabled').value, outerWired: S.inputs[0].link != null,
+    memory: memoryOf(node).links, toasts: toasts.length
+  }
+  clickToggle(node)
+  await tick()
+  out.g.nestedPromoted = { off, onWired: S.inputs[0].link != null, toasts: toasts.length }
+}
+
+// ---- Q4: a subgraph input nobody reads inside is safe
+{
+  const { node, S } = await buildInto(() => null)
+  clickToggle(node)
+  await tick()
+  const off = { enabled: widgetOf(node, 'enabled').value, outerWired: S.inputs[0].link != null,
+    memory: memoryOf(node).links, toasts: toasts.length }
+  clickToggle(node)
+  await tick()
+  out.g.nestedUnread = { off, onWired: S.inputs[0].link != null, toasts: toasts.length }
+}
+
+// ---- Q5: two levels down. root -> Sub A.audio -> (inside A) Sub B.audio -> leaf
+async function buildTwoLevel(makeLeaf) {
+  const graph = makeGraph()
+  const origin = makeOrigin(graph)
+  const node = makeBypass(graph, 10)
+  bp.attach(node)
+  const A = makeSubgraphNode(graph, 'Sub A', { inputs: [{ name: 'audio', type: 'AUDIO' }] })
+  const B = makeSubgraphNode(A.subgraph, 'Sub B', { inputs: [{ name: 'audio', type: 'AUDIO' }] })
+  io.wireFromSubgraphInput(A.subgraph, 0, B, 0) // A's input feeds B's input, inside A
+  const leaf = makeLeaf(B.subgraph)
+  origin.connect(0, node, 1)
+  node.connect(0, A, 0)
+  await tick()
+  resetToasts()
+  return { graph, node, A, B, leaf }
+}
+{
+  const ok = await buildTwoLevel(innerVideo)
+  clickToggle(ok.node)
+  await tick()
+  const off = {
+    enabled: widgetOf(ok.node, 'enabled').value, outerWired: ok.A.inputs[0].link != null,
+    toasts: toasts.length
+  }
+  clickToggle(ok.node)
+  await tick()
+  const bad = await buildTwoLevel(innerSave)
+  clickToggle(bad.node)
+  await tick()
+  out.g.nestedTwoLevel = {
+    optional: { off, onWired: ok.A.inputs[0].link != null },
+    required: {
+      enabled: widgetOf(bad.node, 'enabled').value, outerWired: bad.A.inputs[0].link != null,
+      detail: leafTitleDetail()
+    }
+  }
+}
+
+// ---- Q6: a subgraph input passed straight THROUGH to a subgraph output: the
+// consumers on the far side of that output are the real consumers.
+async function buildPassThrough(makeConsumer) {
+  const graph = makeGraph()
+  const origin = makeOrigin(graph)
+  const node = makeBypass(graph, 10)
+  bp.attach(node)
+  const A = makeSubgraphNode(graph, 'Sub A', {
+    inputs: [{ name: 'audio', type: 'AUDIO' }], outputs: [{ name: 'out', type: 'AUDIO' }]
+  })
+  const pass = {
+    id: 7001, type: 'AUDIO', origin_id: -10, origin_slot: 0, target_id: -20, target_slot: 0
+  }
+  A.subgraph.links.set(pass.id, pass)
+  A.subgraph.inputs[0].linkIds.push(pass.id)
+  A.subgraph.outputs[0].linkIds.push(pass.id)
+  const consumer = makeConsumer(graph)
+  A.connect(0, consumer, audioSlot(consumer))
+  origin.connect(0, node, 1)
+  node.connect(0, A, 0)
+  await tick()
+  resetToasts()
+  return { node, A, consumer }
+}
+{
+  const bad = await buildPassThrough((g) => makeSaveAudio(g))
+  clickToggle(bad.node)
+  await tick()
+  const required = {
+    enabled: widgetOf(bad.node, 'enabled').value, outerWired: bad.A.inputs[0].link != null,
+    detail: leafTitleDetail(), consumerId: bad.consumer.id
+  }
+  const good = await buildPassThrough((g) => makeVideo(g))
+  clickToggle(good.node)
+  await tick()
+  out.g.nestedPassThrough = {
+    required,
+    optional: {
+      enabled: widgetOf(good.node, 'enabled').value, outerWired: good.A.inputs[0].link != null
+    }
+  }
+}
+
+// ---- Q7: THIS node inside a subgraph, output wired to the subgraph's OUTPUT node
+/** Load Audio -> bypass(10) -> the subgraph's OUTPUT 'out', all inside one
+ * definition; each *specs* entry puts an instance of that definition in the
+ * root and wires its output to what `consumer(root, S)` returns. */
+async function buildInside(specs) {
+  const root = makeGraph()
+  const sub = io.asSubgraph(makeGraph(), {
+    name: 'Audio Stage', rootGraph: root, outputs: [{ name: 'out', type: 'AUDIO' }]
+  })
+  const origin = makeOrigin(sub)
+  const node = makeBypass(sub, 10)
+  bp.attach(node)
+  origin.connect(0, node, 1)
+  sub.outputs[0].connect(node.outputs[0], node)
+  const instances = specs.map(({ title, consumer }) => {
+    const S = makeSubgraphNode(root, title, { outputs: [{ name: 'out', type: 'AUDIO' }] }, sub)
+    const c = consumer ? consumer(root, S) : null
+    if (c) S.connect(0, c, audioSlot(c))
+    return { S, consumer: c }
+  })
+  await tick()
+  resetToasts()
+  return { root, sub, origin, node, instances }
+}
+const innerLinkOf = (sub) => [...sub.links.values()].filter((l) => l.target_id === -20)
+const innerState = (sub, node) => ({
+  linkIds: sub.outputs[0].linkIds.length, toNodeOutputs: (node.outputs[0].links || []).length,
+  innerLinks: innerLinkOf(sub).length
+})
+{
+  const { sub, node, instances: [{ S, consumer: video }] } = await buildInside(
+    [{ title: 'Sub S', consumer: (g) => makeVideo(g, 'Outer Video') }])
+  const before = innerState(sub, node)
+  clickToggle(node)
+  await tick()
+  const off = {
+    enabled: widgetOf(node, 'enabled').value, inner: innerState(sub, node),
+    memoryRaw: widgetOf(node, 'links').value, outerStillWired: isWired(video, 'audio'),
+    toasts: toasts.length, outputLabel: node.outputs[0].label
+  }
+  clickToggle(node)
+  await tick()
+  const link = innerLinkOf(sub)[0]
+  out.g.insideRoundTrip = {
+    before, off, sId: S.id,
+    on: {
+      enabled: widgetOf(node, 'enabled').value, inner: innerState(sub, node),
+      linkOrigin: link?.origin_id, linkTarget: link?.target_id, linkSlot: link?.target_slot,
+      nodeOutputHasIt: (node.outputs[0].links || []).includes(link?.id),
+      memoryRaw: widgetOf(node, 'links').value, toasts: toasts.length,
+      outerStillWired: isWired(video, 'audio')
+    }
+  }
+}
+{
+  // a REQUIRED outer consumer refuses (root consumer, then one behind a nested SubgraphNode)
+  const direct = await buildInside([{ title: 'Sub S', consumer: (g) => makeSaveAudio(g) }])
+  clickToggle(direct.node)
+  await tick()
+  const directResult = {
+    enabled: widgetOf(direct.node, 'enabled').value, inner: innerState(direct.sub, direct.node),
+    detail: leafTitleDetail(), memoryRaw: widgetOf(direct.node, 'links').value,
+    consumerId: direct.instances[0].consumer.id
+  }
+  const nested = await buildInside([{
+    title: 'Sub S',
+    consumer: (g) => {
+      const T = makeSubgraphNode(g, 'Sub T', { inputs: [{ name: 'audio', type: 'AUDIO' }] })
+      const save = makeSaveAudio(T.subgraph)
+      save.title = 'Inner Save'
+      io.wireFromSubgraphInput(T.subgraph, 0, save, 0)
+      return T
+    }
+  }])
+  clickToggle(nested.node)
+  await tick()
+  out.g.insideRefuses = {
+    direct: directResult,
+    nestedConsumer: {
+      enabled: widgetOf(nested.node, 'enabled').value, inner: innerState(nested.sub, nested.node),
+      detail: leafTitleDetail()
+    }
+  }
+}
+{
+  // a SubgraphNode instance whose output feeds NOTHING, and a definition with NO instance
+  const dangling = await buildInside([{ title: 'Sub S', consumer: null }])
+  clickToggle(dangling.node)
+  await tick()
+  const danglingOff = { enabled: widgetOf(dangling.node, 'enabled').value,
+    inner: innerState(dangling.sub, dangling.node), toasts: toasts.length }
+  clickToggle(dangling.node)
+  await tick()
+  const unused = await buildInside([])
+  clickToggle(unused.node)
+  await tick()
+  const unusedOff = { enabled: widgetOf(unused.node, 'enabled').value,
+    inner: innerState(unused.sub, unused.node), toasts: toasts.length }
+  clickToggle(unused.node)
+  await tick()
+  out.g.insideNoConsumers = {
+    dangling: { off: danglingOff, onInner: innerState(dangling.sub, dangling.node) },
+    unused: { off: unusedOff, onInner: innerState(unused.sub, unused.node) }
+  }
+}
+{
+  // TWO instances of one definition whose outer consumers differ: the guard looks at ALL
+  const mixed = await buildInside([
+    { title: 'Sub S1', consumer: (g) => makeVideo(g, 'Video One') },
+    { title: 'Sub S2', consumer: (g) => makeSaveAudio(g) }
+  ])
+  clickToggle(mixed.node)
+  await tick()
+  const refused = {
+    enabled: widgetOf(mixed.node, 'enabled').value, inner: innerState(mixed.sub, mixed.node),
+    detail: leafTitleDetail(), memoryRaw: widgetOf(mixed.node, 'links').value,
+    saveId: mixed.instances[1].consumer.id,
+    outerStillWired: mixed.instances.map(({ consumer }) => isWired(consumer, 'audio'))
+  }
+  const fine = await buildInside([
+    { title: 'Sub S1', consumer: (g) => makeVideo(g, 'Video One') },
+    { title: 'Sub S2', consumer: (g) => makeVideo(g, 'Video Two') },
+    { title: 'Sub S3', consumer: null }
+  ])
+  clickToggle(fine.node)
+  await tick()
+  const off = {
+    enabled: widgetOf(fine.node, 'enabled').value, inner: innerState(fine.sub, fine.node),
+    outerStillWired: fine.instances.slice(0, 2).map(({ consumer }) => isWired(consumer, 'audio'))
+  }
+  clickToggle(fine.node)
+  await tick()
+  out.g.insideTwoInstances = { refused, fine: { off, onInner: innerState(fine.sub, fine.node) } }
+}
+{
+  // TWO levels: bypass in B, B inside A, B's output -> A's output -> a root consumer
+  async function twoLevelInside(makeConsumer) {
+    const root = makeGraph()
+    const A = makeSubgraphNode(root, 'Sub A', { outputs: [{ name: 'out', type: 'AUDIO' }] })
+    const B = makeSubgraphNode(A.subgraph, 'Sub B', { outputs: [{ name: 'out', type: 'AUDIO' }] })
+    const origin = makeOrigin(B.subgraph)
+    const node = makeBypass(B.subgraph, 10)
+    bp.attach(node)
+    origin.connect(0, node, 1)
+    B.subgraph.outputs[0].connect(node.outputs[0], node)
+    A.subgraph.outputs[0].connect(B.outputs[0], B)
+    const consumer = makeConsumer(root)
+    A.connect(0, consumer, audioSlot(consumer))
+    await tick()
+    resetToasts()
+    return { root, A, B, node, consumer }
+  }
+  const ok = await twoLevelInside((g) => makeVideo(g, 'Root Video'))
+  clickToggle(ok.node)
+  await tick()
+  const off = {
+    enabled: widgetOf(ok.node, 'enabled').value, inner: innerState(ok.B.subgraph, ok.node),
+    aLevelLinks: innerLinkOf(ok.A.subgraph).length, outerWired: isWired(ok.consumer, 'audio'),
+    memoryRaw: widgetOf(ok.node, 'links').value
+  }
+  clickToggle(ok.node)
+  await tick()
+  const onInner = innerState(ok.B.subgraph, ok.node)
+  const bad = await twoLevelInside((g) => makeSaveAudio(g))
+  clickToggle(bad.node)
+  await tick()
+  out.g.insideTwoLevels = {
+    optional: { off, onInner },
+    required: { enabled: widgetOf(bad.node, 'enabled').value, detail: leafTitleDetail(),
+      consumerId: bad.consumer.id }
+  }
+}
+
+// ---- Q8: the Universal State Controller routes, with a wire into the subgraph output
+{
+  const { sub, node } = await buildInside([{ title: 'Sub S', consumer: (g) => makeVideo(g) }])
+  applyState(node, false)
+  await tick()
+  const off = { inner: innerState(sub, node), memory: memoryOf(node).links,
+    enabled: widgetOf(node, 'enabled').value }
+  const rawAfterOff = widgetOf(node, 'links').value
+  globalThis.__externalHandler([{ node }])
+  await tick()
+  const idempotent =
+    widgetOf(node, 'links').value === rawAfterOff && innerState(sub, node).innerLinks === 0
+  applyState(node, true)
+  await tick()
+  out.g.insideApply = { off, idempotent, on: innerState(sub, node),
+    memoryRaw: widgetOf(node, 'links').value, toasts: toasts.length }
+}
+{
+  // announce-only writer: stored OFF but still wired -> unplug;
+  // stored ON + unwired + memory -> replug
+  const { sub, node } = await buildInside([{ title: 'Sub S', consumer: (g) => makeVideo(g) }])
+  applyState(node, false, { callback: false })
+  await tick()
+  const off = { inner: innerState(sub, node), memory: memoryOf(node).links }
+  applyState(node, true, { callback: false })
+  await tick()
+  out.g.insideApplyAnnounceOnly = { off, on: innerState(sub, node),
+    memoryRaw: widgetOf(node, 'links').value }
+}
+{
+  const { sub, node } = await buildInside([{ title: 'Sub S', consumer: (g) => makeSaveAudio(g) }])
+  applyState(node, false)
+  await tick()
+  out.g.insideApplyRefused = { enabled: widgetOf(node, 'enabled').value,
+    inner: innerState(sub, node), detail: leafTitleDetail() }
+}
+
+// ---- Q9: stale / claimed / hand-edited memory on switch-on, soft per item
+{
+  const off = async () => {
+    const b = await buildInside([{ title: 'Sub S', consumer: (g) => makeVideo(g) }])
+    clickToggle(b.node)
+    await tick()
+    resetToasts()
+    return b
+  }
+  // (a) the subgraph output it was wired to is gone (replaced by a differently-named one)
+  const gone = await off()
+  gone.sub.outputs[0].name = 'renamed_away'
+  clickToggle(gone.node)
+  await tick()
+  const goneResult = {
+    enabled: widgetOf(gone.node, 'enabled').value, inner: innerState(gone.sub, gone.node),
+    memoryRaw: widgetOf(gone.node, 'links').value, detail: leafTitleDetail()
+  }
+  // (b) somebody else's wire now sits on that output: never stomped
+  const claimed = await off()
+  const other = makeOrigin(claimed.sub)
+  const otherLink = claimed.sub.outputs[0].connect(other.outputs[0], other)
+  clickToggle(claimed.node)
+  await tick()
+  const claimedResult = {
+    otherLinkKept: claimed.sub.outputs[0].linkIds[0] === otherLink?.id,
+    linkOrigin: innerLinkOf(claimed.sub)[0]?.origin_id, otherId: other.id,
+    nodeOutLinks: (claimed.node.outputs[0].links || []).length,
+    memoryRaw: widgetOf(claimed.node, 'links').value, detail: leafTitleDetail()
+  }
+  // (c) this node's output index vanished (hand-edited graph): nothing happens, nothing throws
+  const noOutput = await off()
+  noOutput.node.outputs.length = 0
+  clickToggle(noOutput.node)
+  await tick()
+  const noOutputResult = { innerLinks: innerLinkOf(noOutput.sub).length,
+    memoryRaw: widgetOf(noOutput.node, 'links').value }
+  // (d) a memory item that carries the id as a STRING still matches the -20 pseudo-node
+  const stringId = await off()
+  widgetOf(stringId.node, 'links').value = JSON.stringify(
+    { owner: 10, links: [{ node: '-20', input: 'out' }] })
+  clickToggle(stringId.node)
+  await tick()
+  out.g.insideStaleMemory = { gone: goneResult, claimed: claimedResult, noOutput: noOutputResult,
+    stringId: innerState(stringId.sub, stringId.node) }
+}
+
+// ---- Q10: copy/paste -- a pasted copy's foreign-owner memory (with -20) is ignored
+{
+  const { sub, node } = await buildInside([{ title: 'Sub S', consumer: (g) => makeVideo(g) }])
+  clickToggle(node)
+  await tick()
+  const copy = makeBypass(sub, 11)
+  bp.attach(copy)
+  copy.configure({ widgets_values: [false, widgetOf(node, 'links').value] })
+  await tick()
+  resetToasts()
+  clickToggle(copy)
+  await tick()
+  const afterCopyOn = { innerLinks: innerState(sub, node).innerLinks,
+    copyMemoryRaw: widgetOf(copy, 'links').value, toasts: toasts.length }
+  clickToggle(node)
+  await tick()
+  out.g.insidePastedCopy = { afterCopyOn, originalReplugged: innerLinkOf(sub).length,
+    originalOrigin: innerLinkOf(sub)[0]?.origin_id }
+}
+
+// ---- Q11: hooks. A USER unplug of the subgraph output re-settles the node; a new wire
+// dragged onto the subgraph output of an OFF node switches it back on.
+{
+  const { sub, node } = await buildInside([{ title: 'Sub S', consumer: (g) => makeVideo(g) }])
+  node.outputs[0].label = 'stale' // something only a settle pass would repair
+  sub.outputs[0].disconnect() // the user drags the wire off the subgraph output
+  await tick()
+  const afterUserUnplug = { label: node.outputs[0].label, enabled: widgetOf(node, 'enabled').value,
+    inner: innerState(sub, node) }
+  const off = await buildInside([{ title: 'Sub S', consumer: (g) => makeVideo(g) }])
+  clickToggle(off.node)
+  await tick()
+  const stillOff = widgetOf(off.node, 'enabled').value === false
+  resetToasts()
+  off.sub.outputs[0].connect(off.node.outputs[0], off.node) // a NEW wire onto the output
+  await tick()
+  out.g.insideHooks = {
+    afterUserUnplug, stillOffAfterOwnUnplug: stillOff,
+    reenabled: {
+      enabled: widgetOf(off.node, 'enabled').value, memoryRaw: widgetOf(off.node, 'links').value,
+      inner: innerState(off.sub, off.node), toasts: toasts.map((t) => t.severity)
+    }
+  }
+}
+
+// ---- Q12: a -20 wire that is NOT a real subgraph output degrades without throwing
+{
+  const strayOutputs = async (outputs) => {
+    const b = await build((g) => [makeVideo(g)])
+    b.graph.links.get(linkOfInput(b.targets[0], 'audio')).target_id = -20
+    b.graph.nodesById.delete(b.targets[0].id)
+    if (outputs !== undefined) b.graph.outputs = outputs
+    clickToggle(b.node)
+    await tick()
+    return {
+      enabled: widgetOf(b.node, 'enabled').value,
+      stillWired: (b.node.outputs[0].links || []).length,
+      detail: leafTitleDetail(), memoryRaw: widgetOf(b.node, 'links').value
+    }
+  }
+  out.g.strayMinus20 = {
+    noOutputsAtAll: await strayOutputs(undefined),
+    objectShaped: await strayOutputs({}),
+    slotWithoutMethods: await strayOutputs([{ name: 'out', type: 'AUDIO' }]),
+    emptyName: await strayOutputs([{ name: '', type: 'AUDIO', connect() {}, disconnect() {} }]),
+    pureHelpers: (() => {
+      const g = { outputs: [{ name: 'out', connect() {}, disconnect() {} }] }
+      return {
+        isLink: [-20, '-20', 5, null].map(
+          (id) => nc.isSubgraphOutputLink(id === null ? null : { target_id: id })),
+        slotName: nc.subgraphOutputSlotOf(g, { target_id: -20, target_slot: 0 })?.slot.name ?? null,
+        wrongIndex: nc.subgraphOutputSlotOf(g, { target_id: -20, target_slot: 3 }),
+        notMinus20: nc.subgraphOutputSlotOf(g, { target_id: 7, target_slot: 0 })
+      }
+    })()
+  }
+}
+
+// ---- Q13: type adoption / link colours with -10 / -20 endpoints (getNodeById is null)
+{
+  const root = makeGraph()
+  const sub = io.asSubgraph(makeGraph(), {
+    name: 'Audio Stage', rootGraph: root,
+    inputs: [{ name: 'in', type: 'AUDIO' }], outputs: [{ name: 'out', type: '*' }]
+  })
+  const node = makeBypass(sub, 10)
+  bp.attach(node)
+  // origin -10: no node behind it, the link's recorded type is all there is
+  io.wireFromSubgraphInput(sub, 0, node, 1, 'AUDIO')
+  sub.outputs[0].connect(node.outputs[0], node) // target -20: ditto
+  let threw = null
+  try { node[dist.LINK_COLOR_RESYNC_HOOK](); await tick() } catch (e) { threw = String(e) }
+  const link = innerLinkOf(sub)[0]
+  out.g.nestedAdoption = {
+    threw, inputType: inputOfBp(node).type, outputType: node.outputs[0].type,
+    inputLabel: inputOfBp(node).label, outputLabel: node.outputs[0].label,
+    inLinkColor: sub.links.get(inputOfBp(node).link)?.color, outLinkColor: link?.color,
+    nullIds: [sub.getNodeById(-10), sub.getNodeById(-20)]
+  }
+}
+// an output-only wire into the subgraph output adopts nothing and says `any`, no crash
+{
+  const root = makeGraph()
+  const sub = io.asSubgraph(makeGraph(), {
+    name: 'Audio Stage', rootGraph: root, outputs: [{ name: 'out', type: '*' }]
+  })
+  const node = makeBypass(sub, 10)
+  bp.attach(node)
+  sub.outputs[0].connect(node.outputs[0], node)
+  await tick()
+  out.g.nestedAdoptionOutputOnly = {
+    outputType: node.outputs[0].type, outputLabel: node.outputs[0].label
+  }
+}
+
 process.stdout.write(JSON.stringify(out))
 """
 
@@ -1026,7 +1660,18 @@ def probe(tmp_path_factory: pytest.TempPathFactory) -> dict:
     )
     lora_library = layout / "extensions" / "comfyui-epsnodes" / "lora_library"
     lora_library.mkdir(parents=True)
+    # v1.2.0 nested reach: bypass.js now imports the REAL api.js helpers
+    # (describePath / locationsOfNode / resolveLinkTargets / rootGraphOf /
+    # isSubgraphNode), so the real module sits next to a thin stub that
+    # re-exports all of it EXCEPT the one export the probe must intercept
+    # (a local export shadows an `export *` of the same name). The real api.js
+    # in turn imports ../version.js and scripts/app.js + scripts/api.js.
+    shutil.copyfile(WEB / "lora_library" / "api.js", lora_library / "api_real.js")
+    shutil.copyfile(WEB / "lora_library" / "version.js", lora_library / "version.js")
+    (scripts / "api.js").write_text("export const api = {}\n", encoding="utf-8")
+    shutil.copyfile(NESTED_SUBGRAPH_IO_MJS, layout / "nested_subgraph_io.mjs")
     (lora_library / "api.js").write_text(
+        "export * from './api_real.js'\n"
         # The real api.js hands every subscriber the flushed `entries`; the
         # probe delivers them straight to the (single, module-guarded) handler.
         "export function subscribeWidgetsChangedExternally(handler) {\n"
@@ -1044,6 +1689,10 @@ def probe(tmp_path_factory: pytest.TempPathFactory) -> dict:
         .replace("__IS_ENABLED__", json.dumps([[v] for v, _ in IS_ENABLED_CASES]))
         .replace("__LABEL_FOR_TYPE__", json.dumps([[t] for t, _ in LABEL_FOR_TYPE_CASES]))
         .replace("__SAME_TARGET__", json.dumps([[a, b] for a, b, _ in SAME_TARGET_CASES]))
+        .replace(
+            "__PROMOTED_CASES__",
+            "[" + ", ".join(f"[{slot}]" for slot, _ in PROMOTED_CASES) + "]",
+        )
         .replace(
             "__VERDICT_CASES__",
             ",\n".join(f"  [{node_data}, {slot}]" for _label, node_data, slot, _ in VERDICT_CASES),
@@ -1561,6 +2210,307 @@ def test_the_toggle_callback_is_chained_never_replaced(probe: dict) -> None:
     assert probe["g"]["callbackChain"] == {"calls": [False], "ret": "orig"}
 
 
+# ------------------------------------------------------ nested subgraphs
+# v1.2.0 (owner ask 2026-10-03: "Make sure all of the nodes that can control
+# other nodes also looks into nested nodes"; FORMAT.md section 7.10). The
+# fake Subgraph slots come from tests/nested_subgraph_io.mjs (core's
+# SubgraphOutput.connect/disconnect, SubgraphInput); the nested walkers under
+# test are the REAL api.js ones.
+
+NESTED_LABEL = "\u203a"  # the "Subgraph name > Node title" separator
+
+
+def test_has_promoted_widget(probe: dict) -> None:
+    for (slot, expected), actual in zip(PROMOTED_CASES, probe["pure"]["promoted"], strict=True):
+        assert actual is expected, f"hasPromotedWidget({slot}) -> {actual!r}"
+
+
+def test_refusal_message_carries_a_nested_label_verbatim(probe: dict) -> None:
+    text = probe["pure"]["refusal"]["nested"]
+    assert f"Audio Stage {NESTED_LABEL} Save Audio (audio) is a required input" in text
+
+
+def test_the_unrestorable_wording_names_the_subgraph_output_it_cannot_reach(probe: dict) -> None:
+    text = probe["pure"]["refusal"]["unrestorable"]
+    assert "a subgraph output it can't reach" in text
+    assert "legacy Reroute node" in text
+
+
+# -- (A) a wire INTO a SubgraphNode input
+
+
+def test_off_and_on_through_a_subgraph_input_with_an_optional_inner_consumer(probe: dict) -> None:
+    r = probe["g"]["nestedIntoOptional"]
+    off, on = r["off"], r["on"]
+    # The guard used to classify the SubgraphNode with its own (absent)
+    # nodeData -> "unknown" -> refuse; now it looks at the real consumer.
+    assert off["enabled"] is False
+    assert off["outerWired"] is False, "the OUTER wire into the SubgraphNode is unplugged"
+    assert off["memory"] == [{"node": r["sId"], "input": "audio"}]
+    assert off["bypassOutLinks"] == 0
+    assert off["innerKept"] is True, "the wiring INSIDE the subgraph is never touched"
+    assert off["toasts"] == 0
+    assert off["outputLabel"] == probe["pure"]["exports"]["offLabel"]
+    assert on["enabled"] is True
+    assert on["outerWired"] is True, "switching on replays the memory onto the SubgraphNode"
+    assert on["originId"] == 10
+    assert on["targetId"] == r["sId"]
+    assert on["memoryRaw"] == "{}"
+    assert on["innerKept"] is True
+    assert on["toasts"] == 0
+
+
+def test_a_required_inner_consumer_refuses_and_names_where_it_is(probe: dict) -> None:
+    r = probe["g"]["nestedIntoRequired"]
+    assert r["enabled"] is True, "the toggle snaps back ON"
+    assert r["sameLink"] is True, "nothing was unplugged"
+    assert r["memoryRaw"] == "{}"
+    assert r["toasts"] == ["warn"]
+    # "Subgraph name > Node title (input)" -- through api.describePath.
+    assert f"Sub A {NESTED_LABEL} Inner Save (audio) is a required input" in r["detail"]
+    assert "Required input is missing" in r["detail"]
+
+
+def test_a_promoted_widget_on_the_subgraph_input_is_safe(probe: dict) -> None:
+    """With the outer wire gone the SubgraphNode's own value takes over
+    (ExecutableNodeDTO.resolveInput), so even a required inner consumer is
+    fed -- the guard stops at the promoted input and never looks inside."""
+    r = probe["g"]["nestedPromoted"]
+    assert r["off"]["enabled"] is False
+    assert r["off"]["outerWired"] is False
+    assert len(r["off"]["memory"]) == 1
+    assert r["off"]["toasts"] == 0
+    assert r["onWired"] is True
+    assert r["toasts"] == 0
+
+
+def test_a_subgraph_input_nobody_reads_is_safe(probe: dict) -> None:
+    r = probe["g"]["nestedUnread"]
+    assert r["off"]["enabled"] is False
+    assert r["off"]["outerWired"] is False
+    assert len(r["off"]["memory"]) == 1
+    assert r["off"]["toasts"] == 0
+    assert r["onWired"] is True
+
+
+def test_two_levels_of_nesting_are_walked_to_the_leaf(probe: dict) -> None:
+    r = probe["g"]["nestedTwoLevel"]
+    assert r["optional"]["off"]["enabled"] is False
+    assert r["optional"]["off"]["outerWired"] is False
+    assert r["optional"]["off"]["toasts"] == 0
+    assert r["optional"]["onWired"] is True
+    assert r["required"]["enabled"] is True
+    assert r["required"]["outerWired"] is True
+    # outermost-first trail, then the node, then its input
+    trail = f"Sub A {NESTED_LABEL} Sub B {NESTED_LABEL} Inner Save (audio)"
+    assert trail in r["required"]["detail"]
+
+
+def test_a_subgraph_input_passed_through_to_a_subgraph_output_is_followed(probe: dict) -> None:
+    r = probe["g"]["nestedPassThrough"]
+    assert r["required"]["enabled"] is True
+    assert r["required"]["outerWired"] is True
+    # a consumer at the ROOT keeps the ordinary "Title #id (input)" wording
+    assert f"Save Audio #{r['required']['consumerId']} (audio) is a required input" in (
+        r["required"]["detail"]
+    )
+    assert r["optional"]["enabled"] is False
+    assert r["optional"]["outerWired"] is False
+
+
+# -- (B) THIS node inside a subgraph, output wired to the subgraph's OUTPUT node
+
+
+def test_inside_a_subgraph_off_unplugs_the_inner_link_and_on_replugs_it(probe: dict) -> None:
+    r = probe["g"]["insideRoundTrip"]
+    before, off, on = r["before"], r["off"], r["on"]
+    assert before == {"linkIds": 1, "toNodeOutputs": 1, "innerLinks": 1}
+    assert off["enabled"] is False
+    # the INNER link into the subgraph output is gone everywhere: the IO slot,
+    # this node's output, and the subgraph's link table
+    assert off["inner"] == {"linkIds": 0, "toNodeOutputs": 0, "innerLinks": 0}
+    # remembered as the pseudo-node id the serialized link carries + the output NAME
+    assert json.loads(off["memoryRaw"]) == {"owner": 10, "links": [{"node": -20, "input": "out"}]}
+    assert off["outerStillWired"] is True, "the wire in the PARENT graph is not touched"
+    assert off["toasts"] == 0
+    assert off["outputLabel"] == probe["pure"]["exports"]["offLabel"]
+    assert on["enabled"] is True
+    assert on["inner"] == {"linkIds": 1, "toNodeOutputs": 1, "innerLinks": 1}
+    assert (on["linkOrigin"], on["linkTarget"], on["linkSlot"]) == (10, -20, 0)
+    assert on["nodeOutputHasIt"] is True
+    assert on["memoryRaw"] == "{}"
+    assert on["toasts"] == 0
+    assert on["outerStillWired"] is True
+
+
+def test_inside_a_subgraph_a_required_consumer_outside_refuses(probe: dict) -> None:
+    r = probe["g"]["insideRefuses"]
+    direct = r["direct"]
+    assert direct["enabled"] is True
+    assert direct["inner"] == {"linkIds": 1, "toNodeOutputs": 1, "innerLinks": 1}, "unplugged"
+    assert direct["memoryRaw"] == "{}"
+    assert f"Save Audio #{direct['consumerId']} (audio) is a required input" in direct["detail"]
+    nested = r["nestedConsumer"]
+    assert nested["enabled"] is True
+    assert nested["inner"] == {"linkIds": 1, "toNodeOutputs": 1, "innerLinks": 1}
+    # the consumer lives inside ANOTHER SubgraphNode the output feeds
+    assert f"Sub T {NESTED_LABEL} Inner Save (audio) is a required input" in nested["detail"]
+
+
+def test_inside_a_subgraph_with_no_consumers_off_is_safe(probe: dict) -> None:
+    r = probe["g"]["insideNoConsumers"]
+    for case in ("dangling", "unused"):
+        assert r[case]["off"]["enabled"] is False, case
+        assert r[case]["off"]["inner"] == {"linkIds": 0, "toNodeOutputs": 0, "innerLinks": 0}, case
+        assert r[case]["off"]["toasts"] == 0, case
+        assert r[case]["onInner"] == {"linkIds": 1, "toNodeOutputs": 1, "innerLinks": 1}, case
+
+
+def test_two_instances_of_one_definition_are_all_checked(probe: dict) -> None:
+    """One subgraph DEFINITION, two SubgraphNodes: the controller is one
+    object but its output fans out per instance, so the guard classifies the
+    consumers of EVERY instance and refuses on the unsafe one."""
+    r = probe["g"]["insideTwoInstances"]
+    refused = r["refused"]
+    assert refused["enabled"] is True
+    assert refused["inner"] == {"linkIds": 1, "toNodeOutputs": 1, "innerLinks": 1}
+    assert refused["memoryRaw"] == "{}"
+    assert refused["outerStillWired"] == [True, True]
+    assert f"Save Audio #{refused['saveId']} (audio) is a required input" in refused["detail"]
+    assert "Video One" not in refused["detail"], "only the unsafe consumer is named"
+    fine = r["fine"]
+    assert fine["off"]["enabled"] is False
+    assert fine["off"]["inner"] == {"linkIds": 0, "toNodeOutputs": 0, "innerLinks": 0}
+    assert fine["off"]["outerStillWired"] == [True, True]
+    assert fine["onInner"] == {"linkIds": 1, "toNodeOutputs": 1, "innerLinks": 1}
+
+
+def test_the_controller_two_subgraphs_deep_is_checked_through_both_outputs(probe: dict) -> None:
+    r = probe["g"]["insideTwoLevels"]
+    opt = r["optional"]
+    assert opt["off"]["enabled"] is False
+    assert opt["off"]["inner"] == {"linkIds": 0, "toNodeOutputs": 0, "innerLinks": 0}
+    assert opt["off"]["aLevelLinks"] == 1, "only the controller's OWN graph is unplugged"
+    assert opt["off"]["outerWired"] is True
+    assert json.loads(opt["off"]["memoryRaw"])["links"] == [{"node": -20, "input": "out"}]
+    assert opt["onInner"] == {"linkIds": 1, "toNodeOutputs": 1, "innerLinks": 1}
+    req = r["required"]
+    assert req["enabled"] is True
+    assert f"Save Audio #{req['consumerId']} (audio) is a required input" in req["detail"]
+
+
+def test_the_universal_state_routes_unplug_and_replug_a_subgraph_output_wire(probe: dict) -> None:
+    apply = probe["g"]["insideApply"]
+    assert apply["off"]["inner"] == {"linkIds": 0, "toNodeOutputs": 0, "innerLinks": 0}
+    assert apply["off"]["memory"] == [{"node": -20, "input": "out"}]
+    assert apply["off"]["enabled"] is False
+    assert apply["idempotent"] is True
+    assert apply["on"] == {"linkIds": 1, "toNodeOutputs": 1, "innerLinks": 1}
+    assert apply["memoryRaw"] == "{}"
+    assert apply["toasts"] == 0
+    only = probe["g"]["insideApplyAnnounceOnly"]
+    assert only["off"]["inner"]["innerLinks"] == 0, "stored OFF + still wired -> unplug"
+    assert only["off"]["memory"] == [{"node": -20, "input": "out"}]
+    assert only["on"]["innerLinks"] == 1, "stored ON + unwired + memory -> replug"
+    assert only["memoryRaw"] == "{}"
+    refused = probe["g"]["insideApplyRefused"]
+    assert refused["enabled"] is True
+    assert refused["inner"]["innerLinks"] == 1
+    assert "is a required input" in refused["detail"]
+
+
+def test_a_stale_or_claimed_subgraph_output_is_skipped_quietly(probe: dict) -> None:
+    r = probe["g"]["insideStaleMemory"]
+    gone = r["gone"]
+    assert gone["enabled"] is True
+    assert gone["inner"]["innerLinks"] == 0, "the output it named is gone: nothing to replug"
+    assert gone["memoryRaw"] == "{}", "ONE attempt, then the memory is forgotten"
+    assert "Reconnected 0 of 1 wires" in gone["detail"]
+    claimed = r["claimed"]
+    assert claimed["otherLinkKept"] is True, "core's connect would REPLACE it: never stomped"
+    assert claimed["linkOrigin"] == claimed["otherId"]
+    assert claimed["nodeOutLinks"] == 0
+    assert claimed["memoryRaw"] == "{}"
+    assert "Reconnected 0 of 1 wires" in claimed["detail"]
+    assert r["noOutput"] == {"innerLinks": 0, "memoryRaw": "{}"}
+    assert r["stringId"]["innerLinks"] == 1, "a stringified -20 still replugs"
+
+
+def test_a_pasted_copys_foreign_memory_with_a_subgraph_output_is_ignored(probe: dict) -> None:
+    r = probe["g"]["insidePastedCopy"]
+    assert r["afterCopyOn"] == {"innerLinks": 0, "copyMemoryRaw": "{}", "toasts": 0}
+    assert r["originalReplugged"] == 1
+    assert r["originalOrigin"] == 10
+
+
+def test_a_user_unplug_of_the_subgraph_output_resettles_the_node(probe: dict) -> None:
+    """`SubgraphOutput.disconnect()` reports the SubgraphOutput (named by the
+    user, not `value`) as the slot, with THIS node's output index: the hook
+    matches the output-kind event by index, so labels/types re-derive."""
+    r = probe["g"]["insideHooks"]
+    assert r["afterUserUnplug"]["label"] == "AUDIO"
+    assert r["afterUserUnplug"]["enabled"] is True
+    assert r["afterUserUnplug"]["inner"]["innerLinks"] == 0
+    # ...our OWN unplug (an OFF) is not mistaken for a user wiring something on
+    assert r["stillOffAfterOwnUnplug"] is True
+    # a NEW wire dragged onto the subgraph output of an OFF node switches it on
+    again = r["reenabled"]
+    assert again["enabled"] is True
+    assert again["memoryRaw"] == "{}"
+    assert again["inner"]["innerLinks"] == 1
+    assert again["toasts"] == ["info"]
+
+
+def test_a_minus_20_wire_without_a_real_subgraph_output_still_refuses_softly(probe: dict) -> None:
+    r = probe["g"]["strayMinus20"]
+    for case in ("noOutputsAtAll", "objectShaped", "slotWithoutMethods", "emptyName"):
+        got = r[case]
+        assert got["enabled"] is True, f"{case}: refused, never throws"
+        assert got["stillWired"] == 1, case
+        assert got["memoryRaw"] == "{}", case
+        assert "can't be reconnected afterwards" in got["detail"], case
+        assert "subgraph output" in got["detail"], case
+    helpers = r["pureHelpers"]
+    assert helpers["isLink"] == [True, True, False, False]
+    assert helpers["slotName"] == "out"
+    assert helpers["wrongIndex"] is None
+    assert helpers["notMinus20"] is None
+
+
+def test_type_adoption_and_colours_survive_null_boundary_nodes(probe: dict) -> None:
+    """`getNodeById(-10)` / `getNodeById(-20)` are null (pseudo-nodes): the
+    recorded `link.type` is what adoption and the link colours fall back on,
+    and nothing throws."""
+    r = probe["g"]["nestedAdoption"]
+    assert r["threw"] is None
+    assert r["nullIds"] == [None, None]
+    assert r["inputType"] == r["outputType"] == "AUDIO"
+    assert r["inputLabel"] == r["outputLabel"] == "AUDIO"
+    assert r["inLinkColor"] == r["outLinkColor"] == "#audio"
+    only = probe["g"]["nestedAdoptionOutputOnly"]
+    assert only == {"outputType": "*", "outputLabel": "any"}
+
+
+def test_the_nested_guard_uses_the_shared_walkers_and_stops_only_at_the_first_subgraph(
+    source: str,
+) -> None:
+    """Structure pins: the guard walks through api.js's `resolveLinkTargets`,
+    classifies each consumer with the SAME `inputVerdict`, and the promoted-
+    widget stop applies to the SubgraphNode the wire enters (a promoted widget
+    on a DEEPER SubgraphNode is inert: the inner link feeding it still exists)."""
+    body = _function_body(source, "subgraphInputVerdicts(node, root, link, target)")
+    assert "resolveLinkTargets(root, graph, prefix, link, options)" in body
+    assert "subgraphNode === target && hasPromotedWidget(" in body
+    classify = _function_body(source, "classifyConsumers(root, consumers, seen)")
+    assert "inputVerdict(consumer.node, consumer.node?.inputs?.[consumer.slot])" in classify
+    outputs = _function_body(source, "subgraphOutputVerdicts(node, root, link)")
+    assert "locationsOfNode(top, node)" in outputs
+    assert "resolveLinkTargets(top, graph, prefix, link)" in outputs
+    # no promoted-widget stop on the far side of a subgraph output
+    assert "stopAtSubgraphInput" not in outputs
+    guard = _function_body(source, "collectTargetVerdicts(node)")
+    assert guard.index("subgraphOutputSlotOf(graph, link)") < guard.index("isSubgraphNode(target)")
+
 # --------------------------------------------------- source-level structure
 
 
@@ -1579,7 +2529,32 @@ def test_shared_helpers_are_imported_not_copied(source: str) -> None:
         "hideValuesWidget",
         "installMinWidth",
         "isOutputConnected",
+        # v1.2.0 nested reach: the subgraph-output detection is shared too,
+        # so the guard and the unplug can never disagree about what a -20
+        # link is.
+        "isSubgraphOutputLink",
+        "subgraphOutputSlotOf",
     }
+    # ...and the nested walkers come from api.js (the lead's shared "NESTED
+    # REACH" section), never a hand-written copy of a subgraph walk.
+    api_import = re.search(r"import \{([^}]*)\} from '\.\./lora_library/api\.js'", source)
+    assert api_import, "bypass.js must import from lora_library/api.js"
+    api_names = {n.strip() for n in api_import.group(1).split(",") if n.strip()}
+    assert api_names >= {
+        "describePath",
+        "isSubgraphNode",
+        "locationsOfNode",
+        "resolveLinkTargets",
+        "rootGraphOf",
+        "subscribeWidgetsChangedExternally",
+    }
+    for name in api_names:
+        assert not re.search(rf"^(export )?(function|const) {name}\b", source, re.M), (
+            f"{name} is imported from api.js AND redeclared in bypass.js"
+        )
+    assert "SUBGRAPH_OUTPUT_ID" not in source.split("*/", 1)[1], (
+        "the -20 constant comes from api.js (via number_controller.js's helpers)"
+    )
     dist_import = re.search(r"import \{([^}]*)\} from './distributor\.js'", source)
     assert dist_import, "bypass.js must import from distributor.js"
     dist_names = {n.strip() for n in dist_import.group(1).split(",") if n.strip()}
@@ -1700,8 +2675,17 @@ def test_the_hooks_chain_the_originals(source: str) -> None:
 
 
 def test_only_our_own_sockets_schedule_a_pass(source: str) -> None:
+    """Only OUR two sockets schedule a pass. v1.2.0 (nested reach): a subgraph
+    output's own ``disconnect()`` reports the SubgraphOutput as ``slot`` but
+    still passes this node's output INDEX with the output-kind ``type``, so an
+    output event for index 0 counts too (the behavioural test is
+    ``test_a_user_unplug_of_the_subgraph_output_resettles_the_node``)."""
     body = _function_body(source, "wireConnectionSync(state)")
-    assert "const ours = slot === outputOf(this) || slot?.name === INPUT_NAME" in body
+    ours = body.split("const ours =", 1)[1].split("\n    if (", 1)[0]
+    assert "slot === outputOf(this)" in ours
+    assert "slot?.name === INPUT_NAME" in ours
+    assert "type === NODE_SLOT_OUTPUT && index === OUTPUT_INDEX" in ours
+    assert re.search(r"^const NODE_SLOT_OUTPUT = 2$", source, re.M)
 
 
 def test_no_type_veto_hook_is_installed(source: str) -> None:

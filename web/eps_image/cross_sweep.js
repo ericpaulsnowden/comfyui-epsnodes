@@ -25,8 +25,12 @@
  *    rule is no canvas drawing at all -- plus triggers that exist in BOTH
  *    renderers: a chained `onConnectionsChange` wrap and THREE widget
  *    callbacks (`pair_mode`, `sweep_mode`, `solo_run`), and the graph-level
- *    add/remove watch (`installGraphNodeWatch`). No polling timers of this
- *    file's own, no window listeners (§7.5).
+ *    add/remove/after-change watch (`installGraphNodeWatch`), which since
+ *    v1.2.0 sits on EVERY graph of the workflow -- a subgraph's hooks fire
+ *    only on that subgraph -- and recomputes EVERY multiplier readout in
+ *    the whole workflow (a change anywhere can change any multiplier's
+ *    count, nested or not). No polling timers of this file's own, no window
+ *    listeners (§7.5).
  *
  * 2. **Execution toast (the TRUTH).** `run()` `send_sync`s
  *    `eps-run-multiplier-count` `{node, steps, pairs, total}` the moment it
@@ -39,10 +43,36 @@
  * no litegraph stub): `estimateRuns(snapshot, nodeId)` operates on a plain
  * graph snapshot -- nodes by id, each `{classType, widgets: {name: value},
  * inputs: {inputName: {originId, originSlot} | null}}` -- built from the
- * live `app.graph` by the thin `snapshotFromGraph(graph)` adapter. The one
+ * live ROOT graph by the thin `snapshotFromGraph(graph)` adapter. The one
  * live-only fact (an Image Grid's buffer count is server state, not graph
  * state) is injected by the ADAPTER as `imageGridCount` from the litegraph
  * node's own `imgs` array; the estimator itself never touches litegraph.
+ *
+ * **NESTED SUBGRAPHS (v1.2.0, owner ask 2026-10-03: "make sure all of the
+ * nodes that can control other nodes also looks into nested nodes";
+ * FORMAT.md §7.10 nested reach).** The snapshot is the WORKFLOW, not one
+ * graph: root nodes keep their plain ids (a graph without subgraphs
+ * snapshots byte-identically to before), and every node under every
+ * SubgraphNode is keyed by its EXECUTION PATH id ("3:2" = node 2 inside
+ * SubgraphNode 3 -- the same flattened id the API prompt and the Python
+ * `_consumed_output_slots` scan use), once per INSTANCE. Every input link's
+ * `originId`/`originSlot` is resolved THROUGH the subgraph boundaries to
+ * the REAL source's path id (`resolveLinkSources` in lora_library/api.js):
+ * a wire out of a SubgraphNode output lands on the inner node feeding that
+ * output (recursively, pass-through included), and a wire out of a
+ * subgraph's input pseudo-node (origin id -10) climbs out through the
+ * owning SubgraphNode instance -- known from the path prefix, because the
+ * snapshot is per instance -- to whatever feeds that SubgraphNode's input
+ * in the parent graph. A dangling boundary (an unconnected subgraph input
+ * or output) is an UNWIRED input (null), exactly what the prompt flattening
+ * drops; SubgraphNodes themselves never enter the snapshot, so one can
+ * never surface as an unknown-class source. A multiplier inside a
+ * definition that SEVERAL SubgraphNodes instantiate executes once per
+ * instance, possibly under different upstreams: the live `recompute` asks
+ * `estimateRuns` for each path id and `formatInstanceReadouts` shows the
+ * agreed readout, or -- never false confidence -- the largest as a `≥`
+ * floor with a note that the subgraph is used N times with different
+ * counts.
  *
  * Per-source count rules (each verified against the source node's own
  * backend semantics -- see the per-branch comments in `sourceCount()`).
@@ -99,6 +129,21 @@
 
 import { api } from '../../../scripts/api.js'
 import { app } from '../../../scripts/app.js'
+// v1.2.0 nested reach (FORMAT.md §7.10): the SHARED boundary-crossing
+// helpers, imported -- never re-implemented here (this pack's repeated
+// "fix missed the hand-copied sibling" lesson). `api` above stays ComfyUI's
+// own api object; these are the pack's lora_library/api.js helpers.
+import {
+  SUBGRAPH_INPUT_ID,
+  comparePathIds,
+  graphLink,
+  isSubgraphNode,
+  locationsOfNode,
+  resolveLinkSources,
+  rootGraphOf,
+  walkLiveNodes,
+  watchAllGraphs
+} from '../lora_library/api.js'
 
 /** Frozen once shipped -- mirrors the Python node's class id (§6.10/§8). */
 export const CLASS_ID = 'EPSCrossSweep'
@@ -573,8 +618,10 @@ const DEAD_OUTPUT_INPUTS = { 0: 'model', 1: 'clip', 2: 'image', 5: 'label', 6: '
  * propagated verbatim up every recursing branch for the readout to paint.
  * @param {{nodes: object}} snapshot
  * @param {{originId: string|number, originSlot?: number}|null} link
- * @param {Set<string>} path - node ids already on this recursion path (the
- *   cycle guard for EVERY recursing branch, not just chained multipliers)
+ * @param {Set<string>} path - node ids (path ids for nested nodes -- two
+ *   nodes with the same id in different subgraphs never collide) already on
+ *   this recursion path (the cycle guard for EVERY recursing branch, not
+ *   just chained multipliers)
  */
 function sourceCount(snapshot, link, path) {
   if (!link) return null
@@ -958,8 +1005,11 @@ function plural(count, noun) {
  * `run()` mirrored over per-source counts (file header).
  *
  * @param {{nodes: Record<string, {classType: string, widgets?: object,
- *   inputs?: object, imageGridCount?: number}>}} snapshot
- * @param {string|number} nodeId
+ *   inputs?: object, imageGridCount?: number}>}} snapshot - node keys are
+ *   the plain id at the root and the execution PATH id ("3:2") for a node
+ *   under a SubgraphNode (`snapshotFromGraph`); every `originId` is one of
+ *   those keys, so the estimator needs no notion of subgraphs of its own
+ * @param {string|number} nodeId - a snapshot key (path id for a nested node)
  * @returns {{total: number, atLeast: boolean, steps: number,
  *   stepsAtLeast: boolean, pairs: number, pairsAtLeast: boolean,
  *   unknowns: string[], error: string|null, breakdown: string,
@@ -1219,36 +1269,149 @@ export function formatReadout(est) {
   return { text: `Runs: ${est.total} — ${base}`, cls: '' }
 }
 
+/**
+ * The readout for ONE multiplier that executes under SEVERAL path ids --
+ * a node inside a subgraph DEFINITION that more than one SubgraphNode
+ * instantiates (v1.2.0 nested reach, FORMAT.md §7.10, owner ask
+ * 2026-10-03). Every instance is its own prompt node with its own upstream,
+ * so each gets its own `estimateRuns`; this folds them into the one line
+ * the node can show, and never shows more confidence than all of them
+ * support:
+ *
+ * - every instance's readout is identical -> that readout, untouched
+ *   (the common case, and the only one for a root-level multiplier);
+ * - any instance would fail the queue (`est.error`) -> that error, naming
+ *   the copy it is at -- one failing copy fails the whole queue, whatever
+ *   the others say;
+ * - otherwise they DISAGREE: the LARGEST count as a `≥` floor (the real
+ *   number depends on which copy you mean, so only "at least this" is
+ *   true of all of them) plus a note naming that the subgraph is used N
+ *   times with different counts and listing them. When the counts match
+ *   but the sweep/pair splits do not, no floor is claimed (the total IS
+ *   known) and the note says the setups differ instead. Always warn-painted.
+ *
+ * A solo-run instance counts its full SET size (`soloOf`), the number that
+ * differs between copies -- its effective total is always 1.
+ * @param {Array<{pathId: string, est: ReturnType<typeof estimateRuns>}>} instances
+ * @returns {{text: string, cls: string}}
+ */
+export function formatInstanceReadouts(instances) {
+  const views = instances.map(({ est }) => formatReadout(est))
+  if (views.length === 0) return { text: '', cls: '' }
+  if (views.every((v) => v.text === views[0].text && v.cls === views[0].cls)) return views[0]
+
+  const count = instances.length
+  const failing = instances.find(({ est }) => est.error)
+  if (failing) {
+    return {
+      text: `${failing.est.error} (copy ${failing.pathId} of ${count} uses of this subgraph)`,
+      cls: 'eps-rc-error'
+    }
+  }
+
+  const sizeOf = ({ est }) => (est.solo ? est.soloOf : est.total)
+  const floorOf = ({ est }) => (est.solo ? est.soloOfAtLeast : est.atLeast)
+  const sizes = instances.map((item) => ({ n: sizeOf(item), atLeast: floorOf(item) }))
+  const largest = instances.reduce((best, item) => (sizeOf(item) > sizeOf(best) ? item : best))
+  const top = sizeOf(largest)
+  const sameCount = sizes.every((s) => s.n === sizes[0].n && s.atLeast === sizes[0].atLeast)
+  const mark = top > 0 && (!sameCount || sizes[0].atLeast) ? '≥ ' : ''
+  const head = largest.est.solo
+    ? `Solo ${largest.est.solo} — 1 of ${mark}${top} runs`
+    : `Runs: ${mark}${top}`
+
+  const labels = new Map()
+  for (const s of sizes) labels.set(`${s.atLeast ? '≥ ' : ''}${s.n}`, s.n)
+  const differing = [...labels.entries()]
+    .sort((a, b) => a[1] - b[1] || (a[0] < b[0] ? -1 : 1))
+    .map(([label]) => label)
+  const note =
+    differing.length > 1
+      ? `this subgraph is used ${count} times with different counts (${differing.join(', ')})`
+      : `this subgraph is used ${count} times with different sweep/pair setups`
+  return { text: `${head} — ${note}`, cls: 'eps-rc-warn' }
+}
+
 // ---------------------------------------------------------------------------
 // Live-graph adapter (the estimator's only bridge to litegraph)
 // ---------------------------------------------------------------------------
 
-/** One link's `{originId, originSlot}` from the graph's link table --
- * tolerant of both the classic `links[id]` object map and a Map-shaped
- * store on newer frontends. */
-function resolveGraphLink(graph, linkId) {
-  if (linkId == null) return null
-  const links = graph?.links ?? graph?._links
-  if (!links) return null
-  const link = typeof links.get === 'function' ? links.get(linkId) : links[linkId]
+/**
+ * One input's `{originId, originSlot}` for the snapshot, with the origin
+ * resolved to the REAL source's execution path id.
+ *
+ * Three shapes (v1.2.0 nested reach, FORMAT.md §7.10):
+ * - a link to an ordinary node in the SAME graph -> that node's path id
+ *   (`prefix:id`, or the bare id at the root -- byte-identical to the
+ *   pre-1.0.0 snapshot for a graph without subgraphs). An origin id that
+ *   names NO node (a stale link) is deliberately NOT turned into "unwired":
+ *   it stays a pointer at a missing snapshot id, which the estimator counts
+ *   as UNKNOWN (`≥`), exactly as before;
+ * - a link out of a SubgraphNode OUTPUT, or out of this subgraph's own
+ *   input pseudo-node (origin id -10) -> `resolveLinkSources` walks the
+ *   boundary (down into the definition / up and out through the owning
+ *   SubgraphNode named by *prefix*) to the real source node;
+ * - a dangling boundary (nothing feeds it) or a boundary cycle -> null, an
+ *   UNWIRED input, exactly what the prompt flattening drops. The first
+ *   source wins if a malformed table lists several (core takes `.at(0)`).
+ * @param {object} root - the snapshot's root graph
+ * @param {object} graph - the (sub)graph that CONTAINS the consuming node
+ * @param {string} prefix - path id of the SubgraphNode owning *graph* ('' at the root)
+ * @param {Map<string, object>} idsInGraph - String(id) -> node, for *graph*
+ * @param {number|string|null} linkId - the consuming input's `link`
+ * @returns {{originId: string, originSlot: number}|null}
+ */
+function resolveInputLink(root, graph, prefix, idsInGraph, linkId) {
+  const link = graphLink(graph, linkId)
   if (!link || link.origin_id == null) return null
-  return { originId: String(link.origin_id), originSlot: link.origin_slot ?? 0 }
+  const originId = String(link.origin_id)
+  const origin = idsInGraph.get(originId)
+  if (originId !== String(SUBGRAPH_INPUT_ID) && !isSubgraphNode(origin)) {
+    return {
+      originId: prefix ? `${prefix}:${originId}` : originId,
+      originSlot: link.origin_slot ?? 0
+    }
+  }
+  const [source] = resolveLinkSources(root, graph, prefix, link)
+  return source ? { originId: source.pathId, originSlot: source.slot ?? 0 } : null
 }
 
 /**
- * A PLAIN snapshot of *graph* in `estimateRuns()`'s shape (file header) --
- * classType, widget values by name, and input links by input name, plus
- * the one live-only injection: an Image Grid node's `imgs` length as
- * `imageGridCount` (the buffer preview the frontend already holds), so an
- * Emit-mode grid counts exactly instead of downgrading to `≥`.
- * @param {object} graph - `app.graph` (or a node's own `.graph`)
+ * A PLAIN snapshot of the workflow rooted at *graph*, in `estimateRuns()`'s
+ * shape (file header) -- classType, widget values by name, and input links
+ * by input name, plus the one live-only injection: an Image Grid node's
+ * `imgs` length as `imageGridCount` (the buffer preview the frontend
+ * already holds), so an Emit-mode grid counts exactly instead of
+ * downgrading to `≥`.
+ *
+ * v1.2.0 nested reach (FORMAT.md §7.10): every node under every SubgraphNode
+ * is included too, keyed by its execution PATH id ("3:2"), once per
+ * instance of a shared definition, with every input link resolved through
+ * the subgraph boundaries (`resolveInputLink`). Root nodes keep their plain
+ * ids and SubgraphNodes themselves are left out -- nothing points at one
+ * any more -- so a graph without subgraphs snapshots exactly as it did
+ * before. *graph* is the root of the snapshot: a link out of ITS input
+ * pseudo-node has no owner to climb to and reads as unwired, so pass the
+ * workflow's root graph (`app.graph`) to see across every boundary.
+ * @param {object} graph - the workflow's ROOT graph (`app.graph`)
  * @returns {{nodes: Record<string, object>}}
  */
 export function snapshotFromGraph(graph) {
   const snapshot = { nodes: {} }
-  const nodes = graph?._nodes || graph?.nodes || []
-  for (const node of nodes) {
-    if (!node || node.id == null) continue
+  const entries = walkLiveNodes(graph)
+  // graph -> (String(id) -> node): which ids a link's origin may name in
+  // THAT graph's own id space (a shared definition is walked once per
+  // instance but is one graph, so one map).
+  const idsByGraph = new Map()
+  for (const { node, graph: owner } of entries) {
+    let ids = idsByGraph.get(owner)
+    if (!ids) idsByGraph.set(owner, (ids = new Map()))
+    ids.set(String(node.id), node)
+  }
+  for (const { node, graph: owner, pathId } of entries) {
+    if (isSubgraphNode(node)) continue
+    const at = pathId.lastIndexOf(':')
+    const prefix = at === -1 ? '' : pathId.slice(0, at)
     const classType =
       node.comfyClass || (node.constructor && node.constructor.comfyClass) || node.type || ''
     const widgets = {}
@@ -1258,7 +1421,7 @@ export function snapshotFromGraph(graph) {
     const inputs = {}
     for (const input of node.inputs || []) {
       if (!input || typeof input.name !== 'string') continue
-      inputs[input.name] = resolveGraphLink(graph, input.link)
+      inputs[input.name] = resolveInputLink(graph, owner, prefix, idsByGraph.get(owner), input.link)
     }
     const entry = { classType, widgets, inputs }
     if (classType === 'EPSImageGrid' && Number.isFinite(node.imgs?.length)) {
@@ -1271,7 +1434,7 @@ export function snapshotFromGraph(graph) {
       entry.inputIsList = flags.inputIsList
       entry.outputIsList = flags.outputIsList
     }
-    snapshot.nodes[String(node.id)] = entry
+    snapshot.nodes[pathId] = entry
   }
   return snapshot
 }
@@ -1338,21 +1501,15 @@ function loadListFlags() {
   return listFlagsPromise
 }
 
-/** Schedule a recompute on the root graph and every reachable subgraph
- * (cycle-guarded, capped) -- used when a late-arriving fact (the list
- * flags) changes what every readout should say. */
+/** Schedule a recompute of EVERY multiplier readout in the workflow -- used
+ * when a late-arriving fact (the list flags) changes what every readout
+ * should say. Since v1.2.0 (FORMAT.md §7.10) `scheduleGraphRecompute`
+ * itself walks the whole workflow from the root, subgraphs included, so
+ * there is no local graph stack left to keep in sync with it. */
 function recomputeEveryGraph() {
-  const root = app?.graph
+  const root = rootGraphOf(app?.graph)
   if (!root) return
-  const seen = new Set()
-  const stack = [root]
-  while (stack.length && seen.size < 64) {
-    const graph = stack.pop()
-    if (!graph || seen.has(graph)) continue
-    seen.add(graph)
-    scheduleGraphRecompute(graph)
-    for (const node of graph._nodes || []) if (node?.subgraph) stack.push(node.subgraph)
-  }
+  scheduleGraphRecompute(root)
 }
 
 export function init() {
@@ -1400,17 +1557,59 @@ function nodeClassOf(node) {
   return null
 }
 
-/** Re-estimates from the live graph and repaints the line -- only when the
- * text actually changed, so a busy canvas never thrashes the DOM. */
-function recompute(state) {
-  const graph = state.node.graph || app.graph
-  if (!graph) return
+/**
+ * The readout view (`{text, cls}`) for *state*'s multiplier, estimated from
+ * the ROOT graph's *snapshot* (v1.2.0 nested reach, FORMAT.md §7.10): the
+ * node's execution path id(s) come from `locationsOfNode` -- ONE for a
+ * root-level multiplier, one PER INSTANCE for a node inside a subgraph
+ * definition several SubgraphNodes share -- and `formatInstanceReadouts`
+ * folds the instances' estimates into the one line (agreement shown as is,
+ * disagreement shown as a floor with a note, never false confidence).
+ *
+ * A node the root cannot reach -- no id/graph yet at `nodeCreated`, or a
+ * definition no SubgraphNode instantiates -- falls back to the
+ * pre-1.0.0 single-graph estimate over its own graph (the old
+ * "node -1 is not an EPSCrossSweep" first paint, healed by the deferred
+ * recompute, and an honest within-definition count for the orphan).
+ * @param {object} state @param {object} root @param {{nodes: object}} snapshot
+ * @returns {{text: string, cls: string}}
+ */
+function readoutViewFor(state, root, snapshot) {
+  const locations = locationsOfNode(root, state.node).sort((a, b) =>
+    comparePathIds(a.pathId, b.pathId)
+  )
+  if (locations.length === 0) {
+    const own = state.node.graph || root
+    const alone = own === root ? snapshot : snapshotFromGraph(own)
+    return formatReadout(estimateRuns(alone, String(state.node.id)))
+  }
+  return formatInstanceReadouts(
+    locations.map(({ pathId }) => ({ pathId, est: estimateRuns(snapshot, pathId) }))
+  )
+}
+
+/**
+ * Re-estimates from the live ROOT graph and repaints the line -- only when
+ * the text actually changed, so a busy canvas never thrashes the DOM.
+ *
+ * The root, not `state.node.graph` (v1.2.0, FORMAT.md §7.10): a multiplier
+ * INSIDE a subgraph must see sources outside it (through its owning
+ * SubgraphNode's inputs) and one outside must see sources inside, so the
+ * estimate always reads the whole workflow. *pass* is the whole-workflow
+ * recompute's shared `{root, snapshot}` (built ONCE per pass for every
+ * multiplier, watches already armed by it); a lone trigger builds its own.
+ * @param {object} state
+ * @param {{root: object, snapshot: {nodes: object}}} [pass]
+ */
+function recompute(state, pass) {
+  const root = pass?.root || rootGraphOf(state.node.graph) || app.graph
+  if (!root) return
   // v0.68.1: re-verify the graph-level watch on every pass (cheap) -- core
   // restores graph.onNodeAdded/onNodeRemoved on subgraph enter/exit, and
   // this is also what arms a SUBGRAPH's own graph (null at nodeCreated).
-  installGraphNodeWatch(graph)
-  const est = estimateRuns(snapshotFromGraph(graph), String(state.node.id))
-  const view = formatReadout(est)
+  // Since v1.2.0 it covers EVERY graph of the workflow in one call.
+  if (!pass) installGraphNodeWatch(root)
+  const view = readoutViewFor(state, root, pass?.snapshot || snapshotFromGraph(root))
   if (view.text === state.lastText && view.cls === state.lastCls) {
     // Unchanged text can still owe a size pass: the last one may have run
     // before layout gave the element real dimensions, or at a DIFFERENT
@@ -1530,22 +1729,46 @@ function wrapWithRecompute(original, state) {
 }
 
 /**
- * Recompute every run-count readout in *graph*, coalesced to one pass per
- * tick. Same shape (and same reason) as controller.js's
- * `scheduleControllerRefresh` -- see `installGraphNodeWatch` below.
+ * Recompute EVERY run-count readout in the whole workflow *graph* belongs
+ * to, coalesced to one pass per tick. Same shape (and same reason) as
+ * controller.js's `scheduleControllerRefresh` -- see `installGraphNodeWatch`
+ * below.
+ *
+ * v1.2.0 nested reach (owner ask 2026-10-03, FORMAT.md §7.10): *graph* may
+ * be a SUBGRAPH (its own add/remove hook fired), but the count of ANY
+ * multiplier can depend on a node in ANY graph -- a change inside a
+ * subgraph moves a root multiplier's number and vice versa -- so the pass is
+ * keyed and coalesced on the ROOT graph and walks every node under it
+ * (`walkLiveNodes`, subgraphs included). The snapshot is built ONCE and
+ * shared by every multiplier (`recompute`'s `pass`), and the hook watch is
+ * re-armed once per pass, which is also what reaches a SubgraphNode created
+ * since the last one. A node inside a shared definition is walked once per
+ * instance, so states are de-duplicated: one recompute per multiplier.
  */
 function scheduleGraphRecompute(graph) {
-  if (!graph || graph.__epsRcRefreshQueued) return
-  graph.__epsRcRefreshQueued = true
+  const root = rootGraphOf(graph)
+  if (!root || root.__epsRcRefreshQueued) return
+  root.__epsRcRefreshQueued = true
   setTimeout(() => {
-    graph.__epsRcRefreshQueued = false
+    root.__epsRcRefreshQueued = false
     // The state hangs off the node itself (no module-level registry to
     // leak): a deleted node takes its state with it.
-    for (const node of graph._nodes || []) {
-      const state = node?.__epsRcState
-      if (!state) continue
+    const states = new Set()
+    for (const { node } of walkLiveNodes(root)) {
+      if (node?.__epsRcState) states.add(node.__epsRcState)
+    }
+    if (states.size === 0) return
+    let pass = null
+    try {
+      installGraphNodeWatch(root)
+      pass = { root, snapshot: snapshotFromGraph(root) }
+    } catch (error) {
+      console.warn(PREFIX, 'graph-change snapshot failed', error)
+      return
+    }
+    for (const state of states) {
       try {
-        recompute(state)
+        recompute(state, pass)
       } catch (error) {
         console.warn(PREFIX, 'graph-change recompute failed', error)
       }
@@ -1553,8 +1776,24 @@ function scheduleGraphRecompute(graph) {
   }, 0)
 }
 
+//: The owner key `watchAllGraphs` stores this file's wrappers under (and
+//: marks them with) -- the SAME name the one-graph watch used before
+//: v1.2.0, so a wrapper of ours that survives is still recognised.
+const WATCH_KEY = '__epsRcNodeWatch'
+//: The three graph hooks the readout rides (see `installGraphNodeWatch`).
+const WATCH_HOOKS = ['onNodeAdded', 'onNodeRemoved', 'onAfterChange']
+
+/** The watch's one stable event handler (the shared wrapper keeps the FIRST
+ * installed `onEvent`, so this must be a module-level function, never a
+ * per-call closure). *graph* is the graph the event fired on -- possibly a
+ * subgraph; `scheduleGraphRecompute` lifts it to the root. */
+function onWatchedGraphEvent(graph) {
+  scheduleGraphRecompute(graph)
+}
+
 /**
- * Install the graph-level change watch ONCE per graph object (v0.63.2).
+ * Arm (and RE-VERIFY) the graph-level change watch on EVERY graph of the
+ * workflow rooted at *root* (v0.63.2; every graph since v1.2.0).
  *
  * The count depends on the WHOLE upstream graph, but the triggers below
  * only ever fire for this node's OWN edits: `onDrawForeground` is the
@@ -1573,49 +1812,32 @@ function scheduleGraphRecompute(graph) {
  * so it is a bonus, never the guarantee. The recompute is throttle-free
  * here but repaints only on an actual text change, so extra calls cost
  * nothing.
+ *
+ * NOT a one-shot flag (v0.68.1, 2026-08-21). Core's own graph hooks --
+ * `useGraphNodeManager`'s cleanup and `installErrorClearingHooks`'s
+ * disposer (both verified in the 1.48.7 source maps) -- RESTORE
+ * `graph.onNodeAdded`/`onNodeRemoved` to the values they captured at THEIR
+ * install whenever the active graph changes (every subgraph enter/exit),
+ * which drops any wrapper installed after them; a boolean flag then refused
+ * to re-install and every multiplier in that graph went deaf to upstream
+ * adds/removes under Vue. v1.2.0 moved that stored-and-re-verified logic
+ * into the shared `watchAllGraphs` (lora_library/api.js `watchGraphHooks`:
+ * the wrapper is STORED per hook under `WATCH_KEY`, every call re-verifies
+ * that each hook still IS ours and re-wraps the CURRENT value when not, a
+ * surviving older wrapper of ours is adopted so the chain stays bounded,
+ * and the event carries the CLOSURE's graph, not `this`) and widened it to
+ * every graph, because a subgraph's add/remove hooks fire ONLY on that
+ * subgraph (owner ask 2026-10-03, FORMAT.md §7.10). Three compares per hook
+ * per graph -- `recompute()` runs this on every lone pass and the
+ * whole-workflow pass once, which is also what lands the watch on a
+ * SUBGRAPH's own graph: at nodeCreated `node.graph` is still null
+ * (attach() falls back to app.graph, the root) and the deferred first
+ * recompute sees the real graphs.
+ * @param {object} root - the workflow's root graph
  */
-function installGraphNodeWatch(graph) {
-  if (!graph) return
-  // v0.68.1 (2026-08-21): NOT a one-shot flag any more. Core's own graph
-  // hooks -- `useGraphNodeManager`'s cleanup and `installErrorClearingHooks`'s
-  // disposer (both verified in the 1.48.7 source maps) -- RESTORE
-  // `graph.onNodeAdded`/`onNodeRemoved` to the values they captured at THEIR
-  // install whenever the active graph changes (every subgraph enter/exit),
-  // which drops any wrapper installed after them; a boolean flag then refused
-  // to re-install and every multiplier in that graph went deaf to upstream
-  // adds/removes under Vue. So the installed wrapper is STORED per hook and
-  // every call re-verifies that each hook still IS ours, re-wrapping the
-  // CURRENT value when not. A surviving older wrapper of ours (core wrapped
-  // it, then restored it) is adopted rather than re-wrapped, so the chain
-  // stays bounded. Three compares per call -- recompute() runs this on every
-  // pass, which is also what lands the watch on a SUBGRAPH's own graph: at
-  // nodeCreated `node.graph` is still null (attach() falls back to app.graph,
-  // the root) and the deferred first recompute sees the real graph.
-  const stored = graph.__epsRcNodeWatch || (graph.__epsRcNodeWatch = {})
-  for (const hook of ['onNodeAdded', 'onNodeRemoved', 'onAfterChange']) {
-    const current = graph[hook]
-    if (current && current === stored[hook]) continue
-    if (current && current.__epsRcNodeWatch) {
-      stored[hook] = current
-      continue
-    }
-    const original = current
-    const wrapper = function (...args) {
-      let result
-      try {
-        result = original?.apply(this, args)
-      } catch (error) {
-        console.warn(PREFIX, `original ${hook} threw`, error)
-      }
-      // The closure's graph, not `this`: a core wrapper that chains to us
-      // may call without a receiver.
-      scheduleGraphRecompute(graph)
-      return result
-    }
-    wrapper.__epsRcNodeWatch = true
-    stored[hook] = wrapper
-    graph[hook] = wrapper
-  }
+function installGraphNodeWatch(root) {
+  if (!root) return
+  watchAllGraphs(root, WATCH_KEY, WATCH_HOOKS, onWatchedGraphEvent)
 }
 
 //: v0.66.1 (owner): the two mode combos are HIDDEN by default -- multiply
@@ -1718,7 +1940,7 @@ export function attach(node) {
     // Reachable from the graph-level watch below (and only from there);
     // stored on the node so it dies with the node.
     node.__epsRcState = state
-    installGraphNodeWatch(node.graph || app.graph)
+    installGraphNodeWatch(rootGraphOf(node.graph) || app.graph)
     const domWidget = node.addDOMWidget(READOUT_WIDGET_NAME, READOUT_WIDGET_TYPE, root, {
       hideOnZoom: true,
       serialize: false, // excludes from the API prompt (utils/executionUtil.ts)

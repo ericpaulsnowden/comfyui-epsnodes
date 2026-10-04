@@ -336,6 +336,14 @@
 
 import { api } from '../../../scripts/api.js'
 import { app } from '../../../scripts/app.js'
+import {
+  SUBGRAPH_INPUT_ID,
+  describePath,
+  graphLink,
+  isSubgraphNode,
+  liveRootOf,
+  resolveSourcesAt
+} from '../lora_library/api.js'
 
 /** FORMAT.md §6.7 — frozen once shipped. */
 const CLASS_ID = 'EPSFrameSaver'
@@ -496,8 +504,12 @@ function toast(node, severity, detail) {
 // `comfyui-premiere-bridge/web/cprb/nodes.js` both import); every existing
 // `eps_image/*.js` file (image_grid.js, switcher.js, resolution.js) instead
 // calls `api.fetchApi`/`api.apiURL` directly or via its own tiny local
-// helper, so this file follows suit rather than reaching into a sibling
-// family's module.
+// helper, so this file follows suit for FETCHING rather than reaching into
+// a sibling family's module. (The one thing it DOES import from
+// `lora_library/api.js` is the v1.2.0 boundary-crossing GRAPH resolvers
+// `resolveWiredVideo` uses -- owner ask 2026-10-03, FORMAT.md §7.10 nested
+// reach: a graph walk is exactly the kind of helper this pack kept
+// hand-copying and then missing the sibling of, so it is shared on purpose.)
 // ---------------------------------------------------------------------------
 
 /**
@@ -1825,41 +1837,155 @@ function sourceKeyOf(state, rawPath) {
   ])
 }
 
+/** The pre-v1.2.0 single-graph hop: the node wired into *node*'s input at
+ * *slotIndex* through THIS graph's own link table (null for unwired / a
+ * missing link / a missing origin). Stops dead at a subgraph boundary --
+ * which is why it is only the fallback under `upstreamSources` now. */
+function nativeUpstreamAt(node, slotIndex) {
+  const link_id = node.inputs?.[slotIndex]?.link
+  if (link_id == null) return null
+  const link = node.graph?.links?.[link_id] ?? node.graph?.links?.get?.(link_id)
+  if (!link) return null
+  return node.graph?.getNodeById?.(link.origin_id) || null
+}
+
+/**
+ * `resolveWiredVideo`'s ONE hop primitive (v1.2.0 nested reach): the node(s)
+ * really feeding *item*'s input at *slotIndex*, as `{node, graph?, pathId?}`
+ * -- an ARRAY, because stepping out of a node inside a shared subgraph
+ * definition fans out to one source per instance. *item* is the saver itself
+ * (`{node}`, location unknown -> `api.resolveSourcesAt` locates it and
+ * crosses every boundary) or a previous hop's result (carries the `graph` +
+ * `pathId` it was found at, and is resolved FROM THAT PLACE: re-resolving the
+ * node object would fan a reroute inside a shared definition out to every
+ * instance's outer source and make a clear answer look ambiguous).
+ *
+ * Nothing resolved (no live root, a node that is not in it -- the unit-test
+ * fakes -- or a resolver that threw) falls back to `nativeUpstreamAt`, the
+ * exact read this function always made; a SubgraphNode that read returns is
+ * never taken as a source when a root is live (that is a dangling subgraph
+ * output the resolver just walked: it feeds nothing, and the prompt drops it).
+ * Twin of resolution.js's `upstreamSources`.
+ * @param {object|null} root @param {{node: object, graph?: object, pathId?: string}} item
+ * @param {number} slotIndex
+ */
+function upstreamSources(root, item, slotIndex) {
+  if (root) {
+    try {
+      // The shared lane-aware hop (api.js `resolveSourcesAt`).
+      const resolved = resolveSourcesAt(root, item, slotIndex)
+      if (resolved.length > 0) return resolved
+    } catch (error) {
+      warn('nested source resolution failed while reading the wired video', error)
+    }
+  }
+  const native = nativeUpstreamAt(item.node, slotIndex)
+  if (!native) return []
+  if (root && isSubgraphNode(native)) return []
+  return [{ node: native }]
+}
+
+/** The label a wired source shows in the path bar / overlay: the node's own
+ * title, prefixed with the containing subgraph(s) ("Wrapper › Load Video")
+ * when it lives inside one, so two same-titled nodes read apart. A root node
+ * keeps its bare title -- byte-identical to before. */
+function wiredTitle(root, source, ownTitle) {
+  if (!root || !source.pathId || !source.pathId.includes(':')) return ownTitle
+  const { trail } = describePath(root, source.pathId)
+  return trail.length > 0 ? [...trail, ownTitle].join(' › ') : ownTitle
+}
+
+/** True when a LoadVideo's `file` socket is fed by its subgraph's INPUT node
+ * -- the "promoted widget" shape. Core keeps a promoted widget's value in a
+ * host-side store entry separate from the interior widget (SubgraphNode.ts
+ * `_setWidget` registers a COPY), so the interior `file` widget's `.value`
+ * is only the value it had when it was promoted -- reading it would preview
+ * a file the run does not use. Not statically knowable here -> the caller
+ * answers opaque, never a guess. */
+function fileDrivenFromSubgraphInput(source) {
+  if (!source.graph) return false
+  const input = (source.node.inputs || []).find(
+    (candidate) => candidate && (candidate.name === 'file' || candidate.widget?.name === 'file')
+  )
+  const link = graphLink(source.graph, input?.link)
+  return !!link && String(link.origin_id) === String(SUBGRAPH_INPUT_ID)
+}
+
+/**
+ * The verdict over every source the walk reached: one answer is itself;
+ * several that AGREE (the same LoadVideo file reached through two instances
+ * of a shared subgraph) are that answer; anything else is `opaque`, labelled
+ * "(several sources)" -- instances that disagree cannot be previewed as one
+ * video, and never guessing is the whole point of `opaque`. Empty -> null
+ * (nothing really wired, e.g. a dangling subgraph boundary).
+ */
+function settleWiredAnswers(answers) {
+  if (answers.length === 0) return null
+  const [first] = answers
+  const agree = answers.every(
+    (answer) => answer.kind === first.kind && (answer.ref ?? null) === (first.ref ?? null)
+  )
+  if (!agree) return { kind: 'opaque', title: '(several sources)' }
+  if (first.kind === 'input_ref') return first
+  const sameTitle = answers.every((answer) => answer.title === first.title)
+  return sameTitle ? first : { kind: 'opaque', title: '(several sources)' }
+}
+
 /**
  * §6.7 v0.60.0: what is wired into the node's `video` input, followed
  * through reroutes. An upstream core `LoadVideo` is statically knowable
  * from its `file` widget (the exact annotated value the routes' input_ref
  * mode resolves); anything else is a run-time video -- opaque here.
+ *
+ * v1.2.0 nested reach (owner ask 2026-10-03: "Make sure all of the nodes
+ * that can control other nodes also looks into nested nodes"; FORMAT.md
+ * §6.7 / §7.10): every hop -- the saver's own input AND each reroute -- is
+ * boundary-aware (`upstreamSources`), so a LoadVideo INSIDE a subgraph, one
+ * OUTSIDE feeding a subgraph input the saver reads, and a reroute pair
+ * straddling the boundary all resolve like a flat wire instead of reading
+ * "opaque" (the old `getNodeById(link.origin_id)` hop stopped at the
+ * SubgraphNode / returned nothing at a subgraph input). Ambiguity (instances
+ * of a shared definition fed different videos) is `opaque`, never a pick.
+ * Exported for tests.
  * @param {object} node
  * @returns {null | {kind: string, ref?: string, title: string}}
  */
-function resolveWiredVideo(node) {
+export function resolveWiredVideo(node) {
   const slot = (node.inputs || []).findIndex((input) => input && input.name === 'video')
   if (slot === -1) return null
-  let current = node
-  let currentSlot = slot
-  for (let hops = 0; hops < 32; hops++) {
-    const link_id = current.inputs?.[currentSlot]?.link
-    if (link_id == null) return null
-    const link = current.graph?.links?.[link_id] ?? current.graph?.links?.get?.(link_id)
-    if (!link) return null
-    const upstream = current.graph?.getNodeById?.(link.origin_id)
-    if (!upstream) return null
-    if (upstream.type === 'Reroute' || upstream.type === 'Reroute (rgthree)') {
-      current = upstream
-      currentSlot = 0
-      continue
+  const root = liveRootOf(node)
+  let frontier = upstreamSources(root, { node }, slot)
+  const answers = []
+  for (let hops = 0; hops < 32 && frontier.length > 0; hops++) {
+    const next = []
+    const queued = new Set() // converging lanes reach one reroute once
+    for (const source of frontier) {
+      const upstream = source.node
+      if (upstream.type === 'Reroute' || upstream.type === 'Reroute (rgthree)') {
+        for (const hop of upstreamSources(root, source, 0)) {
+          const key = hop.pathId ?? hop.node
+          if (queued.has(key)) continue
+          queued.add(key)
+          next.push(hop)
+        }
+        continue
+      }
+      const upstreamClass = upstream.comfyClass ?? upstream.constructor?.comfyClass ?? upstream.type
+      const title = wiredTitle(root, source, upstream.title || upstreamClass)
+      if (upstreamClass === 'LoadVideo' && !fileDrivenFromSubgraphInput(source)) {
+        const fileWidget = (upstream.widgets || []).find((w) => w && w.name === 'file')
+        const ref = typeof fileWidget?.value === 'string' ? fileWidget.value.trim() : ''
+        if (ref) {
+          answers.push({ kind: 'input_ref', ref, title })
+          continue
+        }
+      }
+      answers.push({ kind: 'opaque', title })
     }
-    const upstreamClass = upstream.comfyClass ?? upstream.constructor?.comfyClass ?? upstream.type
-    const title = upstream.title || upstreamClass
-    if (upstreamClass === 'LoadVideo') {
-      const fileWidget = (upstream.widgets || []).find((w) => w && w.name === 'file')
-      const ref = typeof fileWidget?.value === 'string' ? fileWidget.value.trim() : ''
-      if (ref) return { kind: 'input_ref', ref, title }
-    }
-    return { kind: 'opaque', title }
+    frontier = next
   }
-  return { kind: 'opaque', title: '(reroute loop)' }
+  if (frontier.length > 0) return { kind: 'opaque', title: '(reroute loop)' }
+  return settleWiredAnswers(answers)
 }
 
 /**

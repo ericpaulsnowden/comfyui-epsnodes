@@ -3256,23 +3256,36 @@ function scheduleSendRowRefresh(graph) {
   }, 0)
 }
 
-/** Install once per graph -- see scheduleSendRowRefresh. */
+/**
+ * Install (and RE-VERIFY) the add/remove watch on one graph -- see
+ * scheduleSendRowRefresh. v1.2.0 (owner ask 2026-10-03, FORMAT.md §7.10
+ * nested reach): the shared stored-and-re-verified pattern
+ * (`api.watchGraphHooks`, cross_sweep.js v0.68.1's shape), no longer a
+ * once-per-graph boolean. Core restores `graph.onNodeAdded`/`onNodeRemoved`
+ * to the values it captured at ITS install on every subgraph enter/exit and
+ * on a Nodes 2.0 toggle, dropping a later wrapper; the flag then refused to
+ * re-wrap, so a nested picker's Link-to-loader row went stale. Returns true
+ * when it (re)installed anything.
+ */
+const LP_WATCH_KEY = '__epsLpNodeWatch'
+const LP_WATCH_HOOKS = ['onNodeAdded', 'onNodeRemoved']
+
 function installGraphNodeWatch(graph) {
-  if (!graph || graph.__epsLpNodeWatch) return
-  graph.__epsLpNodeWatch = true
-  for (const hook of ['onNodeAdded', 'onNodeRemoved']) {
-    const original = graph[hook]
-    graph[hook] = function (...args) {
-      let result
-      try {
-        result = original?.apply(this, args)
-      } catch (error) {
-        api.warn(`original ${hook} threw`, error)
-      }
-      scheduleSendRowRefresh(this)
-      return result
-    }
-  }
+  return api.watchGraphHooks(graph, LP_WATCH_KEY, LP_WATCH_HOOKS, (firing) =>
+    scheduleSendRowRefresh(firing)
+  )
+}
+
+/** Re-verify the watch on EVERY graph of the workflow (a subgraph's hooks
+ * fire only on the subgraph itself); one refresh is scheduled when a hook
+ * had to be re-wrapped, because an add/remove may have fired into the gap. */
+function armSendRowGraphWatches() {
+  const root = app.graph
+  if (!root) return
+  const reinstalled = api.watchAllGraphs(root, LP_WATCH_KEY, LP_WATCH_HOOKS, (firing) =>
+    scheduleSendRowRefresh(firing)
+  )
+  if (reinstalled) scheduleSendRowRefresh(root)
 }
 
 /** v0.68.1: the candidate walk, memoized for the CURRENT synchronous run.
@@ -3349,6 +3362,10 @@ function probeSendTarget(node) {
  * (so a broken link is visible immediately, before anything changes).
  */
 function renderSend(state) {
+  // v1.2.0: every Send-row paint re-verifies the graph watch (cheap), so the
+  // stored hooks are put back after a subgraph enter/exit without needing a
+  // poll of this file's own -- the row repainting IS the pass that needs it.
+  armSendRowGraphWatches()
   state.sendRowEl.replaceChildren()
 
   const select = el('select', {

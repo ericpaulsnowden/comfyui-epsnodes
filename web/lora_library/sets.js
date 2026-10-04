@@ -53,8 +53,9 @@
  * runs on dropdown open (both renderers; the Vue select re-evaluates
  * `options.values()` in its open handler), an identity `getOptionLabel`
  * keeps the per-draw display off the graph walk, and the heal moved to
- * `healMirrorsTags()`, driven by a chained, install-once `onNodeRemoved`
- * watch on every graph (`installMirrorsGraphWatch()`, controller.js's
+ * `healMirrorsTags()`, driven by a chained, stored-and-re-verified `onNodeRemoved`
+ * watch on every graph (`installMirrorsGraphWatch()` over the shared
+ * `api.watchAllGraphs`, v1.2.0 -- was controller.js's install-once
  * `installGraphNodeWatch` idiom by hand) plus one deferred pass after each
  * `nodeCreated` (a workflow load restores the tag value AFTER this hook).
  *
@@ -358,7 +359,12 @@ function attachMirrorsWidget(node) {
   // The vanished-loader self-heal that used to live here moved to
   // `healMirrorsTags()` (file header): a values() that wrote `widget.value`
   // ran on every canvas draw, because...
-  widget.options.values = () => [MIRRORS_ANY_VALUE, ...findPllCandidates().map((c) => c.label)]
+  widget.options.values = () => {
+    // v1.2.0: the user is looking at the tag -- re-verify the removal watch
+    // (hooks only, no widget write: this getter stays pure, FORMAT.md §6.2).
+    installMirrorsGraphWatch()
+    return [MIRRORS_ANY_VALUE, ...findPllCandidates().map((c) => c.label)]
+  }
   // ...ComboWidget's `_displayValue` evaluates `values()` per draw when no
   // `getOptionLabel` is installed (installed bundle, read 2026-08-21). The
   // value IS the label here, so an identity mapper keeps the per-draw
@@ -389,36 +395,36 @@ function scheduleMirrorsHeal() {
   setTimeout(() => {
     mirrorsHealQueued = false
     try {
-      if (app.graph) healMirrorsTags()
+      if (app.graph) {
+        installMirrorsGraphWatch() // v1.2.0: re-verify the hook on every heal pass
+        healMirrorsTags()
+      }
     } catch (error) {
       api.warn('mirrors-tag heal failed', error)
     }
   }, 0)
 }
 
-/** Chained, install-once `onNodeRemoved` wrap on every graph in the
+/** Chained, STORED-AND-RE-VERIFIED `onNodeRemoved` wrap on every graph in the
  * workflow (subgraphs included -- their add/remove hooks fire only on the
- * subgraph itself). controller.js's `installGraphNodeWatch` technique,
- * duplicated by hand per this file's no-cross-import rule; its own flag so
- * the two never collide. Re-armed from every `nodeCreated` so a subgraph
- * created later is watched before a loader inside it can vanish. */
+ * subgraph itself). v1.2.0 (owner ask 2026-10-03, FORMAT.md §7.10 nested
+ * reach): this was a chained, install-once boolean flag
+ * (`graph.__epsSetsMirrorsWatch`); core restores `graph.onNodeRemoved` to the
+ * value it captured at ITS install on every subgraph enter/exit and on a
+ * Nodes 2.0 toggle (useGraphNodeManager cleanup / installErrorClearingHooks
+ * disposer), dropping a later wrapper, and the flag then refused to re-wrap
+ * -- after which a deleted loader no longer reset an Apply node's `mirrors
+ * loader` tag to "(any)". Now the shared pattern (`api.watchAllGraphs`,
+ * cross_sweep.js v0.68.1's shape): its own key so it never collides with
+ * controller.js's/picker.js's, re-verified from every `nodeCreated`, every
+ * heal pass and every dropdown open (the user is looking at the tag then),
+ * so a subgraph created later -- or a hook core put back -- is watched
+ * again before a loader inside it can vanish. */
+const MIRRORS_WATCH_KEY = '__epsSetsMirrorsWatch'
+
 function installMirrorsGraphWatch() {
-  if (!app.graph || typeof api.walkGraphs !== 'function') return
-  for (const graph of api.walkGraphs(app.graph)) {
-    if (!graph || graph.__epsSetsMirrorsWatch) continue
-    graph.__epsSetsMirrorsWatch = true
-    const original = graph.onNodeRemoved
-    graph.onNodeRemoved = function (...args) {
-      let result
-      try {
-        result = original?.apply(this, args)
-      } catch (error) {
-        api.warn('original onNodeRemoved threw', error)
-      }
-      scheduleMirrorsHeal()
-      return result
-    }
-  }
+  if (!app.graph || typeof api.watchAllGraphs !== 'function') return
+  api.watchAllGraphs(app.graph, MIRRORS_WATCH_KEY, ['onNodeRemoved'], () => scheduleMirrorsHeal())
 }
 
 /**

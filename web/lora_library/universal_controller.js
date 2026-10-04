@@ -894,8 +894,16 @@ function isStateBearingClass(registry, klass) {
 /** Every state-bearing node on the canvas, subgraphs included --
  * `api.walkLiveNodes` filtered by the state registry. Keeps the live
  * `node` reference (for capture/apply/UI) alongside the plain fields the
- * pure helpers above consume. */
-function discoverStateNodes(registry) {
+ * pure helpers above consume. `pathId` is the EXECUTION-shaped id ("3:2" for
+ * node 2 inside SubgraphNode 3), which is what a state stores, what
+ * `applyPlan` matches on and what the Included-nodes exclusions key by
+ * (v1.2.0 nested reach, owner ask 2026-10-03, FORMAT.md §7.10). A node inside
+ * a subgraph definition that several SubgraphNodes instantiate is reported
+ * once per instance path -- the same live node, so capture records identical
+ * widgets under each path and apply writes them idempotently (harmless; the
+ * duplicate entries are NOT collapsed because a state saved on another
+ * machine may name either path). Exported for tests. */
+export function discoverStateNodes(registry) {
   return api
     .walkLiveNodes(app.graph)
     .filter(({ node }) => node && isStateBearingClass(registry, node.type))
@@ -919,8 +927,9 @@ function readWidgetValues(node, widgetNames) {
   return values
 }
 
-/** `discoverStateNodes()`'s output -> `applyPlan()`'s `liveIndex` shape. */
-function buildLiveIndex(discovered) {
+/** `discoverStateNodes()`'s output -> `applyPlan()`'s `liveIndex` shape.
+ * Exported for tests. */
+export function buildLiveIndex(discovered) {
   const index = {}
   let order = 0
   for (const d of discovered) {
@@ -3114,7 +3123,14 @@ export function registerControllerNode() {
                 [
                   checkbox,
                   el('span', { className: 'lusc-node-title', text: d.title }),
-                  el('span', { className: 'lusc-node-path', text: `#${d.pathId}` })
+                  // v1.2.0 nested reach (FORMAT.md §7.10): a node inside a subgraph
+                  // reads "#3:2"; its tooltip names where ("Looks › Size") so two
+                  // same-titled nodes in different subgraphs read apart.
+                  el('span', {
+                    className: 'lusc-node-path',
+                    text: `#${d.pathId}`,
+                    attrs: { title: api.describePath(app.graph, d.pathId).text }
+                  })
                 ]
               )
             )

@@ -27,11 +27,13 @@ test_frame_saver_paste_js.py convention). Skips cleanly without Node.
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import subprocess
 from pathlib import Path
 
 import pytest
+from nested_layout import build_layout, run_probe
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 IMAGE_GRID_JS = REPO_ROOT / "web" / "eps_image" / "image_grid.js"
@@ -951,31 +953,34 @@ process.stdout.write(JSON.stringify(out))
 """
 
 
+#: image_grid.js's two ComfyUI imports, stubbed at the served depth
+#: (`../../../scripts/{app,api}.js`) -- the same fixture shape
+#: tests/test_distributor_js.py and test_resolution_grid_js.py use, so a
+#: wrong relative depth fails module resolution outright.
+APP_STUB = "export const app = {}\nexport class ComfyApp {}\n"
+API_STUB = (
+    "export const api = {\n"
+    "  apiURL: (p) => p,\n"
+    "  fetchApi: async () => ({ ok: true, json: async () => ({}) }),\n"
+    "  addEventListener: () => {}\n"
+    "}\n"
+)
+
+
+def _build_grid_layout(root: Path) -> Path:
+    """The served layout for image_grid.js. Since v1.2.0 (nested reach,
+    FORMAT.md §7.10) the module imports ``../lora_library/api.js`` for the
+    shared boundary-crossing helpers, so the layout builder (which always
+    copies ``lora_library/api.js`` + ``version.js`` and the shared
+    ``nested_graph.mjs`` fake) replaces the old single-file byte copy."""
+    return build_layout(
+        root, eps_image=("image_grid.js",), api_stub=API_STUB, app_stub=APP_STUB
+    )
+
+
 @pytest.fixture(scope="module")
 def grid_api(tmp_path_factory: pytest.TempPathFactory) -> dict:
-    layout = tmp_path_factory.mktemp("web_root")
-    module_dir = layout / "extensions" / "comfyui-epsnodes" / "eps_image"
-    module_dir.mkdir(parents=True)
-    shutil.copyfile(IMAGE_GRID_JS, module_dir / "image_grid.js")
-
-    # image_grid.js's two imports, stubbed at the served depth
-    # (`../../../scripts/{app,api}.js`) -- the same fixture shape
-    # tests/test_distributor_js.py and test_resolution_grid_js.py use, so a
-    # wrong relative depth fails module resolution outright.
-    scripts = layout / "scripts"
-    scripts.mkdir(parents=True, exist_ok=True)
-    (scripts / "app.js").write_text(
-        "export const app = {}\nexport class ComfyApp {}\n", encoding="utf-8"
-    )
-    (scripts / "api.js").write_text(
-        "export const api = {\n"
-        "  apiURL: (p) => p,\n"
-        "  fetchApi: async () => ({ ok: true, json: async () => ({}) }),\n"
-        "  addEventListener: () => {}\n"
-        "}\n",
-        encoding="utf-8",
-    )
-
+    layout = _build_grid_layout(tmp_path_factory.mktemp("web_root"))
     probe = layout / "probe.mjs"
     probe.write_text(PROBE_JS, encoding="utf-8")
     result = subprocess.run(
@@ -2015,3 +2020,383 @@ def test_mode_dim_sync_and_connections_sync_are_guarded_per_instance() -> None:
     assert "widget.__epsGridDimSyncInstalled" in _SOURCE
     assert "node.__epsGridLinkDimConnectionsWrapped" in _SOURCE
     assert "node.__epsGridLinkDimCleanupWrapped" in _SOURCE
+
+
+# ===========================================================================
+# v1.2.0 NESTED REACH (owner ask 2026-10-03: "make sure all of the nodes that
+# can control other nodes also looks into nested nodes"; FORMAT.md §7.10).
+#
+# Driven for real under Node: tests/nested_image_grid_probe.mjs runs the real
+# image_grid.js against the shared fake nested litegraph (tests/nested_graph.
+# mjs -- SubgraphNode.subgraph, boundary links with origin id -10 / target id
+# -20, one definition shared by several SubgraphNodes). What it cannot cover
+# (the rig must): the real LGraph/LLink classes, a real run's execution ids,
+# core's Pinia output store and canvas repaint.
+# ===========================================================================
+
+NESTED_PROBE = Path(__file__).resolve().parent / "nested_image_grid_probe.mjs"
+
+
+@pytest.fixture(scope="module")
+def nested(tmp_path_factory: pytest.TempPathFactory) -> dict:
+    layout = _build_grid_layout(tmp_path_factory.mktemp("nested_grid"))
+    result = run_probe(layout, NESTED_PROBE.read_text(encoding="utf-8"))
+    # No module warning may have fired anywhere in the probe (an `attach
+    # failed` / `... threw` would otherwise hide behind a green assertion).
+    assert result["warns"] == [], result["warns"]
+    return result
+
+
+# ---- 1. identity collision on paste ----
+
+
+def test_a_grid_pasted_into_a_subgraph_next_to_a_root_grid_is_minted(nested: dict) -> None:
+    got = nested["pasteNested"]
+    assert got["nestedMinted"] is True  # property AND widget carry the fresh uuid
+    assert got["rootKept"] is True
+    # The buffer travels: cloned FROM the shared uuid TO the minted one, and
+    # the display refresh fetches the NEW uuid.
+    assert got["cloned"] == [{"from": "00000001-0000-4000-8000-000000000000", "toIsNew": True}]
+    assert got["refreshedNewUuid"] is True
+
+
+def test_a_nested_duplicate_names_its_path_in_the_log_line(nested: dict) -> None:
+    line = nested["pasteNested"]["logLine"]
+    assert line is not None
+    # shape kept ("node #N: grid_uuid collided ...") with the path added
+    assert "node #2 (path 3:2): grid_uuid collided with a live sibling" in line
+
+
+def test_a_root_grid_pasted_next_to_a_nested_grid_is_minted(nested: dict) -> None:
+    got = nested["pasteRootNextToNested"]
+    assert got["rootMinted"] is True
+    assert got["nestedKept"] is True
+    assert got["cloneCount"] == 1
+    # a root node's label is unchanged -- no path noise for the flat case
+    assert "node #9: grid_uuid collided" in got["logLine"]
+
+
+def test_two_grids_in_different_subgraph_definitions_are_detected(nested: dict) -> None:
+    # neither grid is in the root list: only a whole-workflow walk sees the pair
+    got = nested["pasteNestedNextToNested"]
+    assert got["pastedMinted"] is True
+    assert got["otherKept"] is True
+    assert got["cloneCount"] == 1
+    assert "node #2 (path 4:2): grid_uuid collided" in got["logLine"]
+
+
+def test_a_shared_definition_grid_is_not_its_own_sibling(nested: dict) -> None:
+    got = nested["pasteShared"]
+    # the SAME object really is walked under both path ids ...
+    assert got["pathsSeen"] == ["10:2", "11:2"]
+    # ... and still never collides with itself: nothing minted, nothing cloned
+    assert got["uuidUnchanged"] is True
+    assert got["cloneCount"] == 0
+    assert got["logged"] is False
+
+
+# ---- 2. settled-collision sweep ----
+
+
+def test_sweep_a_nested_duplicate_loses_to_the_lower_root_id(nested: dict) -> None:
+    got = nested["sweepNestedLoses"]
+    assert got["keeperKept"] is True
+    assert got["dupMinted"] is True
+    assert got["cloneCount"] == 1  # never a data loss: the buffer is cloned
+    line = got["logLine"]
+    assert "reminting node #2 (path 3:2) (buffer cloned, lowest-id node keeps the identity)" in line
+
+
+def test_sweep_ranks_by_path_id_not_root_first(nested: dict) -> None:
+    # root #5 vs nested "3:2": "3:2" < "5" per comparePathIds, so the ROOT
+    # grid is the one reminted.
+    got = nested["sweepPathOrdering"]
+    assert got["nestedKept"] is True
+    assert got["rootMinted"] is True
+    assert "reminting node #5 (buffer cloned" in got["logLine"]  # root: no path suffix
+
+
+def test_sweep_compares_path_segments_numerically(nested: dict) -> None:
+    # root 12, "3:2", "10:1": numeric per segment -> "3:2" < "10:1" < "12"
+    got = nested["sweepNumericSegments"]
+    assert got["keeper"] == [False, True, False]
+    assert got["cloneCount"] == 2
+    assert "reminting node #1 (path 10:1)" in got["logs"][0]
+    assert "reminting node #12 (buffer cloned" in got["logs"][1]
+
+
+def test_sweep_leaves_a_lone_shared_definition_grid_alone(nested: dict) -> None:
+    got = nested["sweepSharedAlone"]
+    assert got["unchanged"] is True
+    assert got["cloneCount"] == 0
+    assert got["logged"] is False
+
+
+def test_sweep_dedupes_a_shared_definition_grid_by_object(nested: dict) -> None:
+    # root #5 + ONE grid object under "10:2" and "11:2": that is a single
+    # duplicate (one remint, one clone), not one per path id.
+    got = nested["sweepSharedDuplicate"]
+    assert got["rootKept"] is True
+    assert got["sharedMinted"] is True
+    assert got["cloneCount"] == 1
+    assert len(got["logs"]) == 1
+    assert "(path 10:2)" in got["logs"][0]  # the LOWEST path id names it
+
+
+# ---- 3. post-run refresh keyed by execution path id ----
+
+
+def test_progress_state_keyed_by_the_path_id_refreshes_the_nested_grid_once(nested: dict) -> None:
+    got = nested["progressNested"]
+    assert got["afterRunning"] == {"root": 0, "nested": 0}
+    assert got["afterNestedFinish"] == {"root": 0, "nested": 1}
+    # the registry resends every non-pending node's state: no second fetch
+    assert got["afterResend"] == {"root": 0, "nested": 1}
+
+
+def test_a_root_key_refreshes_only_the_root_grid_that_owns_it(nested: dict) -> None:
+    # root grid id 3 and nested grid with LOCAL id 3 (path "4:3"): "3" is the
+    # root one, never the nested one
+    got = nested["progressNested"]
+    assert got["afterRootKey"] == {"root": 1, "nested": 1}
+    assert got["afterRootResend"] == {"root": 1, "nested": 1}
+
+
+def test_a_bare_local_id_never_matches_a_nested_grid(nested: dict) -> None:
+    assert nested["progressBareIdIgnored"]["refreshes"] == 0
+
+
+def test_two_instances_of_one_definition_do_not_mask_each_other(nested: dict) -> None:
+    # events: 10:2 done/11:2 running -> 11:2 done too -> resend -> both
+    # running -> both done in ONE event. A single per-node memory re-fired or
+    # swallowed these; per node+path gives 1, 2, 2, 2, 3 (one fetch per event
+    # that carries a fresh transition, never one per instance).
+    assert nested["progressShared"]["steps"] == [1, 2, 2, 2, 3]
+
+
+def test_a_finish_in_a_hidden_tab_flushes_once_even_under_two_path_ids(nested: dict) -> None:
+    got = nested["progressHidden"]
+    assert got["whileHidden"] == 0  # queued, not fetched (2026-08-26 backoff)
+    assert got["afterVisible"] == 1  # one node object -> one flush
+
+
+def test_the_empty_buffer_warning_reads_the_real_wiring_across_the_boundary(nested: dict) -> None:
+    got = nested["progressWarning"]
+    # nested grid fed from a subgraph input that nothing outside feeds: the
+    # run sees no input, so the warning fires (it used to be silenced by the
+    # non-null inner link) ...
+    assert got["danglingBoundaryWarns"] == 1
+    # ... and not once the outside is wired
+    assert got["wiredBoundaryAddsNoToast"] == 0
+    # flat behaviour unchanged: a linked input is silent, an unlinked one warns
+    assert got["flatWarnedFor"] == ["bare grid"]
+
+
+# ---- 4. core output store ----
+
+
+def test_a_nested_grid_writes_core_store_under_the_subgraph_locator(nested: dict) -> None:
+    got = nested["store"]
+    # `<immediate-containing-subgraph-uuid>:<local id>` -- types/
+    # nodeIdentification.ts NodeLocatorId, exactly what core's own
+    # nodeToNodeLocatorId reads back in updatePreviews
+    assert got["key"] == "00000077-0000-4000-8000-000000000000:2"
+    after = got["afterSet"]
+    assert after["storeKeyed"] is True
+    assert after["sharedIdentity"] is True  # node.images IS the store's array
+    assert after["coreWouldRerender"] is False
+    # a ROOT node with the same bare id keeps its own entry
+    assert after["bystanderUntouched"] is True
+
+
+def test_a_nested_grid_survives_the_core_executed_clobber(nested: dict) -> None:
+    got = nested["store"]["afterMerge"]
+    assert got["clobberedBefore"] is True  # core replaced the entry with 1 ref
+    assert got["allThree"] == ["a.png", "b.png", "c.png"]
+    assert got["coreWouldRerender"] is False
+    assert got["storeIdentity"] is True
+
+
+def test_an_emptied_nested_grid_removes_only_its_own_store_entry(nested: dict) -> None:
+    got = nested["store"]["afterEmpty"]
+    assert got["nestedEntryDeleted"] is True
+    assert got["bystanderUntouched"] is True
+
+
+def test_the_store_is_left_alone_when_the_locator_cannot_be_proven(nested: dict) -> None:
+    refusals = nested["store"]["refusals"]
+    assert refusals["control"] == ["00000078-0000-4000-8000-000000000000:2"]
+    for case in ("nonUuidSubgraphId", "staleWorkflow", "idWithColon", "notASubgraph"):
+        assert refusals[case] == [], case
+
+
+def test_clear_on_a_nested_grid_repaints_the_nodes_own_graph(nested: dict) -> None:
+    # the root canvas is detached while a subgraph is on screen
+    # (LGraph.attachCanvas), so app.graph.setDirtyCanvas repaints nothing
+    assert nested["repaint"] == {"subgraphDirtied": 1, "rootDirtied": 0}
+
+
+# ---- 5. Collect-only link dimming across the boundary ----
+
+
+def test_dim_follows_a_grid_wire_into_a_subgraph_and_restores_exactly(nested: dict) -> None:
+    got = nested["dimOutsideIn"]
+    dimmed = got["dimmed"]
+    assert dimmed["outer"] is True  # the grid's own link (id-based, as before)
+    assert dimmed["inner"] is True  # the continuation inside the subgraph
+    assert dimmed["innerOwned"] is True
+    assert dimmed["tracked"] == 1
+    assert dimmed["resyncsWhileDimming"] == 0  # no ping-pong while dimmed
+    assert got["dirtyAfterDim"] == 1
+    assert got["noopRedirty"] == 0  # change-gated, like the flat path
+    assert got["restoredOuter"] is True
+    assert got["restoredInnerExactly"] is True  # the prior colour, not undefined
+    assert got["resyncsAfterRestore"] == 1  # the reader's hook, once, after
+    assert got["trackedAfter"] == 0
+
+
+def test_dim_leaves_a_neighbouring_owners_link_alone(nested: dict) -> None:
+    got = nested["dimOutsideIn"]
+    assert got["dimmed"]["unrelatedUntouched"] is True
+    assert got["unrelatedStillUntouched"] is True
+
+
+def test_a_continuation_link_taken_over_while_dimmed_keeps_its_new_owner(nested: dict) -> None:
+    got = nested["dimTakenOver"]
+    assert got["colourKept"] is True
+    assert got["tagKept"] is True
+    assert got["resyncs"] == 0
+    assert got["dropped"] is True
+
+
+def test_cutting_the_grids_wire_releases_the_continuation(nested: dict) -> None:
+    got = nested["dimCutOuterWire"]
+    assert got["dimmedAgain"] is True
+    assert got["innerRestored"] is True
+    assert got["resyncs"] == 1
+
+
+def test_a_wire_removed_inside_the_subgraph_is_dropped_quietly(nested: dict) -> None:
+    got = nested["dimInnerWireRemoved"]
+    assert got["was"] is True
+    assert got["dropped"] is True
+    assert got["resyncs"] == 0
+
+
+def test_a_grid_inside_a_subgraph_dims_the_wire_that_leaves_through_it(nested: dict) -> None:
+    got = nested["dimInsideOut"]
+    assert got["dimmed"] == {"inner": True, "outer": True}
+    # onRemoved's forceUndim: the node's outputs are already torn down, so the
+    # tracked link OBJECTS are the only way to release the outer wire
+    assert got["outerRestoredExactly"] is True
+    assert got["innerRestored"] is True
+    assert got["resyncs"] == 1
+
+
+def test_the_existing_triggers_rederive_the_nested_dim(nested: dict) -> None:
+    # attach(): mode combo callback on, off, then onConfigure (load/undo/paste)
+    assert nested["dimHooks"]["steps"] == [True, True, True, True]
+
+
+def test_loaded_graph_node_rederives_the_dim_after_the_whole_graph_is_configured(
+    nested: dict,
+) -> None:
+    # a nested grid's own onConfigure runs before the root's nodes exist, so
+    # loadedGraphNode (per node, nested included) is what makes the load case
+    assert nested["dimLoaded"] == {"before": True, "after": True}
+
+
+def test_dim_follows_a_chain_through_two_subgraph_levels(nested: dict) -> None:
+    got = nested["dimTwoLevels"]
+    assert got["dimmed"] == [True, True, True]
+    assert got["restored"] == [True, True, True]
+    assert got["resyncs"] == 1  # one call per consuming node, after the pass
+
+
+def test_dim_skips_a_link_inside_a_definition_shared_by_several_instances(nested: dict) -> None:
+    # the shared inner link carries a different feed per instance; dimming it
+    # for one instance's grid would paint a live wire for the others
+    got = nested["dimSharedDefinitionFeed"]
+    assert got["ownOuterWireDimmed"] is True
+    assert got["otherInstanceWireUntouched"] is True
+    assert got["sharedInnerLeftAlone"] is True
+    assert got["nothingTracked"] is True
+
+
+def test_a_grid_inside_a_shared_definition_dims_every_instances_outer_wire(nested: dict) -> None:
+    got = nested["dimSharedDefinitionGrid"]
+    assert got["both"] == [True, True]
+    assert got["restored"] == [True, True]
+
+
+def test_flat_dim_never_allocates_or_resolves_anything_nested(nested: dict) -> None:
+    got = nested["dimFlat"]
+    assert got["dimmed"] is True
+    assert got["restored"] is True
+    assert got["nestedStateNeverAllocated"] is True
+
+
+# ---- source pins: the structure the behaviour above rests on ----
+
+
+def test_image_grid_imports_the_shared_nested_helpers_instead_of_copying_them() -> None:
+    # The pack's shared-code rule: one definition of the walk / ordering /
+    # resolvers (web/lora_library/api.js), imported here -- never a by-hand
+    # copy that the next fix would miss.
+    assert "from '../lora_library/api.js'" in _SOURCE
+    for name in ("walkLiveNodes", "comparePathIds", "resolveOutputTargets", "resolveInputSources"):
+        assert re.search(rf"^\s+{name},?$", _SOURCE, re.M), name
+        assert f"function {name}(" not in _SOURCE, f"{name} must be imported, not redefined"
+
+
+def test_no_root_only_node_walk_is_left_in_image_grid() -> None:
+    # every other-node read goes through the whole-workflow walk now
+    assert "app.graph?._nodes" not in _SOURCE
+    assert "app.graph?.nodes" not in _SOURCE
+    assert "app.graph?.setDirtyCanvas" not in _SOURCE  # root canvas is detached in a subgraph
+    for marker in ("function siblingUuids", "function liveGridEntries"):
+        assert "walkLiveNodes(app.graph)" in _function_body(marker), marker
+    assert "walkLiveNodes(app.graph)" in _function_body("function installExecutionRefreshListener")
+
+
+def test_progress_listener_looks_up_the_path_id_and_keeps_per_path_memory() -> None:
+    body = _function_body("function installExecutionRefreshListener")
+    assert "nodes[pathId]" in body
+    assert "nodes[String(node.id)]" not in body
+    assert "byPath.get(pathId)" in body
+    assert "byPath.set(pathId, state)" in body
+    assert "new WeakMap()" in _SOURCE.split("const lastKnownProgressState", 1)[1].split("\n", 1)[0]
+
+
+def test_sweep_orders_by_path_id_not_numeric_node_id() -> None:
+    body = _function_body("function scheduleSettledCollisionSweep")
+    assert "comparePathIds(a.pathId, b.pathId)" in body
+    assert "(a.id || 0) - (b.id || 0)" not in body
+    assert "comparePathIds(pathId, known) < 0" in _function_body("function liveGridEntries")
+
+
+def test_core_locator_is_the_proven_subgraph_key_with_a_stale_instance_guard() -> None:
+    body = _function_body("function coreOutputLocator")
+    assert "return String(node.id)" in body  # the root key, unchanged
+    assert "`${subgraphId}:${nodeId}`" in body
+    assert "graph.isRootGraph !== false" in body  # core's isSubgraph()
+    assert "rootGraphOf(graph) !== app.graph" in body  # replaced-graph guard
+    assert "CORE_UUID_RE.test(subgraphId)" in body
+    assert "coreOutputLocator(node)" in _function_body("export function syncCoreOutputStore")
+
+
+def test_loaded_graph_node_rederives_link_dimming() -> None:
+    body = _function_body("export function loadedGraphNode")
+    assert "reconcileLinkDimming(node)" in body
+
+
+def test_continuation_dimming_tracks_link_objects_not_ids() -> None:
+    body = _function_body("function reconcileContinuationDimming")
+    assert "node.__epsGridDimmedNestedLinks" in body
+    assert "new Map()" in body  # link OBJECT -> {graph, targets}; ids are per-graph
+    assert "dimStash" in body and "LINK_COLOR_OWNER_KEY" in body
+    # the flat id-based passes are untouched and still run first
+    flat = _function_body("export function reconcileLinkDimming")
+    assert "node.__epsGridDimmedLinkIds" in flat
+    after_flat_passes = flat.index("tracked.add(id)")
+    assert after_flat_passes < flat.index("reconcileContinuationDimming(node, shouldDim)")

@@ -52,6 +52,32 @@
  * NODE's input is nameless) refuses: `disconnectAllTargets` would sever it
  * for good.
  *
+ * **Nested subgraphs (v1.2.0, owner ask 2026-10-03: "Make sure all of the
+ * nodes that can control other nodes also looks into nested nodes"; FORMAT.md
+ * section 7.10 nested reach).** Two wires cross a subgraph boundary:
+ *   (a) a wire INTO a SubgraphNode input. The unplug always worked (a
+ *       SubgraphNode is an ordinary node); the GUARD used to classify the
+ *       SubgraphNode with its own (absent) `nodeData` and refuse even when
+ *       the real consumer inside was optional. Now `subgraphInputVerdicts`
+ *       follows the wire to every real inner consumer (further SubgraphNodes
+ *       and subgraph-output pass-throughs included, via `api.js`'s
+ *       `resolveLinkTargets`) and runs the same `inputVerdict` on each; a
+ *       PROMOTED widget on that SubgraphNode input is safe (its own value
+ *       takes over when the outer wire goes -- `ExecutableNodeDTO.resolveInput`),
+ *       and a subgraph input nobody reads is safe (nothing consumes it);
+ *   (b) THIS node inside a subgraph, output wired to the subgraph's OUTPUT
+ *       node (`target_id` -20). It used to refuse as "unrestorable"; now the
+ *       shared unplug helpers handle it (remembered as `{node: -20, input:
+ *       <subgraph output name>}`, unplugged by `SubgraphOutput.disconnect()`,
+ *       replugged by `SubgraphOutput.connect` -- number_controller.js's nested
+ *       paragraph) and `subgraphOutputVerdicts` classifies the consumers on
+ *       the far side, one set per SubgraphNode instance of the definition
+ *       (`locationsOfNode`), under the same all-or-nothing rule.
+ * Refusal labels for consumers in a subgraph say where they are --
+ * "Subgraph name › Node title (input)" (`describePath`). A -20 wire in a
+ * graph that is not a real Subgraph (no `outputs` slot to reach) still refuses
+ * as unrestorable.
+ *
  * **Every route to "off" runs the same code.** A click and a Universal State
  * Controller Apply both reach `onEnabledChanged`: an Apply does `widget.value
  * = v; widget.callback?.(v, canvas, node)` per node and then
@@ -62,7 +88,9 @@
  * only `enabled`; `links` is excluded (see `nodes_bypass.py`).
  *
  * **The memory** is `{"owner": <this node's id>, "links": [{"node": id,
- * "input": name}, ...]}` in the hidden `links` widget. `owner` exists for one
+ * "input": name}, ...]}` in the hidden `links` widget (`node` is -20 and
+ * `input` the subgraph output's name for a wire into the owning subgraph's
+ * output -- the v1.2.0 nested paragraph above). `owner` exists for one
  * reason: copy/paste. A pasted OFF Bypass carries the original's memory, whose
  * targets are the ORIGINAL consumers -- with their inputs free -- so switching
  * the copy on would wire it into them. A pasted node has a new id, so memory
@@ -99,21 +127,30 @@
  * `VUE_AFFECTED_CLASSES` entry (nothing here is hand-drawn).
  *
  * Known limits, stated rather than discovered: switching off garbage-collects
- * a wire's NATIVE link reroutes (core's `disconnectInput` default), so
- * switching back on reconnects straight; a legacy Reroute NODE downstream
- * refuses (above).
+ * a wire's NATIVE link reroutes (core's `disconnectInput` default, and
+ * `SubgraphOutput.disconnect()` likewise), so switching back on reconnects
+ * straight; a legacy Reroute NODE downstream refuses (above).
  */
 
 import { app } from '../../../scripts/app.js'
-import { subscribeWidgetsChangedExternally } from '../lora_library/api.js'
+import {
+  describePath,
+  isSubgraphNode,
+  locationsOfNode,
+  resolveLinkTargets,
+  rootGraphOf,
+  subscribeWidgetsChangedExternally
+} from '../lora_library/api.js'
 import {
   collectOutputTargets,
   disconnectAllTargets,
   hideValuesWidget,
   installMinWidth,
   isOutputConnected,
+  isSubgraphOutputLink,
   normalizeRememberedLinks,
-  reconnectRememberedTargets
+  reconnectRememberedTargets,
+  subgraphOutputSlotOf
 } from './number_controller.js'
 import {
   LINK_COLOR_OWNER_KEY,
@@ -138,6 +175,10 @@ export const LINKS_WIDGET_NAME = 'links'
 export const INPUT_NAME = 'value'
 /** The one output is always index 0. */
 export const OUTPUT_INDEX = 0
+/** litegraph's `NodeSlotType.OUTPUT` -- the `type` argument of an output-side
+ * `onConnectionsChange` (a plain number: the enum is not a stable public
+ * import, like `HOLLOW_CIRCLE_SHAPE` below). */
+const NODE_SLOT_OUTPUT = 2
 
 /** Litegraph's own "matches anything" type. */
 export const WILDCARD = '*'
@@ -157,12 +198,6 @@ export const MIN_NODE_WIDTH = 240
  * RenderShape.HollowCircle : undefined`). A plain number here because the
  * enum is not a stable public import. */
 export const HOLLOW_CIRCLE_SHAPE = 7
-
-/** `SUBGRAPH_OUTPUT_ID` (litegraph `constants.ts`): the id a link's
- * `target_id` carries when it ends at a subgraph's own output. There is no
- * node behind it to reconnect through `node.connect`, so such a wire is
- * refused (named for what it is, not as a "missing node"). */
-const SUBGRAPH_OUTPUT_ID = -20
 
 /** How long a refusal toast stays up -- long, because it carries a
  * sentence the user has to read before they can act on it. */
@@ -217,7 +252,9 @@ export function serializeMemory(ownerId, links) {
   return clean.length > 0 ? JSON.stringify({ owner: ownerId, links: clean }) : '{}'
 }
 
-/** Whether two remembered targets are the same wire (ids compared as strings). */
+/** Whether two remembered targets are the same wire (ids compared as strings,
+ * so a hand-stringified id -- or the subgraph output pseudo-node's `-20` --
+ * still matches). */
 export function sameTarget(a, b) {
   return String(a?.node) === String(b?.node) && a?.input === b?.input
 }
@@ -294,8 +331,9 @@ export function refusalMessage(blockers) {
       `${one ? 'it' : 'them'} would fail the run with "Required input is missing".`
   } else if (why === 'unrestorable') {
     reason =
-      `${subject} can't be reconnected afterwards (a legacy Reroute node, a subgraph output, ` +
-      'or a wire to a node that no longer exists), so unplugging would lose the wire for good.'
+      `${subject} can't be reconnected afterwards (a legacy Reroute node, a subgraph output ` +
+      "it can't reach, or a wire to a node that no longer exists), so unplugging would lose " +
+      'the wire for good.'
   } else {
     reason =
       `couldn't confirm that ${subject} ${one ? 'is' : 'are'} optional, and unplugging a ` +
@@ -385,24 +423,157 @@ function describeTarget(target, slot) {
 // ---------------------------------------------------------------------------
 
 /**
- * One verdict per LIVE link on the output: `{label, safe, why}`. A link that
+ * Whether *slot* -- an input of a SubgraphNode -- is a PROMOTED WIDGET: the
+ * subgraph exposes an inner node's widget as its own, so when the OUTER wire
+ * is unplugged the SubgraphNode's own value takes over. Read from
+ * `ExecutableNodeDTO.resolveInput` (ComfyUI 1.52.7): with the outer link gone
+ * it returns the promoted widget's value when `subgraphNodeInput.widgetId` is
+ * set and nothing otherwise, and `SubgraphNode._setWidget` stamps
+ * `input.widgetId`, `input._widget` and `input.widget` together. Any of the
+ * three counts, so an older/newer build that keeps only one of them is still
+ * recognised; a field that is simply absent reads as "not promoted", which
+ * is the refusing side. Exported for tests.
+ */
+export function hasPromotedWidget(slot) {
+  return Boolean(slot && (slot.widgetId || slot._widget || slot.widget))
+}
+
+/**
+ * How a toast names a consumer found across a subgraph boundary (owner ask
+ * 2026-10-03): `"Subgraph name › Node title (input)"` through
+ * `api.describePath`, so two same-titled nodes in different subgraphs read
+ * apart. A consumer at the ROOT (reached through a subgraph output) keeps the
+ * ordinary `describeTarget` wording, `Title #id (input)`.
+ */
+function describeConsumer(root, consumer) {
+  const slot = consumer.node?.inputs?.[consumer.slot]
+  const where = describePath(root, consumer.pathId)
+  if (where.trail.length === 0) return describeTarget(consumer.node, slot)
+  const input = slot?.label || slot?.localized_name || slot?.name
+  return input ? `${where.text} (${input})` : where.text
+}
+
+/**
+ * One verdict per REAL consumer `api.resolveLinkTargets` found, the SAME
+ * per-input decision a direct target gets (`inputVerdict`). A `boundary`
+ * result is a SubgraphNode input the walk was told not to descend into -- a
+ * promoted widget -- which is safe by construction (`'widget'`). *seen*
+ * de-duplicates by `pathId#slot` (the same consumer reached by two instances'
+ * walks of one shared definition is one consumer).
+ */
+function classifyConsumers(root, consumers, seen) {
+  const verdicts = []
+  for (const consumer of consumers) {
+    const key = `${consumer.pathId}#${consumer.slot}`
+    if (seen.has(key)) continue
+    seen.add(key)
+    const label = describeConsumer(root, consumer)
+    if (consumer.boundary) {
+      verdicts.push({ label, safe: true, why: 'widget' })
+      continue
+    }
+    const { safe, why } = inputVerdict(consumer.node, consumer.node?.inputs?.[consumer.slot])
+    verdicts.push({ label, safe, why })
+  }
+  return verdicts
+}
+
+/**
+ * A wire INTO a SubgraphNode input (owner ask 2026-10-03, FORMAT.md section
+ * 7.10). Unplugging the OUTER wire already worked mechanically -- the
+ * SubgraphNode is an ordinary node -- but its own `constructor.nodeData` does
+ * not exist, so the plain classification used to fall to "unknown" and refuse
+ * even when the real consumer inside is optional. What the flattened prompt
+ * does once the outer wire is gone (`ExecutableNodeDTO.resolveInput`,
+ * `utils/executionUtil.ts` skips an input that resolves to nothing):
+ *
+ *  - the SubgraphNode input is a PROMOTED WIDGET -> its own value takes over,
+ *    for EVERY inner consumer: safe (`hasPromotedWidget`; the walk is told to
+ *    stop there, and only there -- a promoted widget on a DEEPER SubgraphNode
+ *    does not matter, because the inner link feeding it still exists);
+ *  - otherwise every inner consumer loses the input, so each REAL consumer --
+ *    through further nested SubgraphNodes, and on through a pass-through to a
+ *    subgraph output -- is classified with `inputVerdict` and the refusal
+ *    names it with its path;
+ *  - nobody reads that subgraph input inside -> no consumers -> safe, nothing
+ *    consumes it.
+ *
+ * Walked once per instance of THIS node's own graph when it sits inside a
+ * shared definition (`locationsOfNode`); an unreachable graph (an unused
+ * definition) still walks DOWN from here, just without a path prefix.
+ */
+function subgraphInputVerdicts(node, root, link, target) {
+  const locations = locationsOfNode(root, node)
+  const starts = locations.length > 0 ? locations : [{ graph: node.graph, prefix: '' }]
+  const options = {
+    stopAtSubgraphInput: (subgraphNode, slotIndex) =>
+      subgraphNode === target && hasPromotedWidget(subgraphNode.inputs?.[slotIndex])
+  }
+  const seen = new Set()
+  const verdicts = []
+  for (const { graph, prefix } of starts) {
+    const consumers = resolveLinkTargets(root, graph, prefix, link, options)
+    verdicts.push(...classifyConsumers(root, consumers, seen))
+  }
+  return verdicts
+}
+
+/**
+ * THIS node sits inside a subgraph and its output is wired to that subgraph's
+ * OUTPUT node (owner ask 2026-10-03). The shared unplug machinery handles the
+ * wire itself (number_controller.js's nested paragraph); what the guard has to
+ * decide is whether the consumers on the far side survive losing it. Those
+ * live OUTSIDE, one set per SubgraphNode instance of this node's definition,
+ * so each instance is walked (`locationsOfNode`; `resolveLinkTargets` follows
+ * the instance's own output wires, down through further SubgraphNode inputs)
+ * and every real consumer is classified with the same per-input rules and the
+ * same all-or-nothing refusal. An unused definition (no instance) has no
+ * consumers -> safe. If the ROOT graph cannot be told apart from this subgraph
+ * (a frontend without `subgraph.rootGraph` and no `app.graph` to fall back
+ * on), nothing can be verified, so the wire is `unknown` and refuses.
+ */
+function subgraphOutputVerdicts(node, root, link) {
+  let top = root
+  if (top === node.graph && app.graph && app.graph !== node.graph) top = app.graph
+  if (top === node.graph) return [{ label: "the subgraph's output", safe: false, why: 'unknown' }]
+  const seen = new Set()
+  const verdicts = []
+  for (const { graph, prefix } of locationsOfNode(top, node)) {
+    verdicts.push(...classifyConsumers(top, resolveLinkTargets(top, graph, prefix, link), seen))
+  }
+  return verdicts
+}
+
+/**
+ * One verdict per LIVE link on the output: `{label, safe, why}` (a SubgraphNode
+ * input or a subgraph output expands to one per REAL consumer behind it --
+ * `subgraphInputVerdicts` / `subgraphOutputVerdicts`). A link that
  * `collectOutputTargets` could not record (dangling link id, missing target
- * node, or an input with no name -- the legacy Reroute node's) is
- * `'unrestorable'`, because `disconnectAllTargets` severs every link
- * regardless and an unrecorded one could never come back.
+ * node, an input with no name -- the legacy Reroute node's -- or a link into
+ * a subgraph output this file cannot reach, e.g. in a graph that is not a
+ * Subgraph) is `'unrestorable'`, because `disconnectAllTargets` severs every
+ * link regardless and an unrecorded one could never come back.
  */
 function collectTargetVerdicts(node) {
   const verdicts = []
   const graph = node.graph
   const links = outputOf(node)?.links
   if (!Array.isArray(links)) return verdicts
+  const root = rootGraphOf(graph)
   for (const linkId of links) {
     const link = linkById(graph, linkId)
     const target = link ? graph?.getNodeById?.(link.target_id) : null
     const slot = target?.inputs?.[link?.target_slot]
+    if (link && !target && subgraphOutputSlotOf(graph, link)) {
+      verdicts.push(...subgraphOutputVerdicts(node, root, link))
+      continue
+    }
+    if (link && target && slot?.name && isSubgraphNode(target)) {
+      verdicts.push(...subgraphInputVerdicts(node, root, link, target))
+      continue
+    }
     if (!link || !target || !slot || !slot.name) {
-      const gone =
-        link?.target_id === SUBGRAPH_OUTPUT_ID ? "the subgraph's output" : 'a wire to a missing node'
+      const gone = isSubgraphOutputLink(link) ? "the subgraph's output" : 'a wire to a missing node'
       verdicts.push({
         label: target ? describeTarget(target, slot) : gone,
         safe: false,
@@ -771,8 +942,15 @@ function wireConnectionSync(state) {
     }
     // Only OUR two sockets: the `enabled`/`links` widget inputs also fire
     // this when something is wired into them, and that is none of our
-    // business here.
-    const ours = slot === outputOf(this) || slot?.name === INPUT_NAME
+    // business here. An output-kind event for OUR output index counts even
+    // when `slot` is not our output object: a subgraph output's own
+    // `disconnect()` (the unplug of a wire into this node's subgraph output,
+    // v1.2.0 nested reach) passes the SubgraphOutput as `slot` and this
+    // node's real output index as `index`.
+    const ours =
+      slot === outputOf(this) ||
+      slot?.name === INPUT_NAME ||
+      (type === NODE_SLOT_OUTPUT && index === OUTPUT_INDEX)
     if (!hook.restoring && ours) schedule(!isGraphConfiguring())
     return result
   }

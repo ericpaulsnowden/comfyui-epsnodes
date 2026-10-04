@@ -208,6 +208,12 @@ out.notebookOptionsOf = {
   ]),
   missingTitleFallsBack: m.notebookOptionsOf([{ title: '', file: 'b.md' }]),
   skipsNonStringFile: m.notebookOptionsOf([{ title: 'X', file: null }, null, { title: 'Y' }]),
+  // v1.2.0 nested reach: a Notebook inside a subgraph is labelled by it.
+  nestedWhere: m.notebookOptionsOf([
+    { title: 'Prompts', file: '/lib/a.md', where: 'Outer \\u203a Inner' },
+    { title: 'Prompts', file: '/lib/b.md', where: '' },
+    { title: 'Prompts', file: '/lib/c.md', where: 7 }
+  ]),
   empty: m.notebookOptionsOf([]),
   nonArray: m.notebookOptionsOf(null)
 }
@@ -423,6 +429,14 @@ def test_notebook_options_of_labels_dedupes_and_skips_bad_rows(probe_api: dict) 
     assert got["dedupeKeepsFirstTitle"] == [{"label": "First — a.md", "value": "a.md"}]
     assert got["missingTitleFallsBack"] == [{"label": "Notebook — b.md", "value": "b.md"}]
     assert got["skipsNonStringFile"] == []
+    # v1.2.0 (FORMAT.md §7.10): a nested Notebook's label leads with its
+    # subgraph trail so two same-titled Notebooks read apart; a root one (or a
+    # non-string `where`) keeps the exact legacy label.
+    assert got["nestedWhere"] == [
+        {"label": "Outer \u203a Inner \u203a Prompts \u2014 a.md", "value": "/lib/a.md"},
+        {"label": "Prompts — b.md", "value": "/lib/b.md"},
+        {"label": "Prompts — c.md", "value": "/lib/c.md"},
+    ]
     assert got["empty"] == []
     assert got["nonArray"] == []
 
@@ -926,6 +940,10 @@ def test_discovery_walks_the_whole_workflow_rooted_at_app_graph(source: str) -> 
     discover = _body(source, "discoverNotebookCandidates()")
     assert "walkLiveNodes(app.graph)" in discover
     assert "state.node.graph" not in discover
+    # v1.2.0 (FORMAT.md §7.10): each candidate carries WHERE it lives (its
+    # containing subgraphs' names) so the selector label can tell two
+    # same-titled Notebooks in different subgraphs apart.
+    assert "api.describePath(app.graph, pathId).trail.join(" in discover
 
 
 def test_discovery_captures_each_candidates_raw_drafts_value_too(source: str) -> None:

@@ -425,7 +425,9 @@
  * 'error', ...}}}`, matching `progress.py`'s `_send_progress_state` field
  * for field) reports every node that has started so far in the CURRENT
  * prompt, so the listener checks specifically for each live EPSImageGrid
- * node's OWN id transitioning into `'finished'`, then calls the existing
+ * node's OWN id transitioning into `'finished'` (the node's execution PATH
+ * id since v1.2.0 -- "3:2" for a grid inside a subgraph, the bare id at the
+ * root; see the v1.2.0 section below), then calls the existing
  * `scheduleRefresh()` (unchanged, M1/M2-era) -- the SAME "fetch `/list`,
  * repopulate `node.imgs` from the WHOLE buffer" primitive the 2026-07-20/21
  * load/undo fixes already use -- so the grid ends up correct (the full
@@ -810,10 +812,69 @@
  *    (`runAddBatch`'s `Cancel (n/total)`) on the `mode` widget, shown only
  *    when it would actually change what a Run does (Emit mode AND a
  *    resolved focus -- Collect ignores `focus` entirely).
+ *
+ * ---- v1.2.0 NESTED REACH (owner ask 2026-10-03: "make sure all of the
+ * nodes that can control other nodes also looks into nested nodes";
+ * FORMAT.md §7.10) ----
+ *
+ * Until v1.2.0 every read of OTHER nodes / execution state in this file
+ * stopped at `app.graph._nodes` -- the ROOT graph. A grid inside a SUBGRAPH
+ * therefore (1) was invisible to the uuid-collision check, so a copy
+ * pasted next to / out of a root grid silently shared ONE server-side
+ * buffer with it; (2) never refreshed after its run, because core keys
+ * `progress_state` by the flattened EXECUTION path id ("3:2" = node 2
+ * inside SubgraphNode 3), which a root-only `nodes[String(node.id)]` lookup
+ * can never match; (3) never got the focus-clobber store fix
+ * (`syncCoreOutputStore` refused every non-root grid); (4) painted its
+ * Collect-only dim on the wires in ITS OWN graph only, so the visible wire
+ * stopped dimming at the subgraph boundary; (5) repainted through
+ * `app.graph` -- the root -- while the canvas was showing the subgraph.
+ *
+ * Each now walks the whole workflow through the shared helpers in
+ * `../lora_library/api.js` (`walkLiveNodes`, `comparePathIds`,
+ * `resolveOutputTargets`, `resolveInputSources`, ...), imported rather than
+ * re-copied (the pack's shared-code rule). The facts those fixes lean on,
+ * all read out of the ComfyUI 1.52.7 frontend source (never guessed):
+ *  - One subgraph DEFINITION can be instantiated by several SubgraphNodes
+ *    and then its inner node OBJECTS are shared: `walkLiveNodes` reports the
+ *    same grid object under several path ids ("3:2" and "4:2"). That is ONE
+ *    grid with ONE buffer, so identity checks skip `other === node` and
+ *    dedupe by object, and per-instance state (the finished-run memory)
+ *    keys on node + path id.
+ *  - `app.nodeOutputs` is a plain record keyed by `NodeLocatorId`
+ *    (`types/nodeIdentification.ts`): the bare node id at the root,
+ *    `<immediate-containing-subgraph-uuid>:<node id>` inside a subgraph --
+ *    identical for every instance of the definition. Written by the store's
+ *    `setOutputsByLocatorId`, read by `updatePreviews` through
+ *    `nodeToNodeLocatorId(node)`; see `syncCoreOutputStore`.
+ *  - The wire the user sees across a subgraph boundary is TWO LLink objects,
+ *    one in each graph's own link table (the inner one with an origin id of
+ *    -10 or a target id of -20, the pseudo IO nodes), and the canvas draws
+ *    each with its own `link.color` (`LGraphCanvas.drawConnections`, the
+ *    `subgraph.inputNode` / `outputNode` loops).
+ *  - While the canvas shows a subgraph, core DETACHES it from the root graph
+ *    (`LGraph.attachCanvas` -> `canvas.graph?.detachCanvas`), so
+ *    `app.graph.setDirtyCanvas` repaints nothing: repaint through the NODE's
+ *    own graph (what `LGraphNode.setDirtyCanvas` does).
+ * What only the live rig can confirm is called out at each site as
+ * UNCONFIRMED (the real LGraph/LLink classes, a real run's execution ids,
+ * the Pinia output store).
  */
 
 import { api } from '../../../scripts/api.js'
 import { app, ComfyApp } from '../../../scripts/app.js'
+import {
+  SUBGRAPH_INPUT_ID,
+  SUBGRAPH_OUTPUT_ID,
+  comparePathIds,
+  graphLink,
+  isSubgraphNode,
+  pathIdsOfNode,
+  resolveInputSources,
+  resolveOutputTargets,
+  rootGraphOf,
+  walkLiveNodes
+} from '../lora_library/api.js'
 
 const CLASS_ID = 'EPSImageGrid'
 const PREFIX = '[eps_image:image_grid]'
@@ -1015,19 +1076,48 @@ function writeUuid(node, uuid) {
   }
 }
 
-/** Every OTHER live `EPSImageGrid` node's current uuid. `app.graph._nodes`/
- * `.nodes` is this pack's own established idiom for walking the live graph
- * (`lora_library/controller.js`, `lora_library/sets.js`). */
+/**
+ * Every OTHER live `EPSImageGrid` node's current uuid, across the WHOLE
+ * workflow -- subgraphs included (v1.2.0 nested reach, owner ask 2026-10-03,
+ * FORMAT.md §7.10). This used to read `app.graph._nodes` (the root graph
+ * only), so a grid pasted into a subgraph next to / out of a root grid (or
+ * the reverse) was never seen as a collision and the two silently shared ONE
+ * server-side buffer.
+ *
+ * `walkLiveNodes` reports a node once PER INSTANCE of its subgraph
+ * definition (several SubgraphNodes can share one definition, and then the
+ * inner node object is the very same object under "3:2" and "4:2"), so
+ * `other === node` is what keeps a shared-definition grid from being its own
+ * sibling -- and the returned set dedupes the rest by value anyway.
+ */
 function siblingUuids(node) {
-  const nodes = app.graph?._nodes || app.graph?.nodes || []
   const uuids = new Set()
-  for (const other of nodes) {
+  for (const { node: other } of walkLiveNodes(app.graph)) {
     if (!other || other === node) continue
     if (nodeClassOf(other) !== CLASS_ID) continue
     const uuid = currentUuid(other)
     if (uuid) uuids.add(uuid)
   }
   return uuids
+}
+
+/**
+ * `#7` for a root node, `#2 (path 3:2)` for one inside a subgraph -- the
+ * log label a nested duplicate needs, since "#2" alone could name a node in
+ * any graph. *pathId* is passed by callers that already walked it; otherwise
+ * it is looked up (the LOWEST path id when a shared definition puts the node
+ * under several). Never throws.
+ */
+function nodeLogLabel(node, pathId) {
+  let path = pathId
+  if (path == null) {
+    try {
+      path = pathIdsOfNode(app.graph, node).sort(comparePathIds)[0]
+    } catch {
+      path = null
+    }
+  }
+  return path && path !== String(node.id) ? `#${node.id} (path ${path})` : `#${node.id}`
 }
 
 /**
@@ -1119,7 +1209,7 @@ async function ensureUniqueUuid(node, { allowCollisionMint }) {
 
   console.log(
     PREFIX,
-    `node #${node.id}: grid_uuid collided with a live sibling -- minted a new one ` +
+    `node ${nodeLogLabel(node)}: grid_uuid collided with a live sibling -- minted a new one ` +
       '(each EPSImageGrid keeps its own buffer)'
   )
   try {
@@ -1157,6 +1247,23 @@ async function postClear(grid_uuid) {
   return data
 }
 
+/**
+ * Repaints the canvas showing *node* -- through the NODE's own graph, not
+ * `app.graph` (v1.2.0 nested reach, owner ask 2026-10-03). `app.graph` is
+ * the ROOT graph, and while the user is looking INSIDE a subgraph core has
+ * detached the canvas from the root (`LGraph.attachCanvas` ->
+ * `canvas.graph?.detachCanvas`), so `app.graph.setDirtyCanvas` would repaint
+ * nothing and a Clear / drop on a nested grid would not show until
+ * something else dirtied the canvas. `node.graph` is the graph the canvas is
+ * actually attached to (this is exactly what `LGraphNode.setDirtyCanvas`
+ * does); for a root node it IS `app.graph`, so the flat case is unchanged.
+ * Falls back to `app.graph` for a node with no graph (mid-teardown).
+ */
+function repaintNodeGraph(node) {
+  const graph = node?.graph || app.graph
+  graph?.setDirtyCanvas?.(true, true)
+}
+
 /** Drops the node's own displayed thumbnails immediately, ahead of the next
  * Run's `ui.images` (which would otherwise be the only thing that refreshes
  * the canvas) -- Clear should feel instant. `imageIndex = null` keeps a
@@ -1176,7 +1283,7 @@ function clearNodePreview(node) {
   } catch {
     // Best-effort resize; a missing/erroring hook must not block the clear.
   }
-  app.graph?.setDirtyCanvas(true, true)
+  repaintNodeGraph(node)
 }
 
 async function onClearClicked(node) {
@@ -1828,6 +1935,52 @@ export function mergeBufferRefs(existing, incoming) {
   return { refs: base.concat(additions), added: additions.length }
 }
 
+//: Core's own `UUID_PATTERN` (`types/nodeIdentification.ts`): a subgraph
+//: locator is only valid when the subgraph id matches it.
+const CORE_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+
+/**
+ * The key core files *node*'s outputs under in `app.nodeOutputs`, or null
+ * when it cannot be proven (the caller then leaves the store alone, the
+ * pre-v1.2.0 degrade).
+ *
+ * PROVEN from the 1.52.7 frontend source, both directions of the identity
+ * check `syncCoreOutputStore` exists to satisfy:
+ *  - READ -- `litegraphService.ts` `unsafeUpdatePreviews` does
+ *    `nodeOutputStore.getNodeOutputs(this)` =
+ *    `app.nodeOutputs[nodeToNodeLocatorId(node)]` (`nodeOutputStore.ts`), and
+ *    `nodeToNodeLocatorId` (`workflowStore.ts`) is `isSubgraph(node.graph) ?
+ *    createNodeLocatorId(node.graph.id, node.id) : createNodeLocatorId(null,
+ *    node.id)`, with `isSubgraph = (g) => g?.isRootGraph === false`
+ *    (`typeGuardUtil.ts`).
+ *  - WRITE -- the `executed` handler (`app.ts`) stores a run's outputs through
+ *    `setNodeOutputsByExecutionId` -> `executionIdToNodeLocatorId(rootGraph,
+ *    "3:2")` (`graphTraversalUtil.ts`) = `createNodeLocatorId(<the graph
+ *    `traverseSubgraphPath` reaches through SubgraphNode 3's `.subgraph`>.id,
+ *    "2")`, i.e. the same `<immediate-containing-subgraph-uuid>:<id>`
+ *    (`createNodeLocatorId`: `${subgraphUuid}:${nodeId}`, valid only for a
+ *    UUID-shaped subgraph id and an id with no ':').
+ * The key names the DEFINITION, so it is identical for every instance of a
+ * shared definition -- one grid object, one key.
+ *
+ * Refuses (null): a graph that is neither `app.graph` nor a genuine Subgraph
+ * of THIS workflow (`rootGraphOf(graph) === app.graph` -- the nested analogue
+ * of the root `node.graph !== app.graph` stale-instance guard, so a node left
+ * over from a replaced graph never writes), a non-UUID subgraph id, or an id
+ * containing ':'. UNCONFIRMED until the rig runs a nested grid.
+ */
+function coreOutputLocator(node) {
+  const graph = node?.graph
+  if (!graph || !app.graph) return null
+  if (graph === app.graph) return String(node.id)
+  if (graph.isRootGraph !== false) return null
+  if (rootGraphOf(graph) !== app.graph) return null
+  const subgraphId = String(graph.id ?? '')
+  const nodeId = String(node.id ?? '')
+  if (!CORE_UUID_RE.test(subgraphId) || !nodeId || nodeId.includes(':')) return null
+  return `${subgraphId}:${nodeId}`
+}
+
 /**
  * Makes core's own output store agree with the buffer -- THE root fix for
  * the owner's longest-lingering grid bug ("a new image becomes the focus
@@ -1858,18 +2011,20 @@ export function mergeBufferRefs(existing, incoming) {
  * any independent `showPreview()` that does run renders the full buffer
  * anyway. Both sides of the identity comparison are ours now.
  *
- * Locator: for a root-graph node core keys the store by `String(node.id)`
- * (`nodeToNodeLocatorId`); inside a SUBGRAPH the locator is
- * subgraph-scoped (`<uuid>:<id>`), and writing the plain id would hit some
- * unrelated root node's entry -- so a non-root grid keeps the old
- * imgs-only behavior (safe, just un-hardened) rather than guessing keys.
+ * Locator (`coreOutputLocator` above): for a root-graph node core keys the
+ * store by `String(node.id)` (`nodeToNodeLocatorId`); inside a SUBGRAPH the
+ * locator is subgraph-scoped (`<uuid>:<id>`), and writing the plain id would
+ * hit some unrelated root node's entry. Until v1.2.0 a non-root grid kept
+ * the old imgs-only behavior (safe, just un-hardened -- the focus-clobber
+ * bug above stayed live for it) rather than guessing keys; v1.2.0 (owner ask
+ * 2026-10-03, FORMAT.md §7.10) writes the proven subgraph key instead.
  * Exported for tests.
  */
 export function syncCoreOutputStore(node, refs) {
   try {
     if (!node || !app?.nodeOutputs) return
-    if (!node.graph || !app.graph || node.graph !== app.graph) return
-    const locator = String(node.id)
+    const locator = coreOutputLocator(node)
+    if (!locator) return
     if (refs && refs.length) {
       app.nodeOutputs[locator] = { images: refs }
     } else if (app.nodeOutputs[locator]) {
@@ -2373,6 +2528,17 @@ export function outputLinkIds(node) {
  * that this file doesn't already own is dimmed: its current colour stashed
  * first, then overwritten to `DIM_LINK_COLOR` and tagged as owned.
  *
+ * v1.2.0 (owner ask 2026-10-03, FORMAT.md §7.10): when one of those links
+ * ends at a SubgraphNode input -- or this grid sits INSIDE a subgraph and its
+ * link ends at the subgraph's output node -- the wire the user sees goes on
+ * past the boundary as a SEPARATE link in the other graph's own table, so
+ * the id-based tracking above (this node's own graph only) stopped dimming
+ * at the boundary. `reconcileContinuationDimming` (below) extends the very
+ * same dim / exact-restore / owner-tag / resync-hook semantics to those
+ * continuation links, tracked by link OBJECT (link ids are only unique per
+ * graph). Flat wiring never reaches it: the id-based passes above are
+ * unchanged byte for byte.
+ *
  * Change-gated (`setDirtyCanvas` only when something actually moved) and
  * wrapped by every caller in try/catch, matching this file's other
  * `install*`/sync helpers; never throws itself either way. Exported for
@@ -2421,7 +2587,150 @@ export function reconcileLinkDimming(node, { forceUndim = false } = {}) {
     tracked.add(id)
   }
 
+  if (reconcileContinuationDimming(node, shouldDim)) changed = true
+
   if (changed) node.graph?.setDirtyCanvas?.(true, true)
+}
+
+/**
+ * Whether *link* (a link in *graph*) hands its data across a subgraph
+ * boundary: it enters the subgraph's OUTPUT pseudo-node (target id -20, a
+ * grid sitting inside a subgraph) or lands on a SubgraphNode's input (a
+ * grid feeding one from outside). Anything else is an ordinary same-graph
+ * wire with nothing beyond it to dim.
+ */
+function linkCrossesBoundary(graph, link) {
+  if (!link) return false
+  if (String(link.target_id) === String(SUBGRAPH_OUTPUT_ID)) return true
+  return isSubgraphNode(graph?.getNodeById?.(link.target_id))
+}
+
+/**
+ * The links BEYOND a subgraph boundary that continue *node*'s dimmable
+ * output wires, as `Map<LLink, {graph, targets: Set<node>}>` -- `graph` is
+ * the link table the link lives in (so a later restore can check it is
+ * still wired) and `targets` the real consuming node(s) at the end of the
+ * chain (what the colour-resync hook is invited on, see
+ * `LINK_COLOR_RESYNC_HOOK`). Empty for a flat grid.
+ *
+ * Built from `resolveOutputTargets` (shared, api.js): each result's `hops`
+ * lists every `{graph, link}` the walk crossed, first = the grid's own link
+ * (already handled by the id-based passes), the rest = the continuations.
+ * Boundary hops are verified against the 1.52.7 source -- an inner link of a
+ * subgraph is an ordinary LLink (origin id -10 / target id -20) that
+ * `LGraphCanvas.drawConnections` draws with its own `link.color` -- so
+ * painting it is the same write the flat dim already does.
+ *
+ * A link inside a subgraph DEFINITION that several SubgraphNode paths share
+ * ("3:2" and "4:2" both run the same definition) is ONE link object seen
+ * from every instance, carrying a DIFFERENT feed per instance; dimming it
+ * for one instance's Collect-only grid would paint a live wire for the
+ * others. Such links are left alone (a missed cosmetic dim, never a false
+ * one). A wire added or changed INSIDE a subgraph later is picked up by the
+ * next reconcile trigger (mode change, connection change, configure, load) --
+ * deliberately no extra hooks or polling for a cosmetic. UNCONFIRMED until
+ * the rig: that real subgraph IO links repaint with the new colour (read
+ * from `drawConnections`, not yet seen on screen).
+ */
+function continuationLinksOf(node) {
+  const found = new Map()
+  const root = app.graph
+  const graph = node.graph
+  if (!root || !graph || !Array.isArray(node.outputs)) return found
+  let pathCounts = null
+  const isShared = (hopGraph) => {
+    if (hopGraph === root) return false
+    if (!pathCounts) {
+      pathCounts = new Map()
+      for (const { node: n } of walkLiveNodes(root)) {
+        if (n.subgraph) pathCounts.set(n.subgraph, (pathCounts.get(n.subgraph) || 0) + 1)
+      }
+    }
+    return (pathCounts.get(hopGraph) || 0) > 1
+  }
+  for (const name of DIMMABLE_OUTPUT_NAMES) {
+    const slot = node.outputs.findIndex((o) => o && o.name === name)
+    const ids = slot >= 0 ? node.outputs[slot].links : null
+    if (!Array.isArray(ids)) continue
+    // Only a slot with a boundary-crossing link pays for the resolve.
+    if (!ids.some((id) => linkCrossesBoundary(graph, linkById(graph, id)))) continue
+    for (const target of resolveOutputTargets(root, node, slot)) {
+      for (const hop of target.hops.slice(1)) {
+        if (!hop?.link || isShared(hop.graph)) continue
+        let entry = found.get(hop.link)
+        if (!entry) found.set(hop.link, (entry = { graph: hop.graph, targets: new Set() }))
+        entry.targets.add(target.node)
+      }
+    }
+  }
+  return found
+}
+
+/**
+ * The boundary-crossing half of `reconcileLinkDimming` (v1.2.0 nested reach,
+ * owner ask 2026-10-03, FORMAT.md §7.10): dims the continuation links
+ * `continuationLinksOf` finds while *shouldDim*, and restores every tracked
+ * one that is no longer wanted -- with exactly the semantics of the id-based
+ * passes: stash the prior colour in `dimStash` before the first dim, put it
+ * back EXACTLY on restore, tag/untag `LINK_COLOR_OWNER_KEY` (so
+ * distributor.js / bypass.js / number_controller.js keep skipping a link
+ * while it is claimed), and give each consuming node's
+ * `LINK_COLOR_RESYNC_HOOK` one direct call right after the restores.
+ *
+ * Tracked per node in `node.__epsGridDimmedNestedLinks` (`Map<LLink, {graph,
+ * targets}>`): by link OBJECT, because link ids are only unique within one
+ * graph's table, so the flat id `Set` could collide across graphs. A tracked
+ * link that is no longer in its graph's table (disconnected meanwhile) is
+ * just dropped, like the id-based path. Returns whether anything changed
+ * (the caller owns the one repaint). A flat grid with nothing tracked
+ * allocates nothing and returns at once.
+ */
+function reconcileContinuationDimming(node, shouldDim) {
+  const tracked = node.__epsGridDimmedNestedLinks
+  const desired = shouldDim ? continuationLinksOf(node) : null
+  if (!tracked && (!desired || desired.size === 0)) return false
+  const nested = tracked || (node.__epsGridDimmedNestedLinks = new Map())
+  let changed = false
+
+  const resyncTargets = new Set()
+  for (const [link, entry] of nested) {
+    if (desired?.has(link)) continue
+    const stillWired = graphLink(entry.graph, link.id) === link
+    if (stillWired && link[LINK_COLOR_OWNER_KEY] === LINK_COLOR_OWNER_GRID) {
+      const stash = dimStash.get(link)
+      link.color = stash ? stash.color : undefined
+      delete link[LINK_COLOR_OWNER_KEY]
+      dimStash.delete(link)
+      changed = true
+      for (const target of entry.targets) resyncTargets.add(target)
+    }
+    nested.delete(link)
+  }
+  // ONE direct resync call per consuming node, AFTER every link of this pass
+  // is released: a chain through several subgraphs ends at the same node for
+  // each of its continuation links, and a call between two restores would
+  // let that node see the second link still claimed.
+  for (const target of resyncTargets) {
+    try {
+      const resync = target?.[LINK_COLOR_RESYNC_HOOK]
+      if (typeof resync === 'function') resync()
+    } catch (error) {
+      console.warn(PREFIX, 'link colour resync hook failed', error)
+    }
+  }
+
+  if (desired) {
+    for (const [link, entry] of desired) {
+      if (link[LINK_COLOR_OWNER_KEY] !== LINK_COLOR_OWNER_GRID) {
+        dimStash.set(link, { color: link.color })
+        link.color = DIM_LINK_COLOR
+        link[LINK_COLOR_OWNER_KEY] = LINK_COLOR_OWNER_GRID
+        changed = true
+      }
+      nested.set(link, entry)
+    }
+  }
+  return changed
 }
 
 /**
@@ -2482,6 +2791,13 @@ function installLinkDimConnectionsSync(node) {
  * the time this runs -- but a link this file failed to release for any
  * other reason must never outlive the node that dimmed it, carrying a
  * `LINK_COLOR_OWNER_GRID` tag nothing will ever clear again.
+ *
+ * v1.2.0: for the boundary CONTINUATION links (`reconcileContinuationDimming`)
+ * this is not belt-and-suspenders but the only release -- they live in the
+ * OTHER graph's table, so removing this node never disconnects them, and one
+ * left tagged would stay grey forever. They are restored from the tracked
+ * link-object map, which needs nothing from the node's (already torn-down)
+ * wiring.
  */
 function installLinkDimCleanup(node) {
   if (node.__epsGridLinkDimCleanupWrapped) return
@@ -2892,7 +3208,7 @@ async function addResultItemToBuffer(node, item) {
   if (result && Array.isArray(result.images)) {
     setNodeImagesFromRefs(node, result.images)
   }
-  app.graph?.setDirtyCanvas(true, true)
+  repaintNodeGraph(node)
 }
 
 /**
@@ -4001,7 +4317,9 @@ function installConfigureRefresh(node) {
 //    apart: if two live grids STILL share a uuid at settle time, that is a
 //    genuine persisted duplicate -- the lowest-id node keeps the identity,
 //    every other gets the normal mint+clone (never a data loss: clones
-//    copy the buffer).
+//    copy the buffer). Since v1.2.0 the sweep covers the WHOLE workflow
+//    (subgraphs included) and "lowest id" means the lowest execution PATH
+//    id (`comparePathIds`) -- see `liveGridEntries`.
 // ---------------------------------------------------------------------------
 
 function installUuidSerializeGuard(node) {
@@ -4013,28 +4331,49 @@ function installUuidSerializeGuard(node) {
 
 let settledSweepTimer = 0
 
+/**
+ * Whole-workflow list of the live EPSImageGrid nodes as `{node, pathId}`,
+ * ONE entry per node OBJECT (v1.2.0 nested reach, owner ask 2026-10-03).
+ * `walkLiveNodes` reports a node once per instance of its subgraph
+ * definition; the same grid object under "3:2" and "4:2" is one grid with
+ * one buffer, so it is deduped by identity and keeps its LOWEST path id
+ * (`comparePathIds`) -- the id the "lowest id keeps the identity" ordering
+ * below ranks it by.
+ */
+function liveGridEntries() {
+  const lowest = new Map()
+  for (const { node, pathId } of walkLiveNodes(app.graph)) {
+    if (nodeClassOf(node) !== CLASS_ID) continue
+    const known = lowest.get(node)
+    if (known === undefined || comparePathIds(pathId, known) < 0) lowest.set(node, pathId)
+  }
+  return [...lowest].map(([node, pathId]) => ({ node, pathId }))
+}
+
 function scheduleSettledCollisionSweep() {
   clearTimeout(settledSweepTimer)
   settledSweepTimer = setTimeout(async () => {
     try {
-      const nodes = (app.graph?._nodes || app.graph?.nodes || []).filter(
-        (n) => nodeClassOf(n) === CLASS_ID
-      )
       const byUuid = new Map()
-      for (const n of nodes) {
-        const uuid = currentUuid(n)
+      for (const entry of liveGridEntries()) {
+        const uuid = currentUuid(entry.node)
         if (!GRID_UUID_RE.test(uuid)) continue
         if (!byUuid.has(uuid)) byUuid.set(uuid, [])
-        byUuid.get(uuid).push(n)
+        byUuid.get(uuid).push(entry)
       }
       for (const [uuid, group] of byUuid) {
         if (group.length < 2) continue
-        group.sort((a, b) => (a.id || 0) - (b.id || 0))
-        for (const duplicate of group.slice(1)) {
+        // "Lowest id" is the lowest execution PATH id since v1.2.0: a root
+        // id sorts before a nested path with the same head ("3" < "3:2") and
+        // nested ones compare per segment ("3:2" < "10"), so a grid inside a
+        // subgraph is ranked like any other instead of falling off the end
+        // of a root-only list.
+        group.sort((a, b) => comparePathIds(a.pathId, b.pathId))
+        for (const { node: duplicate, pathId } of group.slice(1)) {
           console.log(
             PREFIX,
             `settled duplicate: nodes share uuid ${uuid} after the graph went ` +
-              `quiet -- reminting node #${duplicate.id} (buffer cloned, ` +
+              `quiet -- reminting node ${nodeLogLabel(duplicate, pathId)} (buffer cloned, ` +
               'lowest-id node keeps the identity)'
           )
           // The collision re-check + mint + clone all live in
@@ -4046,6 +4385,34 @@ function scheduleSettledCollisionSweep() {
       console.warn(PREFIX, 'settled collision sweep failed', error)
     }
   }, 1500)
+}
+
+/**
+ * Whether *node*'s `image` input is wired to something the run could really
+ * have used -- the "live input -> flow-through ran" test `warnIfEmptyAfterRun`
+ * below reads (v1.2.0 nested reach, owner ask 2026-10-03, FORMAT.md §7.10).
+ *
+ * A non-null `input.link` is the whole answer while the wire stays inside one
+ * graph (unchanged). But a grid INSIDE a subgraph fed from the subgraph's
+ * input node, or one fed from a SubgraphNode's output, carries a link to a
+ * boundary pseudo-node (origin id -10) / a SubgraphNode whose far side may
+ * be unconnected: core's prompt flattening then drops that input, the run
+ * sees nothing wired, and the "empty buffer" warning is exactly what the
+ * user needs -- yet the node's own link id is non-null, which used to
+ * silence it. For those two shapes only, ask `resolveInputSources` whether a
+ * REAL source exists on the far side. Advisory-only: a missing/stale link
+ * object keeps the old "treat as wired" answer.
+ */
+function imageInputIsLive(node) {
+  const inputs = node.inputs || []
+  const slot = inputs.findIndex((input) => input.name === 'image')
+  if (slot < 0 || inputs[slot].link == null) return false
+  const link = graphLink(node.graph, inputs[slot].link)
+  if (!link) return true
+  const fromBoundary = String(link.origin_id) === String(SUBGRAPH_INPUT_ID)
+  const fromSubgraph = !fromBoundary && isSubgraphNode(node.graph?.getNodeById?.(link.origin_id))
+  if (!fromBoundary && !fromSubgraph) return true
+  return resolveInputSources(app.graph, node, slot).length > 0
 }
 
 /**
@@ -4069,8 +4436,7 @@ function warnIfEmptyAfterRun(node, refreshed) {
     if (refreshed !== true) return
     const uuid = currentUuid(node)
     if (!GRID_UUID_RE.test(uuid)) return
-    const imageInput = (node.inputs || []).find((input) => input.name === 'image')
-    if (imageInput && imageInput.link != null) return // live input -> flow-through ran
+    if (imageInputIsLive(node)) return // live input -> flow-through ran
     if (Array.isArray(node.images) && node.images.length) return
     app.extensionManager?.toast?.add?.({
       severity: 'warn',
@@ -4091,12 +4457,18 @@ function warnIfEmptyAfterRun(node, refreshed) {
 // -- see file header for the full writeup + citations.
 // ---------------------------------------------------------------------------
 
-//: node -> the last `progress_state` state seen for it ('running'/
-//: 'finished'/etc, or absent before the first sighting) -- so a refresh
-//: fires only on the TRANSITION into 'finished', not on every LATER
-//: `progress_state` message that still happens to list this node (the
-//: registry resends every non-pending node's state on every change for
-//: the rest of that prompt, per `progress.py`'s `_send_progress_state`).
+//: node -> Map<execution path id, the last `progress_state` state seen for
+//: that path> ('running'/'finished'/etc, or absent before the first
+//: sighting) -- so a refresh fires only on the TRANSITION into 'finished',
+//: not on every LATER `progress_state` message that still happens to list
+//: this node (the registry resends every non-pending node's state on every
+//: change for the rest of that prompt, per `progress.py`'s
+//: `_send_progress_state`). Keyed per PATH since v1.2.0 (owner ask
+//: 2026-10-03, FORMAT.md §7.10): one subgraph definition instantiated by
+//: several SubgraphNodes puts the SAME grid object under several execution
+//: ids ("3:2", "4:2"), each with its own run state, and a single per-node
+//: slot let one instance's 'running' overwrite another's 'finished' --
+//: masking a real finish, or re-firing a settled one on the next event.
 const lastKnownProgressState = new WeakMap()
 
 //: Guards `installExecutionRefreshListener` so the module-scope
@@ -4151,6 +4523,23 @@ function installVisibilityRefreshFlush() {
  * the moment ITS OWN execution finishes -- regardless of whether that
  * Run's result carried a `"ui"` key at all. See file header for why
  * `progress_state`, not `"executed"`, is the signal used here.
+ *
+ * v1.2.0 nested reach (owner ask 2026-10-03, FORMAT.md §7.10): the `nodes`
+ * map is keyed by the EXECUTION id (core's `executionStore.ts`
+ * `applyProgressState` reads every key as a `NodeExecutionId`, the prompt's
+ * flattened path), which for a grid inside a subgraph is the path id
+ * "3:2" -- never the bare "2" -- so the lookup walks the WHOLE workflow
+ * (`walkLiveNodes`) and keys `nodes[pathId]`. The old root-only loop never
+ * visited a nested grid (and its bare id is not the key core uses for it:
+ * "2" would name a ROOT node 2, not node 2 inside a subgraph), so a nested
+ * grid never refreshed after its run. The transition memory is per
+ * node + path (`lastKnownProgressState`); a node reached through several
+ * path ids is refreshed at most ONCE per event however many of its instances
+ * finished in it, and once more for each LATER event that carries a fresh
+ * transition (each instance's run really did write the shared buffer).
+ * UNCONFIRMED until the rig runs a nested grid: that a live run's
+ * `progress_state` carries the "3:2" key for it (read from the frontend
+ * source and the flattened prompt ids, not yet seen on the wire).
  */
 function installExecutionRefreshListener() {
   if (executionRefreshListenerInstalled) return
@@ -4160,38 +4549,41 @@ function installExecutionRefreshListener() {
   api.addEventListener('progress_state', (event) => {
     const nodes = event?.detail?.nodes
     if (!nodes) return
-    const graphNodes = app.graph?._nodes || app.graph?.nodes || []
-    for (const node of graphNodes) {
+    const finishedNodes = new Set()
+    for (const { node, pathId } of walkLiveNodes(app.graph)) {
       if (nodeClassOf(node) !== CLASS_ID) continue
-      const entry = nodes[String(node.id)]
+      const entry = nodes[pathId]
       const state = entry ? entry.state : undefined
-      const previous = lastKnownProgressState.get(node)
-      if (state !== undefined) lastKnownProgressState.set(node, state)
-      if (state === 'finished' && previous !== 'finished') {
-        // Forced: this event IS the news that server state changed, so it
-        // must never ride a pre-event fetch or be settle-skipped (see
-        // scheduleRefresh). The 800ms "second, delayed refresh" that used
-        // to sit here -- a timer bet against core's async executed-render
-        // -- is gone: it treated the symptom, could never win (the clobber
-        // re-fired on EVERY repaint via updatePreviews' identity check),
-        // and is superseded by the real fix, `syncCoreOutputStore` +
-        // `installExecutedMerge` (their docstrings have the mechanism).
-        // ONE `/list` per finished run (2026-08-21): the empty-buffer warning
-        // reads the reconcile's result instead of fetching again.
-        //
-        // 2026-08-26: while the tab is BACKGROUNDED, queue this node
-        // instead of firing -- no point spending a forced fetch (network +
-        // a decode/redraw once applied) on a repaint nobody can see, and it
-        // just adds load to a server that may already be GIL-busy mid-run.
-        // `installVisibilityRefreshFlush` above fires it, for every queued
-        // node, the moment the tab is visible again.
-        if (document.hidden) {
-          pendingHiddenRefresh.add(node)
-        } else {
-          void scheduleRefresh(node, { force: true }).then((refreshed) =>
-            warnIfEmptyAfterRun(node, refreshed) // see its docstring (2026-07-24)
-          )
-        }
+      let byPath = lastKnownProgressState.get(node)
+      if (!byPath) lastKnownProgressState.set(node, (byPath = new Map()))
+      const previous = byPath.get(pathId)
+      if (state !== undefined) byPath.set(pathId, state)
+      if (state === 'finished' && previous !== 'finished') finishedNodes.add(node)
+    }
+    for (const node of finishedNodes) {
+      // Forced: this event IS the news that server state changed, so it
+      // must never ride a pre-event fetch or be settle-skipped (see
+      // scheduleRefresh). The 800ms "second, delayed refresh" that used
+      // to sit here -- a timer bet against core's async executed-render
+      // -- is gone: it treated the symptom, could never win (the clobber
+      // re-fired on EVERY repaint via updatePreviews' identity check),
+      // and is superseded by the real fix, `syncCoreOutputStore` +
+      // `installExecutedMerge` (their docstrings have the mechanism).
+      // ONE `/list` per finished run (2026-08-21): the empty-buffer warning
+      // reads the reconcile's result instead of fetching again.
+      //
+      // 2026-08-26: while the tab is BACKGROUNDED, queue this node
+      // instead of firing -- no point spending a forced fetch (network +
+      // a decode/redraw once applied) on a repaint nobody can see, and it
+      // just adds load to a server that may already be GIL-busy mid-run.
+      // `installVisibilityRefreshFlush` above fires it, for every queued
+      // node, the moment the tab is visible again.
+      if (document.hidden) {
+        pendingHiddenRefresh.add(node)
+      } else {
+        void scheduleRefresh(node, { force: true }).then((refreshed) =>
+          warnIfEmptyAfterRun(node, refreshed) // see its docstring (2026-07-24)
+        )
       }
     }
   })
@@ -4386,6 +4778,18 @@ export function loadedGraphNode(node) {
     if (!node) return
     if (nodeClassOf(node) !== CLASS_ID) return
     installUuidSerializeGuard(node) // 2026-07-24 identity hardening
+    // v1.2.0 nested reach: re-derive Collect-only link dimming now that the
+    // WHOLE graph is configured. A grid INSIDE a subgraph is configured
+    // (with its definition) BEFORE the root graph's nodes exist (LGraph.
+    // configure builds the definitions first), so its own `onConfigure`
+    // pass cannot see the SubgraphNode wire(s) its output continues
+    // through; this hook fires per node, nested ones included, after
+    // everything is in place. Cheap and local, like the onConfigure call.
+    try {
+      reconcileLinkDimming(node)
+    } catch (error) {
+      console.warn(PREFIX, 'link dim sync (loadedGraphNode) failed', error)
+    }
     ensureUniqueUuid(node, { allowCollisionMint: false })
       .catch((error) => console.warn(PREFIX, 'loadedGraphNode dedup failed', error))
       .finally(() => {

@@ -33,6 +33,11 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 FRAME_SAVER_JS = REPO_ROOT / "web" / "eps_image" / "frame_saver.js"
+# v1.2.0 nested reach: frame_saver.js now imports `../lora_library/api.js`
+# (the boundary-crossing graph resolvers) -- the real siblings, copied into
+# the served layout below like test_resolution_*_js.py's identical fixture.
+API_JS = REPO_ROOT / "web" / "lora_library" / "api.js"
+VERSION_JS = REPO_ROOT / "web" / "lora_library" / "version.js"
 
 NODE = shutil.which("node")
 
@@ -109,6 +114,10 @@ def upload_api(tmp_path_factory: pytest.TempPathFactory) -> dict:
     module_dir = layout / "extensions" / "comfyui-epsnodes" / "eps_image"
     module_dir.mkdir(parents=True)
     shutil.copyfile(FRAME_SAVER_JS, module_dir / "frame_saver.js")
+    lora_dir = layout / "extensions" / "comfyui-epsnodes" / "lora_library"
+    lora_dir.mkdir(parents=True)
+    shutil.copyfile(API_JS, lora_dir / "api.js")
+    shutil.copyfile(VERSION_JS, lora_dir / "version.js")
 
     probe = layout / "probe.mjs"
     probe.write_text(

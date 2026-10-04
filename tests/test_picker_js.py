@@ -2296,10 +2296,18 @@ class TestSendRowGraphWatchV0632:
     def test_send_row_repaints_on_graph_add_and_remove(self, source: str) -> None:
         assert "function installGraphNodeWatch(graph)" in source
         watch = _function_body(source, "installGraphNodeWatch(graph)")
-        assert "graph.__epsLpNodeWatch" in watch, "install once per graph"
-        assert "'onNodeAdded', 'onNodeRemoved'" in watch
-        assert "original?.apply(this, args)" in watch, "chained, never replaced"
-        assert "scheduleSendRowRefresh(this)" in watch
+        # v1.2.0 (FORMAT.md §7.10): the shared stored-and-re-verified pattern,
+        # not a once-per-graph flag -- core restores the graph hooks on every
+        # subgraph enter/exit and on a Nodes 2.0 toggle.
+        assert "api.watchGraphHooks(graph, LP_WATCH_KEY, LP_WATCH_HOOKS" in watch
+        assert "const LP_WATCH_KEY = '__epsLpNodeWatch'" in source
+        assert "const LP_WATCH_HOOKS = ['onNodeAdded', 'onNodeRemoved']" in source
+        assert "graph.__epsLpNodeWatch = true" not in source, "the one-shot flag is gone"
+        assert "scheduleSendRowRefresh(firing)" in watch
+        # ...re-verified on EVERY graph from each Send-row paint.
+        arm = _function_body(source, "armSendRowGraphWatches()")
+        assert "api.watchAllGraphs(root, LP_WATCH_KEY, LP_WATCH_HOOKS" in arm
+        assert "armSendRowGraphWatches()" in _function_body(source, "renderSend(state)")
 
     def test_refresh_is_coalesced_and_state_hangs_off_the_node(self, source: str) -> None:
         body = _function_body(source, "scheduleSendRowRefresh(graph)")
@@ -2615,8 +2623,9 @@ class TestPerfRoundV0681:
         assert "find:" not in registry
         assert "pll.findPllNodes" not in source
         assert "dasiwa.findDasiwaNodes" not in source
-        # the bridges keep their root-only helpers only for their own test
-        # pins, and say so at the definition (removal is a follow-up)
+        # the bridges keep their (v1.2.0: now nested-aware) find helpers only
+        # for their own test pins, and say so at the definition (removal is a
+        # follow-up)
         for path in (BRIDGE_JS, DASIWA_JS):
             bridge = path.read_text(encoding="utf-8")
             assert "UNUSED BY THE PICKER, marked for removal" in bridge, path.name

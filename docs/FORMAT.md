@@ -921,6 +921,22 @@ pin sync.
   displayed by title; tolerates the id disappearing (falls back to
   "(any)").
 
+**Nested subgraphs (v1.2.0, owner ask 2026-10-03: "make sure all of the
+nodes that can control other nodes also looks into nested nodes"; §7.10).**
+The `mirrors loader` combo lists every Power Lora Loader and EPS LoRA Picker
+in the WHOLE workflow, subgraphs included, as `<title> #<path id>` (`#3:2` =
+node 2 inside SubgraphNode 3 — exactly what the API prompt calls it), and
+`healMirrorsTags()` (a tag whose loader vanished falls back to `(any)`) hears
+`onNodeRemoved` on EVERY graph through the shared stored-and-re-verified watch
+(`api.watchAllGraphs`, key `__epsSetsMirrorsWatch`), re-verified from each
+`nodeCreated`, each heal pass and each dropdown open. It used to be an
+install-once flag: core restores a graph's hooks on every subgraph enter/exit,
+after which a deleted loader silently stopped resetting the tag. An Apply node
+that itself sits inside a subgraph is found by the controller's Push State
+(§6.3) the same way (`walkLiveNodes`). A node inside a subgraph definition that
+several SubgraphNodes share is one node object listed once per instance path;
+all of its instances read the same widgets.
+
 ### §6.3 `EPS Lora Loader State Controller` (frontend-only virtual node)
 
 **An in-progress group rename survives a tab switch instead of being
@@ -1372,6 +1388,24 @@ on both renderers; the Controller's is a real litegraph widget because
 §6.3's hidden `set` widget needs the slot beside it. They differ by widget
 KIND, not by oversight -- fix the renderer gap, never "unify" them by
 changing the widget kind.
+
+**Nested subgraphs (v1.2.0, owner ask 2026-10-03; §7.10).** Target
+discovery (`findTargetCandidates`), the `All loaders (N)` set, capture/apply,
+the composite loader-slot mapping and Push receivers already walked the whole
+workflow since v0.64.0 (`api.walkLiveNodes(app.graph)`, path ids). v1.2.0 closes
+two gaps. (1) The graph add/remove watch was an install-once flag; it now uses
+the shared stored-and-re-verified pattern (`api.watchGraphHooks` /
+`api.watchAllGraphs`, key `__epsCtrlNodeWatch`) and is re-verified from every
+refresh pass, `onAdded`, the heartbeat and the shared sets poller's tick (the
+only periodic point under Nodes 2.0, which has no heartbeat), re-scheduling one
+refresh when it had to put a hook back. (2) A loader inside a subgraph
+definition that several SubgraphNodes instantiate is ONE node reported once
+per instance path; listing it per path double-counted `All loaders (N)`,
+defeated the "exactly one loader → auto-select" rule and shifted every later
+loader's composite slot index. Candidates are now one per node (first instance
+path), while a stored `#7:2`-style label naming a later instance still
+resolves by path / node identity. `comparePathIds` is the shared
+`api.comparePathIds`.
 
 ## §6.4 `EPSSwitcher` (display: "EPS Image Switcher") — image toggle + fan-out
 
@@ -1891,7 +1925,12 @@ is the functional core WITHOUT the grid.
       resolution (not the on-canvas thumbnail), and it is live BEFORE any
       Run — which is the point, since choosing a target size is what you do
       first. Deliberately shallow: one hop is the real wiring, and a wrong
-      number would be worse than none.
+      number would be worse than none. (Historical: since v0.87.0 the walk
+      climbs through switchers/Distributors/Reroutes, and since v1.2.0 every
+      hop crosses subgraph boundaries through `api.resolveSourcesAt` instead
+      of `getInputNode`, which stops at a SubgraphNode — see the "Nested
+      subgraphs" paragraph at the end of this section; `getInputNode` remains
+      only as the fallback for a host with no live root.)
     - **Nothing to show ⇒ nothing drawn, and the strip stays ONE line.**
       `hasSourceLine` gates the draw AND both height functions
       (`computeGridWidgetHeight`/`computeGridElementHeight` gained a
@@ -2037,6 +2076,23 @@ is the functional core WITHOUT the grid.
 - **M4 (multi-image) — SHIPPED v0.61.0** as the MULTI-IMAGE mode bullet
   above (`image_2..8` inputs → `resized_2..8` tail outputs); the earlier
   "Deferred (M4) … do NOT build it yet" note no longer applies.
+
+**Nested subgraphs (v1.2.0, owner ask 2026-10-03, §7.10).** The incoming-size
+walk crosses subgraph boundaries. Every hop goes through `api.js`'s
+`resolveSourcesAt` (the entry node via `resolveInputSources`, each later hop
+from the exact place the previous one was found), so an image arriving out of a
+subgraph's output, in through a subgraph input from outside, or through
+several levels of nesting is found like a flat wire. The first hop returns an
+array: a Resolution inside a subgraph definition that several SubgraphNodes
+instantiate has one source per instance, and those feed the same collect →
+summarize machinery as a switcher's slots, so disagreeing instances read
+`mixed` and agreeing ones `single`. Later hops stay on their own instance lane
+(re-resolving the shared node OBJECT would fan out to every instance's outer
+source and make a clear answer read `mixed`). A boundary crossing does not
+spend the 8-hop pass-through budget, and the cycle guard keys path ids, not
+node ids. A dangling subgraph input or output reads `none`; `copy from image`'s
+"wired" check means a real source resolves. Hosts or nodes the resolvers cannot
+locate (no live root, a unit-test fake) fall back to `getInputNode`.
 
 ## §6.6 `EPSImageGrid` (display: "EPS Image Grid") — accumulate + fan out
 
@@ -2528,6 +2584,30 @@ add; single batch-aware IMAGE input; disk-backed, survive-restart, NO cap.
   2026-07-29; count, reorder, batch-count guard still open). No cap in
   v1. No module-scope torch/ComfyUI import (lazy inside functions).
 
+**Nested subgraphs (v1.2.0, owner ask 2026-10-03, §7.10).** Every cross-node
+read the grid does walks the whole workflow, subgraphs included. The
+uuid-collision check and the settled-collision sweep see a grid pasted into,
+out of, or between subgraphs; the sweep ranks duplicates by execution path id
+(`comparePathIds`: `3` < `3:2` < `10`; a root id outranks a nested one with
+the same head) and a nested duplicate's log line names its path. One subgraph
+definition instantiated by several SubgraphNodes shows the same grid object
+under several path ids; that is one grid with one buffer, never its own
+sibling. The post-run refresh keys `progress_state` by the flattened path id
+(`"3:2"`), and its finished-run memory is per node and per path, so two
+instances of a definition cannot mask each other; a node refreshes once per
+event. The focus-clobber store fix writes
+`app.nodeOutputs["<subgraph uuid>:<node id>"]` for a grid inside a subgraph
+(core's `NodeLocatorId`, proven from the 1.52.7 source), and still leaves the
+store alone when the key cannot be proven. In Collect only, the dim follows each
+output wire across a subgraph boundary into the continuation link in the other
+graph's table (tracked by link OBJECT — link ids repeat across graphs), with
+the same exact restore and ownership tag; a link inside a definition shared by
+several instances is left undimmed (one object carrying a different feed per
+instance — a missed cosmetic dim, never a false one), and a wire added inside
+a subgraph later is picked up on the next trigger. Clear and drop repaint
+through the node's own graph, since core detaches the root canvas while a
+subgraph is on screen.
+
 ## §6.7 `EPSFrameSaver` (display: "EPS Frame Saver") — video frame picker
 
 **Typing a frame number could be overwritten out from under the user (§7.9,
@@ -2685,6 +2765,17 @@ single-frame output (NOT a list); "close-enough preview, EXACT on output".
   in/out range. VFR sources: the frame↔time arithmetic is approximate for the
   counter (shared limitation of all prior art); output still lands on a real
   frame. No module-scope torch/av/ComfyUI import.
+
+**Nested subgraphs (v1.2.0, owner ask 2026-10-03, §7.10).** The `video` wire is
+followed across subgraph boundaries. A core LoadVideo inside a subgraph, one
+outside feeding a subgraph input the saver reads, and reroutes straddling the
+boundary all resolve to `input_ref` and preview. A non-LoadVideo source across
+a boundary is `opaque`, titled with its subgraph trail (`Subgraph name › Node
+title`). When instances of a shared definition are fed different videos the
+answer is `opaque` ("(several sources)"); agreeing instances resolve as one. A
+LoadVideo whose `file` socket is fed from its subgraph's input (a promoted
+widget) is `opaque`, because the host holds the live value. The 32-hop guard and
+`(reroute loop)` are unchanged.
 
 ### §6.8 `LoraLibrarySweep` (display: "EPS LoRA Iterator") — strength iterator
 
@@ -3156,6 +3247,35 @@ or more runs matching nothing still raises exactly as before -- that guard
 exists so a typo can never burn a queue as a silent 0-run success, and it
 is untouched. Fixed on the MATCHING side rather than the baking side
 deliberately: only that repairs images already saved.
+
+**Nested subgraphs (v1.2.0, owner ask 2026-10-03: "make sure all of the
+nodes that can control other nodes also looks into nested nodes"; §7.10).** The
+run-count readout used to snapshot ONE graph, so a wire out of a SubgraphNode
+output (or in from a subgraph's input node) pointed at an id that was not in it
+and counted as an unknown `≥` source. `snapshotFromGraph` now snapshots the
+whole workflow: root nodes keep their plain ids and every node under a
+SubgraphNode is keyed by its execution PATH id (`"3:2"`, the same id the API
+prompt and the backend's `_consumed_output_slots` scan use), once per instance.
+Each input link is resolved through the boundaries (`api.resolveLinkSources`)
+to the real source's path id, pass-through included. An unconnected subgraph
+input or output reads as an unwired input, exactly what the prompt flattening
+drops, and a SubgraphNode never appears as an unknown-class source. The live
+readout estimates from the ROOT graph, so a multiplier inside a subgraph sees
+sources outside and vice versa. A multiplier inside a definition that several
+SubgraphNodes share runs once per instance with possibly different upstreams:
+identical readouts are shown as is; a failing copy shows its error and names
+the copy; otherwise the line is the largest count as a `≥` floor with a note
+that this subgraph is used N times with different counts (`Runs: ≥ 5 — this
+subgraph is used 2 times with different counts (3, 5)`). The graph watch
+(`api.watchAllGraphs`, key `__epsRcNodeWatch`, stored and re-verified, never
+one-shot) now sits on EVERY graph, and any add/remove/after-change recomputes
+EVERY multiplier readout in the workflow in one coalesced pass per tick on the
+root, sharing one snapshot. A pass-through subgraph (a subgraph input wired
+straight to its output) is estimated as the wire it is, but 1.52.7's own
+prompt flattening cannot resolve a subgraph output fed straight from its
+input, so the real queue may still fail there. A promoted `solo_run`/mode
+widget on a SubgraphNode keeps its value in the frontend's widget store; the
+estimator reads the inner node's own widget.
 
 ### §6.11 `EPSDistributor` (display: "EPS Distributor") — one in, N gated out
 
@@ -3908,6 +4028,20 @@ apply/text helpers, so it drops in anywhere Apply LoRA Set does.
   replace, unknown names ignored, missing-from-list favorites appended
   at the end so two machines' concurrent edits can't drop stars).
 
+**Nested subgraphs (v1.2.0, owner ask 2026-10-03; §7.10).** The "Link to"
+dropdown (every supported loader — Power Lora Loader, DaSiWa — in the WHOLE
+workflow, subgraphs included), live sync and the controller's Push all resolve
+through path ids (`#3:2`), as since v0.64.0; the stored `Linked loader`
+property is the path id. v1.2.0 replaces the once-per-graph hook flag
+(`__epsLpNodeWatch`) that repaints the Send row on loader add/remove with the
+shared stored-and-re-verified watch (`api.watchAllGraphs`), re-verified on every
+Send-row paint, because core drops a graph's hooks on every subgraph enter/exit
+and Nodes 2.0 toggle (§7.10). The bridges' `findPllNodes` / `findDasiwaNodes`
+(unused by the picker, kept for their test pins) now walk the whole workflow in
+path-id order instead of `app.graph._nodes` only. A loader inside a subgraph
+definition shared by several SubgraphNodes shows once per instance path; linking
+either path syncs the one shared node.
+
 ## §6.14 `EPSSaveImage` (display: "EPS Save Image") — Save Image with provenance baked in
 
 **In-place bake + undo (v0.80.0).** `save()` now uses
@@ -4046,6 +4180,24 @@ onto comfyui and recreate just that image"). Shipped v0.70.0.
   `boolean` declaration in `tests/test_state_registry.py` +
   `tests/test_universal_states_store.py`.
 
+**Nested subgraphs (v1.2.0, owner ask 2026-10-03; §7.10).** The Python side
+was already depth-correct and is now pinned by `tests/test_nested_subgraphs.py`:
+`capture_pins` walks the flattened PROMPT (a Prompt Notebook / Apply LoRA Set
+inside a subgraph is `"3:2"`, two levels down `"3:5:4"`), and `_bake_widget`
+writes through `find_node_in_workflow`, which resolves a path id segment by
+segment through `definitions.subgraphs` (a SubgraphNode's `type` is the
+definition's `id`; ids that collide with a root id are kept apart by the full
+path; a missing definition degrades to "not found", never a wrong node). The
+multiplier named by `run_info.node` (its execution id) is therefore soloed in
+BOTH the workflow definition and the prompt chunk at any depth, and the
+in-place bake + `undo_bakes` restores definition nodes byte-for-byte. A
+definition instantiated twice appears once in the workflow JSON and under two
+prompt ids; both ids bake the identical pin. Frontend: the filename-token
+drop fallback (`applyFilenameSolo`) walks the whole workflow
+(`walkLiveNodes`) and counts DISTINCT multiplier nodes — one multiplier inside
+a definition shared by several SubgraphNodes is one multiplier (it was counted
+per instance path, turning a clean "apply" into a false "ambiguous").
+
 ## §6.15 `EPSPromptBuilder` (display: "EPS Prompt Builder") — compose from the Notebook
 
 **Content-derived `IS_CHANGED` (v0.80.0, §6.1's rationale verbatim).**
@@ -4131,6 +4283,15 @@ behaving inconsistently between nodes. Search filters BEFORE grouping, so an
 emptied category's header disappears with it, and a collapsed group's matches
 still show while a search is active (a match hidden behind a stale collapse
 reads as "search is broken").
+
+**Nested subgraphs (v1.2.0, owner ask 2026-10-03; §7.10).** The Notebook
+dropdown is built from `walkLiveNodes(app.graph)` — rooted at the whole
+workflow, never `node.graph`, so a builder inside a subgraph still sees every
+Notebook and a builder at the root sees the ones inside subgraphs. Mirroring is
+by FILE, so a nested Notebook needs no id, but its option label now leads with
+its containing subgraph(s): `Looks › Prompts — loras.md` (`api.describePath`'s
+trail; a root Notebook's label is unchanged), so two same-titled Notebooks in
+different subgraphs read apart. Its mirrored `drafts` ride the same walk.
 
 ## §6.16 `EPSUniversalStateController` (display: "EPS Universal State Controller") — states for every EPS node
 
@@ -4248,6 +4409,22 @@ switch were the user pressing Enter — the §7.9 "second-half" failure mode
 trip fired mid-teardown), not merely losing one. `onRemoved()` now just
 discards the local DOM/JS handle, exactly like `controller.js`'s own.
 
+**Nested subgraphs (v1.2.0, owner ask 2026-10-03; §7.10).** Discovery
+(`discoverStateNodes`, now exported with `buildLiveIndex`) is
+`api.walkLiveNodes(app.graph)` filtered by the registry, so state-bearing nodes
+inside subgraphs are captured and applied. A state stores the execution-shaped
+PATH id (`"3:2"`), exact-id matching compares it as a string, and the Included
+nodes exclusions key by the LIVE path id. Cross-machine matching (id → unique
+class+title → class order) works unchanged for nested nodes: if the subgraph
+node itself was renumbered (`3` → `8`) the stored `"3:2"` finds its node by
+title; the nested-vs-root ambiguity of two same-titled nodes falls to the class
+order pass, which `summarizeApply` already reports as a positional guess. The
+Nodes page shows `#3:2` and its tooltip names the container (`Looks › Size`).
+A node inside a definition shared by several SubgraphNodes is listed once per
+instance path (the same live node: capture records identical widgets under
+each, apply writes idempotently); the duplicates are deliberately not collapsed
+because a state saved elsewhere may name either path.
+
 ## §6.17 `EPSNumberController` (display: "EPS Number Controller") — every number in one place
 
 New in v0.88.0. Owner ask, verbatim: *"It could have any number of outputs.
@@ -4268,7 +4445,9 @@ min/max, seed-style randomize, and step/scrub.
   the count is frozen at registration. Raising it later is safe (new slots
   append); LOWERING it would orphan wires in every saved workflow. One hidden
   required STRING widget `values` holds everything as a JSON object keyed
-  `num_N` → `{name, value, type, enabled?, links?}`. `RETURN_NAMES` is
+  `num_N` → `{name, value, type, enabled?, links?}` (`links` items are `{node,
+  input}`; `node: -20` names the owning subgraph's own output node, v1.2.0).
+  `RETURN_NAMES` is
   class-level and therefore generic — the FRONTEND sets each socket's `.label`
   from the row's own name.
 - **Per-slot type adoption**, unlike §6.11 Distributor's one-type-for-the-whole-node
@@ -4617,6 +4796,22 @@ paste-a-path only takes server paths. So a remote viewer had no way in.
   were split into single characters and Desktop would not start. Both
   messages say so.
 
+**Nested subgraphs (v1.2.0, §7.10; owner ask 2026-10-03).** A row wired into a
+SubgraphNode input behaves like any other wire and adopts that input's declared
+INT/FLOAT. A row inside a subgraph wired to the subgraph's own output (link
+`target_id` -20) used to be skipped by the checkbox, leaving a row marked OFF
+while the wire still carried the number. The shared unplug helpers
+(`collectOutputTargets` / `disconnectAllTargets` / `reconnectRememberedTargets`,
+also used by EPS Bypass) now remember it as `{"node": -20, "input": <subgraph
+output name>}` in the row's `links` memory, unplug it with
+`SubgraphOutput.disconnect()`, and replug with `SubgraphOutput.connect` (skipped
+if the slot has since been claimed; the type veto still applies, each item
+fails soft on its own). A graph that is not a real Subgraph degrades to the old
+behaviour (the link is neither remembered nor touched). A row wired only to a
+subgraph output stays untyped (`*`) and renders as a plain int-or-float number.
+The Number Controller has no required-input guard: its checkbox contract relies
+on the wire going to a widget-backed or promoted INT/FLOAT input.
+
 ## §6.18 `EPSBypass` (display: "EPS Bypass", v0.99.0) — switch a wire off, and what it feeds sees nothing
 
 New in v0.99.0. Owner ask, verbatim: *"A node you can plug something into
@@ -4702,8 +4897,9 @@ Class id `EPSBypass` (FROZEN, §8), category `EPSNodes/Utilities`.
      message.
 
   A link the memory could not record (its target node is gone, a subgraph
-  output at `target_id` -20, or an input with no name — the legacy Reroute
-  NODE's) is `unrestorable`: `disconnectAllTargets` severs every link, so an
+  output at `target_id` -20 in a graph that is NOT a real Subgraph — v1.2.0
+  handles the real case, see "Nested subgraphs" below — or an input with no
+  name — the legacy Reroute NODE's) is `unrestorable`: `disconnectAllTargets` severs every link, so an
   unrecorded one would be lost for good. If ANY link is unsafe, NOTHING is
   unplugged, the toggle snaps back ON (set directly, never through its own
   callback, and asserted again next tick so it wins even when the Vue
@@ -4722,7 +4918,9 @@ Class id `EPSBypass` (FROZEN, §8), category `EPSNodes/Utilities`.
 - **The memory** is `{"owner": <this node's id>, "links": [{"node": id,
   "input": name}, ...]}` (an empty memory is `"{}"`, so a switched-on node
   leaves no residue in its saved workflow). Targets are keyed `{node id,
-  input NAME}` — inputs restore by name (§8). **`owner` exists for
+  input NAME}` — inputs restore by name (§8); a wire into the owning
+  subgraph's own output node is `{node: -20, input: <subgraph output name>}`
+  (v1.2.0, "Nested subgraphs" below). **`owner` exists for
   copy/paste:** a pasted OFF Bypass carries the original's memory, whose
   targets are the ORIGINAL consumers with their inputs free, so switching
   the copy on would wire it into them. A pasted node has a new id, so memory
@@ -4784,8 +4982,9 @@ Class id `EPSBypass` (FROZEN, §8), category `EPSNodes/Utilities`.
   `VUE_AFFECTED_CLASSES` gate does NOT apply and the node is not listed there.
 - **Known limits, stated rather than discovered.** Switching off
   garbage-collects the wire's NATIVE link reroutes (core's `disconnectInput`
-  default), so switching on reconnects straight. A legacy Reroute NODE or a
-  subgraph output downstream refuses (above). A BOOLEAN wired into `enabled`
+  default), so switching on reconnects straight. A legacy Reroute NODE
+  downstream refuses (above); a wire into a subgraph's own output no longer
+  does (v1.2.0, "Nested subgraphs" below). A BOOLEAN wired into `enabled`
   bypasses the callback entirely, so there is no unplug: the backend
   fallback blocks the consumer. Muting or bypassing the Bypass node itself
   is core's own mechanism and omits it from the prompt.
@@ -4823,6 +5022,30 @@ Class id `EPSBypass` (FROZEN, §8), category `EPSNodes/Utilities`.
   there is a node between the source and the optional input, when the source
   also feeds other consumers, or when the state has to live in a Universal
   State. Those are the cases this node is for.
+
+- **Nested subgraphs (v1.2.0, §7.10; owner ask 2026-10-03: "Make sure all of
+  the nodes that can control other nodes also looks into nested nodes").** Two
+  wires cross a subgraph boundary and both work. (a) A wire INTO a SubgraphNode
+  input is unplugged like any other, but the guard no longer judges the
+  SubgraphNode by its own (absent) `nodeData`: it follows the wire to every
+  real inner consumer (`api.resolveLinkTargets`, through further SubgraphNodes
+  and subgraph-output pass-throughs) and applies the per-input rules above. A
+  PROMOTED widget on that SubgraphNode input is safe (its value takes over when
+  the outer wire goes; core's `ExecutableNodeDTO.resolveInput` reads
+  `input.widgetId`), and so is a subgraph input nobody reads. (b) THIS node
+  inside a subgraph, output wired to the subgraph's own output (link
+  `target_id` -20), is remembered as `{"node": -20, "input": <subgraph output
+  name>}` (the name, not the index or label), unplugged with
+  `SubgraphOutput.disconnect()` and replugged with
+  `SubgraphOutput.connect(output, node)`, skipping a slot that now holds
+  another link (core's `connect` would replace it). The guard classifies the
+  consumers OUTSIDE, one set per SubgraphNode instance of the definition
+  (`api.locationsOfNode`); an unused definition has none. The refusal stays
+  all-or-nothing, and nested consumers are named `Subgraph name › Node title
+  (input)`. Both connection hooks also match an output event by this node's own
+  output INDEX, because a subgraph output's `disconnect()` reports the
+  SubgraphOutput as the slot. A -20 wire in a graph that is not a real Subgraph
+  still refuses as unrestorable.
 
 ## §6.19 `EPSSplatPlacement` (display: "EPS Splat Placement", v0.100.0) — make Render Splat match the 3D preview
 
@@ -5556,6 +5779,104 @@ post-restore reconverge (`convergeImageInputs`, via `pruneToggles`/
 lands — never against a mid-rebuild snapshot, which is the shape that would
 let it silently disagree with (and overwrite) the real thing configure() just
 restored.
+
+## §7.10 Nested subgraphs — every node that controls or reads another node reaches into them (v1.2.0, owner ask 2026-10-03)
+
+Owner, verbatim: "Make sure all of the nodes that can control other nodes also
+looks into nested nodes." "Nested" means nodes inside **subgraphs**, at any
+depth. This is the cross-cutting rule; each node's own section carries a short
+"Nested subgraphs" note with its specifics.
+
+**The model** (read from the frontend source — `lib/litegraph/src/subgraph/*`,
+`LGraph.ts`, `utils/executionUtil.ts` — not guessed). A `SubgraphNode` carries
+`.subgraph`, an LGraph with its OWN node list, link table and id space; its
+`inputs[i]` / `outputs[j]` are index-aligned with `subgraph.inputs[i]` /
+`.outputs[j]`. Inside the subgraph the boundary is two pseudo-nodes that are NOT
+in `_nodes` / `getNodeById`: a link whose `origin_id` is **-10** leaves the
+subgraph's input node and one whose `target_id` is **-20** enters its output
+node; the wire the user sees OUTSIDE is a separate link in the PARENT graph's
+own table. litegraph's `getInputNode` therefore stops dead at a boundary. The
+API prompt is built from a flattened resolution of those links and keys nodes by
+EXECUTION PATH id (`"3:2"` = node 2 inside SubgraphNode 3, `"3:5:2"` two levels
+down); an input with no resolvable source is simply absent. Graph events fire
+only on the graph they happen in (a subgraph's `onNodeAdded` never reaches the
+root). One subgraph DEFINITION can be instantiated by several SubgraphNodes:
+they share `.subgraph`, so the inner node OBJECTS are shared and appear under
+several path ids — walking DOWN through a specific SubgraphNode is unambiguous,
+walking UP out of a shared definition fans out per instance (so every resolver
+returns an array, never one guess). Node ids are strings on newer frontends and
+numbers on older ones; every comparison goes through `String()`.
+
+**The shared helpers (`web/lora_library/api.js`, the one place the traversal
+lives — import, never re-walk by hand).** `walkLiveNodes` / `walkGraphs` /
+`findByPathId` (v0.64.0) enumerate the workflow with path ids. v1.2.0 adds the
+boundary-crossing layer: `isSubgraphNode`, `graphLink`, `joinPath` /
+`parentPrefixOf`, `locateByPathId`, `locationsOfNode` (one location per
+instance), `rootGraphOf` / `liveRootOf` (the app's live root a node sits under,
+or null so a caller can fall back to the native single-graph read),
+`comparePathIds`, `describePath` (`Subgraph name › Node title`),
+`resolveInputSources` / `resolveLinkSources` (the real UPSTREAM node(s), the
+replacement for `getInputNode`), `resolveSourcesAt` (one hop of a MULTI-hop
+upstream walk: after the first hop it resolves from the exact place the
+previous hop was found — re-resolving a shared definition's node object would
+fan out to every instance's upstream and read as a false "mixed"),
+`resolveOutputTargets` / `resolveLinkTargets` (the real DOWNSTREAM consumer(s),
+with the hops walked and a `stopAtSubgraphInput` option), the constants
+`SUBGRAPH_INPUT_ID` (-10) / `SUBGRAPH_OUTPUT_ID` (-20), and the graph-hook
+installer `watchGraphHooks` / `watchAllGraphs`.
+
+**Graph watches are stored and re-verified, never one-shot.** Core's
+`useGraphNodeManager` cleanup and `installErrorClearingHooks` disposer RESTORE
+`graph.onNodeAdded` / `onNodeRemoved` to the values they captured at their own
+install whenever the active graph changes (every subgraph enter/exit) and on a
+Nodes 2.0 toggle, dropping any wrapper installed after them; a once-per-graph
+boolean flag then refuses to re-wrap and the watcher goes deaf. The v0.68.1
+Run Multiplier fix (store the wrapper per hook, re-verify on every pass, adopt a
+surviving wrapper of ours) is now `api.watchGraphHooks`; every watcher — the
+Lora Loader State Controller, the LoRA Picker's Send row, Apply LoRA Set's
+`mirrors loader` heal, the Run Multiplier readout — uses it over EVERY graph
+(`watchAllGraphs`), re-verified from its own refresh pass. Several features
+watch the same hook, so each wrapper inherits the owner-key set of the wrapper
+beneath it and a sibling's wrapper that still contains ours is adopted rather
+than wrapped again (otherwise N features re-verifying each other would stack a
+layer per pass, unbounded). `tests/test_nested_reach_guard.py` fails if any
+module installs a graph hook by hand or enumerates a single graph's `_nodes`.
+
+**Which nodes reach into subgraphs, and how ids are shown.**
+
+| Node | Reaches | Shown as |
+| --- | --- | --- |
+| Lora Loader State Controller (§6.3) | loaders, pickers, Apply nodes at any depth: target combo, `All loaders` (one entry per node), capture/apply/Push, composite slot order | `<title> #3:2` |
+| EPS Universal State Controller (§6.16) | every state-bearing node at any depth: capture, id→title→class match, exclusions | `#3:2` (tooltip `Subgraph › Node`) |
+| EPS LoRA Picker (§6.13) | the `Link to` loader list, live sync, Push | `<title> #3:2` |
+| EPS Apply LoRA Set (§6.2) | `mirrors loader` list and its removal heal | `<title> #3:2` |
+| EPS Prompt Builder (§6.15) | Notebooks anywhere in the workflow | `Subgraph › Title — file.md` |
+| EPS Save Image (§6.14) | Notebook / Apply Set / multiplier pins and solo, backend + drop fallback | execution ids `"3:5:2"` |
+| EPS Run Multiplier (§6.10) | the run-count estimator walks sources through boundaries; watch on every graph | readout note for shared definitions |
+| EPS Number Controller (§6.17) / EPS Bypass (§6.18) | unplug/replug of wires into a SubgraphNode input and out through a subgraph's output node (`{node: -20, input: <output name>}`); Bypass guard classifies the real inner/outer consumers | `Subgraph › Node (input)` in refusals |
+| EPS Resolution (§6.5) / EPS Frame Saver (§6.7) | the upstream walk (size / wired video) crosses boundaries | `Subgraph › Node` as a video source title |
+| EPS Image Grid (§6.6) | identity-collision detection, post-run refresh (`progress_state` path ids), core output-store key, Collect-only wire dimming across the boundary | path ids in logs |
+
+Not applicable (reasoned in the audit): the four switchers' toggle-column
+alignment (`switcher.js` `graphColumnBounds`) is per canvas by design — a
+subgraph and its parent are never on screen together; the Distributor, the
+Checkpoint Switcher and the Notebook read and write only their own widgets and
+their own links (the Distributor's type adoption falls back to the link's
+recorded type at a boundary); every backend prompt scan
+(`_consumed_output_slots`, `_input_origin`, the Distributor's wired-slot scan,
+the switchers' all-off sibling scan) compares the flattened execution id as a
+string and is nested-aware by construction (pinned in
+`tests/test_nested_subgraphs.py`).
+
+**Known limits, stated rather than discovered.** A definition shared by several
+SubgraphNodes is ONE set of widgets: pins, states and links address it under
+every instance path (harmless duplicates, deliberately not collapsed — a state
+saved elsewhere may name either path). A SubgraphNode's PROMOTED widget keeps
+its value in the frontend's widget store, not on the inner node, so a state or
+the estimator reads the inner node's own widget. Muted/bypassed nodes are not
+modelled by the walks (as before). A subgraph input wired straight to its own
+output is resolved by the helpers as the wire it is, but the frontend's own
+prompt flattening cannot resolve it (`ExecutableNodeDTO._resolveSubgraphOutput`).
 
 ## §8 Versioning & stability
 

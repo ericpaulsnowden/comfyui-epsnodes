@@ -1173,6 +1173,14 @@ function registerController(node) {
   if (!sharedPollTimer) {
     sharedPollTimer = setInterval(() => {
       if (document.hidden) return
+      // v1.2.0 (FORMAT.md §7.10): the periodic point that re-verifies the
+      // graph add/remove watch on every graph -- core drops our wrapper on a
+      // subgraph enter/exit and under Vue nothing else ticks (no heartbeat).
+      try {
+        armControllerGraphWatches()
+      } catch (error) {
+        api.warn(`${NODE_TITLE}: graph watch re-arm failed`, error)
+      }
       sharedSetsRefresh().catch(() => {})
     }, SETS_POLL_MS)
     document.addEventListener('visibilitychange', onSharedVisibilityChange)
@@ -1423,14 +1431,11 @@ function familyOf(node) {
  * segment compares numerically, so "10" > "9" and "3:2" > "3".
  */
 function comparePathIds(a, b) {
-  const as = String(a).split(':').map(Number)
-  const bs = String(b).split(':').map(Number)
-  const len = Math.max(as.length, bs.length)
-  for (let i = 0; i < len; i++) {
-    const d = (as[i] ?? -Infinity) - (bs[i] ?? -Infinity)
-    if (d) return d
-  }
-  return 0
+  // v1.2.0 (shared-code rule, FORMAT.md §7.10): the ONE definition now lives
+  // in api.js (`api.comparePathIds`) so every nested-aware "lowest id wins"
+  // tie-break in the pack (Image Grid's collision sweep, here) orders path
+  // ids identically. This name stays as the local alias the call sites use.
+  return api.comparePathIds(a, b)
 }
 
 /**
@@ -1442,8 +1447,19 @@ function comparePathIds(a, b) {
  */
 function findTargetCandidates() {
   const out = []
+  // v1.2.0 (owner ask 2026-10-03, FORMAT.md §7.10): a loader inside a
+  // subgraph DEFINITION that several SubgraphNodes instantiate is ONE node
+  // object that `walkLiveNodes` reports once per instance path. Listing it
+  // per path made "All loaders (N)" count it twice, defeated the "exactly
+  // one loader -> auto-select" rule, and shifted every later loader's
+  // composite slot index by one. One entry per node (the first instance
+  // path); a stored label naming a later instance path ("#7:2") still
+  // resolves, because `resolveTargetNode`/`pllAscendingIndexById` look it up
+  // by path/node identity rather than through this list.
+  const seen = new Set()
   for (const { node, pathId } of api.walkLiveNodes(app.graph)) {
-    if (!familyOf(node)) continue
+    if (!familyOf(node) || seen.has(node)) continue
+    seen.add(node)
     out.push({ id: pathId, node, label: `${node.title || node.type} #${pathId}` })
   }
   return out
@@ -1480,7 +1496,11 @@ function scheduleControllerRefresh() {
     try {
       // A refresh is also when NEW subgraphs get their watch — a
       // SubgraphNode added moments ago fired the add event that got us
-      // here, so its inner graph is armed before anything happens inside.
+      // here, so its inner graph is armed before anything happens inside --
+      // and when a hook core restored on a subgraph enter/exit is put back
+      // (v1.2.0: re-verified, never one-shot). Plain `walkGraphs` + install
+      // (not `armControllerGraphWatches`): a re-wrap here must not schedule
+      // ANOTHER refresh from inside this one.
       for (const graph of api.walkGraphs(root)) installGraphNodeWatch(graph)
       for (const { node } of api.walkLiveNodes(root)) {
         if (!node || node.type !== NODE_TYPE) continue
@@ -1496,27 +1516,47 @@ function scheduleControllerRefresh() {
 }
 
 /**
- * Install the graph-level add/remove watch ONCE per graph object. Verified
- * on the rig 2026-08-14: `onNodeAdded`/`onNodeRemoved` fire for a manual
- * drop, a delete, AND every node of a `loadGraphData`, in both renderers
- * and with no draw involved -- and `app.graph` survives a workflow load as
- * the SAME object, so one install keeps working. Chained, never replaced.
+ * Install (and RE-VERIFY) the graph-level add/remove watch on one graph.
+ * Verified on the rig 2026-08-14: `onNodeAdded`/`onNodeRemoved` fire for a
+ * manual drop, a delete, AND every node of a `loadGraphData`, in both
+ * renderers and with no draw involved. Chained, never replaced.
+ *
+ * v1.2.0 (owner ask 2026-10-03, FORMAT.md §7.10 nested reach): NO LONGER a
+ * one-shot flag. Core's `useGraphNodeManager` cleanup and
+ * `installErrorClearingHooks` disposer RESTORE `graph.onNodeAdded`/
+ * `onNodeRemoved` to the values they captured at THEIR install whenever the
+ * active graph changes (every subgraph enter/exit) and on a Nodes 2.0
+ * toggle, dropping any wrapper installed after them -- and the old
+ * once-per-graph boolean flag then refused to re-install, so the
+ * controller went deaf to loaders dropped in afterwards (cross_sweep.js
+ * v0.68.1 root-caused the same thing). The stored-and-re-verified pattern is
+ * now shared (`api.watchGraphHooks`, cross_sweep.js's `installGraphNodeWatch`
+ * shape): every pass re-checks that each hook is still ours and re-wraps the
+ * CURRENT value when not. Returns true when it (re)installed anything.
  */
+const CTRL_WATCH_KEY = '__epsCtrlNodeWatch'
+const CTRL_WATCH_HOOKS = ['onNodeAdded', 'onNodeRemoved']
+
 function installGraphNodeWatch(graph) {
-  if (!graph || graph.__epsCtrlNodeWatch) return
-  graph.__epsCtrlNodeWatch = true
-  for (const hook of ['onNodeAdded', 'onNodeRemoved']) {
-    const original = graph[hook]
-    graph[hook] = function (...args) {
-      let result
-      try {
-        result = original?.apply(this, args)
-      } catch (error) {
-        api.warn(`${NODE_TITLE}: original ${hook} threw`, error)
-      }
-      scheduleControllerRefresh()
-      return result
-    }
+  return api.watchGraphHooks(graph, CTRL_WATCH_KEY, CTRL_WATCH_HOOKS, () =>
+    scheduleControllerRefresh()
+  )
+}
+
+/**
+ * (Re-)arm the watch on EVERY graph of the workflow -- a subgraph's add/
+ * remove hooks fire only on that subgraph (v0.64.0), and core drops our
+ * wrapper on a subgraph enter/exit (above), so this runs from every refresh
+ * pass, `onAdded`, the heartbeat and the shared poller's tick (which is the
+ * Vue renderer's only guaranteed periodic point). When it had to re-wrap
+ * something, one refresh is scheduled: an add/remove may have fired into the
+ * gap while the hook was not ours.
+ */
+function armControllerGraphWatches() {
+  const root = app.graph
+  if (!root) return
+  if (api.watchAllGraphs(root, CTRL_WATCH_KEY, CTRL_WATCH_HOOKS, () => scheduleControllerRefresh())) {
+    scheduleControllerRefresh()
   }
 }
 
@@ -1620,7 +1660,14 @@ function pllAscendingIndex(node) {
 function pllAscendingIndexById(id) {
   if (id == null) return null
   const candidates = findTargetCandidates().sort((a, b) => comparePathIds(a.id, b.id))
-  const index = candidates.findIndex((c) => String(c.id) === String(id))
+  let index = candidates.findIndex((c) => String(c.id) === String(id))
+  if (index === -1) {
+    // v1.2.0: a path naming a LATER instance of a shared subgraph definition
+    // ("7:2" when the candidate list carries the node once, as "3:2") still
+    // names a live loader -- rank it by node identity.
+    const node = api.findByPathId(app.graph, id)
+    if (node && familyOf(node)) index = candidates.findIndex((c) => c.node === node)
+  }
   return index === -1 ? null : index
 }
 
@@ -3000,7 +3047,7 @@ export function registerControllerNode() {
           // Watch the graph this node just joined, so a loader dropped in
           // LATER is noticed without waiting for a draw-driven heartbeat
           // (owner report 2026-08-14 -- see installGraphNodeWatch).
-          for (const graph of api.walkGraphs(app.graph)) installGraphNodeWatch(graph)
+          armControllerGraphWatches()
           this._refreshTargetCombo()
           this._probeAndUpdateStatus()
           // v0.68.1: CRUD anywhere (another controller, this one) lands here
@@ -4180,6 +4227,7 @@ export function registerControllerNode() {
         const now = Date.now()
         if (now - this._lastHeartbeat < HEARTBEAT_MIN_MS) return
         this._lastHeartbeat = now
+        armControllerGraphWatches() // v1.2.0: re-verify the hooks (cheap)
         this._refreshTargetCombo()
         this._probeAndUpdateStatus()
         // v0.68.1: the sets/layout poll LEFT the heartbeat -- it is shared,

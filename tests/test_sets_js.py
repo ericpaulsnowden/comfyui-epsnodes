@@ -119,7 +119,12 @@ class TestMirrorsComboIsPureV0681:
 
     def test_values_is_pure_and_display_is_identity_mapped(self, source: str) -> None:
         body = _function_body(source, "attachMirrorsWidget(node)")
-        assert "widget.options.values = () => [MIRRORS_ANY_VALUE, ...findPllCandidates().map((c) => c.label)]" in body
+        # v1.2.0: the same pure list, plus one hook re-verify (no widget
+        # write) -- the user is looking at the tag, the best cheap moment to
+        # put back a removal watch core dropped on a subgraph enter/exit.
+        assert "widget.options.values = () => {" in body
+        assert "installMirrorsGraphWatch()" in body
+        assert "return [MIRRORS_ANY_VALUE, ...findPllCandidates().map((c) => c.label)]" in body
         assert "widget.options.getOptionLabel = (value) => (value == null ? '' : String(value))" in body
         assert "widget.value = MIRRORS_ANY_VALUE" not in body  # no write inside the getter any more
 
@@ -128,10 +133,17 @@ class TestMirrorsComboIsPureV0681:
         assert "findPllCandidates()" in heal
         assert "widget.value = MIRRORS_ANY_VALUE" in heal
         watch = _function_body(source, "installMirrorsGraphWatch()")
-        assert "api.walkGraphs(app.graph)" in watch
-        assert "graph.__epsSetsMirrorsWatch" in watch  # install once per graph
-        assert "original?.apply(this, args)" in watch  # chained, never replaced
+        # v1.2.0 (FORMAT.md §7.10): stored-and-re-verified via the shared
+        # api.watchAllGraphs (covers every subgraph's own hooks), NOT an
+        # install-once flag -- core restores graph.onNodeRemoved on every
+        # subgraph enter/exit and Nodes 2.0 toggle.
+        assert "api.watchAllGraphs(app.graph, MIRRORS_WATCH_KEY, ['onNodeRemoved']" in watch
+        assert "const MIRRORS_WATCH_KEY = '__epsSetsMirrorsWatch'" in source
+        assert "graph.__epsSetsMirrorsWatch = true" not in source
         assert "scheduleMirrorsHeal()" in watch
+        # re-verified from the heal pass and the dropdown open too
+        assert "installMirrorsGraphWatch()" in _function_body(source, "scheduleMirrorsHeal()")
+        assert "installMirrorsGraphWatch()" in _function_body(source, "attachMirrorsWidget(node)")
         # one deferred pass per created node (configure() restores the tag
         # AFTER nodeCreated, so the tick lands after the whole load)
         attach = _function_body(source, "attachApplySetBehavior(node)")

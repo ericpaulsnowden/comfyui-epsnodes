@@ -236,13 +236,24 @@ def test_controller_target_discovery_does_not_depend_on_drawing() -> None:
     source = _source("web/lora_library/controller.js")
     assert "function installGraphNodeWatch(graph)" in source
     watch = source.split("function installGraphNodeWatch(graph)", 1)[1].split("\n}\n", 1)[0]
-    assert "graph.__epsCtrlNodeWatch" in watch, "must install once per graph"
-    assert "'onNodeAdded', 'onNodeRemoved'" in watch
-    assert "original?.apply(this, args)" in watch, "chained, never replaced"
+    # v1.2.0 (FORMAT.md §7.10): the shared stored-and-re-verified pattern
+    # (api.watchGraphHooks, cross_sweep.js v0.68.1's shape), NOT a one-shot
+    # flag -- core restores graph.onNodeAdded/onNodeRemoved on every subgraph
+    # enter/exit and on a Nodes 2.0 toggle, and a boolean refused to re-wrap.
+    assert "api.watchGraphHooks(graph, CTRL_WATCH_KEY, CTRL_WATCH_HOOKS" in watch
     assert "scheduleControllerRefresh()" in watch
-    # ...installed from onAdded across EVERY graph in the workflow (v0.64.0:
-    # subgraph events fire only on the subgraph's own hooks).
-    assert "for (const graph of api.walkGraphs(app.graph)) installGraphNodeWatch(graph)" in source
+    assert "const CTRL_WATCH_KEY = '__epsCtrlNodeWatch'" in source
+    assert "const CTRL_WATCH_HOOKS = ['onNodeAdded', 'onNodeRemoved']" in source
+    assert "graph.__epsCtrlNodeWatch = true" not in source, "the one-shot flag is gone"
+    # ...armed across EVERY graph in the workflow (v0.64.0: subgraph events
+    # fire only on the subgraph's own hooks) from onAdded, the heartbeat and
+    # the shared poller's tick (the Vue renderer's only periodic point).
+    arm = source.split("function armControllerGraphWatches()", 1)[1].split("\n}\n", 1)[0]
+    assert "api.watchAllGraphs(root, CTRL_WATCH_KEY, CTRL_WATCH_HOOKS" in arm
+    # def + onAdded + heartbeat + shared poller
+    assert source.count("armControllerGraphWatches()") >= 4
+    old_loop = "for (const graph of api.walkGraphs(app.graph)) installGraphNodeWatch(graph)"
+    assert old_loop not in source
 
 
 def test_controller_graph_refresh_is_coalesced_per_tick() -> None:

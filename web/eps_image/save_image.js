@@ -80,9 +80,18 @@ function applyFilenameSolo(file) {
   const token = tokenFromFileName(file.name)
   if (!token) return
   const found = []
+  // v1.2.0 nested reach (owner ask 2026-10-03, FORMAT.md §7.10): the walk
+  // already descends into subgraphs, but a multiplier inside a subgraph
+  // DEFINITION that several SubgraphNodes instantiate is the SAME node object
+  // reported once per instance path -- counting it per path made one
+  // multiplier look like several un-soloed ones and turned a clean 'apply'
+  // into 'ambiguous'. Distinct node objects only.
+  const seenNodes = new Set()
   for (const { node } of walkLiveNodes(app.graph)) {
     const cls = node?.comfyClass || node?.constructor?.comfyClass || node?.type
     if (cls !== MULTIPLIER_CLASS) continue
+    if (seenNodes.has(node)) continue
+    seenNodes.add(node)
     const widget = soloWidgetOf(node)
     if (!widget) continue
     found.push({ node, widget, soloValue: String(widget.value ?? '') })

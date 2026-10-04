@@ -151,3 +151,34 @@ def test_handle_file_is_wrapped_once_chained_and_image_only(source: str) -> None
     # no drop-path interception, no window listeners
     assert not re.search(r"window\.addEventListener", source)
     assert "onDragDrop" not in source
+
+
+# ------------------------------------------------------------------------
+# v1.2.0 nested reach (owner ask 2026-10-03, FORMAT.md §7.10): the drop
+# handler's multiplier lookup, driven for real against a fake nested graph.
+# ------------------------------------------------------------------------
+
+# The probe is a plain .mjs next to this file (its long JS lines stay out of
+# the Python linter); it drives the REAL init()/handleFile wrap over fakes.
+NESTED_DROP_PROBE_JS = (Path(__file__).resolve().parent / "nested_save_image_probe.mjs").read_text(
+    encoding="utf-8"
+)
+
+
+def test_drop_fallback_finds_a_multiplier_inside_a_subgraph(tmp_path: Path) -> None:
+    """The filename fallback walks the whole workflow: a lone multiplier inside
+    a subgraph is soloed; the same node reached through two SubgraphNode
+    instances is still ONE multiplier (apply, never a false 'ambiguous'); two
+    genuinely distinct un-soloed ones stay ambiguous; a baked one is left."""
+    from nested_layout import build_layout, run_probe
+
+    layout = build_layout(
+        tmp_path,
+        eps_image=("save_image.js",),
+        app_stub="export const app = { graph: null }\n",
+    )
+    out = run_probe(layout, NESTED_DROP_PROBE_JS)
+    assert out["nested"] == {"solos": ["m2_i1_t3"], "toasts": ["info"]}
+    assert out["shared"] == {"solos": ["m2_i1_t3"], "toasts": ["info"]}
+    assert out["ambiguous"] == {"solos": ["", ""], "toasts": ["warn"]}
+    assert out["baked"] == {"solos": ["m2_i1_t3"], "toasts": []}

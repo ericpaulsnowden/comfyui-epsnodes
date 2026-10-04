@@ -216,7 +216,12 @@
 
 import { app } from '../../../scripts/app.js'
 import { api } from '../../../scripts/api.js'
-import { subscribeWidgetsChangedExternally } from '../lora_library/api.js'
+import {
+  isSubgraphNode,
+  liveRootOf,
+  resolveSourcesAt,
+  subscribeWidgetsChangedExternally
+} from '../lora_library/api.js'
 
 const NODE_TYPE = 'EPSResolution'
 const NODE_TITLE = 'EPS Resolution'
@@ -636,6 +641,22 @@ function imageInputSlot(node) {
 // `Reroute`/rgthree's `Reroute (rgthree)`); anything else, known or not, is
 // a WALL whose own displayed image (if any) is read, never assumed to
 // forward something else's.
+//
+// v1.2.0 NESTED REACH (owner ask 2026-10-03: "Make sure all of the nodes
+// that can control other nodes also looks into nested nodes"; FORMAT.md
+// §7.10 nested reach, §6.5). The walk used to climb with litegraph's own
+// `getInputNode`, which stops dead at a subgraph boundary: it returns the
+// SubgraphNode (not the real source) when the image comes OUT of a subgraph
+// and null when it comes IN through a subgraph input node, so the source
+// line and `copy from image` silently went blank across a boundary. Every
+// hop now steps through `api.js`'s boundary-aware resolvers instead
+// (`upstreamSources` below): a hop returns an ARRAY, because a node inside a
+// subgraph DEFINITION that several SubgraphNodes instantiate has one real
+// source PER INSTANCE -- those feed the very same collect -> summarize
+// machinery as a switcher's several slots, so disagreeing instances read as
+// an honest "mixed: ..." and agreeing ones as one size, never a guess.
+// Cycle-guarded by PATH id ("3:2") for a located node, since inner node ids
+// can collide with root ids in older builds.
 
 //: Class ids/`.type` values this walk treats as pass-throughs. Verified
 //: against THIS repo, not guessed: `eps_image/nodes_distributor.py` class
@@ -671,7 +692,10 @@ function classIdOf(node) {
  * litegraph's own `getInputNode` (the same API `readIncomingImageSize`
  * always used) -- `null` for an unwired slot, a missing/renamed API, or
  * any thrown error (fail-soft: an unreadable graph is a wall, never a
- * guess). */
+ * guess). Single-graph only: since v1.2.0 this is the FALLBACK under
+ * `upstreamSources` (a host with no live `app.graph`, a node that is not in
+ * it -- the unit tests' fakes -- or a resolver that finds nothing on an odd
+ * host), never the primary read. */
 function upstreamNodeAt(node, slotIndex) {
   if (slotIndex < 0 || typeof node?.getInputNode !== 'function') return null
   try {
@@ -680,6 +704,52 @@ function upstreamNodeAt(node, slotIndex) {
     console.warn(PREFIX, 'getInputNode failed during the incoming-size walk', error)
     return null
   }
+}
+
+/**
+ * The walk's ONE hop primitive (v1.2.0 nested reach): the node(s) really
+ * feeding *item*'s input at *slotIndex*, as walk items `{node, graph?,
+ * pathId?}` -- an ARRAY, because stepping out of a node inside a shared
+ * subgraph definition fans out to one source per instance. *item* is either
+ * the entry node (`{node}`, location unknown) or a previous hop's result
+ * (which carries the `graph` + `pathId` it was found at).
+ *
+ *  - Resolved by the shared `api.resolveSourcesAt` (lora_library/api.js, the
+ *    one copy of this logic -- it was a hand-kept twin of frame_saver.js's
+ *    until the lead folded both into api.js). Entry (no `item.graph`):
+ *    locates the node (one entry per instance) and crosses every boundary.
+ *    A previous result (has `item.graph`): resolved FROM THAT EXACT PLACE,
+ *    never by re-resolving the node object again. That matters: a shared
+ *    definition's inner node is the same OBJECT under every instance's path,
+ *    so re-resolving it would fan out to ALL instances' outer sources and
+ *    make a Resolution fed through instance 1 appear to see instance 2's
+ *    image too -- a false "mixed". Staying on the lane keeps each hop exact.
+ *  - Nothing resolved (or no live root, or the resolver threw): the native
+ *    `getInputNode` read, so a fake/odd host works exactly as before. A
+ *    SubgraphNode that read returns is never taken as a wall when a root is
+ *    live: that is the dangling-output case the resolver just walked (an
+ *    unconnected subgraph output feeds nothing; the prompt drops it too).
+ * @param {object|null} root @param {{node: object, graph?: object, pathId?: string}} item
+ * @param {number} slotIndex
+ * @returns {Array<{node: object, graph?: object, pathId?: string, slot?: number}>}
+ */
+function upstreamSources(root, item, slotIndex) {
+  if (slotIndex < 0) return []
+  if (root) {
+    try {
+      // The shared lane-aware hop (api.js `resolveSourcesAt`): the entry node
+      // is located and resolved per instance, a previous hop's result is
+      // resolved from the exact place it was found.
+      const resolved = resolveSourcesAt(root, item, slotIndex)
+      if (resolved.length > 0) return resolved
+    } catch (error) {
+      console.warn(PREFIX, 'nested source resolution failed during the incoming-size walk', error)
+    }
+  }
+  const native = upstreamNodeAt(item.node, slotIndex)
+  if (!native) return []
+  if (root && isSubgraphNode(native)) return []
+  return [{ node: native }]
 }
 
 /**
@@ -701,15 +771,19 @@ function parseSwitcherToggles(raw) {
 }
 
 /** Every ENABLED, WIRED `image_N` input slot of an `EPSSwitcher` node, as
- * upstream NODE objects -- nodes_switcher.py's exact enabled rule: a
- * toggles key is disabled ONLY when explicitly `false`; an absent key, a
+ * upstream walk items -- nodes_switcher.py's exact enabled rule: a toggles
+ * key is disabled ONLY when explicitly `false`; an absent key, a
  * malformed/non-object toggles value, or a non-boolean-false value all
  * mean enabled. Own copy of the rule `cross_sweep.js`'s `enabledSlotLinks`
  * implements for the run-count estimator's SERIALIZED-graph view -- this
  * one reads the LIVE litegraph node instead (`node.inputs` is an array of
  * `{name, link}` here, not the estimator's name-keyed map), so it is
- * re-derived rather than imported. */
-function switcherSlotUpstreams(node) {
+ * re-derived rather than imported. *item* is the switcher's own walk item
+ * (v1.2.0 nested reach: a switcher INSIDE a subgraph steps out of it
+ * through the right SubgraphNode, and one slot can fan out to several items
+ * across a shared definition's instances -- see `upstreamSources`). */
+function switcherSlotUpstreams(root, item) {
+  const node = item.node
   const toggles = parseSwitcherToggles(widgetByName(node, 'toggles')?.value)
   const inputs = Array.isArray(node?.inputs) ? node.inputs : []
   const upstreams = []
@@ -718,26 +792,24 @@ function switcherSlotUpstreams(node) {
     if (!input || !/^image_\d+$/.test(input.name || '')) continue
     if (input.link == null) continue
     if (toggles[input.name] === false) continue
-    const upstream = upstreamNodeAt(node, i)
-    if (upstream) upstreams.push(upstream)
+    upstreams.push(...upstreamSources(root, item, i))
   }
   return upstreams
 }
 
-/** *node*'s single upstream at the named input (or slot 0 when *inputName*
- * is `null`, core Reroute's shape), as a one-element (or empty) array --
- * kept the same shape `switcherSlotUpstreams` returns so the walk can
- * treat every pass-through class uniformly. `EPSDistributor` has exactly
+/** *item*'s single upstream at the named input (or slot 0 when *inputName*
+ * is `null`, core Reroute's shape), as a (possibly empty) array of walk
+ * items -- kept the same shape `switcherSlotUpstreams` returns so the walk
+ * can treat every pass-through class uniformly. `EPSDistributor` has exactly
  * ONE real `image` input regardless of how many of ITS OWN outputs are
  * individually gated -- which of its outputs this walk arrived through
  * never matters, the source is the same either way. */
-function singlePassThroughUpstream(node, inputName) {
-  const inputs = Array.isArray(node?.inputs) ? node.inputs : []
+function singlePassThroughUpstream(root, item, inputName) {
+  const inputs = Array.isArray(item.node?.inputs) ? item.node.inputs : []
   const slot =
     inputName == null ? 0 : inputs.findIndex((input) => input && input.name === inputName)
   if (slot < 0 || slot >= inputs.length) return []
-  const upstream = upstreamNodeAt(node, slot)
-  return upstream ? [upstream] : []
+  return upstreamSources(root, item, slot)
 }
 
 /** The live pixel size *node* itself is displaying -- generalizes the
@@ -761,10 +833,21 @@ function ownDisplayedImageSize(node) {
  * (`EPSSwitcher` fans into its own enabled+wired slots; `EPSDistributor`
  * and both Reroute flavors follow their one input), collecting every
  * reachable WALL node's own live pixel size. Bounded to
- * `MAX_INCOMING_WALK_DEPTH` hops and cycle-guarded by node id -- a
- * revisited node stops that branch rather than looping, so even a
- * malformed graph (a genuine cycle) terminates. An unknown class is always
- * a wall: its own `.imgs` is read, never assumed to forward anything.
+ * `MAX_INCOMING_WALK_DEPTH` hops and cycle-guarded -- a revisited node
+ * stops that branch rather than looping, so even a malformed graph (a
+ * genuine cycle) terminates. An unknown class is always a wall: its own
+ * `.imgs` is read, never assumed to forward anything.
+ *
+ * v1.2.0 nested reach (owner ask 2026-10-03, FORMAT.md §7.10): every hop
+ * crosses subgraph boundaries (`upstreamSources`), so an image arriving out
+ * of a subgraph's output, or in through a subgraph input from outside, or
+ * through two levels of nesting, is found like a flat wire. A boundary
+ * crossing happens INSIDE one hop and does not spend `MAX_INCOMING_WALK_DEPTH`
+ * (only pass-through nodes do). The guard keys a located node by its PATH id
+ * ("3:2" -- the same inner node can sit under several SubgraphNode
+ * instances, and inner ids can collide with root ids in older builds) and an
+ * un-located one by node id, as before. A wall INSIDE a subgraph reports its
+ * own `imgs`, which is correct: that is the image it displays.
  *
  * Not pure (it reads the live graph), but exported so tests can drive it
  * against small fake node/graph fixtures the way `resolveWiredVideo`-style
@@ -774,29 +857,32 @@ function ownDisplayedImageSize(node) {
  */
 export function collectIncomingImageSizes(node) {
   const slot = imageInputSlot(node)
-  const start = upstreamNodeAt(node, slot)
-  if (!start) return []
+  const root = liveRootOf(node)
+  const start = upstreamSources(root, { node }, slot)
+  if (start.length === 0) return []
 
   const sizes = []
   const seen = new Set()
-  let frontier = [start]
+  let frontier = start
   for (let depth = 0; depth < MAX_INCOMING_WALK_DEPTH && frontier.length > 0; depth++) {
     const next = []
     for (const candidate of frontier) {
-      const id = candidate?.id
-      const key = id != null ? `id:${id}` : candidate
+      const target = candidate?.node
+      const id = target?.id
+      const key =
+        candidate?.pathId != null ? `path:${candidate.pathId}` : id != null ? `id:${id}` : target
       if (seen.has(key)) continue
       seen.add(key)
 
-      const classId = classIdOf(candidate)
+      const classId = classIdOf(target)
       if (classId === 'EPSSwitcher') {
-        next.push(...switcherSlotUpstreams(candidate))
+        next.push(...switcherSlotUpstreams(root, candidate))
       } else if (classId === 'EPSDistributor') {
-        next.push(...singlePassThroughUpstream(candidate, 'image'))
-      } else if (REROUTE_TYPES.has(candidate?.type) || REROUTE_TYPES.has(classId)) {
-        next.push(...singlePassThroughUpstream(candidate, null))
+        next.push(...singlePassThroughUpstream(root, candidate, 'image'))
+      } else if (REROUTE_TYPES.has(target?.type) || REROUTE_TYPES.has(classId)) {
+        next.push(...singlePassThroughUpstream(root, candidate, null))
       } else {
-        const size = ownDisplayedImageSize(candidate)
+        const size = ownDisplayedImageSize(target)
         if (size) sizes.push(size)
       }
     }
@@ -866,10 +952,12 @@ function resolveIncomingImageSummary(node) {
  * Historically ONE HOP only (`getInputNode` straight off the `image`
  * slot); since the 2026-08-28 owner report ("plugged into a switcher …
  * the app can't tell what the resolution is") it walks UP through
- * `collectIncomingImageSizes`'s pass-through classes first. Everything
- * remains optional-chained/try-caught throughout that walk, so a missing
- * graph, an unlinked slot, a renamed API, or an upstream mid-load all
- * still degrade to `null` here exactly as before.
+ * `collectIncomingImageSizes`'s pass-through classes first, and since
+ * v1.2.0 (owner ask 2026-10-03, FORMAT.md §7.10 nested reach) every hop of
+ * that walk also crosses subgraph boundaries. Everything remains
+ * optional-chained/try-caught throughout that walk, so a missing graph, an
+ * unlinked slot, a renamed API, or an upstream mid-load all still degrade to
+ * `null` here exactly as before.
  */
 function readIncomingImageSize(node) {
   const summary = resolveIncomingImageSummary(node)
@@ -3524,7 +3612,15 @@ function attachCopyFromImage(node) {
       return
     }
     if (summary.kind !== 'single') {
-      const wired = imageInputSlot(node) >= 0 && node.inputs?.[imageInputSlot(node)]?.link != null
+      // v1.2.0 nested reach: "wired" means a REAL source resolves, not just
+      // that the input holds a link -- inside a subgraph the link can run to
+      // a subgraph input that nothing feeds outside, and "run the loader
+      // once" would send the user after an image that does not exist.
+      const slot = imageInputSlot(node)
+      const wired =
+        slot >= 0 &&
+        node.inputs?.[slot]?.link != null &&
+        upstreamSources(liveRootOf(node), { node }, slot).length > 0
       toast(
         node,
         'warn',

@@ -328,6 +328,10 @@ happen there — and the Builder assembles prompts *out of* it:
   `examples/eps-cross-test-prompts.md` into your library first, same file the
   Run Multiplier demo uses).
 
+**Nested subgraphs (v1.2.0).** The Notebook dropdown finds every Prompt Notebook
+in the whole workflow, including ones inside subgraphs (listed as `Subgraph
+name › Notebook title — file.md`), wherever the builder itself sits.
+
 ## EPS Universal State Controller (shipped)
 
 - **Search matches several words now, in any order.** Typing `7 state`
@@ -386,6 +390,12 @@ another session.
   registry (`GET /eps/state_registry`) — the piece that lets this node (and
   future tools) read and write any node's settings without guessing at
   formats.
+
+**Nested subgraphs (v1.2.0).** Capture and Apply reach every state-bearing node
+in the workflow, including nodes inside subgraphs at any depth. They are listed
+on the Nodes page as `#3:2` (node 2 inside subgraph node 3); hover the id to
+see which subgraph. A state applied on another machine still finds nested nodes
+by title when the subgraph node's number differs.
 
 ## EPS Lora Loader State Controller (shipped; requires rgthree-comfy)
 
@@ -489,6 +499,12 @@ the loader stays the loader, this node just moves whole configurations
   keep working without rgthree at all.
 - Every `EPS Apply LoRA Set` dropdown refreshes automatically after any state
   change — no page reload.
+
+**Nested subgraphs (v1.2.0).** The controller sees loaders, pickers and Apply
+nodes at any subgraph depth (shown as `#3:2`), and keeps noticing new loaders
+after you have entered and left a subgraph (previously it could go deaf after
+the first trip into one). A loader inside a subgraph that is copied to several
+places counts once.
 
 ## EPS LoRA Picker (shipped)
 
@@ -604,6 +620,10 @@ favorites or recently-used anywhere in the ecosystem.
   browser, so the panel reads top-to-bottom: Selected, divider, browse,
   link.
 
+**Nested subgraphs (v1.2.0).** The "Link to" list shows loaders anywhere in the
+workflow, including inside subgraphs (`#3:2`), and stays accurate after entering
+and leaving subgraphs.
+
 ## EPS Apply LoRA Set (shipped)
 
 `EPSNodes → LoRA → EPS Apply LoRA Set`: pick a saved state from the dropdown and every
@@ -647,6 +667,10 @@ expectation — including stacked rows, a dual clip strength, a disabled row,
 and `strength_scale`. It needs `torch` plus an importable ComfyUI (set
 `EPS_COMFYUI_ROOT=/path/to/ComfyUI` if `comfy` isn't already on the path)
 and skips cleanly where those are absent.
+
+**Nested subgraphs (v1.2.0).** `mirrors loader` lists loaders inside subgraphs
+(`#3:2`) and still resets to `(any)` when one is deleted, even after you have
+been inside a subgraph.
 
 ## EPS LoRA Iterator (shipped)
 
@@ -859,6 +883,11 @@ save and recall the whole set at once — which is the point of it.
   off, and where the off rows were plugged in all survive tabbing away and back
   — and a field you are actively typing in is never overwritten underneath you.
 
+**Nested subgraphs (v1.2.0).** A row wired into a subgraph works like any other
+wire, and a Number Controller sitting *inside* a subgraph whose number leaves
+through the subgraph's own output now switches that wire off and back on with
+its checkbox too (before, the row read off while the number still flowed out).
+
 ## EPS Distributor (shipped)
 
 `EPSNodes → EPS Distributor`: the **mirror of EPS Image Switcher**. Where the
@@ -983,10 +1012,16 @@ what makes that possible.)
 - **Copy and paste is safe.** A pasted copy of an off Bypass doesn't remember
   the original's wires, so switching the copy on can't reach into the nodes the
   original was feeding.
+- **Works with subgraphs (v1.2.0):** a wire going into a subgraph is switched
+  off like any other — it checks the nodes *inside* the subgraph (an optional
+  input, or one with its own value, is fine; a required one refuses and the
+  message names it, e.g. `Looks › Save Audio (audio)`). A Bypass sitting
+  *inside* a subgraph whose output leaves through the subgraph's own output
+  works too, checking everything the subgraph feeds outside.
 - **Not supported (it refuses rather than lose a wire):** an output wired to a
-  legacy Reroute *node* (its input has no name to remember it by) or to a
-  subgraph's own output. Switching off also removes any curved reroute points
-  you added on that wire, so switching on reconnects it straight.
+  legacy Reroute *node* (its input has no name to remember it by). Switching
+  off also removes any curved reroute points you added on that wire, so
+  switching on reconnects it straight.
 
 ## EPS Splat Placement (shipped)
 
@@ -1155,6 +1190,10 @@ dimensions. It replaces a resize node + a reroute + a get-image-size node.
   once, the readout says so (`in mixed: 717x1600, 839x1200`) and *copy from
   image* refuses to guess rather than picking one at random.
 
+**Nested subgraphs (v1.2.0).** The incoming-size readout and *copy from image*
+see through subgraphs: they read the real source across a subgraph boundary,
+and say so honestly (`mixed`) when copies of a subgraph are fed differently.
+
 ## EPS Image Grid (shipped)
 
 - **Copy (Clipspace) always gives you the full-size image.** Right-click →
@@ -1245,6 +1284,10 @@ times to gather images, then send the whole set through a workflow at once.
   frame, switch to another open workflow tab and back, and it's still that
   one frame — not the whole buffer — so Emit keeps sending just the image
   you focused instead of quietly reverting.
+
+**Nested subgraphs (v1.2.0).** Image Grid works inside subgraphs: copy/paste
+identity collisions, the refresh after a run and the Collect-only wire dimming
+all reach across subgraph boundaries.
 
 ## EPS Run Multiplier (shipped)
 
@@ -1390,6 +1433,10 @@ always a mistake; the same rule covers `model`/`clip`/`image`/`label`).
   fixed seed repeats across every run, so strength and pair are the only
   variables moving.
 
+**Nested subgraphs (v1.2.0).** The `Runs: N` readout counts sources and chained
+multipliers inside subgraphs (and sees outside a subgraph from within one),
+refreshes when anything changes in any subgraph, and shows a `≥` floor with a
+note when a subgraph used several times gets different counts.
 
 ## EPS Save Image (shipped)
 
@@ -1446,6 +1493,11 @@ puts you back on the live library.
   or converting to JPEG loses it), and the filename fallback needs the name
   intact. The image also carries the Prompt Notebook text and Apply LoRA Set rows as they were (M3 pinning, v0.72.0) — the nodes show them pinned with a drift badge and an Unpin button.
 
+**Nested subgraphs (v1.2.0).** A Prompt Notebook, an Apply LoRA Set or the Run
+Multiplier inside a subgraph (at any depth) is pinned and soloed in the saved
+image like one at the top level. Dropping an older image whose file name carries
+the run token also finds the multiplier inside a subgraph.
+
 ## EPS Frame Saver (shipped)
 
 - **Upload a video from the computer you're sitting at.** Click **Upload…**
@@ -1496,6 +1548,10 @@ as an image.
   the frame extracted on Run is exact (decoded server-side with PyAV).
 - Common codecs (H.264 mp4, webm) play and scrub smoothly; an exotic codec the
   browser can't decode still extracts correctly on Run, it just won't preview.
+
+**Nested subgraphs (v1.2.0).** The Frame Saver follows its `video` wire across
+subgraph boundaries, so a Load Video inside (or outside) a subgraph still
+previews.
 
 ## Install
 

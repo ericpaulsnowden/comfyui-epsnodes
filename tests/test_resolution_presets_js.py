@@ -785,8 +785,15 @@ def test_attach_installs_the_shared_external_write_subscription(source: str) -> 
     # sets, not by class string -- any entry naming this node reconciles,
     # regardless of which widget(s) it wrote (cheap + idempotent either way).
     assert "if (entry?.node?._epsPresets) reconcilePresetsUi(entry.node)" in install
-    assert (
-        "import { subscribeWidgetsChangedExternally } from '../lora_library/api.js'" in source
+    # v1.2.0 nested reach: the same import statement now also carries the
+    # boundary-crossing graph helpers (the incoming-size walk,
+    # test_resolution_passthrough_js.py), so pin the NAME inside the one
+    # `../lora_library/api.js` import rather than a statement that lists
+    # only this name.
+    assert re.search(
+        r"import \{[^}]*\bsubscribeWidgetsChangedExternally\b[^}]*\}"
+        r" from '\.\./lora_library/api\.js'",
+        source,
     )
 
 

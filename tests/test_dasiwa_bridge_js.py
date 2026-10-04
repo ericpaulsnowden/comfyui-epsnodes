@@ -38,6 +38,7 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 BRIDGE_JS = REPO_ROOT / "web" / "lora_library" / "dasiwa_bridge.js"
+API_JS = REPO_ROOT / "web" / "lora_library" / "api.js"
 
 NODE = shutil.which("node")
 
@@ -90,6 +91,14 @@ const high = fakeDasiwa(7)
 const low = fakeDasiwa(3)
 app.graph = { _nodes: [high, low, { id: 5, type: 'SomeOtherNode' }] }
 out.findOrder = m.findDasiwaNodes().map((node) => node.id)
+// v1.2.0 nested reach: stackers INSIDE a subgraph (own id space; inner id 3
+// collides with root `low`) are found too, ordered by PATH id.
+const nestedA = fakeDasiwa(3)
+const nestedB = fakeDasiwa(2)
+const sub = { id: 9, type: 'Sub', subgraph: { _nodes: [nestedA, nestedB] } }
+app.graph = { _nodes: [high, low, sub] }
+const tag = (node) => `${node.id}${node === nestedA || node === nestedB ? 'n' : ''}`
+out.findNested = m.findDasiwaNodes().map(tag)
 
 out.probeWrongType = m.probeDasiwa({ id: 9, type: 'SomeOtherNode', widgets: [] })
 out.probeNoWidget = m.probeDasiwa(fakeDasiwa(20, { widgets: [] }))
@@ -249,9 +258,15 @@ def bridge_api(tmp_path_factory: pytest.TempPathFactory) -> dict:
     shutil.copyfile(BRIDGE_JS, module_dir / "dasiwa_bridge.js")
     # dasiwa_bridge.js imports only `../../../scripts/app.js` -- stub it
     # exactly as test_pll_bridge_js.py does; the probe mutates `app.graph`.
+    # v1.2.0 (FORMAT.md §7.10): the root-only finder now imports the shared
+    # `walkLiveNodes`/`comparePathIds` from `./api.js`, whose own imports
+    # (`scripts/api.js`, `scripts/app.js`, `./version.js`) need serving too.
+    shutil.copyfile(API_JS, module_dir / "api.js")
+    shutil.copyfile(API_JS.parent / "version.js", module_dir / "version.js")
     scripts = layout / "scripts"
     scripts.mkdir(parents=True, exist_ok=True)
     (scripts / "app.js").write_text("export const app = {}\n", encoding="utf-8")
+    (scripts / "api.js").write_text("export const api = {}\n", encoding="utf-8")
 
     probe = layout / "probe.mjs"
     probe.write_text(PROBE_JS, encoding="utf-8")
@@ -313,6 +328,13 @@ def test_find_dasiwa_nodes_sorted_ascending_and_type_filtered(bridge_api: dict) 
     """Graph order was [7, 3, non-DaSiWa]; the candidate order is ascending
     id with the non-DaSiWa dropped (§6.13 M4's cross-family combo order)."""
     assert bridge_api["findOrder"] == [3, 7]
+
+
+def test_find_dasiwa_nodes_reaches_into_subgraphs_ordered_by_path_id(bridge_api: dict) -> None:
+    """v1.2.0 nested reach (owner ask 2026-10-03, FORMAT.md §7.10): root 3,
+    root 7, then the nested "9:2" and "9:3" -- an inner id may collide with a
+    root id, the PATH id keeps them apart."""
+    assert bridge_api["findNested"] == ["3", "7", "2n", "3n"]
 
 
 # ----------------------------------------------------------------- probeDasiwa
@@ -530,10 +552,12 @@ def test_attribution_comment_records_gpl_data_only_provenance(source: str) -> No
 
 
 def test_no_import_of_the_clone_only_the_served_app_stub(source: str) -> None:
-    """NEW code speaking the DATA format: the module's one import is the
-    served scripts/app.js -- never the GPL clone (or anything else)."""
+    """NEW code speaking the DATA format: the module's imports are the
+    served scripts/app.js and (v1.2.0, FORMAT.md §7.10) this pack's own
+    shared traversal in ./api.js -- never the GPL clone (or anything else)."""
     assert re.findall(r"^import .*$", source, flags=re.MULTILINE) == [
-        "import { app } from '../../../scripts/app.js'"
+        "import { app } from '../../../scripts/app.js'",
+        "import { walkLiveNodes, comparePathIds } from './api.js'",
     ]
     assert "scratchpad" not in source
 

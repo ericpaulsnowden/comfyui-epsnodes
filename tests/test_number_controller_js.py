@@ -67,7 +67,11 @@ from pathlib import Path
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-NUMBER_CONTROLLER_JS = REPO_ROOT / "web" / "eps_image" / "number_controller.js"
+WEB = REPO_ROOT / "web"
+NUMBER_CONTROLLER_JS = WEB / "eps_image" / "number_controller.js"
+#: Fake Subgraph slots (SubgraphOutput.connect/disconnect, SubgraphInput) shared
+#: with tests/test_bypass_js.py -- see the file's own header.
+NESTED_SUBGRAPH_IO_MJS = Path(__file__).resolve().parent / "nested_subgraph_io.mjs"
 
 NODE = shutil.which("node")
 
@@ -140,6 +144,11 @@ NORMALIZE_REMEMBERED_LINKS_CASES = [
     ([{"input": "cfg"}], []),  # missing node dropped
     ([None, "garbage", 5], []),
     ([{"node": True, "input": "cfg"}], []),  # bool is not a valid node id
+    # v1.2.0: the subgraph OUTPUT pseudo-node (-20) is an ordinary number id
+    # and the output NAME an ordinary input name.
+    ([{"node": -20, "input": "out"}], [{"node": -20, "input": "out"}]),
+    ([{"node": "-20", "input": "out"}], [{"node": "-20", "input": "out"}]),
+    ([{"node": -20, "input": ""}], []),
     (
         [{"node": 1, "input": "a"}, "junk", {"node": 2, "input": "b"}],
         [{"node": 1, "input": "a"}, {"node": 2, "input": "b"}],
@@ -344,6 +353,7 @@ RESOLVE_DOM_WIDGET_MARGIN_CASES = [
 
 PROBE_JS = """
 import * as nc from './extensions/comfyui-epsnodes/eps_image/number_controller.js'
+import * as io from './nested_subgraph_io.mjs'
 
 // ---------------------------------------------------------------------------
 // Part 1: pure-helper probing (no DOM involved).
@@ -1001,6 +1011,282 @@ const dom = out.dom
   }
 }
 
+
+// ===========================================================================
+// NESTED SUBGRAPHS (v1.2.0, owner ask 2026-10-03: "Make sure all of the nodes
+// that can control other nodes also looks into nested nodes"; FORMAT.md
+// section 7.10) -- Tests N-A..N-I. The fake Subgraph slots (SubgraphOutput
+// .connect/.disconnect and friends) come from tests/nested_subgraph_io.mjs; the
+// node/graph shapes are this harness's own. No percent signs in here: this
+// whole string goes through Python's percent-formatting.
+// ===========================================================================
+
+/** A Subgraph whose OUTPUT slots are *outputs* (`[{name, type}]`), under a
+ * fresh root graph. */
+function makeFakeSubgraph(outputs) {
+  const root = makeFakeGraph()
+  const sub = io.asSubgraph(makeFakeGraph(), { name: 'Stage', rootGraph: root, outputs })
+  return { root, sub }
+}
+const innerLinksOf = (sub) => [...sub.links.values()].filter((l) => l.target_id === -20)
+const nestedState = (sub, node) => ({
+  linkIds: sub.outputs[0].linkIds.length,
+  nodeOutLinks: (node.outputs[0].links || []).length,
+  tableLinks: innerLinksOf(sub).length
+})
+const tickMs = () => new Promise((resolve) => setTimeout(resolve, 5))
+
+// --- N-A: a row wired to the subgraph OUTPUT: uncheck unplugs the inner
+// link, re-check replugs it, the memory round-trips as {node: -20, input: NAME}.
+{
+  const { sub } = makeFakeSubgraph([{ name: 'steps_out', type: 'INT' }])
+  const node = makeFakeNode('{}', 501)
+  sub.register(node)
+  nc.attach(node)
+  sub.outputs[0].connect(node.outputs[0], node)
+  node.__epsNcReload()
+  const result = {
+    before: nestedState(sub, node),
+    collected: nc.collectOutputTargets(node, 0),
+    badgeBefore: rowsOf(node)[0].typeEl.textContent
+  }
+  let row1 = rowsOf(node)[0]
+  row1.enabledInput.checked = false
+  row1.enabledInput.dispatch('change')
+  const mapOff = JSON.parse(node.widgets[0].value)
+  row1 = rowsOf(node)[0]
+  result.off = {
+    state: nestedState(sub, node),
+    storedEnabled: nc.isRowEnabled(mapOff.num_1),
+    storedLinks: nc.normalizeRememberedLinks(mapOff.num_1 && mapOff.num_1.links),
+    checkbox: row1.enabledInput.checked,
+    dimmed: row1.el.className.includes('epsnc-row-disabled'),
+    isOutputConnected: nc.isOutputConnected(node.outputs[0])
+  }
+  row1.enabledInput.checked = true
+  row1.enabledInput.dispatch('change')
+  const mapOn = JSON.parse(node.widgets[0].value)
+  const link = innerLinksOf(sub)[0]
+  result.on = {
+    state: nestedState(sub, node),
+    linkOrigin: link && link.origin_id, linkTarget: link && link.target_id,
+    linkSlot: link && link.target_slot,
+    storedEnabled: nc.isRowEnabled(mapOn.num_1),
+    storedLinks: nc.normalizeRememberedLinks(mapOn.num_1 && mapOn.num_1.links),
+    checkbox: rowsOf(node)[0].enabledInput.checked,
+    isOutputConnected: nc.isOutputConnected(node.outputs[0])
+  }
+  dom.nestedRowRoundTrip = result
+}
+
+// --- N-B: the Universal State Apply path against a subgraph output wire.
+{
+  const { sub } = makeFakeSubgraph([{ name: 'steps_out', type: 'INT' }])
+  const node = makeFakeNode('{}', 511)
+  sub.register(node)
+  nc.attach(node)
+  sub.outputs[0].connect(node.outputs[0], node)
+  node.__epsNcReload()
+  // stored OFF while the wire is still live -> detach, fresh targets captured
+  node.widgets[0].value = JSON.stringify({
+    num_1: { name: '', value: 0, type: '*', enabled: false }
+  })
+  node.__epsNcReload()
+  const mapOff = JSON.parse(node.widgets[0].value)
+  const detached = {
+    state: nestedState(sub, node),
+    remembered: nc.normalizeRememberedLinks(mapOff.num_1 && mapOff.num_1.links),
+    checkbox: rowsOf(node)[0].enabledInput.checked
+  }
+  // stored ON + unwired + memory -> replug, memory forgotten after ONE attempt
+  node.widgets[0].value = JSON.stringify({
+    num_1: {
+      name: '', value: 0, type: '*', enabled: true, links: [{ node: -20, input: 'steps_out' }]
+    }
+  })
+  node.__epsNcReload()
+  const mapOn = JSON.parse(node.widgets[0].value)
+  const replugged = {
+    state: nestedState(sub, node),
+    remembered: nc.normalizeRememberedLinks(mapOn.num_1 && mapOn.num_1.links)
+  }
+  dom.nestedApply = { detached, replugged }
+}
+
+// --- N-C: replug is soft per item and never stomps.
+{
+  // somebody else's wire now sits on the subgraph output
+  const { sub } = makeFakeSubgraph([{ name: 'steps_out', type: 'INT' }])
+  const node = makeFakeNode('{}', 521)
+  sub.register(node)
+  nc.attach(node)
+  sub.outputs[0].connect(node.outputs[0], node)
+  node.__epsNcReload()
+  let row1 = rowsOf(node)[0]
+  row1.enabledInput.checked = false
+  row1.enabledInput.dispatch('change')
+  const other = makeFakeNode('{}', 522)
+  sub.register(other)
+  const otherLink = sub.outputs[0].connect(other.outputs[0], other)
+  row1 = rowsOf(node)[0]
+  row1.enabledInput.checked = true
+  row1.enabledInput.dispatch('change')
+  const claimed = {
+    otherKept: sub.outputs[0].linkIds[0] === otherLink.id,
+    originNow: innerLinksOf(sub)[0] && innerLinksOf(sub)[0].origin_id,
+    nodeOutLinks: (node.outputs[0].links || []).length,
+    storedLinks: nc.normalizeRememberedLinks((JSON.parse(node.widgets[0].value).num_1 || {}).links)
+  }
+
+  // the output it named no longer exists / this graph is not a subgraph at all
+  const gone = makeFakeSubgraph([{ name: 'something_else', type: 'INT' }])
+  const goneNode = makeFakeNode('{}', 523)
+  gone.sub.register(goneNode)
+  nc.attach(goneNode)
+  let threw = null
+  try {
+    nc.reconnectRememberedTargets(goneNode, 0, [{ node: -20, input: 'steps_out' }])
+    const plain = makeFakeGraph()
+    const plainNode = makeFakeNode('{}', 524)
+    plain.register(plainNode)
+    nc.reconnectRememberedTargets(plainNode, 0, [{ node: -20, input: 'steps_out' }])
+  } catch (e) { threw = String(e) }
+
+  // one item throwing never blocks its neighbours
+  const mixed = makeFakeSubgraph([{ name: 'steps_out', type: 'INT' }])
+  const mixedNode = makeFakeNode('{}', 525)
+  mixed.sub.register(mixedNode)
+  const target = makeFakeTargetNode(526, 'cfg', 'FLOAT')
+  mixed.sub.register(target)
+  mixed.sub.outputs[0].connect = () => { throw new Error('boom') }
+  let mixedThrew = null
+  try {
+    nc.reconnectRememberedTargets(mixedNode, 0, [
+      { node: -20, input: 'steps_out' }, { node: 526, input: 'cfg' }])
+  } catch (e) { mixedThrew = String(e) }
+
+  // the type veto still applies to a replug onto a subgraph output typed IMAGE
+  const veto = makeFakeSubgraph([{ name: 'img_out', type: 'IMAGE' }])
+  const vetoNode = makeFakeNode('{}', 527)
+  veto.sub.register(vetoNode)
+  nc.attach(vetoNode)
+  nc.reconnectRememberedTargets(vetoNode, 0, [{ node: -20, input: 'img_out' }])
+
+  dom.nestedSoftReplug = {
+    claimed, goneLinks: innerLinksOf(gone.sub).length, threw,
+    mixedThrew, mixedNeighbourReplugged: target.inputs[0].link != null,
+    vetoed: {
+      tableLinks: innerLinksOf(veto.sub).length,
+      nodeOutLinks: (vetoNode.outputs[0].links || []).length
+    }
+  }
+}
+
+// --- N-D: a graph that is NOT a Subgraph with a stray -20 link degrades to the
+// old behaviour -- not remembered, not touched, never thrown.
+{
+  const attempt = (outputs) => {
+    const graph = makeFakeGraph()
+    const node = makeFakeNode('{}', 531)
+    graph.register(node)
+    if (outputs !== undefined) graph.outputs = outputs
+    const link = {
+      id: 9031, origin_id: node.id, origin_slot: 0, target_id: -20, target_slot: 0, type: '*'
+    }
+    graph.links.set(link.id, link)
+    node.outputs[0].links = [link.id]
+    let threw = null
+    let collected = null
+    try {
+      collected = nc.collectOutputTargets(node, 0)
+      nc.disconnectAllTargets(node, 0)
+    } catch (e) { threw = String(e) }
+    return {
+      threw, collected, stillThere: graph.links.has(link.id),
+      outLinks: node.outputs[0].links.length
+    }
+  }
+  dom.nestedNotASubgraph = {
+    noOutputs: attempt(undefined),
+    objectShaped: attempt({}),
+    noMethods: attempt([{ name: 'out', type: 'INT' }]),
+    noName: attempt([{ name: '', type: 'INT', connect() {}, disconnect() {} }]),
+    pure: {
+      isLink: [-20, '-20', 5, undefined].map((id) => nc.isSubgraphOutputLink({ target_id: id })),
+      nullLink: nc.isSubgraphOutputLink(null)
+    }
+  }
+}
+
+// --- N-E: type adoption (C) -- a SubgraphNode INPUT adopts its declared type;
+// a wire into the subgraph OUTPUT has no node (getNodeById is null), only the
+// link's recorded type, and nothing throws.
+{
+  const graph = makeFakeGraph()
+  const node = makeFakeNode('{}', 541)
+  graph.register(node)
+  const sg = makeFakeTargetNode(542, 'steps', 'INT') // an ordinary node to the graph
+  sg.subgraph = io.asSubgraph(makeFakeGraph(), {
+    name: 'Inner', rootGraph: graph, inputs: [{ name: 'steps', type: 'INT' }]
+  })
+  graph.register(sg)
+  nc.attach(node)
+  node.connect(0, sg, 0)
+  node.__epsNcReload()
+  const storedOf = (n) => (JSON.parse(n.widgets[0].value).num_1 || {})
+  const intoSubgraphNode = {
+    badge: rowsOf(node)[0].typeEl.textContent, stored: storedOf(node).type
+  }
+  let row1 = rowsOf(node)[0]
+  row1.enabledInput.checked = false
+  row1.enabledInput.dispatch('change')
+  const off = {
+    wired: sg.inputs[0].link != null,
+    remembered: nc.normalizeRememberedLinks(storedOf(node).links)
+  }
+  row1 = rowsOf(node)[0]
+  row1.enabledInput.checked = true
+  row1.enabledInput.dispatch('change')
+  const on = { wired: sg.inputs[0].link != null, badge: rowsOf(node)[0].typeEl.textContent }
+
+  const { sub } = makeFakeSubgraph([{ name: 'out', type: '*' }])
+  const inner = makeFakeNode('{}', 543)
+  sub.register(inner)
+  nc.attach(inner)
+  sub.outputs[0].connect(inner.outputs[0], inner)
+  let threw = null
+  try { inner.__epsNcReload() } catch (e) { threw = String(e) }
+  const untyped = {
+    threw, badge: rowsOf(inner)[0].typeEl.textContent, stored: storedOf(inner).type
+  }
+  // the same wire, recorded with a concrete type: adopted from link.type
+  innerLinksOf(sub)[0].type = 'INT'
+  inner.__epsNcReload()
+  const typed = {
+    badge: rowsOf(inner)[0].typeEl.textContent,
+    nullIds: [sub.getNodeById(-10), sub.getNodeById(-20)]
+  }
+  dom.nestedAdoption = { intoSubgraphNode, off, on, untyped, typed }
+}
+
+// --- N-F: the connection hook re-syncs a row whose subgraph output the USER
+// unplugged, even though SubgraphOutput.disconnect() reports the SubgraphOutput
+// (named by the user, not num_N) as `slot`.
+{
+  const { sub } = makeFakeSubgraph([{ name: 'my_steps', type: 'INT' }])
+  const node = makeFakeNode('{}', 551)
+  sub.register(node)
+  nc.attach(node)
+  sub.outputs[0].connect(node.outputs[0], node)
+  await tickMs()
+  innerLinksOf(sub)[0].type = 'INT'
+  node.__epsNcReload()
+  const badgeWired = rowsOf(node)[0].typeEl.textContent
+  sub.outputs[0].disconnect() // the user drags the wire off the subgraph output
+  await tickMs()
+  dom.nestedUserUnplug = { badgeWired, badgeAfter: rowsOf(node)[0].typeEl.textContent }
+}
+
 process.stdout.write(JSON.stringify(out))
 """
 
@@ -1021,14 +1307,23 @@ def number_controller_api(tmp_path_factory: pytest.TempPathFactory) -> dict:
     scripts.mkdir(parents=True, exist_ok=True)
     (scripts / "app.js").write_text("export const app = {}\n", encoding="utf-8")
 
-    # number_controller.js's second import -- a stub sufficient to resolve
-    # the module; the real pub/sub behavior is not what Test C drives (it
-    # invokes the `__epsNcReload` seam directly, same as the real subscriber
-    # callback would).
+    # number_controller.js's second import. v1.2.0 (nested reach) it also takes
+    # `SUBGRAPH_OUTPUT_ID` from the REAL api.js, so the real module sits next to
+    # a thin stub that re-exports it and shadows only the pub/sub the probe does
+    # not drive (Test C invokes the `__epsNcReload` seam directly, same as the
+    # real subscriber callback would; a local export beats an `export *` of the
+    # same name). The real api.js imports ../version.js and scripts/app.js +
+    # scripts/api.js, so those sit in the layout too.
     lora_library = layout / "extensions" / "comfyui-epsnodes" / "lora_library"
     lora_library.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(WEB / "lora_library" / "api.js", lora_library / "api_real.js")
+    shutil.copyfile(WEB / "lora_library" / "version.js", lora_library / "version.js")
+    (scripts / "api.js").write_text("export const api = {}\n", encoding="utf-8")
+    shutil.copyfile(NESTED_SUBGRAPH_IO_MJS, layout / "nested_subgraph_io.mjs")
     (lora_library / "api.js").write_text(
-        "export function subscribeWidgetsChangedExternally(handler) {}\n", encoding="utf-8"
+        "export * from './api_real.js'\n"
+        "export function subscribeWidgetsChangedExternally(handler) {}\n",
+        encoding="utf-8",
     )
 
     probe = layout / "probe.mjs"
@@ -1494,6 +1789,137 @@ def test_universal_state_apply_detaches_a_stale_link(number_controller_api: dict
         "the CURRENT live target must be captured fresh, not trusted from "
         "whatever (possibly stale) links the applied JSON itself carried"
     )
+
+
+# ------------------------------------------------------ nested subgraphs
+# v1.2.0 (owner ask 2026-10-03: "Make sure all of the nodes that can control
+# other nodes also looks into nested nodes"; FORMAT.md section 7.10). The
+# three shared unplug/replug helpers (collectOutputTargets /
+# disconnectAllTargets / reconnectRememberedTargets) now also handle a wire
+# into the OWNING subgraph's OUTPUT node (link target_id -20), which has no
+# node behind it. Fake Subgraph slots: tests/nested_subgraph_io.mjs (core's
+# SubgraphOutput.connect/disconnect). EPS Bypass imports the same three
+# helpers; tests/test_bypass_js.py drives them from the Bypass side.
+
+_GONE = {"linkIds": 0, "nodeOutLinks": 0, "tableLinks": 0}
+_WIRED = {"linkIds": 1, "nodeOutLinks": 1, "tableLinks": 1}
+
+
+def test_a_row_wired_to_the_subgraph_output_unplugs_and_replugs(
+    number_controller_api: dict,
+) -> None:
+    """The silent failure this closes: unchecking the row used to skip the -20
+    link everywhere, marking the row OFF while the wire still carried the
+    number out of the subgraph."""
+    r = number_controller_api["dom"]["nestedRowRoundTrip"]
+    assert r["before"] == _WIRED
+    # remembered as the id the serialized link carries + the output's NAME
+    assert r["collected"] == [{"node": -20, "input": "steps_out"}]
+    assert r["off"]["state"] == _GONE
+    assert r["off"]["storedEnabled"] is False
+    assert r["off"]["storedLinks"] == [{"node": -20, "input": "steps_out"}]
+    assert r["off"]["checkbox"] is False
+    assert r["off"]["dimmed"] is True
+    assert r["off"]["isOutputConnected"] is False, "ON/OFF must agree with the wiring"
+    assert r["on"]["state"] == _WIRED
+    assert (r["on"]["linkOrigin"], r["on"]["linkTarget"], r["on"]["linkSlot"]) == (501, -20, 0)
+    assert r["on"]["storedEnabled"] is True
+    assert r["on"]["storedLinks"] == [], "one attempt, then the memory is forgotten"
+    assert r["on"]["checkbox"] is True
+    assert r["on"]["isOutputConnected"] is True
+
+
+def test_universal_state_apply_detaches_and_replugs_a_subgraph_output_wire(
+    number_controller_api: dict,
+) -> None:
+    r = number_controller_api["dom"]["nestedApply"]
+    assert r["detached"]["state"] == _GONE, "stored OFF + still wired -> detach"
+    assert r["detached"]["remembered"] == [{"node": -20, "input": "steps_out"}], (
+        "the CURRENT live target is captured fresh"
+    )
+    assert r["detached"]["checkbox"] is False
+    assert r["replugged"]["state"] == _WIRED, "stored ON + unwired + memory -> replug"
+    assert r["replugged"]["remembered"] == []
+
+
+def test_replug_onto_a_subgraph_output_is_soft_and_never_stomps(
+    number_controller_api: dict,
+) -> None:
+    r = number_controller_api["dom"]["nestedSoftReplug"]
+    claimed = r["claimed"]
+    assert claimed["otherKept"] is True, "core's connect REPLACES a link: it must be skipped"
+    assert claimed["originNow"] == 522
+    assert claimed["nodeOutLinks"] == 0
+    assert claimed["storedLinks"] == []
+    assert r["goneLinks"] == 0, "the named output no longer exists: skipped quietly"
+    assert r["threw"] is None
+    assert r["mixedThrew"] is None, "one item raising never escapes"
+    assert r["mixedNeighbourReplugged"] is True, "...and never blocks its neighbours"
+    assert r["vetoed"] == {"tableLinks": 0, "nodeOutLinks": 0}, (
+        "wireTypeVeto still applies to a replug onto a subgraph output typed IMAGE"
+    )
+
+
+def test_a_minus_20_link_in_a_graph_that_is_not_a_subgraph_is_left_alone(
+    number_controller_api: dict,
+) -> None:
+    """No `outputs` array / object-shaped `outputs` / a slot without
+    connect+disconnect / a nameless slot: the link is neither remembered nor
+    touched (the pre-v1.2.0 behaviour), and nothing throws."""
+    r = number_controller_api["dom"]["nestedNotASubgraph"]
+    for case in ("noOutputs", "objectShaped", "noMethods", "noName"):
+        assert r[case] == {"threw": None, "collected": [], "stillThere": True, "outLinks": 1}, case
+    assert r["pure"] == {"isLink": [True, True, False, False], "nullLink": False}
+
+
+def test_type_adoption_through_a_subgraph_boundary(number_controller_api: dict) -> None:
+    """(a) a SubgraphNode INPUT is an ordinary node input: it adopts its
+    declared INT, and off/on works on the outer wire. (c) a wire into the
+    subgraph OUTPUT has no node (`getNodeById(-20)` is null): only the link's
+    own recorded type is available, so it stays `*` until that is concrete."""
+    r = number_controller_api["dom"]["nestedAdoption"]
+    assert r["intoSubgraphNode"] == {"badge": "INT", "stored": "INT"}
+    assert r["off"]["wired"] is False
+    assert r["off"]["remembered"] == [{"node": 542, "input": "steps"}]
+    assert r["on"] == {"wired": True, "badge": "INT"}
+    assert r["untyped"]["threw"] is None
+    assert r["untyped"]["badge"] == "any"
+    assert r["untyped"]["stored"] in (None, "*")
+    assert r["typed"]["badge"] == "INT"
+    assert r["typed"]["nullIds"] == [None, None]
+
+
+def test_a_user_unplug_of_the_subgraph_output_resyncs_the_row(number_controller_api: dict) -> None:
+    """`SubgraphOutput.disconnect()` passes the SubgraphOutput (a name the user
+    chose, not `num_N`) as `slot` but this node's output INDEX: the connection
+    hook matches the output-kind event by that index's name too."""
+    r = number_controller_api["dom"]["nestedUserUnplug"]
+    assert r["badgeWired"] == "INT"
+    assert r["badgeAfter"] == "any"
+
+
+def test_the_nested_branches_live_in_the_shared_helpers_once(source: str) -> None:
+    """Structure: the -20 detection is one exported pair
+    (`isSubgraphOutputLink` / `subgraphOutputSlotOf`) that all three shared
+    helpers use, so they can never disagree about what a -20 link is; the
+    constant comes from api.js, never a second copy of the number."""
+    assert "import { SUBGRAPH_OUTPUT_ID, subscribeWidgetsChangedExternally } from" in source
+    assert "const SUBGRAPH_OUTPUT_ID" not in source
+    collect = _function_body(source, "collectOutputTargets(node, idx)")
+    assert "subgraphOutputSlotOf(graph, link)" in collect
+    assert "node: SUBGRAPH_OUTPUT_ID, input: sub.slot.name" in collect
+    disconnect = _function_body(source, "disconnectAllTargets(node, idx)")
+    assert "subgraphOutputSlotOf(graph, link)?.slot.disconnect()" in disconnect
+    reconnect = _function_body(source, "reconnectRememberedTargets(node, idx, remembered)")
+    assert "String(item?.node) === String(SUBGRAPH_OUTPUT_ID)" in reconnect
+    assert "reconnectToSubgraphOutput(node, idx, item)" in reconnect
+    replug = _function_body(source, "reconnectToSubgraphOutput(node, idx, item)")
+    assert "slot.connect(output, node)" in replug
+    # never stomp: core's SubgraphOutput.connect replaces an existing link
+    assert replug.index("subgraphOutputIsTaken(slot)") < replug.index("slot.connect(output, node)")
+    helper = _function_body(source, "subgraphOutputSlotOf(graph, link)")
+    assert "Array.isArray(slots)" in helper
+    assert "typeof slot.connect !== 'function' || typeof slot.disconnect !== 'function'" in helper
 
 
 # ------------------------------------------------- fill-style panel sizing

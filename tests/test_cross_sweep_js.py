@@ -44,6 +44,7 @@ import subprocess
 from pathlib import Path
 
 import pytest
+from nested_layout import build_layout, run_probe
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 CROSS_SWEEP_JS = REPO_ROOT / "web" / "eps_image" / "cross_sweep.js"
@@ -1692,6 +1693,13 @@ def cross_sweep_api(tmp_path_factory: pytest.TempPathFactory) -> dict:
     module_dir = layout / "extensions" / "comfyui-epsnodes" / "eps_image"
     module_dir.mkdir(parents=True)
     shutil.copyfile(CROSS_SWEEP_JS, module_dir / "cross_sweep.js")
+    # v1.2.0 nested reach: cross_sweep.js imports the shared boundary
+    # helpers from `../lora_library/api.js` (which pulls `./version.js`), so
+    # a fixture that byte-copies only the one module no longer resolves.
+    library_dir = layout / "extensions" / "comfyui-epsnodes" / "lora_library"
+    library_dir.mkdir(parents=True)
+    for shared in ("api.js", "version.js"):
+        shutil.copyfile(REPO_ROOT / "web" / "lora_library" / shared, library_dir / shared)
 
     # cross_sweep.js's two imports -- `../../../scripts/api.js` and
     # `../../../scripts/app.js` -- stubbed exactly as test_picker_js.py
@@ -2048,22 +2056,27 @@ def test_no_window_listeners_and_no_interval_timers(source: str) -> None:
     both are DEFERRALS, not polling timers: the one-shot post-add recompute
     (at nodeCreated the node has no id yet, and the Vue renderer never
     self-heals via a redraw -- 2026-08-14), and the per-tick coalescer for
-    the graph-change watch (v0.63.2)."""
+    the graph-change watch (v0.63.2; since v1.2.0 one pass per tick on the
+    ROOT graph for the whole workflow, FORMAT.md §7.10 nested reach)."""
     assert "window.addEventListener" not in source
     assert "setInterval" not in source
     assert source.count("setTimeout(") == 2
     attach = _function_body(source, "attach(node)")
     assert "setTimeout(() => {" in attach  # the documented post-add deferral
     coalescer = _function_body(source, "scheduleGraphRecompute(graph)")
-    assert "graph.__epsRcRefreshQueued" in coalescer
+    assert "root.__epsRcRefreshQueued" in coalescer
+    assert "setTimeout(() => {" in coalescer
 
 
 def test_recompute_repaints_only_on_change(source: str) -> None:
     """A busy canvas redraws constantly; identical text must not thrash the
     DOM."""
-    body = _function_body(source, "recompute(state)")
+    body = _function_body(source, "recompute(state, pass)")
     assert "if (view.text === state.lastText && view.cls === state.lastCls) {" in body
-    assert "estimateRuns(snapshotFromGraph(graph), String(state.node.id))" in body
+    # v1.2.0: the view is estimated from the ROOT's snapshot (a lone trigger
+    # builds its own, the whole-workflow pass shares one) -- see
+    # test_recompute_estimates_from_the_root_graph below.
+    assert "readoutViewFor(state, root, pass?.snapshot || snapshotFromGraph(root))" in body
 
 
 def test_adapter_injects_the_live_image_grid_count(source: str) -> None:
@@ -2122,7 +2135,7 @@ def test_readout_wraps_and_grows_to_fit_long_messages(source: str) -> None:
     # be trusted, and the skipped pass retries via needsMeasure.
     assert "if (!scrollH || !lineEl.clientWidth) {" in body
     assert "state.needsMeasure = true" in body
-    recompute_body = _function_body(source, "recompute(state)")
+    recompute_body = _function_body(source, "recompute(state, pass)")
     # ...and a stale-WIDTH measurement re-sizes too: wrapping depends on
     # width, so a pass taken mid-layout (or before a node resize) must be
     # redone once the width settles.
@@ -2141,7 +2154,7 @@ def test_readout_wraps_and_grows_to_fit_long_messages(source: str) -> None:
         " : node.size[1]" in body
     )
     assert "Math.max(target, floor)" in body
-    assert "sizeToContent(state)" in _function_body(source, "recompute(state)")
+    assert "sizeToContent(state)" in _function_body(source, "recompute(state, pass)")
 
 
 def test_readout_size_never_double_counts_across_a_rebuild(source: str) -> None:
@@ -2189,36 +2202,79 @@ def test_run_count_refreshes_on_graph_changes_not_only_draws(source: str) -> Non
     in eps_image.js's VUE_AFFECTED_CLASSES, so "works under Vue" is a
     promise this file has to keep: deleting an upstream loader must not
     leave a stale number behind."""
-    assert "function installGraphNodeWatch(graph)" in source
-    watch = _function_body(source, "installGraphNodeWatch(graph)")
-    assert "graph.__epsRcNodeWatch" in watch, "per-graph record of the installed wrappers"
-    assert "'onNodeAdded', 'onNodeRemoved', 'onAfterChange'" in watch
-    assert "original?.apply(this, args)" in watch, "chained, never replaced"
+    assert "function installGraphNodeWatch(root)" in source
+    watch = _function_body(source, "installGraphNodeWatch(root)")
+    # v0.68.1 -> v1.2.0: NOT a one-shot boolean. Core's useGraphNodeManager
+    # cleanup and installErrorClearingHooks disposer (1.48.7 source maps)
+    # RESTORE graph.onNodeAdded/onNodeRemoved to the values captured at
+    # THEIR install on every subgraph enter/exit -- dropping a later wrapper
+    # -- so the installed wrapper is stored per hook and re-verified on every
+    # call (re-wrapping the CURRENT value when it is no longer ours; a
+    # surviving older wrapper of ours is adopted, bounded chain; the graph is
+    # the closure's, not `this`). That logic now lives ONCE in the shared
+    # lora_library/api.js `watchAllGraphs` (tests/test_nested_reach_js.py
+    # pins it), and this file just delegates -- on EVERY graph, since a
+    # subgraph's hooks fire only on that subgraph (FORMAT.md §7.10).
+    assert "watchAllGraphs(root, WATCH_KEY, WATCH_HOOKS, onWatchedGraphEvent)" in watch
+    assert "const WATCH_KEY = '__epsRcNodeWatch'" in source
+    assert "const WATCH_HOOKS = ['onNodeAdded', 'onNodeRemoved', 'onAfterChange']" in source
+    assert "graph.__epsRcNodeWatch = true" not in source, "the one-shot flag is gone"
+    assert "wrapper.__epsRcNodeWatch" not in source, "no hand-copied wrapper installer"
+    assert "original?.apply(this, args)" not in source, "the chain lives in the shared helper"
+    handler = _function_body(source, "onWatchedGraphEvent(graph)")
+    assert "scheduleGraphRecompute(graph)" in handler
+    assert "scheduleGraphRecompute(this)" not in source
     # State hangs off the node, so a deleted node takes its state with it.
     assert "node.__epsRcState = state" in source
-    assert "installGraphNodeWatch(node.graph || app.graph)" in source
-    # v0.68.1: NOT a one-shot boolean. Core's useGraphNodeManager cleanup and
-    # installErrorClearingHooks disposer (1.48.7 source maps) RESTORE
-    # graph.onNodeAdded/onNodeRemoved to the values captured at THEIR
-    # install on every subgraph enter/exit -- dropping a later wrapper -- so
-    # the installed wrapper is stored per hook and re-verified on every call
-    # (re-wrapping the CURRENT value when it is no longer ours), a surviving
-    # older wrapper of ours is adopted (bounded chain), and the graph is the
-    # closure's, not `this` (a core wrapper may chain to us receiver-less).
-    assert "graph.__epsRcNodeWatch = true" not in source, "the one-shot flag is gone"
-    assert "if (current && current === stored[hook]) continue" in watch
-    assert "if (current && current.__epsRcNodeWatch) {" in watch
-    assert "wrapper.__epsRcNodeWatch = true" in watch
-    assert "scheduleGraphRecompute(graph)" in watch
-    assert "scheduleGraphRecompute(this)" not in watch
-    # ...re-verified from every recompute pass, which is also what arms a
-    # SUBGRAPH's own graph: node.graph is null at nodeCreated (attach falls
-    # back to app.graph, the root) and the deferred first recompute sees it.
-    recompute = _function_body(source, "recompute(state)")
-    assert "installGraphNodeWatch(graph)" in recompute
-    assert recompute.index("installGraphNodeWatch(graph)") < recompute.index(
-        "estimateRuns(snapshotFromGraph(graph)"
+    assert "installGraphNodeWatch(rootGraphOf(node.graph) || app.graph)" in source
+    # ...re-verified from every lone recompute pass (and once per
+    # whole-workflow pass), which is also what arms a SUBGRAPH's own graph:
+    # node.graph is null at nodeCreated (attach falls back to app.graph, the
+    # root) and the deferred first recompute sees the real graphs.
+    recompute = _function_body(source, "recompute(state, pass)")
+    assert "if (!pass) installGraphNodeWatch(root)" in recompute
+    assert recompute.index("installGraphNodeWatch(root)") < recompute.index(
+        "readoutViewFor(state, root,"
     )
+    coalescer = _function_body(source, "scheduleGraphRecompute(graph)")
+    assert "installGraphNodeWatch(root)" in coalescer
+
+
+def test_recompute_estimates_from_the_root_graph(source: str) -> None:
+    """v1.2.0 nested reach (owner ask 2026-10-03, FORMAT.md §7.10): the
+    readout estimates from the ROOT graph (`rootGraphOf(state.node.graph)`,
+    falling back to app.graph), so a multiplier inside a subgraph sees
+    sources outside and vice versa, and finds its own path id(s) with
+    `locationsOfNode` -- one per instance of a shared definition."""
+    body = _function_body(source, "recompute(state, pass)")
+    assert "const root = pass?.root || rootGraphOf(state.node.graph) || app.graph" in body
+    view = _function_body(source, "readoutViewFor(state, root, snapshot)")
+    assert "locationsOfNode(root, state.node)" in view
+    assert "estimateRuns(snapshot, pathId)" in view
+    assert "formatInstanceReadouts(" in view
+    # the old "estimate from the node's own graph" call is gone
+    assert "estimateRuns(snapshotFromGraph(graph)" not in source
+    assert "state.node.graph || app.graph" not in source
+
+
+def test_whole_workflow_recompute_walks_every_graph(source: str) -> None:
+    """A change in ANY graph can change ANY multiplier's count, so the
+    coalesced pass is keyed on the ROOT graph, walks every node under it
+    (subgraphs included, via the shared walkLiveNodes), shares ONE snapshot,
+    and de-duplicates states (a node in a shared definition is walked once
+    per instance). `recomputeEveryGraph` no longer keeps its own graph
+    stack."""
+    body = _function_body(source, "scheduleGraphRecompute(graph)")
+    assert "const root = rootGraphOf(graph)" in body
+    assert "for (const { node } of walkLiveNodes(root))" in body
+    assert "const states = new Set()" in body
+    assert "pass = { root, snapshot: snapshotFromGraph(root) }" in body
+    assert "recompute(state, pass)" in body
+    assert "graph._nodes" not in body
+    every = _function_body(source, "recomputeEveryGraph()")
+    assert "scheduleGraphRecompute(root)" in every
+    assert "stack" not in every
+    assert "._nodes" not in every
 
 
 def test_model_low_is_a_welded_axis_member_in_the_estimator(source: str) -> None:
@@ -2253,3 +2309,1033 @@ def test_mode_combos_hidden_behind_a_property(source: str) -> None:
     assert "node.addProperty(PROP_SHOW_MODES, false, 'boolean')" in wire
     assert "applyModeVisibility(node)" in wire  # apply-once at attach
     assert "wireModeVisibility(node)" in _function_body(source, "attach(node)")
+
+
+# =============================================================================
+# v1.2.0 NESTED SUBGRAPHS (owner ask 2026-10-03: "make sure all of the nodes
+# that can control other nodes also looks into nested nodes"; FORMAT.md §7.10
+# nested reach). The REAL `snapshotFromGraph` + `estimateRuns` over the shared
+# fake nested litegraph (tests/nested_graph.mjs -- SubgraphNode `.subgraph`,
+# index-aligned inputs/outputs, boundary links with origin id -10 / target id
+# -20 that are NOT nodes, one definition shared by several instances), plus
+# the readout watch driven through the REAL `attach()` against a stub DOM.
+#
+# What this cannot cover (the rig must): the real LGraph/LLink classes, a
+# real graphToPrompt, core's own hook restore on subgraph enter/exit, and the
+# Vue renderer.
+# =============================================================================
+
+NESTED_PRELUDE_JS = r"""
+import { FakeGraph, FakeNode, FakeSubgraphNode, wire, INPUT, OUTPUT } from './nested_graph.mjs'
+import * as cs from './extensions/comfyui-epsnodes/eps_image/cross_sweep.js'
+
+const wlist = (widgets) => Object.entries(widgets).map(([name, value]) => ({ name, value }))
+const mk = (id, type, { inputs = [], outputs = ['out'], widgets = {} } = {}) =>
+  new FakeNode({ id, type, inputs, outputs, widgets: wlist(widgets) })
+const MULT_IN = ['model', 'model_low', 'clip', 'label', 'vae', 'text', 'image', 'name']
+const MULT_OUT = ['model', 'clip', 'image', 'text', 'save_prefix', 'label', 'vae', 'model_low']
+const mult = (id, widgets = {}) =>
+  mk(id, 'EPSCrossSweep', { inputs: MULT_IN, outputs: MULT_OUT, widgets })
+const slot = (name) => MULT_IN.indexOf(name)
+const notebook = (id, lines) =>
+  mk(id, 'LoraLibraryNotebook', {
+    inputs: ['text'],
+    outputs: ['text', 'name'],
+    widgets: { file: 'a.md', entry: Array.from({ length: lines }, (_, i) => `e${i}`).join('\n') }
+  })
+const loader = (id) => mk(id, 'UNETLoader', { outputs: ['MODEL'] })
+const textSource = (id) => mk(id, 'PrimitiveStringMultiline', { outputs: ['STRING'] })
+const modelSwitcher = (id, n) =>
+  mk(id, 'EPSModelSwitcher', {
+    inputs: Array.from({ length: n }, (_, i) => `model_${i + 1}`),
+    outputs: ['model', 'models_low'],
+    widgets: { toggles: '{}' }
+  })
+const subnode = (root, id, name, ins, outs) =>
+  new FakeSubgraphNode({ id, name, inputs: ins, outputs: outs, rootGraph: root })
+/** A model switcher fed by loaders `base..base+n-1`, all in *graph*. */
+const fedSwitcher = (graph, id, n, base) => {
+  const sw = graph.add(modelSwitcher(id, n))
+  for (let i = 0; i < n; i++) wire(graph, graph.add(loader(base + i)), 0, sw, i)
+  return sw
+}
+const pick = (e) => ({
+  total: e.total, atLeast: e.atLeast, steps: e.steps, pairs: e.pairs,
+  unknowns: [...e.unknowns].sort(), error: e.error, breakdown: e.breakdown
+})
+const est = (root, pathId) => pick(cs.estimateRuns(cs.snapshotFromGraph(root), pathId))
+const snap = (root) => cs.snapshotFromGraph(root)
+const out = {}
+"""
+
+NESTED_ESTIMATE_PROBE_JS = NESTED_PRELUDE_JS + r"""
+// ---- 1. root multiplier fed by sources INSIDE a subgraph --------------------
+{
+  // a Notebook (3 lines) behind a subgraph output
+  const root = new FakeGraph()
+  const S = root.add(subnode(root, 10, 'Prompts', [], ['text']))
+  wire(S.subgraph, S.subgraph.add(notebook(2, 3)), 0, OUTPUT, 0)
+  const M = root.add(mult(5))
+  wire(root, S, 0, M, slot('text'))
+  out.notebookInside = { est: est(root, '5'), text: snap(root).nodes['5'].inputs.text }
+}
+{
+  // a 3-way Model Switcher inside (the model axis), plain text at the root
+  const root = new FakeGraph()
+  const S = root.add(subnode(root, 10, 'Models', [], ['model']))
+  const sw = fedSwitcher(S.subgraph, 2, 3, 3)
+  wire(S.subgraph, sw, 0, OUTPUT, 0)
+  const M = root.add(mult(5))
+  const T = root.add(textSource(6))
+  wire(root, S, 0, M, slot('model'))
+  wire(root, T, 0, M, slot('text'))
+  out.switcherInside = est(root, '5')
+}
+{
+  // an Emit-mode Image Grid inside: the live imgs count crosses the boundary
+  const root = new FakeGraph()
+  const S = root.add(subnode(root, 10, 'Frames', [], ['image']))
+  const grid = S.subgraph.add(
+    mk(2, 'EPSImageGrid', { outputs: ['image'], widgets: { mode: 'Emit', focus: '' } })
+  )
+  grid.imgs = [1, 2, 3, 4]
+  wire(S.subgraph, grid, 0, OUTPUT, 0)
+  const M = root.add(mult(5))
+  wire(root, S, 0, M, slot('image'))
+  wire(root, root.add(notebook(6, 2)), 0, M, slot('text'))
+  out.gridInside = est(root, '5')
+}
+
+// ---- 2. multiplier INSIDE a subgraph, fed from OUTSIDE -----------------------
+{
+  const root = new FakeGraph()
+  const nb = root.add(notebook(1, 4))
+  const sw = fedSwitcher(root, 3, 2, 20)
+  const S = root.add(subnode(root, 10, 'Runner', ['text', 'model'], []))
+  wire(root, nb, 0, S, 0)
+  wire(root, sw, 0, S, 1)
+  const M = S.subgraph.add(mult(2))
+  wire(S.subgraph, INPUT, 0, M, slot('text'))
+  wire(S.subgraph, INPUT, 1, M, slot('model'))
+  out.insideFedFromOutside = {
+    est: est(root, '10:2'),
+    inputs: snap(root).nodes['10:2'].inputs,
+    // the SubgraphNode itself never enters the snapshot (nothing points at it)
+    keys: Object.keys(snap(root).nodes).sort()
+  }
+}
+
+// ---- 3. two levels deep ------------------------------------------------------
+{
+  // (a) root multiplier <- S1 <- S2 <- Notebook(5)
+  const root = new FakeGraph()
+  const S1 = root.add(subnode(root, 5, 'Outer', [], ['text']))
+  const S2 = S1.subgraph.add(subnode(root, 7, 'Inner', [], ['text']))
+  wire(S2.subgraph, S2.subgraph.add(notebook(2, 5)), 0, OUTPUT, 0)
+  wire(S1.subgraph, S2, 0, OUTPUT, 0)
+  const M = root.add(mult(9))
+  wire(root, S1, 0, M, slot('text'))
+  out.deepSource = { est: est(root, '9'), text: snap(root).nodes['9'].inputs.text }
+}
+{
+  // (b) multiplier at depth 2 <- (through two subgraph inputs) <- root switcher
+  const root = new FakeGraph()
+  const sw = fedSwitcher(root, 1, 3, 20)
+  const S1 = root.add(subnode(root, 5, 'Outer', ['model'], []))
+  wire(root, sw, 0, S1, 0)
+  const S2 = S1.subgraph.add(subnode(root, 7, 'Inner', ['model'], []))
+  wire(S1.subgraph, INPUT, 0, S2, 0)
+  const M = S2.subgraph.add(mult(4))
+  wire(S2.subgraph, INPUT, 0, M, slot('model'))
+  wire(S2.subgraph, S2.subgraph.add(notebook(6, 2)), 0, M, slot('text'))
+  out.deepConsumer = { est: est(root, '5:7:4'), model: snap(root).nodes['5:7:4'].inputs.model }
+}
+{
+  // (c) multiplier at depth 1: model from the ROOT (up one), text from depth 2 (down one)
+  const root = new FakeGraph()
+  const sw = fedSwitcher(root, 1, 2, 20)
+  const S1 = root.add(subnode(root, 5, 'Outer', ['model'], []))
+  wire(root, sw, 0, S1, 0)
+  const M = S1.subgraph.add(mult(3))
+  wire(S1.subgraph, INPUT, 0, M, slot('model'))
+  const S2 = S1.subgraph.add(subnode(root, 7, 'Inner', [], ['text']))
+  wire(S2.subgraph, S2.subgraph.add(notebook(2, 4)), 0, OUTPUT, 0)
+  wire(S1.subgraph, S2, 0, M, slot('text'))
+  out.mixedDepths = { est: est(root, '5:3'), text: snap(root).nodes['5:3'].inputs.text }
+}
+
+// ---- 4. pass-through (a subgraph input wired straight to its output) ---------
+{
+  const root = new FakeGraph()
+  const nb = root.add(notebook(1, 3))
+  const S = root.add(subnode(root, 10, 'Pipe', ['x'], ['y']))
+  wire(root, nb, 0, S, 0)
+  wire(S.subgraph, INPUT, 0, OUTPUT, 0)
+  const M = root.add(mult(5))
+  wire(root, S, 0, M, slot('text'))
+  out.passThrough = { est: est(root, '5'), text: snap(root).nodes['5'].inputs.text }
+}
+{
+  // two pass-throughs nested: S1.x -> S2.x -> S2.y -> S1.y
+  const root = new FakeGraph()
+  const nb = root.add(notebook(1, 3))
+  const S1 = root.add(subnode(root, 10, 'Pipe1', ['x'], ['y']))
+  wire(root, nb, 0, S1, 0)
+  const S2 = S1.subgraph.add(subnode(root, 11, 'Pipe2', ['x'], ['y']))
+  wire(S1.subgraph, INPUT, 0, S2, 0)
+  wire(S2.subgraph, INPUT, 0, OUTPUT, 0)
+  wire(S1.subgraph, S2, 0, OUTPUT, 0)
+  const M = root.add(mult(5))
+  wire(root, S1, 0, M, slot('text'))
+  out.passThroughNested = { est: est(root, '5'), text: snap(root).nodes['5'].inputs.text }
+}
+
+// ---- 5. dangling boundaries read as UNWIRED (the prompt drops them too) -------
+{
+  // (a) inside multiplier, model from a subgraph input nobody feeds outside
+  const root = new FakeGraph()
+  const S = root.add(subnode(root, 10, 'Open', ['m'], []))
+  const M = S.subgraph.add(mult(2))
+  wire(S.subgraph, INPUT, 0, M, slot('model'))
+  wire(S.subgraph, S.subgraph.add(notebook(3, 2)), 0, M, slot('text'))
+  out.danglingInput = { est: est(root, '10:2'), model: snap(root).nodes['10:2'].inputs.model }
+}
+{
+  // (b) root multiplier, model from a SubgraphNode output with nothing behind it
+  const root = new FakeGraph()
+  const S = root.add(subnode(root, 10, 'Empty', [], ['y']))
+  const M = root.add(mult(5))
+  wire(root, S, 0, M, slot('model'))
+  wire(root, root.add(notebook(6, 2)), 0, M, slot('text'))
+  out.danglingOutput = { est: est(root, '5'), model: snap(root).nodes['5'].inputs.model }
+}
+{
+  // (c) the REQUIRED text is the dangling one: nothing to pair, no crash
+  const root = new FakeGraph()
+  const S = root.add(subnode(root, 10, 'Open', ['t'], []))
+  const M = S.subgraph.add(mult(2))
+  wire(S.subgraph, INPUT, 0, M, slot('text'))
+  out.danglingText = est(root, '10:2')
+}
+
+// ---- 6. a chained multiplier INSIDE a subgraph: the dead-output guard --------
+const chained = (wireBacking) => {
+  const root = new FakeGraph()
+  const S = root.add(subnode(root, 10, 'Inner sweep', ['m'], ['m']))
+  const inner = S.subgraph.add(mult(2))
+  wire(S.subgraph, INPUT, 0, inner, slot('model'))
+  wire(S.subgraph, S.subgraph.add(notebook(3, 2)), 0, inner, slot('text'))
+  wire(S.subgraph, inner, 0, OUTPUT, 0) // the inner multiplier's MODEL output leaves the subgraph
+  if (wireBacking) wire(root, root.add(loader(20)), 0, S, 0)
+  const outer = root.add(mult(9))
+  wire(root, S, 0, outer, slot('model'))
+  wire(root, root.add(notebook(21, 3)), 0, outer, slot('text'))
+  return root
+}
+{
+  const root = chained(true)
+  const nodes = snap(root).nodes
+  out.chainedBacked = { est: est(root, '9'), outerModel: nodes['9'].inputs.model }
+  // the flattened-prompt view of the same wires, for the Python agreement test
+  const asPromptInputs = (inputs) =>
+    Object.fromEntries(
+      Object.entries(inputs)
+        .filter(([, link]) => link)
+        .map(([name, link]) => [name, [link.originId, link.originSlot]])
+    )
+  out.chainedPrompt = Object.fromEntries(
+    Object.entries(nodes).map(([id, n]) => [id, { inputs: asPromptInputs(n.inputs) }])
+  )
+}
+{
+  const root = chained(false)
+  out.chainedDead = est(root, '9')
+}
+
+// ---- 7. ONE definition, TWO instances, different upstream --------------------
+const shared = (leftLines, rightLines) => {
+  const root = new FakeGraph()
+  const nbA = root.add(notebook(1, leftLines))
+  const nbB = root.add(notebook(2, rightLines))
+  const S1 = root.add(subnode(root, 10, 'Twin', ['t'], []))
+  const S2 = root.add(subnode(root, 11, 'Twin', ['t'], []))
+  S2.subgraph = S1.subgraph // one shared definition, like a pasted SubgraphNode
+  const M = S1.subgraph.add(mult(20))
+  wire(S1.subgraph, INPUT, 0, M, slot('text'))
+  wire(root, nbA, 0, S1, 0)
+  wire(root, nbB, 0, S2, 0)
+  return { root, M }
+}
+{
+  const { root } = shared(3, 5)
+  out.sharedDifferent = { first: est(root, '10:20'), second: est(root, '11:20') }
+}
+{
+  // instance 10's output feeds instance 11's input: each path id resolves its OWN upstream
+  const root = new FakeGraph()
+  const nb = root.add(notebook(1, 3))
+  const S1 = root.add(subnode(root, 10, 'Link', ['t'], ['t']))
+  const S2 = root.add(subnode(root, 11, 'Link', ['t'], ['t']))
+  S2.subgraph = S1.subgraph
+  const M = S1.subgraph.add(mult(20))
+  wire(S1.subgraph, INPUT, 0, M, slot('text'))
+  wire(S1.subgraph, M, 3, OUTPUT, 0)
+  wire(root, nb, 0, S1, 0)
+  wire(root, S1, 0, S2, 0)
+  out.sharedChained = {
+    first: est(root, '10:20'),
+    second: est(root, '11:20'),
+    secondText: snap(root).nodes['11:20'].inputs.text
+  }
+}
+
+// ---- 8. same id at the root and inside a subgraph ----------------------------
+{
+  const root = new FakeGraph()
+  const rootNb = root.add(notebook(2, 7)) // root node id 2
+  const S = root.add(subnode(root, 10, 'Twin id', [], ['text']))
+  wire(S.subgraph, S.subgraph.add(notebook(2, 3)), 0, OUTPUT, 0) // inner node id 2
+  const MInner = root.add(mult(5))
+  wire(root, S, 0, MInner, slot('text'))
+  const MRoot = root.add(mult(6))
+  wire(root, rootNb, 0, MRoot, slot('text'))
+  const nodes = snap(root).nodes
+  out.sameId = {
+    viaSubgraph: est(root, '5'),
+    viaRoot: est(root, '6'),
+    keys: Object.keys(nodes).sort(),
+    innerEntry: nodes['10:2'].widgets.entry.split('\n').length,
+    rootEntry: nodes['2'].widgets.entry.split('\n').length
+  }
+}
+
+// ---- 9. cycles terminate -------------------------------------------------------
+{
+  // two multipliers feeding each other's TEXT across a boundary
+  const root = new FakeGraph()
+  const S = root.add(subnode(root, 10, 'Loop', ['x'], ['y']))
+  const M2 = S.subgraph.add(mult(2))
+  wire(S.subgraph, INPUT, 0, M2, slot('text'))
+  wire(S.subgraph, M2, 3, OUTPUT, 0)
+  const M1 = root.add(mult(5))
+  wire(root, S, 0, M1, slot('text'))
+  wire(root, M1, 3, S, 0)
+  out.cycleMultipliers = { outer: est(root, '5'), inner: est(root, '10:2') }
+}
+{
+  // a boundary-only loop: S.y -> S.x with a pass-through inside
+  const root = new FakeGraph()
+  const S = root.add(subnode(root, 10, 'Ouroboros', ['x'], ['y']))
+  wire(S.subgraph, INPUT, 0, OUTPUT, 0)
+  wire(root, S, 0, S, 0)
+  const M = root.add(mult(5))
+  wire(root, S, 0, M, slot('text'))
+  out.cycleBoundary = { est: est(root, '5'), text: snap(root).nodes['5'].inputs.text }
+}
+
+// ---- 10. a flat graph snapshots exactly as before ------------------------------
+{
+  const root = new FakeGraph()
+  const sw = fedSwitcher(root, 1, 4, 11)
+  const T = root.add(textSource(3))
+  const M = root.add(mult(5, { pair_mode: 'paired', sweep_mode: 'multiply' }))
+  wire(root, sw, 0, M, slot('model'))
+  wire(root, T, 0, M, slot('text'))
+  // a STALE link: its origin id (99) names no node in this graph
+  const M2 = root.add(mult(6))
+  root.links.set(900, {
+    id: 900, origin_id: 99, origin_slot: 2, target_id: 6, target_slot: slot('model')
+  })
+  M2.inputs[slot('model')].link = 900
+  wire(root, T, 0, M2, slot('text'))
+  const nodes = snap(root).nodes
+  out.flat = {
+    keys: Object.keys(nodes).sort(),
+    five: nodes['5'],
+    staleModel: nodes['6'].inputs.model,
+    est: est(root, '5'),
+    staleEst: est(root, '6')
+  }
+}
+{
+  // a stale link INSIDE a subgraph keeps the prefix: still an unknown id, not "unwired"
+  const root = new FakeGraph()
+  const S = root.add(subnode(root, 10, 'Stale', [], []))
+  const M = S.subgraph.add(mult(2))
+  S.subgraph.links.set(901, {
+    id: 901, origin_id: 77, origin_slot: 0, target_id: 2, target_slot: slot('model')
+  })
+  M.inputs[slot('model')].link = 901
+  wire(S.subgraph, S.subgraph.add(notebook(3, 2)), 0, M, slot('text'))
+  out.staleInside = { model: snap(root).nodes['10:2'].inputs.model, est: est(root, '10:2') }
+}
+
+// ---- 11. link tables of every shape (Map / plain object / Map-and-index Proxy) --
+{
+  const build = () => {
+    const root = new FakeGraph()
+    const S = root.add(subnode(root, 10, 'Tables', [], ['text']))
+    wire(S.subgraph, S.subgraph.add(notebook(2, 3)), 0, OUTPUT, 0)
+    const M = root.add(mult(5))
+    wire(root, S, 0, M, slot('text'))
+    return { root, S }
+  }
+  const asObject = (graph) => { graph.links = Object.fromEntries(graph.links) }
+  const asProxy = (graph) => {
+    const map = graph.links
+    graph.links = new Proxy(map, {
+      get(target, prop) {
+        if (typeof prop === 'string' && /^\d+$/.test(prop)) return target.get(Number(prop))
+        const value = Reflect.get(target, prop)
+        return typeof value === 'function' ? value.bind(target) : value
+      }
+    })
+  }
+  out.linkTables = {}
+  for (const [name, shape] of [['map', null], ['object', asObject], ['proxy', asProxy]]) {
+    const { root, S } = build()
+    if (shape) { shape(root); shape(S.subgraph) }
+    out.linkTables[name] = est(root, '5').total
+  }
+}
+
+console.log(JSON.stringify(out))
+"""
+
+NESTED_FORMAT_PROBE_JS = NESTED_PRELUDE_JS + r"""
+const E = (o) => ({
+  total: 0, atLeast: false, steps: 1, pairs: 1, unknowns: [], error: null, breakdown: '',
+  solo: null, soloOf: 0, soloOfAtLeast: false, ...o
+})
+const fmt = (...ests) =>
+  cs.formatInstanceReadouts(ests.map((est, i) => ({ pathId: `${3 + i}:5`, est })))
+const four = E({ total: 6, steps: 2, pairs: 3 })
+const three = E({ total: 3, steps: 1, pairs: 3 })
+const five = E({ total: 5, steps: 1, pairs: 5 })
+out.cases = {
+  empty: cs.formatInstanceReadouts([]),
+  single: fmt(E({ total: 8, steps: 4, pairs: 2 })),
+  singleMatchesFormatReadout: cs.formatReadout(E({ total: 8, steps: 4, pairs: 2 })),
+  agree: fmt(E({ total: 8, steps: 4, pairs: 2 }), E({ total: 8, steps: 4, pairs: 2 })),
+  differentTotals: fmt(three, five),
+  threeUses: fmt(five, three, five),
+  sameTotalOtherSplit: fmt(four, E({ total: 6, steps: 3, pairs: 2 })),
+  oneIsFloor: fmt(
+    E({ total: 4, atLeast: true, steps: 2, pairs: 2, unknowns: ['text'] }),
+    E({ total: 4, steps: 2, pairs: 2 })
+  ),
+  failing: fmt(
+    three,
+    E({ error: 'sweep lengths disagree: model=4 vs vae=2 — the queue will fail' })
+  ),
+  solo: fmt(
+    E({ total: 1, solo: 'm1_t1', soloOf: 4 }),
+    E({ total: 1, solo: 'm1_t1', soloOf: 6 })
+  ),
+  zeroAndEight: fmt(
+    E({ total: 0, breakdown: 'nothing to run' }),
+    E({ total: 8, steps: 4, pairs: 2 })
+  ),
+  allZeroDifferentNames: fmt(
+    E({ total: 0, breakdown: 'nothing to run (text input is empty/blocked)' }),
+    E({ total: 0, breakdown: 'nothing to run' })
+  )
+}
+console.log(JSON.stringify(out))
+"""
+
+
+@pytest.fixture(scope="module")
+def nested_estimates(tmp_path_factory: pytest.TempPathFactory) -> dict:
+    """The estimator probe over every nested fixture (one Node run)."""
+    layout = build_layout(
+        tmp_path_factory.mktemp("cross_sweep_nested"), eps_image=("cross_sweep.js",)
+    )
+    return run_probe(layout, NESTED_ESTIMATE_PROBE_JS)
+
+
+@pytest.fixture(scope="module")
+def nested_formats(tmp_path_factory: pytest.TempPathFactory) -> dict:
+    layout = build_layout(
+        tmp_path_factory.mktemp("cross_sweep_nested_fmt"), eps_image=("cross_sweep.js",)
+    )
+    return run_probe(layout, NESTED_FORMAT_PROBE_JS)
+
+
+def _est(total: int, steps: int, pairs: int, **extra: object) -> dict:
+    """The estimator fields every nested case asserts on (see `pick` in the probe)."""
+    return {
+        "total": total,
+        "atLeast": False,
+        "steps": steps,
+        "pairs": pairs,
+        "unknowns": [],
+        "error": None,
+        "breakdown": f"{steps} sweep step{'s' if steps != 1 else ''} × "
+        f"{pairs} pair{'s' if pairs != 1 else ''}",
+        **extra,
+    }
+
+
+# ------------------------------------------------- sources inside a subgraph
+
+
+def test_root_multiplier_counts_a_notebook_inside_a_subgraph(nested_estimates: dict) -> None:
+    """The headline gap: the snapshot used to read ONE graph, so a wire out of
+    a SubgraphNode output pointed at an id that was not in it and counted as
+    UNKNOWN (`≥`). It now resolves to the inner node's PATH id."""
+    got = nested_estimates["notebookInside"]
+    assert got["text"] == {"originId": "10:2", "originSlot": 0}
+    assert got["est"] == _est(3, 1, 3)
+
+
+def test_root_multiplier_counts_a_switcher_inside_a_subgraph(nested_estimates: dict) -> None:
+    assert nested_estimates["switcherInside"] == _est(3, 3, 1)
+
+
+def test_root_multiplier_counts_an_image_grid_inside_a_subgraph(nested_estimates: dict) -> None:
+    """The live imgs count is injected per node OBJECT, so it crosses the
+    boundary too: 4 frames x 2 texts, still a floor (server state)."""
+    got = nested_estimates["gridInside"]
+    assert got["total"] == 8
+    assert got["atLeast"] is True
+    assert got["unknowns"] == ["image"]
+
+
+# ------------------------------------------- multiplier inside, source outside
+
+
+def test_multiplier_inside_a_subgraph_sees_sources_outside(nested_estimates: dict) -> None:
+    """A link out of the subgraph's INPUT pseudo-node (origin id -10) climbs
+    out through the owning SubgraphNode instance -- known from the path
+    prefix -- to whatever feeds that input in the parent graph."""
+    got = nested_estimates["insideFedFromOutside"]
+    assert got["inputs"]["text"] == {"originId": "1", "originSlot": 0}
+    assert got["inputs"]["model"] == {"originId": "3", "originSlot": 0}
+    assert got["est"] == _est(8, 2, 4)
+    # the SubgraphNode never enters the snapshot: nothing can see it as an
+    # unknown-class source any more
+    assert "10" not in got["keys"]
+    assert "10:2" in got["keys"]
+
+
+def test_two_levels_deep_in_both_directions(nested_estimates: dict) -> None:
+    deep_source = nested_estimates["deepSource"]
+    assert deep_source["text"] == {"originId": "5:7:2", "originSlot": 0}
+    assert deep_source["est"] == _est(5, 1, 5)
+    deep_consumer = nested_estimates["deepConsumer"]
+    assert deep_consumer["model"] == {"originId": "1", "originSlot": 0}
+    assert deep_consumer["est"] == _est(6, 3, 2)
+
+
+def test_source_and_consumer_at_different_depths(nested_estimates: dict) -> None:
+    got = nested_estimates["mixedDepths"]
+    assert got["text"] == {"originId": "5:7:2", "originSlot": 0}
+    assert got["est"] == _est(8, 2, 4)
+
+
+def test_pass_through_subgraph_resolves(nested_estimates: dict) -> None:
+    """A subgraph input wired straight to its output (no node inside)."""
+    for case in ("passThrough", "passThroughNested"):
+        got = nested_estimates[case]
+        assert got["text"] == {"originId": "1", "originSlot": 0}, case
+        assert got["est"] == _est(3, 1, 3), case
+
+
+# ------------------------------------------------------- dangling boundaries
+
+
+def test_dangling_boundaries_read_as_unwired_not_unknown(nested_estimates: dict) -> None:
+    """An unconnected subgraph input/output is dropped by the prompt
+    flattening, so the input is UNWIRED (null) -- not a `≥` unknown, and
+    never a crash."""
+    inside = nested_estimates["danglingInput"]
+    assert inside["model"] is None
+    assert inside["est"] == _est(2, 1, 2)
+    outside = nested_estimates["danglingOutput"]
+    assert outside["model"] is None
+    assert outside["est"] == _est(2, 1, 2)
+
+
+def test_dangling_required_text_means_nothing_to_run(nested_estimates: dict) -> None:
+    got = nested_estimates["danglingText"]
+    assert got["total"] == 0
+    assert got["error"] is None
+    assert got["breakdown"] == "nothing to run"
+
+
+# ------------------------------------------- chained multiplier (dead output)
+
+
+def test_chained_multiplier_inside_a_subgraph_counts_through(nested_estimates: dict) -> None:
+    """The outer multiplier's model axis is the INNER multiplier's run count
+    (2 notebook lines), reached across the boundary: 2 steps x 3 pairs."""
+    got = nested_estimates["chainedBacked"]
+    assert got["outerModel"] == {"originId": "10:2", "originSlot": 0}
+    assert got["est"] == _est(6, 2, 3)
+
+
+def test_dead_output_guard_follows_the_flattened_prompt(nested_estimates: dict) -> None:
+    """Consuming the inner multiplier's model OUTPUT while its model INPUT is
+    unwired (here a dangling subgraph input) is the v0.51.0 queue-time
+    ValueError -- and the readout paints it, exactly as the flattened prompt
+    (where the inner node is "10:2" and the input carries no link) will."""
+    got = nested_estimates["chainedDead"]
+    assert got["error"] is not None
+    assert "model output is consumed" in got["error"]
+    assert "the queue will fail" in got["error"]
+
+
+def test_snapshot_links_agree_with_the_python_consumed_slot_scan(nested_estimates: dict) -> None:
+    """Item 4 of the nested-reach brief: the backend's `_consumed_output_slots`
+    scans the FLATTENED prompt, where a consumer reached across a subgraph
+    boundary references the inner multiplier by its path id. The snapshot's
+    boundary-resolved links, rendered as `[origin, slot]` prompt inputs, must
+    make that scan report the same consumed slot the JS dead-output guard
+    reasons about -- the two sides cannot disagree about who consumes it."""
+    from eps_image.nodes_cross_sweep import _consumed_output_slots
+
+    prompt = nested_estimates["chainedPrompt"]
+    assert _consumed_output_slots(prompt, "10:2") == {0}
+    # the outer multiplier's own output is consumed by nobody
+    assert _consumed_output_slots(prompt, "9") == set()
+    # ...and a root node whose id merely EQUALS the inner id is a different node
+    assert _consumed_output_slots(prompt, "2") == set()
+
+
+# ----------------------------------------------------- shared definitions
+
+
+def test_shared_definition_is_estimated_per_instance(nested_estimates: dict) -> None:
+    got = nested_estimates["sharedDifferent"]
+    assert got["first"] == _est(3, 1, 3)
+    assert got["second"] == _est(5, 1, 5)
+
+
+def test_instance_to_instance_wire_resolves_each_path_id_its_own_upstream(
+    nested_estimates: dict,
+) -> None:
+    """Instance 10's output feeds instance 11's input; the walk UP out of the
+    shared definition must pick the instance named by the path prefix, not
+    fan out to every instance."""
+    got = nested_estimates["sharedChained"]
+    assert got["secondText"] == {"originId": "10:20", "originSlot": 3}
+    assert got["first"] == _est(3, 1, 3)
+    assert got["second"] == _est(3, 1, 3)
+
+
+def test_same_id_at_root_and_inside_a_subgraph_stay_apart(nested_estimates: dict) -> None:
+    got = nested_estimates["sameId"]
+    assert got["viaSubgraph"]["pairs"] == 3
+    assert got["viaRoot"]["pairs"] == 7
+    assert got["innerEntry"] == 3
+    assert got["rootEntry"] == 7
+    assert "2" in got["keys"]
+    assert "10:2" in got["keys"]
+
+
+# ------------------------------------------------------------------- cycles
+
+
+def test_cycles_across_a_boundary_terminate(nested_estimates: dict) -> None:
+    """The probe finishing is the guard proof. Two multipliers feeding each
+    other across a boundary degrade to the honest `≥` floor; a boundary-only
+    loop (no node in it) resolves to an unwired input."""
+    for case in ("outer", "inner"):
+        got = nested_estimates["cycleMultipliers"][case]
+        assert got["atLeast"] is True, case
+        assert got["error"] is None, case
+    boundary = nested_estimates["cycleBoundary"]
+    assert boundary["text"] is None
+    assert boundary["est"]["total"] == 0
+
+
+# --------------------------------------------------------- flat is unchanged
+
+
+def test_flat_graph_snapshot_is_unchanged(nested_estimates: dict) -> None:
+    """No subgraphs: keys are the plain ids, the entry shape is exactly the
+    pre-1.0.0 one, and a STALE link (its origin names no node) still points
+    at the missing id so the estimator counts it UNKNOWN -- not unwired."""
+    got = nested_estimates["flat"]
+    assert sorted(got["keys"]) == sorted(["1", "3", "5", "6", "11", "12", "13", "14"])
+    five = got["five"]
+    assert set(five) == {"classType", "widgets", "inputs"}
+    assert five["classType"] == "EPSCrossSweep"
+    assert five["inputs"]["model"] == {"originId": "1", "originSlot": 0}
+    assert five["inputs"]["text"] == {"originId": "3", "originSlot": 0}
+    assert five["inputs"]["vae"] is None
+    assert got["staleModel"] == {"originId": "99", "originSlot": 2}
+    assert got["staleEst"]["atLeast"] is True
+    assert got["staleEst"]["unknowns"] == ["model"]
+    # 4 models x 1 text, text is the paired side
+    assert got["est"]["total"] == 4
+
+
+def test_stale_link_inside_a_subgraph_keeps_the_path_prefix(nested_estimates: dict) -> None:
+    got = nested_estimates["staleInside"]
+    assert got["model"] == {"originId": "10:77", "originSlot": 0}
+    assert got["est"]["atLeast"] is True
+    assert got["est"]["unknowns"] == ["model"]
+
+
+def test_every_link_table_shape_resolves_across_boundaries(nested_estimates: dict) -> None:
+    """Map, plain object and the Map-and-index Proxy 1.5x uses."""
+    assert nested_estimates["linkTables"] == {"map": 3, "object": 3, "proxy": 3}
+
+
+# ------------------------------------------------ shared helpers, not copies
+
+
+def test_nested_walk_is_delegated_to_the_shared_helpers(source: str) -> None:
+    """This pack keeps shipping fixes that miss hand-copied siblings, so the
+    boundary traversal, the path-id lookup and the hook watch are IMPORTED
+    from lora_library/api.js (FORMAT.md §7.10) -- never re-implemented in
+    this file."""
+    imports = re.search(r"import \{([^}]*)\} from '\.\./lora_library/api\.js'", source)
+    assert imports, "cross_sweep.js must import the shared nested helpers"
+    names = {name.strip() for name in imports.group(1).split(",")}
+    assert {
+        "SUBGRAPH_INPUT_ID",
+        "comparePathIds",
+        "graphLink",
+        "isSubgraphNode",
+        "locationsOfNode",
+        "resolveLinkSources",
+        "rootGraphOf",
+        "walkLiveNodes",
+        "watchAllGraphs",
+    } <= names
+    # the old one-graph link reader is gone (api.graphLink is its superset)
+    assert "function resolveGraphLink(" not in source
+    link = _function_body(source, "resolveInputLink(root, graph, prefix, idsInGraph, linkId)")
+    assert "graphLink(graph, linkId)" in link
+    assert "resolveLinkSources(root, graph, prefix, link)" in link
+    adapter = _function_body(source, "snapshotFromGraph(graph)")
+    assert "walkLiveNodes(graph)" in adapter
+    assert "if (isSubgraphNode(node)) continue" in adapter
+    assert "snapshot.nodes[pathId] = entry" in adapter
+    assert "graph?._nodes" not in adapter
+    # the header no longer claims a single-graph snapshot
+    assert "NESTED SUBGRAPHS (v1.2.0" in source
+    assert "built from the\n * live `app.graph`" not in source
+
+
+# ------------------------------------------------- the multi-instance readout
+
+
+def test_instance_readouts_agree_or_never_overclaim(nested_formats: dict) -> None:
+    """`formatInstanceReadouts` -- one multiplier, several path ids."""
+    cases = nested_formats["cases"]
+    assert cases["empty"] == {"text": "", "cls": ""}
+    # one instance / agreeing instances: exactly the ordinary readout
+    assert cases["single"] == cases["singleMatchesFormatReadout"]
+    assert cases["single"] == {"text": "Runs: 8 — 4 sweep steps × 2 pairs", "cls": ""}
+    assert cases["agree"] == cases["single"]
+    # disagreement: the largest as a floor + a note naming the N uses
+    assert cases["differentTotals"] == {
+        "text": "Runs: ≥ 5 — this subgraph is used 2 times with different counts (3, 5)",
+        "cls": "eps-rc-warn",
+    }
+    assert cases["threeUses"] == {
+        "text": "Runs: ≥ 5 — this subgraph is used 3 times with different counts (3, 5)",
+        "cls": "eps-rc-warn",
+    }
+    # equal totals, different splits: the total IS known -- no floor claimed
+    assert cases["sameTotalOtherSplit"] == {
+        "text": "Runs: 6 — this subgraph is used 2 times with different sweep/pair setups",
+        "cls": "eps-rc-warn",
+    }
+    # an instance that is itself a floor keeps the floor and stays honest
+    assert cases["oneIsFloor"]["text"] == (
+        "Runs: ≥ 4 — this subgraph is used 2 times with different counts (4, ≥ 4)"
+    )
+    # a zero-run copy beside a real one
+    assert cases["zeroAndEight"]["text"] == (
+        "Runs: ≥ 8 — this subgraph is used 2 times with different counts (0, 8)"
+    )
+    assert cases["allZeroDifferentNames"]["text"] == (
+        "Runs: 0 — this subgraph is used 2 times with different sweep/pair setups"
+    )
+
+
+def test_instance_readout_failure_and_solo_are_never_softened(nested_formats: dict) -> None:
+    cases = nested_formats["cases"]
+    # one failing copy fails the whole queue, whatever the others say
+    assert cases["failing"]["cls"] == "eps-rc-error"
+    assert cases["failing"]["text"] == (
+        "sweep lengths disagree: model=4 vs vae=2 — the queue will fail "
+        "(copy 4:5 of 2 uses of this subgraph)"
+    )
+    # solo: the SET sizes are what differ between copies
+    assert cases["solo"] == {
+        "text": "Solo m1_t1 — 1 of ≥ 6 runs — this subgraph is used 2 times "
+        "with different counts (4, 6)",
+        "cls": "eps-rc-warn",
+    }
+
+
+# ------------------------------------------------------- live readout + watch
+
+NESTED_WATCH_PROBE_JS = NESTED_PRELUDE_JS + r"""
+import { app } from './scripts/app.js'
+
+// ---- a stub DOM: attach() builds a root div holding the readout line --------
+const makeEl = (tag) => ({
+  tag, className: '', textContent: '', title: '', style: {}, clientWidth: 0, scrollHeight: 0,
+  children: [], appendChild(c) { this.children.push(c); return c }
+})
+globalThis.document = {
+  createElement: makeEl, getElementById: () => null, head: { appendChild() {} }
+}
+
+class MultNode extends FakeNode {
+  constructor(opts = {}) {
+    super({ type: 'EPSCrossSweep', inputs: MULT_IN, outputs: MULT_OUT, ...opts })
+    this.properties = {}
+  }
+  addDOMWidget(name, type, el, options) {
+    const widget = { name, type, element: el, options }
+    this.domEl = el
+    this.widgets.push(widget)
+    return widget
+  }
+  addProperty(name, value) { this.properties[name] = value }
+  computeSize() { return [200, 80] }
+  get readout() { return this.domEl?.children?.[0]?.textContent ?? null }
+  get readoutClass() { return this.domEl?.children?.[0]?.className ?? null }
+}
+const tick = () => new Promise((resolve) => setTimeout(resolve, 5))
+const marked = (graph, hook) => !!graph[hook]?.__epsRcNodeWatch
+
+// ---- A. multiplier at the ROOT, the change happens INSIDE a subgraph ----------
+{
+  const root = new FakeGraph()
+  app.graph = root
+  const S = root.add(subnode(root, 10, 'Models', [], ['model']))
+  const sw = S.subgraph.add(modelSwitcher(2, 6))
+  wire(S.subgraph, S.subgraph.add(loader(3)), 0, sw, 0)
+  wire(S.subgraph, S.subgraph.add(loader(4)), 0, sw, 1)
+  wire(S.subgraph, sw, 0, OUTPUT, 0)
+  const nb = root.add(notebook(7, 1))
+  const M = root.add(new MultNode({ id: 5 }))
+  wire(root, S, 0, M, slot('model'))
+  wire(root, nb, 0, M, slot('text'))
+  cs.attach(M)
+  const A = { first: M.readout }
+  A.armed = {
+    root: ['onNodeAdded', 'onNodeRemoved', 'onAfterChange'].map((h) => marked(root, h)),
+    sub: ['onNodeAdded', 'onNodeRemoved', 'onAfterChange'].map((h) => marked(S.subgraph, h))
+  }
+  const add = (id, at) => {
+    const l = loader(id)
+    wire(S.subgraph, l, 0, sw, at)
+    S.subgraph.add(l)
+  }
+  // 1) an event fired on the SUBGRAPH's own hook reaches a ROOT multiplier
+  add(5, 2)
+  await tick()
+  A.afterSubAdd = M.readout
+  // 2) core restores the subgraph's hook to the value it captured (ours dropped)
+  S.subgraph.onNodeAdded = undefined
+  A.deafHookIsOurs = marked(S.subgraph, 'onNodeAdded')
+  add(6, 3)
+  await tick()
+  A.deaf = M.readout // the new loader went unnoticed: the scenario is real
+  // 3) the next lone recompute re-verifies every graph's hooks
+  M.onConnectionsChange()
+  A.healed = { hookIsOurs: marked(S.subgraph, 'onNodeAdded'), readout: M.readout }
+  // 4) ...so a later subgraph add reaches the multiplier again
+  add(7, 4)
+  await tick()
+  A.afterHeal = M.readout
+  // 5) removal inside the subgraph is noticed too
+  const doomed = S.subgraph.getNodeById(7)
+  sw.disconnectInput(4)
+  S.subgraph.remove(doomed)
+  await tick()
+  A.afterRemove = M.readout
+  out.rootWatchesSubgraph = A
+}
+
+// ---- B. multiplier INSIDE a subgraph, the change happens at the ROOT ----------
+{
+  const root = new FakeGraph()
+  app.graph = root
+  const sw = root.add(modelSwitcher(3, 5))
+  wire(root, root.add(loader(20)), 0, sw, 0)
+  wire(root, root.add(loader(21)), 0, sw, 1)
+  const S = root.add(subnode(root, 10, 'Runner', ['model'], []))
+  wire(root, sw, 0, S, 0)
+  const M = S.subgraph.add(new MultNode({ id: 2 }))
+  wire(S.subgraph, INPUT, 0, M, slot('model'))
+  wire(S.subgraph, S.subgraph.add(notebook(3, 2)), 0, M, slot('text'))
+  cs.attach(M)
+  const B = { first: M.readout }
+  const l = loader(22)
+  wire(root, l, 0, sw, 2)
+  root.add(l)
+  await tick()
+  B.afterRootAdd = M.readout
+  out.subgraphWatchesRoot = B
+}
+
+// ---- C. one pass per tick on the ROOT, one shared snapshot --------------------
+{
+  const root = new FakeGraph()
+  app.graph = root
+  let snapshotsBuilt = 0
+  const probe = loader(40)
+  Object.defineProperty(probe, 'widgets', { get() { snapshotsBuilt += 1; return [] }, set() {} })
+  root.add(probe)
+  const S = root.add(subnode(root, 10, 'Holder', [], []))
+  const first = root.add(new MultNode({ id: 5 }))
+  const second = S.subgraph.add(new MultNode({ id: 2 }))
+  for (const m of [first, second]) {
+    const nb = (m.graph || root).add(notebook(m.id + 100, 2))
+    wire(m.graph, nb, 0, m, slot('text'))
+    cs.attach(m)
+  }
+  await tick()
+  snapshotsBuilt = 0
+  for (let i = 0; i < 5; i++) root.add(loader(50 + i)) // five events, one tick
+  S.subgraph.add(loader(60)) // ...and one from the subgraph
+  await tick()
+  out.coalesced = {
+    snapshotsBuilt,
+    queuedFlagCleared: root.__epsRcRefreshQueued === false,
+    subFlag: S.subgraph.__epsRcRefreshQueued ?? null
+  }
+}
+
+// ---- D. a shared definition: instances agree / disagree on the node's line ----
+{
+  const mkShared = (left, right) => {
+    const root = new FakeGraph()
+    app.graph = root
+    const S1 = root.add(subnode(root, 10, 'Twin', ['t'], []))
+    const S2 = root.add(subnode(root, 11, 'Twin', ['t'], []))
+    S2.subgraph = S1.subgraph
+    const M = S1.subgraph.add(new MultNode({ id: 20 }))
+    wire(S1.subgraph, INPUT, 0, M, slot('text'))
+    wire(root, root.add(notebook(1, left)), 0, S1, 0)
+    wire(root, root.add(notebook(2, right)), 0, S2, 0)
+    cs.attach(M)
+    return { root, M }
+  }
+  const differ = mkShared(3, 5)
+  const agree = mkShared(3, 3)
+  out.sharedReadout = {
+    differ: [differ.M.readout, differ.M.readoutClass],
+    agree: [agree.M.readout, agree.M.readoutClass]
+  }
+}
+
+// ---- E. attach before the node has a graph/id (nodeCreated), then add ---------
+{
+  const root = new FakeGraph()
+  app.graph = root
+  const nb = root.add(notebook(7, 2))
+  const M = new MultNode({ id: -1 })
+  cs.attach(M) // node.graph is null here, exactly like nodeCreated
+  const E_ = { beforeAdd: M.readout, armedAtAttach: marked(root, 'onNodeAdded') }
+  root.add(M)
+  M.id = 5
+  wire(root, nb, 0, M, slot('text'))
+  await tick()
+  E_.afterAdd = M.readout
+  out.createdThenAdded = E_
+}
+
+// ---- F. an orphan definition (no SubgraphNode instantiates it) ----------------
+{
+  const root = new FakeGraph()
+  app.graph = root
+  const orphan = new FakeGraph({ name: 'Orphan', rootGraph: root })
+  const M = orphan.add(new MultNode({ id: 2 }))
+  wire(orphan, orphan.add(notebook(3, 2)), 0, M, slot('text'))
+  cs.attach(M)
+  out.orphan = M.readout
+}
+
+console.log(JSON.stringify(out))
+"""
+
+
+@pytest.fixture(scope="module")
+def nested_watch(tmp_path_factory: pytest.TempPathFactory) -> dict:
+    """attach() + the graph watch against the fake nested litegraph and a
+    stub DOM (one Node run)."""
+    layout = build_layout(
+        tmp_path_factory.mktemp("cross_sweep_nested_watch"), eps_image=("cross_sweep.js",)
+    )
+    return run_probe(layout, NESTED_WATCH_PROBE_JS)
+
+
+def test_readout_watch_is_armed_on_every_graph(nested_watch: dict) -> None:
+    """attach() arms the root AND the subgraph (a subgraph's add/remove hooks
+    fire only on the subgraph itself); every hook carries our owner mark."""
+    got = nested_watch["rootWatchesSubgraph"]
+    assert got["first"] == "Runs: 2 — 2 sweep steps × 1 pair"
+    assert got["armed"] == {"root": [True, True, True], "sub": [True, True, True]}
+
+
+def test_a_change_in_another_graph_recomputes_the_readout(nested_watch: dict) -> None:
+    """The multiplier is at the ROOT; the loader is added INSIDE a subgraph
+    (an event on the subgraph's own hook) -- and vice versa."""
+    got = nested_watch["rootWatchesSubgraph"]
+    assert got["afterSubAdd"] == "Runs: 3 — 3 sweep steps × 1 pair"
+    inverse = nested_watch["subgraphWatchesRoot"]
+    assert inverse["first"] == "Runs: 4 — 2 sweep steps × 2 pairs"
+    assert inverse["afterRootAdd"] == "Runs: 6 — 3 sweep steps × 2 pairs"
+
+
+def test_core_restoring_a_subgraph_hook_is_healed_not_one_shot(nested_watch: dict) -> None:
+    """Core restores graph hooks on subgraph enter/exit. The scenario is
+    proven real first (the add goes unnoticed while the hook is gone), then
+    the next recompute re-verifies EVERY graph and a later add lands again."""
+    got = nested_watch["rootWatchesSubgraph"]
+    assert got["deafHookIsOurs"] is False
+    assert got["deaf"] == "Runs: 3 — 3 sweep steps × 1 pair"
+    assert got["healed"] == {
+        "hookIsOurs": True,
+        "readout": "Runs: 4 — 4 sweep steps × 1 pair",
+    }
+    assert got["afterHeal"] == "Runs: 5 — 5 sweep steps × 1 pair"
+    assert got["afterRemove"] == "Runs: 4 — 4 sweep steps × 1 pair"
+
+
+def test_burst_of_events_is_one_pass_with_one_shared_snapshot(nested_watch: dict) -> None:
+    """Six events (five at the root, one in a subgraph) in the same tick, two
+    multipliers (one nested): the snapshot is built exactly ONCE."""
+    got = nested_watch["coalesced"]
+    assert got["snapshotsBuilt"] == 1
+    assert got["queuedFlagCleared"] is True
+    # the coalescing flag lives on the ROOT, never on a subgraph
+    assert got["subFlag"] is None
+
+
+def test_shared_definition_readout_never_overclaims(nested_watch: dict) -> None:
+    got = nested_watch["sharedReadout"]
+    assert got["differ"] == [
+        "Runs: ≥ 5 — this subgraph is used 2 times with different counts (3, 5)",
+        "eps-rc-line eps-rc-warn",
+    ]
+    assert got["agree"] == ["Runs: 3 — 1 sweep step × 3 pairs", "eps-rc-line"]
+
+
+def test_attach_before_the_node_is_in_any_graph_still_settles(nested_watch: dict) -> None:
+    """nodeCreated runs before the node has a graph or an id: the first paint
+    is the old "not an EPSCrossSweep" text, the root's watch is armed from
+    app.graph, and the graph add heals it through the whole-workflow pass."""
+    got = nested_watch["createdThenAdded"]
+    assert "is not an EPSCrossSweep" in got["beforeAdd"]
+    assert got["armedAtAttach"] is True
+    assert got["afterAdd"] == "Runs: 2 — 1 sweep step × 2 pairs"
+
+
+def test_orphan_definition_falls_back_to_its_own_graph(nested_watch: dict) -> None:
+    """A node in a definition NO SubgraphNode instantiates is unreachable from
+    the root: it estimates over its own graph (the pre-1.0.0 behaviour)
+    instead of painting a misleading error."""
+    assert nested_watch["orphan"] == "Runs: 2 — 1 sweep step × 2 pairs"

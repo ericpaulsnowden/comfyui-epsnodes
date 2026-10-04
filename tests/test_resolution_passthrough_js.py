@@ -20,6 +20,13 @@ shapes (`.inputs`, `.getInputNode`, `.comfyClass`/`.type`, `.imgs`,
 possible for this one (unlike the M3/M4 attach()-only code, which the
 sibling files pin via source text instead).
 
+v1.2.0 NESTED REACH (owner ask 2026-10-03, FORMAT.md §7.10): the same walk
+now crosses subgraph boundaries (``TestNestedIncomingSizeWalk`` below, driven
+by ``tests/nested_resolution_probe.mjs`` over the shared fake nested
+litegraph). The small fakes above deliberately keep their one-graph shape --
+no ``.graph``, no ``app.graph`` -- because that is the FALLBACK path
+(``getInputNode``) that must keep working exactly as before.
+
 Skips cleanly when Node isn't installed.
 """
 
@@ -32,6 +39,7 @@ import subprocess
 from pathlib import Path
 
 import pytest
+from nested_layout import build_layout, run_probe
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 RESOLUTION_JS = REPO_ROOT / "web" / "eps_image" / "resolution.js"
@@ -39,6 +47,9 @@ API_JS = REPO_ROOT / "web" / "lora_library" / "api.js"
 VERSION_JS = REPO_ROOT / "web" / "lora_library" / "version.js"
 
 NODE = shutil.which("node")
+NESTED_PROBE_JS = (Path(__file__).resolve().parent / "nested_resolution_probe.mjs").read_text(
+    encoding="utf-8"
+)
 
 pytestmark = pytest.mark.skipif(NODE is None, reason="node (JS runtime) not installed")
 
@@ -498,3 +509,159 @@ class TestCopyFromImageRefusesOnMixed:
         body = _function_body(source, "attachCopyFromImage(node)")
         assert "summary.sizes.map" in body
         assert "different sizes" in body
+
+
+# ------------------------------------------------------- v1.2.0 nested reach
+#
+# The incoming-size walk used litegraph's `getInputNode`, which stops dead at
+# a subgraph boundary (the SubgraphNode when the image comes OUT of one, null
+# when it comes IN through a subgraph input node), so the source line and
+# `copy from image` went blank across a boundary. Every hop is now
+# boundary-aware (api.js `resolveInputSources` for the entry node, then the
+# same resolvers FROM each hop's own place). Executed for real under Node over
+# tests/nested_graph.mjs, which models the 1.52.7 subgraph shapes. What this
+# cannot cover (the rig must): the real LGraph/LLink classes and a real
+# decoded `<img>` on a wall inside a subgraph.
+
+
+@pytest.fixture(scope="module")
+def nested(tmp_path_factory: pytest.TempPathFactory) -> dict:
+    layout = build_layout(
+        tmp_path_factory.mktemp("nested_resolution"), eps_image=("resolution.js",)
+    )
+    return run_probe(layout, NESTED_PROBE_JS)
+
+
+class TestNestedIncomingSizeWalk:
+    def test_image_out_of_a_subgraph_reaches_the_inner_wall(self, nested: dict) -> None:
+        out = nested["outOfSubgraph"]
+        # The premise: litegraph's own read returns the SubgraphNode here.
+        assert out["nativeIsSubgraphNode"] is True
+        assert out["sizes"] == [{"width": 800, "height": 600}]
+        assert out["summary"] == {"kind": "single", "width": 800, "height": 600}
+        assert out["sourceLine"] == {"dims": "800 x 600", "mp": "0.48 MP", "aspect": "4:3"}
+
+    def test_image_in_through_a_subgraph_input_reaches_the_outer_wall(self, nested: dict) -> None:
+        out = nested["inThroughInput"]
+        assert out["nativeIsNull"] is True  # getInputNode is blind at the input node
+        assert out["sizes"] == [{"width": 640, "height": 480}]
+
+    def test_a_switcher_inside_a_subgraph_steps_out_through_its_slots(self, nested: dict) -> None:
+        both = nested["switcherInside"]
+        assert both["kind"] == "mixed"
+        assert both["sizes"] == [{"width": 640, "height": 480}, {"width": 320, "height": 240}]
+        # the switcher's toggles still gate which slots count
+        assert nested["switcherInsideOneDisabled"] == {
+            "kind": "single",
+            "width": 640,
+            "height": 480,
+        }
+
+    def test_two_levels_of_nesting_both_directions(self, nested: dict) -> None:
+        assert nested["twoLevelIn"] == [{"width": 500, "height": 400}]
+        assert nested["twoLevelOut"] == [{"width": 123, "height": 456}]
+
+    def test_boundary_crossings_do_not_spend_the_depth_budget(self, nested: dict) -> None:
+        # three SubgraphNodes between the wall and the Resolution, depth cap 8
+        assert nested["threeCrossings"] == [{"width": 77, "height": 88}]
+
+    def test_pass_through_nodes_on_both_sides_of_a_boundary(self, nested: dict) -> None:
+        # Reroute outside -> two subgraph levels -> Distributor inside -> Resolution
+        assert nested["passThroughsAcrossBoundaries"] == [{"width": 500, "height": 400}]
+
+    def test_a_subgraph_that_only_forwards_its_input_is_transparent(self, nested: dict) -> None:
+        assert nested["forwardingSubgraph"] == [{"width": 700, "height": 300}]
+
+    def test_shared_definition_with_disagreeing_instances_reads_mixed(self, nested: dict) -> None:
+        got = nested["sharedDifferent"]
+        assert got["kind"] == "mixed"
+        assert got["sizes"] == [{"width": 1024, "height": 1024}, {"width": 832, "height": 1216}]
+
+    def test_shared_definition_with_agreeing_instances_reads_single(self, nested: dict) -> None:
+        assert nested["sharedSame"] == {"kind": "single", "width": 1024, "height": 1024}
+
+    def test_each_hop_stays_on_its_own_instance_lane(self, nested: dict) -> None:
+        """A Resolution fed through instance A must not see instance B's image
+        just because the inner node between them is the same object under both
+        instances' paths -- that would be a false 'mixed' on every shared
+        definition."""
+        lanes = nested["sharedLaneExact"]
+        assert lanes["viaA"] == {"kind": "single", "width": 1024, "height": 1024}
+        assert lanes["viaB"] == {"kind": "single", "width": 832, "height": 1216}
+
+    def test_dangling_boundaries_read_as_nothing(self, nested: dict) -> None:
+        assert nested["danglingInput"] == []
+        assert nested["danglingOutput"] == {"sizes": [], "summary": {"kind": "none"}}
+        assert nested["unwiredWithLiveRoot"] == []
+
+    def test_a_flat_graph_reads_exactly_as_before_with_a_live_root(self, nested: dict) -> None:
+        assert nested["flatReroute"] == [{"width": 640, "height": 480}]
+        mixed = nested["flatSwitcherMixed"]
+        assert mixed["kind"] == "mixed"
+        assert mixed["sizes"] == [{"width": 1024, "height": 1024}, {"width": 832, "height": 1216}]
+        assert nested["flatCycle"] == {"threw": None, "result": []}
+        assert nested["flatDepthCap"] == []
+        assert nested["flatShortChain"] == [{"width": 1234, "height": 5678}]
+
+    def test_the_cycle_guard_keys_path_ids_not_node_ids(self, nested: dict) -> None:
+        """An inner wall and a root wall may share a numeric id (older builds);
+        keyed by node id the second would be dropped as already seen and the
+        result would wrongly read as one size."""
+        got = nested["idCollision"]
+        assert got["kind"] == "mixed"
+        assert got["sizes"] == [{"width": 640, "height": 480}, {"width": 100, "height": 100}]
+
+    def test_a_node_the_resolvers_cannot_locate_falls_back_to_get_input_node(
+        self, nested: dict
+    ) -> None:
+        assert nested["bareFakeWithLiveRoot"] == [{"width": 800, "height": 600}]
+        assert nested["noRootAtAll"] == [{"width": 800, "height": 600}]
+        # an odd host where the resolver finds nothing: litegraph's own read answers
+        assert nested["oddHostLinkTable"] == [{"width": 800, "height": 600}]
+
+    def test_a_subgraph_node_is_never_taken_for_a_wall(self, nested: dict) -> None:
+        assert nested["subgraphNodeIsNeverAWall"] == []
+
+    def test_the_flat_case_does_not_walk_the_whole_graph(self, nested: dict) -> None:
+        got = nested["flatNoFullWalk"]
+        assert got["result"] == [{"width": 640, "height": 480}]
+        assert got["decoyReads"] == 0
+
+
+class TestNestedWalkSourcePins:
+    """Pins for the parts only a real node/DOM runs (this file's convention)."""
+
+    def test_get_input_node_is_only_ever_called_inside_the_fallback(self, source: str) -> None:
+        # Any other `.getInputNode(` call site would be a second, boundary-blind
+        # walk sitting beside the nested-aware one (the sibling-escape class).
+        calls = re.findall(r"\.getInputNode\(", source)
+        assert len(calls) == 1
+        body = _function_body(source, "upstreamNodeAt(node, slotIndex)")
+        assert ".getInputNode(slotIndex)" in body
+
+    def test_every_pass_through_hop_goes_through_the_one_primitive(self, source: str) -> None:
+        for signature in (
+            "switcherSlotUpstreams(root, item)",
+            "singlePassThroughUpstream(root, item, inputName)",
+        ):
+            assert "upstreamSources(root, item," in _function_body(source, signature)
+        walk = _function_body(source, "collectIncomingImageSizes(node)")
+        assert "upstreamSources(root, { node }, slot)" in walk
+        # located nodes are guarded by PATH id, un-located ones by node id
+        assert "`path:${candidate.pathId}`" in walk
+        assert "`id:${id}`" in walk
+
+    def test_the_hop_resolves_from_its_own_place_not_by_node_object(self, source: str) -> None:
+        body = _function_body(source, "upstreamSources(root, item, slotIndex)")
+        # the lane-aware resolution is the shared api.js helper (v1.2.0)
+        assert "resolveSourcesAt(root, item, slotIndex)" in body
+        # a SubgraphNode from the native fallback is the dangling-output case
+        assert "if (root && isSubgraphNode(native)) return []" in body
+
+    def test_copy_from_image_and_source_line_share_the_nested_walk(self, source: str) -> None:
+        assert "return summarizeIncomingSizes(collectIncomingImageSizes(node))" in _function_body(
+            source, "resolveIncomingImageSummary(node)"
+        )
+        # "wired" in copy-from-image's refusal means a REAL source resolves
+        body = _function_body(source, "attachCopyFromImage(node)")
+        assert "upstreamSources(liveRootOf(node), { node }, slot).length > 0" in body
