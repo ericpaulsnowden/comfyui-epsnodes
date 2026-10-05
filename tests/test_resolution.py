@@ -33,6 +33,7 @@ import pytest
 pytest.importorskip("torch")
 
 import torch
+from ratio_cases import CONFORM_CASES, PARSE_CASES, STATE_PATTERN_CASES
 
 from eps_image import nodes_resolution
 from eps_image import resolution_presets_store as presets_store
@@ -888,6 +889,25 @@ class TestParseRatio:
     def test_whitespace_is_tolerated(self) -> None:
         assert nodes_resolution.parse_ratio("  4:5  ") == (4, 5)
 
+    @pytest.mark.parametrize("text,expected", PARSE_CASES)
+    def test_shared_case_table(self, text: str, expected: tuple[float, float] | None) -> None:
+        """2026-10-05 (owner: "type in a ratio not just use presets"):
+        decimals, ``x``/``X``/multiplication-sign/``/`` separators and spaces parse; zero,
+        negative, malformed and over-long numbers do not. The SAME table runs
+        through ``resolution.js``'s ``parseRatio`` in
+        ``test_resolution_ratio_js.py`` (``tests/ratio_cases.py``)."""
+        assert nodes_resolution.parse_ratio(text) == expected
+
+    def test_whole_numbers_stay_ints_so_old_ratios_do_the_same_arithmetic(self) -> None:
+        width, height = nodes_resolution.parse_ratio("16:9")  # type: ignore[misc]
+        assert isinstance(width, int) and isinstance(height, int)
+        decimal_w, _ = nodes_resolution.parse_ratio("2.39:1")  # type: ignore[misc]
+        assert isinstance(decimal_w, float)
+
+    def test_never_raises_on_odd_input(self) -> None:
+        for value in (None, 0, 1.5, [], {}, b"16:9", object(), "\x00", "9" * 10_000):
+            assert nodes_resolution.parse_ratio(value) is None
+
 
 class TestConformToRatio:
     """``conform_to_ratio`` truth table: all 5 ratios, both anchors,
@@ -953,6 +973,47 @@ class TestConformToRatio:
         assert nodes_resolution.conform_to_ratio(0, 0, "1:1", 0, "width") == (0, 0)
 
 
+class TestConformToRatioTypedRatios:
+    """The shared truth table (``tests/ratio_cases.py``) for typed decimals,
+    the two new presets and the exact ``.5`` ties -- the SAME rows run through
+    ``resolution.js``'s ``conformToRatio`` in ``test_resolution_ratio_js.py``."""
+
+    @pytest.mark.parametrize("width,height,ratio,multiple_of,anchor,expected", CONFORM_CASES)
+    def test_shared_case_table(
+        self,
+        width: int,
+        height: int,
+        ratio: str,
+        multiple_of: int,
+        anchor: str,
+        expected: tuple[int, int],
+    ) -> None:
+        got = nodes_resolution.conform_to_ratio(width, height, ratio, multiple_of, anchor)
+        assert got == expected
+
+    def test_a_typed_ratio_locks_a_full_run_end_to_end(self) -> None:
+        """Through ``resolve()`` itself, not just the helper: 1000 wide at a
+        typed ``2.39:1`` runs 1000 x 418 -- and the node reports it."""
+        _, _, width, height, _, _ = _resolve_scalar(
+            _node(), width=1000, height=1, resize_method="stretch", ratio="2.39:1"
+        )
+        assert (width, height) == (1000, 418)
+
+    def test_a_typed_ratio_composes_with_multiple_of(self) -> None:
+        # 1024 wide at 21:9 derives 438.86 -> 439, which multiple_of=8 snaps to 440.
+        _, _, width, height, _, _ = _resolve_scalar(
+            _node(), width=1024, height=1, resize_method="stretch", multiple_of=8, ratio="21:9"
+        )
+        assert (width, height) == (1024, 440)
+
+    def test_each_new_preset_runs(self) -> None:
+        for ratio, expected in (("4:3", (1024, 768)), ("3:4", (1024, 1365))):
+            _, _, width, height, _, _ = _resolve_scalar(
+                _node(), width=1024, height=1, resize_method="stretch", ratio=ratio
+            )
+            assert (width, height) == expected
+
+
 class TestRatioLockTailPosition:
     """§8 LAW: `ratio` is a NEW widget-bearing input and must be the very
     LAST real widget declared, after the existing hidden `presets` --
@@ -988,19 +1049,87 @@ class TestRatioLockTailPosition:
         assert optional["ratio"][1]["default"] == "none"
         assert optional["ratio"][0] == nodes_resolution.RATIO_OPTIONS
 
-    def test_ratio_options_are_exactly_the_owners_five_plus_none(self) -> None:
-        assert nodes_resolution.RATIO_OPTIONS == ["none", "1:1", "5:4", "4:5", "9:16", "16:9"]
+    def test_ratio_options_are_the_presets_plus_the_two_owner_added_pairs(self) -> None:
+        """2026-10-05 (owner: "3:4 and 4:3 should be added as presets"). The
+        values are plain strings a workflow stores by VALUE, so the new order
+        and the two new entries disturb no saved workflow -- every value the
+        old list held is still in this one."""
+        assert nodes_resolution.RATIO_OPTIONS == [
+            "none",
+            "1:1",
+            "5:4",
+            "4:5",
+            "4:3",
+            "3:4",
+            "16:9",
+            "9:16",
+        ]
+        for old_value in ("none", "1:1", "5:4", "4:5", "9:16", "16:9"):
+            assert old_value in nodes_resolution.RATIO_OPTIONS
+
+    def test_every_option_is_a_ratio_the_backend_reads_and_none_stays_first(self) -> None:
+        options = nodes_resolution.RATIO_OPTIONS
+        assert options[0] == nodes_resolution.DEFAULT_RATIO == "none"
+        for option in options[1:]:
+            assert nodes_resolution.parse_ratio(option) is not None
+
+    def test_custom_is_a_panel_command_and_never_a_backend_option(self) -> None:
+        """The panel's last entry (``custom…``) opens a typing box and is put
+        back at once -- it must never be a value the backend lists or accepts."""
+        assert nodes_resolution.RATIO_CUSTOM_OPTION == "custom…"
+        assert nodes_resolution.RATIO_CUSTOM_OPTION not in nodes_resolution.RATIO_OPTIONS
+        assert nodes_resolution.parse_ratio(nodes_resolution.RATIO_CUSTOM_OPTION) is None
 
 
 class TestRatioLockEPSStateWidgets:
-    """§6.16: `ratio` is a plain combo, declared like `resize_method`/
-    `interpolation` -- the Universal State Controller's completeness test
-    (tests/test_state_registry.py) enforces every widget-bearing input is
-    declared or excluded; this pins the specific declaration."""
+    """§6.16: `ratio` is declared for the Universal State Controller -- the
+    completeness test (tests/test_state_registry.py) enforces every
+    widget-bearing input is declared or excluded; this pins the specific
+    declaration.
 
-    def test_ratio_is_declared_as_a_choice(self) -> None:
+    It is kind ``string`` WITH a ``pattern`` -- not ``choice`` (it was, until
+    2026-10-05). A ``choice`` is checked on Apply against the live widget's
+    own options, but a ratio the owner TYPES is by design not one of the
+    dropdown's presets, so a state that captured one would be refused as
+    "value not in options"."""
+
+    def test_ratio_is_declared_as_a_pattern_constrained_string(self) -> None:
         widgets = nodes_resolution.EPSResolution.EPS_STATE_WIDGETS["widgets"]
-        assert widgets["ratio"] == {"kind": "choice"}
+        assert widgets["ratio"] == {
+            "kind": "string",
+            "pattern": nodes_resolution.RATIO_STATE_PATTERN,
+            "max_len": nodes_resolution.RATIO_STATE_MAX_LEN,
+        }
+
+    @pytest.mark.parametrize("text,matches", STATE_PATTERN_CASES)
+    def test_state_pattern_shared_case_table(self, text: str, matches: bool) -> None:
+        """The pattern string is JSON that BOTH ends evaluate -- Python's
+        ``re.fullmatch`` here, a real JavaScript RegExp in
+        ``test_resolution_ratio_js.py`` -- over this same table."""
+        import re
+
+        pattern = nodes_resolution.RATIO_STATE_PATTERN
+        assert (re.fullmatch(pattern, text) is not None) is matches
+
+    def test_the_pattern_never_admits_what_the_backend_could_not_read(self) -> None:
+        """A stored ratio must be one the lock reads: everything the pattern
+        accepts, ``parse_ratio`` accepts too (bar ``none``, the off state)."""
+        import re
+
+        pattern = nodes_resolution.RATIO_STATE_PATTERN
+        for text, _ in [*STATE_PATTERN_CASES, *[(t, False) for t, _ in PARSE_CASES]]:
+            if re.fullmatch(pattern, text) and text != "none":
+                assert nodes_resolution.parse_ratio(text) is not None, text
+
+    def test_every_preset_the_old_choice_could_store_still_matches(self) -> None:
+        """States saved while ``ratio`` was a ``choice`` hold one of the old
+        preset strings; every one must still pass the new rule."""
+        import re
+
+        for old_value in ("none", "1:1", "5:4", "4:5", "9:16", "16:9"):
+            assert re.fullmatch(nodes_resolution.RATIO_STATE_PATTERN, old_value)
+        for preset in nodes_resolution.RATIO_OPTIONS:
+            assert re.fullmatch(nodes_resolution.RATIO_STATE_PATTERN, preset)
 
 
 class TestRatioLockOmittedIsSafeDefault:
@@ -1116,3 +1245,149 @@ class TestRatioLockMultiImage:
         assert result[2][0] == 1000 and result[3][0] == 800
         assert tuple(result[1][0].shape) == (1, 800, 1000, 3)
         assert tuple(result[6][0].shape) == (1, 800, 1000, 3)
+
+
+class TestRatioTypedWithPresetsAndImages:
+    """A typed ratio is just another ``W:H`` string to everything downstream:
+    it conforms every selected preset, and it conforms a multi-image box."""
+
+    def test_a_typed_ratio_conforms_every_selected_preset(self, context: LibraryContext) -> None:
+        presets_store.save_preset(context, "P1", _other_values(width=1000, height=1))
+        presets_store.save_preset(context, "P2", _other_values(width=500, height=999))
+        result = _node().resolve(
+            width=1, height=1, presets=json.dumps(["P1", "P2"]), ratio="2.39:1"
+        )
+        assert result[2] == [1000, 500]
+        assert result[3] == [418, 209]
+
+    def test_a_typed_ratio_conforms_the_shared_multi_image_box(
+        self, fake_execution_blocker: type
+    ) -> None:
+        a = _make_image(height=64, width=64)
+        b = _make_image(height=48, width=48)
+        result = _node().resolve(width=1000, height=1, image=a, image_2=b, ratio="2.39:1")
+        assert (result[2][0], result[3][0]) == (1000, 418)
+        assert tuple(result[1][0].shape) == (1, 418, 1000, 3)
+        assert tuple(result[6][0].shape) == (1, 418, 1000, 3)
+
+    def test_an_unreadable_ratio_degrades_to_no_lock_instead_of_failing_a_run(self) -> None:
+        # The queue-time check (VALIDATE_INPUTS) is what refuses a bad ratio;
+        # resolve() itself stays fail-soft, the posture the whole node keeps.
+        for bad in ("banana", "custom…", "0:1", ""):
+            _, _, width, height, _, _ = _resolve_scalar(
+                _node(), width=640, height=480, resize_method="stretch", ratio=bad
+            )
+            assert (width, height) == (640, 480), bad
+
+
+class TestRatioValidation:
+    """``VALIDATE_INPUTS`` (owner ask 2026-10-05: type a ratio, keep the
+    dropdown). Naming ``ratio`` in the signature turns core's own "value not
+    in list" check OFF for it (``execution.py`` ``validate_inputs``: the combo
+    check runs only ``if x not in validate_function_inputs and not
+    validate_has_kwargs``) -- and a typed ratio is by design not in the list --
+    so this IS the check now."""
+
+    def test_only_ratio_is_named_and_there_is_no_kwargs(self) -> None:
+        """Naming another input would silently turn off ITS core check
+        (``multiple_of``'s min/max, ``resize_method``'s membership); ``**kwargs``
+        would turn them ALL off."""
+        import inspect
+
+        spec = inspect.getfullargspec(nodes_resolution.EPSResolution.VALIDATE_INPUTS)
+        assert spec.args == ["cls", "ratio"]
+        assert spec.varkw is None
+        assert spec.varargs is None
+
+    def test_an_omitted_ratio_is_valid(self) -> None:
+        """Core passes only inputs present in the prompt -- an old API prompt
+        omits ``ratio`` entirely, and must still queue."""
+        assert nodes_resolution.EPSResolution.VALIDATE_INPUTS() is True
+
+    @pytest.mark.parametrize(
+        "value",
+        [*nodes_resolution.RATIO_OPTIONS, "21:9", "2.39:1", "1.85:1", "16x9", " 16 / 9 ", "0.5:1"],
+    )
+    def test_none_presets_and_any_readable_ratio_pass(self, value: str) -> None:
+        assert nodes_resolution.EPSResolution.VALIDATE_INPUTS(value) is True
+
+    @pytest.mark.parametrize(
+        "value", ["banana", "", "0:1", "1:0", "-4:3", "1:2:3", "16:9x", "None", "1e3:1", "4,3"]
+    )
+    def test_everything_else_is_refused_with_a_message(self, value: str) -> None:
+        result = nodes_resolution.EPSResolution.VALIDATE_INPUTS(value)
+        assert isinstance(result, str)
+        assert "EPS Resolution" in result and "ratio" in result
+        assert repr(value) in result  # names what was refused
+        assert "2.39:1" in result  # and says what to type instead
+        assert "16:9" in result  # ...and lists the presets
+
+    def test_the_custom_command_is_refused_with_its_own_explanation(self) -> None:
+        result = nodes_resolution.EPSResolution.VALIDATE_INPUTS("custom…")
+        assert isinstance(result, str)
+        assert "menu command" in result and "type" in result
+
+    @pytest.mark.parametrize("value", [42, 1.5, True, {"a": 1}, ["16:9", "1:1"]])
+    def test_a_non_text_value_is_refused(self, value: object) -> None:
+        result = nodes_resolution.EPSResolution.VALIDATE_INPUTS(value)
+        assert isinstance(result, str)
+        assert "text" in result
+
+    def test_a_linked_ratio_cannot_be_judged_yet_so_it_passes(self) -> None:
+        """A LINKED input arrives as ``None`` at validation time (its value
+        does not exist yet -- ``execution.py`` ``get_input_data``); ``resolve``
+        degrades an unreadable ratio to no lock rather than failing a run."""
+        assert nodes_resolution.EPSResolution.VALIDATE_INPUTS(None) is True
+
+    def test_a_one_element_list_is_unwrapped(self) -> None:
+        """This node has no ``INPUT_IS_LIST`` so values arrive as scalars, but
+        a validator that tolerates the list form costs nothing (the
+        ``nodes_save_image._unwrap`` precedent)."""
+        assert nodes_resolution.EPSResolution.VALIDATE_INPUTS(["21:9"]) is True
+        assert isinstance(nodes_resolution.EPSResolution.VALIDATE_INPUTS(["banana"]), str)
+
+    def test_the_node_does_not_use_input_is_list(self) -> None:
+        assert not getattr(nodes_resolution.EPSResolution, "INPUT_IS_LIST", False)
+
+    def test_ratio_problem_agrees_with_parse_ratio_over_the_shared_table(self) -> None:
+        from ratio_cases import PARSE_CASES
+
+        for text, expected in PARSE_CASES:
+            problem = nodes_resolution.ratio_problem(text)
+            if expected is not None or text.strip() == "none":
+                assert problem is None, text
+            else:
+                assert isinstance(problem, str), text
+
+    def test_the_core_combo_check_would_have_refused_a_typed_ratio(self) -> None:
+        """Why the input must be named at all: ``2.39:1`` is not a dropdown
+        entry, so core's combo-membership check (``val not in combo_options``)
+        would reject every typed ratio at queue time."""
+        optional = nodes_resolution.EPSResolution.INPUT_TYPES()["optional"]
+        assert "2.39:1" not in optional["ratio"][0]
+
+
+class TestRatioJavaScriptParityPins:
+    """The panel keeps its own copy of two backend facts. They are checked
+    against the real files so they cannot drift apart silently."""
+
+    @staticmethod
+    def _js() -> str:
+        from pathlib import Path
+
+        path = Path(__file__).resolve().parent.parent / "web" / "eps_image" / "resolution.js"
+        return path.read_text(encoding="utf-8")
+
+    def test_custom_command_text_matches_resolution_js(self) -> None:
+        assert (
+            f"export const RATIO_CUSTOM_OPTION = '{nodes_resolution.RATIO_CUSTOM_OPTION}'"
+            in self._js()
+        )
+
+    def test_the_panels_fallback_presets_equal_the_backends_list(self) -> None:
+        import re
+
+        match = re.search(r"const FALLBACK_RATIO_PRESETS = \[([^\]]*)\]", self._js())
+        assert match
+        listed = re.findall(r"'([^']*)'", match.group(1))
+        assert listed == nodes_resolution.RATIO_OPTIONS

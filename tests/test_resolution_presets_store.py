@@ -35,6 +35,43 @@ def _other_values(**overrides: object) -> dict:
 # ------------------------------------------------------------------- loading
 
 
+class TestRatioIsNotAPresetField:
+    """The `ratio` lock is a NODE-level setting, orthogonal to size presets
+    (owner ask 2026-08-28, kept 2026-10-05 when typed ratios arrived: "I should
+    be able to type in a ratio not just use presets"). A preset stores exactly
+    five fields -- so a typed ratio never rides in one, nothing about it has to
+    round-trip through this file, and picking a preset never changes the lock
+    (and the lock conforms a preset's size at run time instead)."""
+
+    def test_a_preset_stores_exactly_the_five_fields(self) -> None:
+        assert (*store._INT_FIELDS, *store._STR_FIELDS) == (
+            "width",
+            "height",
+            "multiple_of",
+            "resize_method",
+            "interpolation",
+        )
+
+    def test_a_ratio_key_handed_to_save_is_not_stored(self, context: LibraryContext) -> None:
+        store.save_preset(context, "Cinema", _other_values(ratio="2.39:1"))
+        presets, _mtime = store.load_presets(context)
+        assert presets["Cinema"] == VALUES  # no `ratio`, typed or otherwise
+        assert "ratio" not in json.loads(store.presets_path(context).read_text("utf-8"))[
+            "presets"
+        ]["Cinema"]
+
+    def test_the_panel_saves_and_applies_only_those_five_fields(self) -> None:
+        from pathlib import Path
+
+        source = (
+            Path(__file__).resolve().parent.parent / "web" / "eps_image" / "resolution.js"
+        ).read_text(encoding="utf-8")
+        assert (
+            "const PRESET_FIELD_NAMES = ['width', 'height', 'resize_method', 'interpolation', "
+            "'multiple_of']" in source
+        )
+
+
 class TestLoadPresets:
     def test_missing_file_returns_empty_presets_and_none_mtime(
         self, context: LibraryContext

@@ -421,7 +421,9 @@ captured by §6.16's Universal State Controller. Shape:
   class rejects undeclared/excluded widget keys loudly
   (`StateValidationError` naming `<class>.<widget>`) and type-checks every
   value per kind (the closed set, §6.16 -- `boolean` joined it in v0.99.0:
-  `bool` only, never a `1`/`0`). A class with NO registry entry (future pack, third-party,
+  `bool` only, never a `1`/`0`; a `string` may also carry an anchored
+  `pattern`, checked with `re.fullmatch` -- 2026-10-05, EPS Resolution's
+  typed `ratio`). A class with NO registry entry (future pack, third-party,
   not loaded here) is kept as-is and echoed in the save response's
   `foreign` list — save is tolerant-but-loud, load silently tolerant, so a
   state from a newer build survives a round trip through an older one.
@@ -1650,8 +1652,123 @@ only the prefix and IO type substituted:
 
 ## §6.5 `EPSResolution` (display: "EPS Resolution") — M1 core
 
+**M6 — typed ratio, `3:4`/`4:3`, rotate, button rows (2026-10-05, owner
+asks).** *"I should be able to type in a ratio not just use presets. 3:4 and
+4:3 should be added as presets. Next to the copy from image button there
+should be a 'rotate' button that swaps the width and height values. Save and
+Delete should be next to each other not stacked."*
+
+- **Presets.** `RATIO_OPTIONS` is now `none, 1:1, 5:4, 4:5, 4:3, 3:4, 16:9,
+  9:16`. The values are plain strings stored BY VALUE, so the two new
+  entries and the new order (16:9 before 9:16) disturb no saved workflow.
+- **Typed ratio — the dropdown stays.** The `ratio` widget is still a COMBO
+  (presets one click away) and gains a last entry, `custom…`. Picking it
+  opens a box (`app.extensionManager.dialog.prompt` when the frontend has it,
+  else `canvas.prompt` — at the click when the renderer gave us the event,
+  centred otherwise — else `window.prompt`, else a self-owned DOM dialog; one
+  helper, `promptText`, also serves the preset-name box) prefilled with the
+  current value. `custom…` is a COMMAND, never a value: both renderers write
+  the picked value onto the widget BEFORE calling its callback, so the
+  callback's first act is to put the widget back (`node._epsRatioCommitted`,
+  the last real ratio). Accepted: `W:H` with positive numbers, decimals
+  allowed (`21:9`, `2.39:1`, `1.85:1`), `:` `x` `X` `×` or `/` between them,
+  spaces around, `none`; stored canonically (`21x9` → `21:9`, `2.390 : 1.0` →
+  `2.39:1`). Each number is 1–6 integer digits and optionally 1–6 decimals
+  (keeps a typo from becoming a billion-pixel request and `String(number)`
+  free of exponent forms in both languages). Invalid input toasts and keeps
+  the previous ratio; Cancel keeps it too. The widget's `options.values` is a
+  FUNCTION — presets, then the current value when it is a custom ratio, then
+  `custom…` — assigned IN PLACE (Nodes 2.0 keeps a reference to the original
+  options object), reading `widget.value` at call time so Nodes 2.0's select
+  re-reads it when the value changes: a typed ratio is never flagged by the
+  select's "not in my list" ring, and a hand-edited `banana` still is.
+- **Backend.** `parse_ratio` accepts decimals (floats; whole numbers still
+  come back as ints, so every old ratio does the identical integer
+  arithmetic) and the separators above; `conform_to_ratio` is unchanged
+  arithmetic. `EPSResolution.VALIDATE_INPUTS(cls, ratio)` is the ratio's
+  whole validation (`ratio_problem`): naming `ratio` turns core's own "value
+  not in list" check OFF for it (`execution.py` `validate_inputs`: the combo
+  check runs only `if x not in validate_function_inputs and not
+  validate_has_kwargs`) — and a typed ratio is by design not in the list, so
+  core's check could not be kept. `none` or anything `parse_ratio` reads
+  passes; everything else is refused with a message naming the value and the
+  presets. A LINKED ratio arrives as `None` (no value yet) and passes;
+  `resolve()` stays fail-soft (an unreadable ratio is "no lock", never a
+  failed run). Only `ratio` is named and there is no `**kwargs`, so core's
+  min/max checks on the other inputs are untouched. The node does not use
+  `INPUT_IS_LIST` (values arrive as scalars; a one-element list is tolerated
+  anyway).
+- **Universal State.** `ratio` is declared `{"kind": "string", "pattern":
+  RATIO_STATE_PATTERN, "max_len": 32}` — see §6.16 for why not `choice` — so a
+  state with a typed ratio captures AND applies; garbage is refused by
+  name on save and dropped per-widget on Apply. Presets/ratio are not part
+  of the stored size presets (the five fields only, M3), so nothing there
+  round-trips a ratio.
+- **`rotate`.** A button in the SAME row as `copy from image` (copy left,
+  rotate right). It swaps `width` and `height`; a locked ratio flips with
+  them (`16:9`↔`9:16`, `2.39:1`→`1:2.39`; `1:1` and `none` unchanged). It is
+  a manual edit — it goes through `writeSize`, the path `copy from image`
+  and the pad use, so the active size preset un-selects itself and the pad
+  repaints. The ratio is flipped FIRST with a bare assignment (the ratio
+  widget's own callback would re-derive height from width before the swapped
+  pair is written); the swap runs under `withMultipleOfSnapSuppressed` (both
+  values were already snapped, a re-snap could only change a number the user
+  did not ask to change); under a lock the swapped pair is CONFORMED to the
+  flipped lock with width anchored, like every write, because that is what
+  the backend computes at run time (`1000 x 418` at `2.39:1` rotates to
+  `418 x 999` at `1:2.39`, not an exact `418 x 1000`; with evenly dividing
+  numbers such as 1024 x 576 it is an exact swap). Width == height with
+  nothing to flip toasts instead of doing nothing silently.
+- **The lock no longer walks away from what was typed (found on the way).**
+  The lock's width/height wraps re-derived the OTHER axis whenever either
+  field's callback fired, and a derived write is itself a write that fires a
+  callback — one typed edit bounced between the fields and settled where both
+  directions agreed. v1.5.0, `16:9`, type width `1000` → `1001 x 563`; a
+  typed `2.39:1` at 1024 wide → `1023 x 428`. `withRatioDerivedWrite` marks
+  writes that are consequences (the derived axis, a ratio pick's height, the
+  pre-conformed pair `writeSize`/a preset apply write) so the wraps do not
+  re-derive from them; a real edit still anchors on the field touched.
+  Removing that accidental drift exposed a quiet 1 px mismatch it had been
+  masking: JavaScript's `Math.round` takes an exact `.5` UP while Python's
+  `round()` takes the EVEN neighbour (`1000 x 9/16 = 562.5` → 563 vs 562, and
+  `800 / 64 = 12.5` → 832 vs 768), so the panel now rounds half to even in
+  `conformToRatio`/`roundToMultipleOf` — the shared case table
+  (`tests/ratio_cases.py`) pins both readers to each other, ties included.
+- **Button rows.** `Save | Delete` and `copy from image | rotate` are each ONE
+  DOM widget of equal-width HTML buttons, built by the shared
+  `addButtonRow` (`web/eps_image/button_row.js`) — four stacked litegraph
+  buttons became two rows. The helper owns what a native button widget got for
+  free: BOTH serialize flags (`options.serialize` gates the API prompt,
+  `widget.serialize` the workflow file — a past regression shipped phantom
+  `"Save"`/`"Delete"` inputs with only one), `hideInPanel`, a fixed height in
+  both renderers (classic: `computeSize` + `computedHeight` +
+  `getMin/MaxHeight` + the element's CSS height; Nodes 2.0: an explicit CSS
+  height, `flex: 0 0 auto`, and `computeLayoutSize` SHADOWED to `undefined`
+  so the grid row is `min-content`, not an expanding `auto`), `click` (not
+  `pointerdown`, which Nodes 2.0's `WidgetDOM` stops) carrying the real
+  `MouseEvent` (Save hands it to `canvas.prompt`), one undo step per click
+  (an HTML button's `mouseup` fires BEFORE its `click`, so the helper asks the
+  active workflow's ChangeTracker to capture after the handler), and a hide
+  that writes `widget.hidden`, `options.hidden` (in place) AND the element's
+  `display` (Nodes 2.0 1.52.7 observes neither flag after the first render).
+  `Delete`'s disabled state is still `updateDeleteEnabled`'s, now on the
+  `<button>`; the `Presets` property hides/shows the whole Save | Delete row.
+  Names: `eps_resolution_copy_row`, `eps_resolution_preset_row` (unique on the
+  node; Nodes 2.0 1.53+ renames duplicates).
+- **Saved bytes unchanged.** The copy | rotate row keeps `copy from image`'s
+  non-tail position above the size fields and the chained `onSerialize`
+  hole-compaction (see the `copy from image` bullet below). Four
+  `serialize:false` widgets became two, which changes how many holes the RAW
+  `widgets_values` has but not one byte that survives compaction:
+  `tests/test_resolution_rows_js.py` runs the real `attach()` against a
+  litegraph serialize/configure model and compares against v1.5.0's widget
+  layout both ways (older workflows load here, workflows saved here load on
+  the older build), for a fresh node and for workflows saved before `ratio` /
+  `presets` existed.
+
 **M4 — ratio lock (v0.87.0, owner ask 2026-08-28).** A VISIBLE `ratio`
-combo — `none` (default), `1:1`, `5:4`, `4:5`, `9:16`, `16:9` — appended
+combo — `none` (default), `1:1`, `5:4`, `4:5`, `9:16`, `16:9` (M6 above adds
+`4:3`, `3:4` and a typed `custom…`) — appended
 LAST in `INPUT_TYPES` (after the hidden `presets`; §8's tail law, so every
 saved workflow's positional `widgets_values` is undisturbed). ONE uniform
 rule: whenever width or height changes for ANY reason, a locked ratio
@@ -1750,6 +1867,9 @@ is the functional core WITHOUT the grid.
   (`LGraphNode.ts`). The same rig round caught the preset `Save`/`Delete`
   buttons setting only the latter and therefore shipping phantom
   `"Save"`/`"Delete"` inputs in every queued prompt (fixed v0.63.0).
+  **2026-10-05:** the button is now the left half of a `copy from image |
+  rotate` ROW widget (`addButtonRow`, M6 above), which carries both flags and
+  this compaction for the pair; the click handler is `copyFromImage`.
 - **MULTI-IMAGE mode (v0.61.0, owner ask 2026-08-10: "plug in multiple
   images so you can resize more than one image to the same size at the
   same time … multiple image inputs and multiple image outputs").**
@@ -2040,7 +2160,15 @@ is the functional core WITHOUT the grid.
     (checkpoint_switcher's convention); still-selected names missing from
     the store are KEPT (appended, prior relative order) so the backend can
     fail the queue loudly.
-  - **Save/Delete:** Save prompts through a THREE-STEP chain that can
+  - **Save/Delete (one row since 2026-10-05, M6 above):** the two are
+    real HTML buttons side by side in ONE DOM widget
+    (`eps_resolution_preset_row`, `addButtonRow`); the click hands us the
+    real `MouseEvent` where a native widget callback under Nodes 2.0 hands
+    none. The prompt chain below now lives in `promptText` (the custom-ratio
+    box shares it; only the ratio box opts in to
+    `app.extensionManager.dialog.prompt` — Save keeps its event-positioned
+    `canvas.prompt`). In-flight relabelling is the button's `textContent`.
+    Save prompts through a THREE-STEP chain that can
     never be a silent no-op (owner report 2026-08-09, "clicking save …
     doesn't seem to do anything", reproduced on the rig):
     `LGraphCanvas.prompt` **with the event litegraph hands the button
@@ -2062,7 +2190,8 @@ is the functional core WITHOUT the grid.
     (`commitSelection`: normalize → widget.value + callback → combo/
     Delete re-render).
   - **`Presets` node property** (boolean, default true): false hides all
-    three widgets (BOTH hide flags each, §7.5) and force-clears the
+    three widgets (the combo and the Save | Delete row; every hide flag each,
+    §7.5, `options` mutated in place since 2026-10-05) and force-clears the
     selection to `"[]"` so the backend provably runs classic mode; the
     reconcile also enforces that invariant on restore of a saved
     `Presets: false` file.
@@ -4972,6 +5101,22 @@ opt-ins, on the owner's word).
   rejected in both -- a stored `"false"` string would apply as ON). Adding a
   kind means moving `_check_kind`, `validateStateValue` and
   `tests/test_state_registry.py`'s `_CLOSED_KINDS` together.
+  **`string` + `pattern` (2026-10-05, not a new kind — the closed set did
+  not grow).** `string` may carry an anchored regex the whole value must
+  match: `universal_states_store._check_kind` runs it through
+  `re.fullmatch`, `validateStateValue` through a `RegExp`, and both read
+  the SAME pattern string out of the descriptor (a pattern that is not a
+  valid regex fails the value, never throws). First user: §6.5's `ratio`,
+  which was a `choice` until this change. A `choice` is checked on Apply
+  against the LIVE widget's own options, and a ratio the owner TYPES
+  (`2.39:1`) is by design not one of the dropdown's presets — so a state
+  that captured one saved fine and was then refused as "value not in
+  options". The pattern (`nodes_resolution.RATIO_STATE_PATTERN`: `none` or
+  a canonical `W:H` with positive numbers) is the real rule; every value
+  the old `choice` could store still matches it, so states saved before the
+  change apply unchanged. `tests/test_state_registry.py` checks that a
+  `pattern` compiles and sits on a `string`; the Python and JavaScript
+  readers run one shared table through the same pattern string.
   `GET /eps/state_registry` collects them (routes_list_flags' memo shape).
   Consumers validate through the registry instead of hand-parsing hidden
   JSON bridges; `tests/test_state_registry.py`'s completeness check forces

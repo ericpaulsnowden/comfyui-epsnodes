@@ -28,6 +28,8 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 RESOLUTION_JS = REPO_ROOT / "web" / "eps_image" / "resolution.js"
+# v1.6 (2026-10-05): resolution.js imports the shared button-row helper.
+BUTTON_ROW_JS = REPO_ROOT / "web" / "eps_image" / "button_row.js"
 # 2026-08-29 (Universal State Controller Apply fix): resolution.js now also
 # imports `../lora_library/api.js` (subscribeWidgetsChangedExternally) --
 # the real siblings, test_resolution_presets_js.py's identical convention.
@@ -165,6 +167,7 @@ def grid_api(tmp_path_factory: pytest.TempPathFactory) -> dict:
     module_dir = layout / "extensions" / "comfyui-epsnodes" / "eps_image"
     module_dir.mkdir(parents=True)
     shutil.copyfile(RESOLUTION_JS, module_dir / "resolution.js")
+    shutil.copyfile(BUTTON_ROW_JS, module_dir / "button_row.js")
 
     # 2026-08-29: resolution.js's THIRD static import, `../lora_library/
     # api.js` (subscribeWidgetsChangedExternally) -- ES modules resolve
@@ -467,7 +470,14 @@ class TestCopyFromImageV0630:
     """v0.63.0 (owner ask 2026-08-14): a `copy from image` button above the
     size fields that writes the wired image's own pixel size into
     width/height -- and the serialization guard that makes a NON-TAIL
-    widget safe to add at all."""
+    widget safe to add at all.
+
+    2026-10-05: the button became half of a `copy from image | rotate` ROW
+    (``attachCopyRotateRow``, built by the shared ``addButtonRow``); the click
+    handler is ``copyFromImage``. Every pin below still guards what it always
+    guarded; the live behaviour (a real click on a real ``<button>``, the saved
+    ``widgets_values``) is exercised against a fake litegraph node in
+    ``tests/test_resolution_rows_js.py``."""
 
     @pytest.fixture(scope="class")
     def source(self) -> str:
@@ -475,16 +485,17 @@ class TestCopyFromImageV0630:
 
     def test_button_label_is_the_owners_wording(self, source: str) -> None:
         assert "const COPY_FROM_IMAGE_LABEL = 'copy from image'" in source
-        body = _function_body(source, "attachCopyFromImage(node)")
-        assert "node.addWidget('button', COPY_FROM_IMAGE_LABEL" in body
+        body = _function_body(source, "attachCopyRotateRow(node)")
+        assert "label: COPY_FROM_IMAGE_LABEL" in body
+        assert "onClick: () => copyFromImage(node)" in body
 
     def test_button_sits_above_the_size_fields(self, source: str) -> None:
-        body = _function_body(source, "attachCopyFromImage(node)")
-        assert "node.widgets.unshift(button)" in body
+        body = _function_body(source, "attachCopyRotateRow(node)")
+        assert "node.widgets.unshift(row.widget)" in body
         # ...and it is attached last, so the unshift lands above every
         # widget rather than racing the presets cluster.
         attach = _function_body(source, "attach(node)")
-        assert attach.index("attachPresetsUi(node)") < attach.index("attachCopyFromImage(node)")
+        assert attach.index("attachPresetsUi(node)") < attach.index("attachCopyRotateRow(node)")
 
     def test_copy_reuses_the_live_source_read_and_the_one_size_writer(
         self, source: str
@@ -494,7 +505,7 @@ class TestCopyFromImageV0630:
         `resolveIncomingImageSummary` directly (not the thin
         `readIncomingImageSize` wrapper) so it can refuse-with-a-message on
         a 'mixed' walk result instead of guessing."""
-        body = _function_body(source, "attachCopyFromImage(node)")
+        body = _function_body(source, "copyFromImage(node)")
         assert "resolveIncomingImageSummary(node)" in body
         assert "writeSize(node, size.width, size.height)" in body
         # EXACT pixels -- "copy" means copy; multiple_of still rounds at run
@@ -514,13 +525,13 @@ class TestCopyFromImageV0630:
         (this function's own doc). The one write here must run under the
         suppression guard so the wired image's EXACT pixels always land,
         multiple_of notwithstanding."""
-        body = _function_body(source, "attachCopyFromImage(node)")
+        body = _function_body(source, "copyFromImage(node)")
         assert "withMultipleOfSnapSuppressed(node, () => writeSize(" in body
 
     def test_both_failure_modes_toast_differently(self, source: str) -> None:
         """§6.3 never-silent: nothing wired vs wired-but-not-decoded need
         different fixes, so they get different messages."""
-        body = _function_body(source, "attachCopyFromImage(node)")
+        body = _function_body(source, "copyFromImage(node)")
         assert "Wire an image into this node first." in body
         assert "hasn't loaded yet" in body
         assert "link != null" in body
@@ -535,18 +546,42 @@ class TestCopyFromImageV0630:
         [null, 333, 777, ...] and shifted every value on reload. Compacting
         the hole on the way out makes the saved array byte-identical to a
         button-less build's -- old saves load here, and saves made here
-        still load on an older build."""
-        body = _function_body(source, "attachCopyFromImage(node)")
-        # BOTH flags: options.serialize gates the API PROMPT, widget.serialize
-        # gates the WORKFLOW file (executionUtil.ts says so in as many words).
-        # Rig-caught: with only the latter, every queued prompt carried a
-        # phantom `"copy from image": null` input.
-        assert "button.serialize = false" in body
-        assert "button.options = { ...(button.options || {}), serialize: false }" in body
+        still load on an older build.
+
+        Since 2026-10-05 BOTH serialize flags are the shared ``addButtonRow``'s
+        job (tests/test_button_row_js.py pins them there, and
+        tests/test_resolution_rows_js.py proves the saved array byte for byte
+        against a litegraph serialize/configure model); the compaction stays
+        here, chained and never replaced."""
+        body = _function_body(source, "attachCopyRotateRow(node)")
         assert "const originalOnSerialize = node.onSerialize" in body
         assert "originalOnSerialize?.apply(this, arguments)" in body
         # `i in values` distinguishes a HOLE from a genuinely stored null.
         assert "values.filter((_, i) => i in values)" in body
+        # the row is built by the shared helper, which owns the two flags
+        assert "addButtonRow(node, COPY_ROW_WIDGET_NAME" in body
+
+    def test_rotate_is_the_second_button_of_the_same_row(self, source: str) -> None:
+        """Owner ask 2026-10-05: a `rotate` button next to `copy from image`
+        -- the SAME row, copy on the left, rotate on the right."""
+        assert "const ROTATE_LABEL = 'rotate'" in source
+        body = _function_body(source, "attachCopyRotateRow(node)")
+        assert body.index("key: 'copy'") < body.index("key: 'rotate'")
+        assert "label: ROTATE_LABEL" in body
+        assert "onClick: () => rotateSize(node)" in body
+        # one addButtonRow call for the pair, not one per button
+        assert body.count("addButtonRow(") == 1
+
+    def test_rotate_writes_through_the_one_size_writer_with_the_snap_suppressed(
+        self, source: str
+    ) -> None:
+        body = _function_body(source, "rotateSize(node)")
+        assert "withMultipleOfSnapSuppressed(node, () => writeSize(node, height, width))" in body
+        # the ratio flips FIRST and silently, so the lock conforms the swapped pair
+        assert body.index("ratioWidget.value = ratioNext") < body.index("writeSize(")
+        assert "flipRatioValue(ratioNow)" in body
+        # nothing to rotate is said, not swallowed (§6.3)
+        assert "nothing to rotate" in body
 
 
 # ------------------------------------------------------------ v0.68.1 pins

@@ -47,7 +47,7 @@ section further down; this is the map.
 | [**EPS Node Audit**](#eps-node-audit-shipped) | A plain-language look at what your other installed node packs can reach: their web routes, where they've called out to, and a scan of their code for a few patterns worth knowing about — green/yellow/red per pack, with a verbose toggle for the technical detail. | Nothing — reads whatever else is installed. |
 | [**EPS Number Controller**](#eps-number-controller-shipped) | Every number a workflow uses, kept in one place: named rows, each a plain number box. Wire one into a socket and it quietly becomes the right kind of number for it — whole or decimal. Untick a row and whatever it was plugged into goes back to its own value. The Universal State Controller can save and recall the whole set, including which rows are switched on. | Nothing — drag-and-drop with core nodes. |
 | [**EPS Checkpoint Switcher**](#eps-checkpoint-switcher-shipped) | Tick several checkpoint files in a list; one queue runs the workflow once per ticked checkpoint, with each run's model, CLIP, and VAE kept together and a label for save paths. | Your checkpoint files — drag-and-drop with core nodes. |
-| [**EPS Resolution**](#eps-resolution-shipped) | Image-first resize + size in one node: target size (with a drag pad), four resize modes, and the original image + both sets of dimensions passed through. Named size presets are shared across your machines — tick several and one Run resizes once per preset. Wire in extra images and they all come out at the same target size in one Run. | Nothing — drag-and-drop with core nodes. |
+| [**EPS Resolution**](#eps-resolution-shipped) | Image-first resize + size in one node: target size (with a drag pad, a ratio lock you can type your own ratio into, and a rotate button), four resize modes, and the original image + both sets of dimensions passed through. Named size presets are shared across your machines — tick several and one Run resizes once per preset. Wire in extra images and they all come out at the same target size in one Run. | Nothing — drag-and-drop with core nodes. |
 | [**EPS Image Grid**](#eps-image-grid-shipped) | Collects images across separate Runs into a buffer that survives restarts, shows them as a thumbnail grid, and fans the whole set out on demand. Add whole batches at once — a multiselect picker, a folder importer, or one big drag. | Nothing — drag-and-drop with core nodes. |
 | [**EPS Run Multiplier**](#eps-run-multiplier-shipped) | Multiplies whatever you wire in: a sweep group (LoRA Iterator, or Checkpoint Switcher with its VAEs) × images × texts, in one node — or just images × texts with no sweep at all — with per-run save paths so big runs land in tidy folders. | Any of: EPS LoRA Iterator / EPS Checkpoint Switcher / EPS Model + VAE Switchers (`models`→`model`, `models_low`→`model_low`, `vaes`→`vae`) on the sweep side; an Image Grid or Image Switcher plus a multi-select Prompt Notebook on the pair side. |
 | [**EPS Save Image**](#eps-save-image-shipped) | Save Image with provenance baked in: wire the Run Multiplier's `run_info` and every saved file carries a workflow already soloed to the run that made it — drop the image onto the canvas to recreate just that one. Without `run_info` it is exactly Save Image. A **preview_only** switch (v1.1.0) turns it into a Preview Image — nothing saved — without swapping nodes. A **format** choice (png, exr or avif — with bit depth and color space under *Show advanced inputs*) saves more than PNG. | Nothing — a drop-in for the core Save Image node; `run_info` from EPS Run Multiplier unlocks the recreate-one-image drop. exr and avif need a ComfyUI that has those encoders. |
@@ -1095,6 +1095,33 @@ wire into save paths so results land in folders named by model.
   actually use. If you also have a ratio locked and the two can't both be
   satisfied, the multiple wins and the ratio gives by a few pixels.
 
+- **Type your own ratio, plus `3:4` and `4:3`, a `rotate` button and tidier
+  buttons (v1.6.0).** The `ratio` dropdown now also offers `4:3` and `3:4`, and its last
+  entry, **`custom…`**, opens a box where you type any ratio you like —
+  `21:9`, `2.39:1`, `1.85:1`. Decimals are fine, and `21x9` or `21/9` work too
+  (it tidies them to `21:9`). Type something that isn't a ratio and the node
+  says so and keeps what you had; Cancel keeps it too. While it's your current
+  ratio it also shows in the dropdown next to the presets, and it works
+  everywhere a preset ratio does — typing a width or height, the drag pad, *copy from image*,
+  size presets, and saved Universal States (a state with `2.39:1` in it
+  captures and applies like any other). A ratio the Run can't read is refused
+  at Queue time with a message telling you what to type. **`rotate`** sits
+  next to *copy from image* and swaps width and height in one click — with a
+  ratio locked, the ratio flips too (`16:9` becomes `9:16`, `2.39:1` becomes
+  `1:2.39`), and any size preset you had picked un-selects itself like any
+  other hand edit. (With a ratio that isn't a whole-number pair, such as
+  `2.39:1`, a rotate can land one pixel off, e.g. `1000 x 418` becomes
+  `418 x 999`: that is exactly what the Run makes of `418` at `1:2.39`, so
+  the panel shows the size you will really get.) **Save** and **Delete** now sit side by side on one row
+  (and *copy from image* / *rotate* on another) instead of stacking. Your
+  existing workflows load exactly as before.
+- **The ratio lock keeps the number you typed (v1.6.0).** Previously, with a ratio
+  locked, typing a width could nudge it by a pixel (`1000` at `16:9` became
+  `1001`) because the lock re-worked the width from the height it had just
+  worked out. It now keeps the field you edit exactly and works out the other
+  one, and the panel rounds the same way the Run does, so the size you see is
+  the size you get.
+
 `EPSNodes → EPS Resolution`: one image-first node for the everyday
 "resize this and tell me the sizes" job — set a target width/height, pick a
 mode, and get back the resized image **and** the original, plus both sets of
@@ -1123,7 +1150,8 @@ dimensions. It replaces a resize node + a reroute + a get-image-size node.
   and `pad` (black), with a choice of interpolation. `multiple_of` snaps the
   result to a multiple (e.g. 64) for latent-friendly sizes.
 - **Set one axis to `0`** to derive it from the other and the image's aspect.
-- **`copy from image`** (since v0.63.0): a button above the size fields that
+- **`copy from image`** (since v0.63.0): a button above the size fields (it
+  shares a row with `rotate`, which swaps width and height) that
   fills `width`/`height` with the wired image's own pixel size in one click
   — no reading the numbers off the panel and retyping them. It copies the
   EXACT size (if you've set `multiple_of`, the Run rounds it just as it
@@ -1146,7 +1174,7 @@ dimensions. It replaces a resize node + a reroute + a get-image-size node.
   composes with multi-preset ticks: 3 images x 2 presets = every image at
   every size. With `keep aspect (fit)` every image fits inside the one shared box (a 0 width/height derives that box from the first image), so a wide first image never shrinks the others (v0.68.1).
 - **Size presets, shared across machines:** the `preset` dropdown (with
-  **Save** and **Delete** right under it, above the pad) saves all five
+  **Save** and **Delete** side by side right under it, above the pad) saves all five
   fields — width, height, mode, interpolation, `multiple_of` — as a named
   preset. Pick one to apply it; **Shift-click the dropdown to tick
   several**, and one Run then resizes once per preset (2 presets → the same
@@ -1177,7 +1205,8 @@ dimensions. It replaces a resize node + a reroute + a get-image-size node.
 ### Ratio lock and seeing through switchers (v0.87.0)
 
 - **Lock to a ratio**: the `ratio` dropdown — `none`, `1:1`, `5:4`, `4:5`,
-  `9:16`, `16:9` — keeps width and height locked together. Edit either and
+  `4:3`, `3:4`, `16:9`, `9:16`, or `custom…` to type your own (`21:9`,
+  `2.39:1`) — keeps width and height locked together. Edit either and
   the other follows; picking a ratio recalculates height from the current
   width. `multiple_of` still rounds the recalculated side afterward. A lock
   beats a preset or *copy from image* too — width kept, height

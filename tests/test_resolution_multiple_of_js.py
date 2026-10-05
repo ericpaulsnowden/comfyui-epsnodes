@@ -18,7 +18,7 @@ pure, exported math (``snapDimensionValue``) is driven headlessly under Node
 via a served-layout probe script; the LIVE-graph glue that only runs inside
 ``attach()`` against a real litegraph node (``applyMultipleOfWidgetStep``,
 ``wireMultipleOfSnap``, ``resnapCurrentSizeToMultipleOf``,
-``wireMultipleOfLock``, the `attachCopyFromImage` suppression) has no
+``wireMultipleOfLock``, the `copyFromImage` suppression) has no
 browser harness here and is pinned via SOURCE-TEXT assertions instead.
 
 The real ComfyUI frontend semantics this fix relies on (`options.step2` vs
@@ -48,6 +48,8 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 RESOLUTION_JS = REPO_ROOT / "web" / "eps_image" / "resolution.js"
+# v1.6 (2026-10-05): resolution.js imports the shared button-row helper.
+BUTTON_ROW_JS = REPO_ROOT / "web" / "eps_image" / "button_row.js"
 API_JS = REPO_ROOT / "web" / "lora_library" / "api.js"
 VERSION_JS = REPO_ROOT / "web" / "lora_library" / "version.js"
 
@@ -116,6 +118,7 @@ def multiple_of_api(tmp_path_factory: pytest.TempPathFactory) -> dict:
     module_dir = layout / "extensions" / "comfyui-epsnodes" / "eps_image"
     module_dir.mkdir(parents=True)
     shutil.copyfile(RESOLUTION_JS, module_dir / "resolution.js")
+    shutil.copyfile(BUTTON_ROW_JS, module_dir / "button_row.js")
 
     lora_dir = layout / "extensions" / "comfyui-epsnodes" / "lora_library"
     lora_dir.mkdir(parents=True)
@@ -368,7 +371,7 @@ class TestRatioLockInteraction:
         assert (
             attach.index("wireMultipleOfLock(node)")
             < attach.index("wireRatioLock(node)")
-            < attach.index("attachCopyFromImage(node)")
+            < attach.index("attachCopyRotateRow(node)")
         )
 
 

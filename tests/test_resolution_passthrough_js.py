@@ -43,6 +43,8 @@ from nested_layout import build_layout, run_probe
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 RESOLUTION_JS = REPO_ROOT / "web" / "eps_image" / "resolution.js"
+# v1.6 (2026-10-05): resolution.js imports the shared button-row helper.
+BUTTON_ROW_JS = REPO_ROOT / "web" / "eps_image" / "button_row.js"
 API_JS = REPO_ROOT / "web" / "lora_library" / "api.js"
 VERSION_JS = REPO_ROOT / "web" / "lora_library" / "version.js"
 
@@ -301,6 +303,7 @@ def walk_api(tmp_path_factory: pytest.TempPathFactory) -> dict:
     module_dir = layout / "extensions" / "comfyui-epsnodes" / "eps_image"
     module_dir.mkdir(parents=True)
     shutil.copyfile(RESOLUTION_JS, module_dir / "resolution.js")
+    shutil.copyfile(BUTTON_ROW_JS, module_dir / "button_row.js")
 
     lora_dir = layout / "extensions" / "comfyui-epsnodes" / "lora_library"
     lora_dir.mkdir(parents=True)
@@ -488,7 +491,9 @@ class TestSourceLineForSummary:
 
 # --------------------------------------------------- copy-from-image refusal
 #
-# attachCopyFromImage only runs against a real litegraph node/DOM, so
+# copyFromImage (the click handler of the `copy from image | rotate` row,
+# split out of attachCopyFromImage on 2026-10-05) only runs against a real
+# litegraph node/DOM, so
 # (matching test_resolution_presets_js.py's/test_resolution_ratio_js.py's
 # identical convention for that class of code) this is pinned via
 # source-text assertions rather than a probe call.
@@ -496,7 +501,7 @@ class TestSourceLineForSummary:
 
 class TestCopyFromImageRefusesOnMixed:
     def test_mixed_kind_refuses_before_any_write(self, source: str) -> None:
-        body = _function_body(source, "attachCopyFromImage(node)")
+        body = _function_body(source, "copyFromImage(node)")
         mixed_at = body.index("summary.kind === 'mixed'")
         write_at = body.index("writeSize(node, size.width, size.height)")
         assert mixed_at < write_at
@@ -506,7 +511,7 @@ class TestCopyFromImageRefusesOnMixed:
         assert "writeSize" not in mixed_branch
 
     def test_mixed_message_names_every_reported_size(self, source: str) -> None:
-        body = _function_body(source, "attachCopyFromImage(node)")
+        body = _function_body(source, "copyFromImage(node)")
         assert "summary.sizes.map" in body
         assert "different sizes" in body
 
@@ -527,7 +532,7 @@ class TestCopyFromImageRefusesOnMixed:
 @pytest.fixture(scope="module")
 def nested(tmp_path_factory: pytest.TempPathFactory) -> dict:
     layout = build_layout(
-        tmp_path_factory.mktemp("nested_resolution"), eps_image=("resolution.js",)
+        tmp_path_factory.mktemp("nested_resolution"), eps_image=("resolution.js", "button_row.js")
     )
     return run_probe(layout, NESTED_PROBE_JS)
 
@@ -663,5 +668,5 @@ class TestNestedWalkSourcePins:
             source, "resolveIncomingImageSummary(node)"
         )
         # "wired" in copy-from-image's refusal means a REAL source resolves
-        body = _function_body(source, "attachCopyFromImage(node)")
+        body = _function_body(source, "copyFromImage(node)")
         assert "upstreamSources(liveRootOf(node), { node }, slot).length > 0" in body

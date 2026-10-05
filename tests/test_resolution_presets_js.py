@@ -54,6 +54,8 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 RESOLUTION_JS = REPO_ROOT / "web" / "eps_image" / "resolution.js"
+# v1.6 (2026-10-05): resolution.js imports the shared button-row helper.
+BUTTON_ROW_JS = REPO_ROOT / "web" / "eps_image" / "button_row.js"
 # 2026-08-29 (Universal State Controller Apply fix): resolution.js now also
 # imports `../lora_library/api.js` (subscribeWidgetsChangedExternally) --
 # the real siblings, checkpoint_switcher_api's identical convention.
@@ -214,6 +216,7 @@ def presets_api(tmp_path_factory: pytest.TempPathFactory) -> dict:
     module_dir = layout / "extensions" / "comfyui-epsnodes" / "eps_image"
     module_dir.mkdir(parents=True)
     shutil.copyfile(RESOLUTION_JS, module_dir / "resolution.js")
+    shutil.copyfile(BUTTON_ROW_JS, module_dir / "button_row.js")
 
     # 2026-08-29: resolution.js's THIRD import, `../lora_library/api.js`
     # (subscribeWidgetsChangedExternally) -- the real sibling module, not a
@@ -398,7 +401,11 @@ def test_presets_widget_hidden_with_both_flags(source: str) -> None:
     not assume that.)"""
     body = _function_body(source, "hidePresetsWidget(widget)")
     assert "widget.hidden = true" in body
-    assert "widget.options = { ...(widget.options || {}), hidden: true }" in body
+    # 2026-10-05: IN PLACE -- Nodes 2.0 keeps a reference to the ORIGINAL
+    # options object (the widget store's `_state.options`), so a spread copy
+    # is invisible to it (audit V-02).
+    assert "widget.options.hidden = true" in body
+    assert "...(widget.options" not in body  # no spread-copy replacement
 
 
 def test_presets_widget_is_hidden_during_attach(source: str) -> None:
@@ -433,8 +440,13 @@ def test_property_changed_is_chained_never_replaced(source: str) -> None:
 
 def test_presets_off_hides_widgets_and_clears_selection(source: str) -> None:
     body = _function_body(source, "applyPresetsPropertyVisibility(node)")
-    assert "widget.hidden = !enabled" in body
-    assert "widget.options = { ...(widget.options || {}), hidden: !enabled }" in body
+    # the combo: both flags, options written IN PLACE (never replaced)
+    assert "state.combo.hidden = !enabled" in body
+    assert "state.combo.options.hidden = !enabled" in body
+    assert "...(" not in body  # no spread-copy replacement of `options`
+    # the Save | Delete row: its own setHidden writes every flag (widget.hidden,
+    # options.hidden in place, and the element's display -- see button_row.js)
+    assert "state.row?.setHidden(!enabled)" in body
     assert "commitSelection(node, [])" in body
 
 
@@ -481,8 +493,9 @@ def test_save_success_sets_saved_preset_active_and_selected(source: str) -> None
 
 
 def test_delete_button_starts_disabled(source: str) -> None:
-    body = _function_body(source, "createDeleteButton(node, state)")
-    assert "btn.disabled = true" in body
+    body = _function_body(source, "createPresetButtonRow(node, state)")
+    delete_spec = body[body.index("key: 'delete'") :]
+    assert "disabled: true" in delete_spec
 
 
 def test_delete_enabled_state_tracks_exactly_one_selected(source: str) -> None:
@@ -496,7 +509,7 @@ def test_delete_enabled_state_tracks_exactly_one_selected(source: str) -> None:
 def test_delete_button_has_a_no_op_guard_alongside_disabled(source: str) -> None:
     """"widget.disabled = true and a no-op guard in the callback" (task
     brief, req. 3) -- belt-and-suspenders, not relying on `disabled` alone."""
-    body = _function_body(source, "createDeleteButton(node, state)")
+    body = _function_body(source, "createPresetButtonRow(node, state)")
     assert "if (!state.deleteBtn || state.deleteBtn.disabled) return" in body
 
 
@@ -556,7 +569,9 @@ def test_begin_preset_action_disables_both_buttons_and_relabels_the_active_one(
     assert "state.presetActionPending = true" in body
     assert "for (const btn of [state.saveBtn, state.deleteBtn])" in body
     assert "if (btn) btn.disabled = true" in body
-    assert "if (activeBtn) activeBtn.name = pendingLabel" in body
+    # a real HTML <button> since 2026-10-05: its label is `textContent`, not a
+    # litegraph widget's `.name`
+    assert "if (activeBtn) activeBtn.textContent = pendingLabel" in body
 
 
 def test_save_shows_saving_and_delete_shows_deleting(source: str) -> None:
@@ -677,11 +692,13 @@ def test_context_menu_referenced_as_an_ambient_global(source: str) -> None:
 
 
 def test_combo_and_buttons_are_relocated_before_the_pad_in_order(source: str) -> None:
+    """The combo, then the ONE Save | Delete row (2026-10-05: it used to be two
+    stacked button widgets), each spliced in right before the pad."""
     body = _function_body(source, "attachPresetsUi(node)")
     combo_idx = body.index("relocateBeforePad(node, state.combo)")
-    save_idx = body.index("relocateBeforePad(node, state.saveBtn)")
-    delete_idx = body.index("relocateBeforePad(node, state.deleteBtn)")
-    assert combo_idx < save_idx < delete_idx
+    row_idx = body.index("relocateBeforePad(node, state.row.widget)")
+    assert combo_idx < row_idx
+    assert "relocateBeforePad(node, state.saveBtn)" not in body  # no per-button widgets any more
 
 
 def test_relocate_before_pad_uses_the_pure_row_index_helper(source: str) -> None:
@@ -720,13 +737,15 @@ def test_new_widgets_are_excluded_from_widgets_values(source: str) -> None:
     `.serialize = false` flag (`LGraphNode.ts`'s `widgets_values`
     save/restore check -- NOT `options.serialize`, a different, API-prompt-
     only flag; see `image_grid.js`'s "Clear button" section, cited in this
-    file's own header)."""
+    file's own header).
+
+    The combo sets it itself; the Save | Delete row gets BOTH flags from the
+    shared ``addButtonRow`` (pinned in tests/test_button_row_js.py, and proven
+    live against a fake litegraph node in tests/test_resolution_rows_js.py)."""
     combo_body = _function_body(source, "createPresetCombo(node, state)")
     assert "combo.serialize = false" in combo_body
-    save_body = _function_body(source, "createSaveButton(node)")
-    assert "btn.serialize = false" in save_body
-    delete_body = _function_body(source, "createDeleteButton(node, state)")
-    assert "btn.serialize = false" in delete_body
+    row_body = _function_body(source, "createPresetButtonRow(node, state)")
+    assert "addButtonRow(node, PRESET_ROW_WIDGET_NAME" in row_body
 
 
 def test_presets_ui_attached_after_the_grid_so_the_pad_already_exists(source: str) -> None:
@@ -913,31 +932,42 @@ def test_save_click_can_never_be_a_silent_no_op(source: str) -> None:
     sat OUTSIDE the try, so a browser that also refuses window.prompt left
     the click dead with no dialog and no message.
 
-    Three pins, one per link in that chain."""
-    body = _function_body(source, "promptPresetName(node, prefill, onCommit, event)")
+    Three pins, one per link in that chain. (2026-10-05: the chain now lives
+    in ``promptText``, which the custom-ratio box shares; ``promptPresetName``
+    is a thin wrapper that hands it the click event.)"""
+    wrapper = _function_body(source, "promptPresetName(node, prefill, onCommit, event)")
+    assert "promptText(node, {" in wrapper and "event," in wrapper
+    # the Save wrapper must NOT opt in to the extension dialog: Save has the
+    # real click event, and its small box opening at the pointer is the
+    # established behaviour
+    assert "preferExtensionDialog" not in wrapper
+    body = _function_body(source, "promptText(node, options)")
     # 1. The real event reaches canvas.prompt.
-    assert "canvas.prompt('Preset name', prefill || '', commit, event ?? null)" in body
+    assert "canvas.prompt(label, prefill, commit, event ?? null)" in body
     assert "commit, null)" not in body
     # 2. window.prompt is GUARDED (it can throw "prompt() is not supported").
-    guarded = body[body.index("window.prompt"):]
+    guarded = body[body.index("window.prompt") :]
     assert "catch" in guarded
     # 3. A self-owned dialog backstops both, so Save always opens something.
-    assert "promptPresetNameFallback(node, prefill, commit)" in body
+    assert "promptTextFallback(node, { title: label, prefill, confirmLabel }, commit)" in body
 
 
-def test_save_button_forwards_litegraph_s_event(source: str) -> None:
-    """litegraph hands a button callback (value, canvas, node, pos, event);
-    the event is exactly what canvas.prompt needs, so the Save widget must
-    forward it rather than dropping it."""
-    body = _function_body(source, "createSaveButton(node)")
-    assert "(_value, _canvas, _node, _pos, event) => openSaveDialog(node, event)" in body
+def test_save_button_forwards_the_real_click_event(source: str) -> None:
+    """The Save | Delete row is made of real HTML buttons, so a click hands us
+    the real MouseEvent -- exactly what canvas.prompt positions itself from
+    (a native litegraph button callback under Nodes 2.0 hands us none). The
+    row must forward it rather than dropping it."""
+    body = _function_body(source, "createPresetButtonRow(node, state)")
+    assert "onClick: (event) => openSaveDialog(node, event)" in body
 
 
 def test_fallback_dialog_is_self_contained_and_canvas_safe(source: str) -> None:
     """The last-resort dialog owns its own DOM: keydown must stopPropagation
     (canvas hotkeys would otherwise eat the typing -- the same rule every
     text input in this pack follows), and it must clean itself up."""
-    body = _function_body(source, "promptPresetNameFallback(node, prefill, commit)")
+    body = _function_body(
+        source, "promptTextFallback(node, { title, prefill, confirmLabel }, commit)"
+    )
     assert "keyEvent.stopPropagation()" in body
     assert "overlay.remove()" in body
     assert "'Enter'" in body and "'Escape'" in body
@@ -948,11 +978,16 @@ def test_preset_buttons_stay_out_of_the_api_prompt() -> None:
     `widget.serialize` gates the workflow FILE (executionUtil.ts vs
     LGraphNode.ts). Both preset buttons had only the latter, so every
     queued prompt carried phantom `"Save"`/`"Delete"` inputs for the node
-    (rig-caught 2026-08-14 while adding the copy-from-image button)."""
+    (rig-caught 2026-08-14 while adding the copy-from-image button).
+
+    2026-10-05: the two buttons are ONE row widget from ``addButtonRow``, which
+    sets both flags once for every row. The behavioural proof -- the names a
+    queued prompt would carry, taken from a live ``attach()`` -- is in
+    tests/test_resolution_rows_js.py (``test_no_phantom_inputs``)."""
     source = RESOLUTION_JS.read_text(encoding="utf-8")
-    save = _function_body(source, "createSaveButton(node)")
-    assert "{ serialize: false }" in save
-    assert "btn.serialize = false" in save
-    delete = _function_body(source, "createDeleteButton(node, state)")
-    assert "{ serialize: false }" in delete
-    assert "btn.serialize = false" in delete
+    row = _function_body(source, "createPresetButtonRow(node, state)")
+    assert "addButtonRow(node, PRESET_ROW_WIDGET_NAME" in row
+    helper = (REPO_ROOT / "web" / "eps_image" / "button_row.js").read_text(encoding="utf-8")
+    assert "serialize: false," in helper  # options bag at creation
+    assert "widget.options.serialize = false" in helper  # ...and in place afterwards
+    assert "widget.serialize = false" in helper

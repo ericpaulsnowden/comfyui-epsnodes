@@ -515,6 +515,114 @@ class TestEPSSaveImageFormatIsAcceptedByTheStore:
             store.normalize_state(payload)
 
 
+class TestEPSResolutionRatioIsAcceptedByTheStore:
+    """2026-10-05: the REAL EPSResolution descriptor through the REAL
+    validator. `ratio` is a pattern-constrained ``string`` so a state may
+    capture a ratio the owner TYPED (``2.39:1``), which a ``choice`` could not
+    express -- and garbage is refused by name."""
+
+    def _payload(self, widgets: dict) -> dict:
+        return {
+            "name": "wide",
+            "nodes": [{"class": "EPSResolution", "id": "12", "widgets": widgets}],
+        }
+
+    @pytest.mark.parametrize(
+        "ratio", ["none", "1:1", "5:4", "4:5", "4:3", "3:4", "16:9", "9:16", "21:9", "2.39:1"]
+    )
+    def test_presets_and_typed_ratios_round_trip(self, fake_nodes, ratio) -> None:
+        from eps_image.nodes_resolution import EPSResolution
+
+        _register(fake_nodes, "EPSResolution", EPSResolution)
+        widgets = {"width": 1024, "height": 576, "ratio": ratio, "presets": []}
+        normalized, foreign = store.normalize_state(self._payload(widgets))
+        assert foreign == []
+        assert normalized["nodes"][0]["widgets"]["ratio"] == ratio
+
+    @pytest.mark.parametrize(
+        "bad", ["banana", "", "0:5", "5:0", "16x9", " 16:9", "custom…", "1:2:3", "-1:1", "None"]
+    )
+    def test_garbage_is_refused_naming_the_class_and_widget(self, fake_nodes, bad) -> None:
+        from eps_image.nodes_resolution import EPSResolution
+
+        _register(fake_nodes, "EPSResolution", EPSResolution)
+        with pytest.raises(store.StateValidationError, match=r"EPSResolution.*ratio"):
+            store.normalize_state(self._payload({"ratio": bad}))
+
+    @pytest.mark.parametrize("bad", [16, None, True, ["16:9"], {"w": 16}])
+    def test_a_non_string_is_refused(self, fake_nodes, bad) -> None:
+        from eps_image.nodes_resolution import EPSResolution
+
+        _register(fake_nodes, "EPSResolution", EPSResolution)
+        with pytest.raises(store.StateValidationError, match=r"EPSResolution.*ratio"):
+            store.normalize_state(self._payload({"ratio": bad}))
+
+    def test_an_old_choice_era_state_still_loads(self, fake_nodes, context: LibraryContext) -> None:
+        """A state saved while ``ratio`` was a ``choice`` holds one of the old
+        preset strings. It must save, reload and normalise unchanged."""
+        from eps_image.nodes_resolution import EPSResolution
+
+        _register(fake_nodes, "EPSResolution", EPSResolution)
+        payload = self._payload({"width": 768, "height": 1024, "ratio": "3:4"})
+        slug, _normalized, foreign = store.save_state(context, payload)
+        assert foreign == []
+        loaded = store.load_state(context, slug)
+        assert loaded is not None
+        assert loaded["nodes"][0]["widgets"]["ratio"] == "3:4"
+
+
+class TestStringPatternKind:
+    """`string` + `pattern` as a general mechanism (a fake class, so the rule is
+    pinned apart from any one node)."""
+
+    class _Patterned:
+        EPS_STATE_WIDGETS: ClassVar[dict[str, Any]] = {
+            "format": 1,
+            "widgets": {
+                "code": {"kind": "string", "pattern": r"^[A-Z]{2}-\d+$", "max_len": 8},
+                "plain": {"kind": "string", "max_len": 8},
+                "broken": {"kind": "string", "pattern": "(unclosed"},
+            },
+        }
+
+    def _entry(self, **widgets: object) -> dict:
+        return {"name": "p", "nodes": [{"class": "Patterned", "id": "1", "widgets": widgets}]}
+
+    def test_a_matching_value_passes(self, fake_nodes) -> None:
+        _register(fake_nodes, "Patterned", self._Patterned)
+        normalized, _ = store.normalize_state(self._entry(code="AB-12"))
+        assert normalized["nodes"][0]["widgets"] == {"code": "AB-12"}
+
+    def test_a_non_matching_value_is_refused(self, fake_nodes) -> None:
+        _register(fake_nodes, "Patterned", self._Patterned)
+        with pytest.raises(store.StateValidationError, match=r"Patterned\.code.*expected format"):
+            store.normalize_state(self._entry(code="ab-12"))
+
+    def test_the_pattern_is_a_fullmatch_not_a_search(self, fake_nodes) -> None:
+        _register(fake_nodes, "Patterned", self._Patterned)
+        with pytest.raises(store.StateValidationError, match=r"Patterned\.code"):
+            store.normalize_state(self._entry(code="xAB-12"))
+        with pytest.raises(store.StateValidationError, match=r"Patterned\.code"):
+            store.normalize_state(self._entry(code="AB-12\n"))
+
+    def test_max_len_still_applies_alongside_the_pattern(self, fake_nodes) -> None:
+        _register(fake_nodes, "Patterned", self._Patterned)
+        with pytest.raises(store.StateValidationError, match="at most 8"):
+            store.normalize_state(self._entry(code="AB-1234567"))
+
+    def test_a_string_without_a_pattern_is_unchanged(self, fake_nodes) -> None:
+        _register(fake_nodes, "Patterned", self._Patterned)
+        normalized, _ = store.normalize_state(self._entry(plain="anything"))
+        assert normalized["nodes"][0]["widgets"] == {"plain": "anything"}
+
+    def test_a_broken_descriptor_pattern_is_a_clear_error_not_a_traceback(
+        self, fake_nodes
+    ) -> None:
+        _register(fake_nodes, "Patterned", self._Patterned)
+        with pytest.raises(store.StateValidationError, match="not a valid regular expression"):
+            store.normalize_state(self._entry(broken="x"))
+
+
 class TestForeignClass:
     """FORMAT.md §4.3: a class with no registry entry (a future EPSNodes
     build, a third-party pack, or simply not loaded in THIS process) is

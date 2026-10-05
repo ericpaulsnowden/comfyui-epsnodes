@@ -182,6 +182,21 @@ class TestSchema:
                 re.compile(pattern)  # raises re.error on a malformed pattern
 
     @pytest.mark.parametrize("class_id,node_class,_display", _STATE_BEARING_SPECS)
+    def test_string_patterns_compile_and_belong_to_string_kinds(
+        self, class_id, node_class, _display
+    ) -> None:
+        """2026-10-05: a ``string`` may carry an anchored ``pattern`` (EPS
+        Resolution's ``ratio``). It must be a real regex, and only the
+        ``string`` kind honours the key -- a ``pattern`` on any other kind would
+        be silently ignored by both validators, which is a descriptor bug."""
+        for name, widget_spec in node_class.EPS_STATE_WIDGETS["widgets"].items():
+            if "pattern" not in widget_spec:
+                continue
+            assert widget_spec["kind"] == "string", f"{class_id}.{name}: pattern on a non-string"
+            assert isinstance(widget_spec["pattern"], str) and widget_spec["pattern"]
+            re.compile(widget_spec["pattern"])  # raises re.error on a malformed pattern
+
+    @pytest.mark.parametrize("class_id,node_class,_display", _STATE_BEARING_SPECS)
     def test_min_max_are_numbers_when_present(self, class_id, node_class, _display) -> None:
         for name, widget_spec in node_class.EPS_STATE_WIDGETS["widgets"].items():
             for bound in ("min", "max"):
@@ -294,6 +309,34 @@ class TestSaveImagePreviewOnly:
     def test_the_registry_route_collects_the_boolean(self) -> None:
         registry = collect_state_registry({"EPSSaveImage": EPSSaveImage})
         assert registry["EPSSaveImage"]["widgets"]["preview_only"] == {"kind": "boolean"}
+
+
+# ------------------------------------------------------- EPS Resolution
+
+
+class TestResolutionRatio:
+    """2026-10-05: `ratio` became a pattern-constrained ``string`` (a typed
+    ratio is by design not one of the dropdown's options, which a ``choice``
+    is checked against on Apply)."""
+
+    def test_declared_with_the_pattern_the_node_owns(self) -> None:
+        from eps_image import nodes_resolution
+
+        widget = EPSResolution.EPS_STATE_WIDGETS["widgets"]["ratio"]
+        assert widget["kind"] == "string"
+        assert widget["pattern"] == nodes_resolution.RATIO_STATE_PATTERN
+        assert widget["max_len"] == nodes_resolution.RATIO_STATE_MAX_LEN
+
+    def test_the_registry_route_carries_the_pattern_to_the_frontend(self) -> None:
+        registry = collect_state_registry({"EPSResolution": EPSResolution})
+        ratio = registry["EPSResolution"]["widgets"]["ratio"]
+        assert ratio["kind"] == "string" and ratio["pattern"]
+
+    def test_the_ratio_widget_is_still_a_widget_the_completeness_rule_covers(self) -> None:
+        # It stays a COMBO in INPUT_TYPES (the panel adds a `custom…` entry in
+        # front of it), so the declare-or-exclude rule still sees it.
+        assert "ratio" in _widget_bearing_inputs(EPSResolution)
+        assert "ratio" in EPSResolution.EPS_STATE_WIDGETS["widgets"]
 
 
 # -------------------------------------------------- out-of-scope nodes

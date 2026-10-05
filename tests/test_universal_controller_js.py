@@ -110,6 +110,86 @@ out.validateString = {
   tooLong: m.validateStateValue({ kind: 'string', max_len: 3 }, 'hello'),
   wrongType: m.validateStateValue({ kind: 'string' }, 5)
 }
+// 2026-10-05: `string` may carry an anchored `pattern` (EPS Resolution's
+// `ratio`) -- the same pattern string the backend runs through re.fullmatch.
+out.validateStringPattern = {
+  ok: m.validateStateValue({ kind: 'string', pattern: '^[A-Z]{2}$' }, 'AB'),
+  noMatch: m.validateStateValue({ kind: 'string', pattern: '^[A-Z]{2}$' }, 'ab'),
+  wrongType: m.validateStateValue({ kind: 'string', pattern: '^[A-Z]{2}$' }, 5),
+  tooLongStillRefused: m.validateStateValue(
+    { kind: 'string', pattern: '^[A-Z]+$', max_len: 3 },
+    'ABCD'
+  ),
+  trailingNewline: m.validateStateValue({ kind: 'string', pattern: '^[A-Z]{2}$' }, 'AB\n'),
+  brokenPatternFailsTheValue: m.validateStateValue({ kind: 'string', pattern: '(unclosed' }, 'x'),
+  emptyPatternIsNoPattern: m.validateStateValue({ kind: 'string', pattern: '' }, 'anything'),
+  patternOnOtherKindsIsIgnored: m.validateStateValue({ kind: 'lines', pattern: '^x$' }, 'y')
+}
+{
+  // The REAL `ratio` descriptor from nodes_resolution.py, through capture and apply.
+  const RATIO_PATTERN = __RATIO_STATE_PATTERN__
+  const ratioRegistry = {
+    classes: {
+      EPSResolution: {
+        display: 'EPS Resolution',
+        widgets: { ratio: { kind: 'string', pattern: RATIO_PATTERN, max_len: 32 } }
+      }
+    }
+  }
+  const noExclusions = { nodes: {}, classes: {} }
+  const capture = (value) =>
+    m.buildStatePayload(
+      [{ pathId: '7', class: 'EPSResolution', title: 'R', widgetValues: { ratio: value } }],
+      ratioRegistry,
+      noExclusions
+    )
+  // A LIVE ratio widget whose option list is the presets + `custom…` -- a typed
+  // ratio like 2.39:1 is by design NOT in it, which is exactly why a `choice`
+  // refused it on Apply ("value not in options").
+  const live = {
+    '7': {
+      class: 'EPSResolution',
+      widgets: {
+        ratio: {
+          value: '16:9',
+          options: {
+            values: () => ['none', '1:1', '5:4', '4:5', '4:3', '3:4', '16:9', '9:16', 'custom…']
+          }
+        }
+      }
+    }
+  }
+  const apply = (value) =>
+    m.applyPlan(
+      [{ class: 'EPSResolution', id: '7', title: 'R', widgets: { ratio: value } }],
+      live,
+      ratioRegistry,
+      noExclusions
+    ).matched[0]
+  out.ratioState = {
+    captureTyped: capture('2.39:1'),
+    capturePreset: capture('16:9'),
+    captureNone: capture('none'),
+    captureGarbage: capture('banana'),
+    captureSentinel: capture('custom…'),
+    applyTyped: apply('2.39:1'),
+    applyPreset: apply('4:3'),
+    applyNone: apply('none'),
+    applyGarbage: apply('banana'),
+    applyLooseSpelling: apply('16x9'),
+    // the same typed value under the OLD kind (what states hit before 2026-10-05)
+    oldChoiceApplyTyped: m.applyPlan(
+      [{ class: 'EPSResolution', id: '7', title: 'R', widgets: { ratio: '2.39:1' } }],
+      live,
+      {
+        classes: {
+          EPSResolution: { display: 'EPS Resolution', widgets: { ratio: { kind: 'choice' } } }
+        }
+      },
+      noExclusions
+    ).matched[0]
+  }
+}
 out.validateInt = {
   ok: m.validateStateValue({ kind: 'int', min: 0, max: 10 }, 5),
   belowMin: m.validateStateValue({ kind: 'int', min: 0 }, -1),
@@ -600,7 +680,13 @@ def controller_api(tmp_path_factory: pytest.TempPathFactory) -> dict:
     (scripts / "app.js").write_text("export const app = {}\n", encoding="utf-8")
 
     probe = layout / "probe.mjs"
-    probe.write_text(PROBE_JS, encoding="utf-8")
+    # The REAL ratio pattern, spliced in rather than retyped (it would drift).
+    from eps_image.nodes_resolution import RATIO_STATE_PATTERN
+
+    probe.write_text(
+        PROBE_JS.replace("__RATIO_STATE_PATTERN__", json.dumps(RATIO_STATE_PATTERN)),
+        encoding="utf-8",
+    )
 
     result = subprocess.run(
         [NODE, str(probe)], capture_output=True, text=True, timeout=60, cwd=layout
@@ -669,12 +755,82 @@ def test_syntax_is_valid() -> None:
 # ------------------------------------------------------------- pure helpers
 
 
+class TestRatioStateRoundTrip:
+    """EPS Resolution's `ratio` (2026-10-05, owner: "I should be able to type in
+    a ratio not just use presets"): a state with a TYPED ratio must capture and
+    apply. It is declared as a pattern-constrained `string`, not a `choice`,
+    because Apply checks a `choice` against the live widget's own options and a
+    typed ratio is by design not one of them."""
+
+    def test_a_typed_ratio_is_captured(self, controller_api: dict) -> None:
+        r = controller_api["ratioState"]
+        assert r["captureTyped"]["nodes"][0]["widgets"] == {"ratio": "2.39:1"}
+        assert r["captureTyped"]["warnings"] == []
+
+    def test_presets_and_none_are_captured(self, controller_api: dict) -> None:
+        r = controller_api["ratioState"]
+        assert r["capturePreset"]["nodes"][0]["widgets"] == {"ratio": "16:9"}
+        assert r["captureNone"]["nodes"][0]["widgets"] == {"ratio": "none"}
+
+    @pytest.mark.parametrize("key", ["captureGarbage", "captureSentinel"])
+    def test_garbage_and_the_custom_command_are_skipped_with_a_warning(
+        self, controller_api: dict, key: str
+    ) -> None:
+        captured = controller_api["ratioState"][key]
+        assert captured["nodes"][0]["widgets"] == {}  # the node stays, that one widget drops
+        assert len(captured["warnings"]) == 1
+        assert "ratio" in captured["warnings"][0]
+
+    def test_a_typed_ratio_applies_though_the_live_options_do_not_list_it(
+        self, controller_api: dict
+    ) -> None:
+        applied = controller_api["ratioState"]["applyTyped"]
+        assert applied["writes"] == [{"name": "ratio", "value": "2.39:1"}]
+        assert applied["invalid"] == []
+
+    def test_presets_and_none_apply(self, controller_api: dict) -> None:
+        r = controller_api["ratioState"]
+        assert r["applyPreset"]["writes"] == [{"name": "ratio", "value": "4:3"}]
+        assert r["applyNone"]["writes"] == [{"name": "ratio", "value": "none"}]
+
+    def test_garbage_and_loose_spellings_are_dropped_per_widget_not_per_node(
+        self, controller_api: dict
+    ) -> None:
+        r = controller_api["ratioState"]
+        for key in ("applyGarbage", "applyLooseSpelling"):
+            assert r[key]["writes"] == []
+            assert [i["name"] for i in r[key]["invalid"]] == ["ratio"]
+
+    def test_the_old_choice_kind_is_what_refused_a_typed_ratio(
+        self, controller_api: dict
+    ) -> None:
+        """The reason for the change, pinned: under `choice` the same typed
+        value is "value not in options" -- so the state would have captured fine
+        and then silently refused to apply."""
+        old = controller_api["ratioState"]["oldChoiceApplyTyped"]
+        assert old["writes"] == []
+        assert old["invalid"] == [{"name": "ratio", "reason": "value not in options"}]
+
+
 class TestValidateStateValue:
     def test_string(self, controller_api: dict) -> None:
         v = controller_api["validateString"]
         assert v["ok"] == {"ok": True}
         assert v["tooLong"]["ok"] is False
         assert v["wrongType"]["ok"] is False
+
+    def test_string_pattern(self, controller_api: dict) -> None:
+        """2026-10-05: an optional anchored `pattern` on `string` -- the SAME
+        string `universal_states_store._check_kind` runs through `re.fullmatch`."""
+        v = controller_api["validateStringPattern"]
+        assert v["ok"] == {"ok": True}
+        assert v["noMatch"] == {"ok": False, "error": "does not match the expected format"}
+        assert v["wrongType"]["ok"] is False
+        assert v["tooLongStillRefused"]["ok"] is False  # max_len is checked first, alongside
+        assert v["trailingNewline"]["ok"] is False  # `$` is end-of-string here, like fullmatch
+        assert v["brokenPatternFailsTheValue"] == {"ok": False, "error": "invalid pattern"}
+        assert v["emptyPatternIsNoPattern"] == {"ok": True}
+        assert v["patternOnOtherKindsIsIgnored"] == {"ok": True}
 
     def test_int(self, controller_api: dict) -> None:
         v = controller_api["validateInt"]

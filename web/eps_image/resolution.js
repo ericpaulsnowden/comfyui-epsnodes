@@ -11,6 +11,13 @@
  * correctness constraint, not a style choice) and the ContextMenu/Vue-mode
  * verification trail.
  *
+ * 2026-10-05 round (owner asks): the `ratio` combo gained `custom…` (type
+ * any ratio -- "M6: typed ratio" section), `rotate` joined `copy from image`
+ * (swap width/height -- `rotateSize`), and the two button PAIRS are now
+ * side-by-side rows (`Save | Delete`, `copy from image | rotate`) built by
+ * the shared `addButtonRow` in `button_row.js` instead of four stacked
+ * litegraph buttons.
+ *
  * ---- Hideable outputs: how, and why it's two different mechanisms ----
  *
  * FORMAT.md §6.5 says "Frontend does the hide (litegraph output `hidden`
@@ -222,6 +229,7 @@ import {
   resolveSourcesAt,
   subscribeWidgetsChangedExternally
 } from '../lora_library/api.js'
+import { addButtonRow, captureUndoState } from './button_row.js'
 
 const NODE_TYPE = 'EPSResolution'
 const NODE_TITLE = 'EPS Resolution'
@@ -243,6 +251,24 @@ const ORIGINAL_SIZE_TYPE = 'INT'
 //: 2026-08-28, M4 section below) -- a real, VISIBLE backend widget, unlike
 //: `presets` above.
 const RATIO_WIDGET_NAME = 'ratio'
+
+//: The ratio dropdown's LAST entry (owner ask 2026-10-05, M6 section below).
+//: A COMMAND, never a value: picking it opens a box to type a ratio in, and
+//: the widget is put straight back to what it was. Pinned equal to
+//: nodes_resolution.py's `RATIO_CUSTOM_OPTION` by tests/test_resolution.py.
+export const RATIO_CUSTOM_OPTION = 'custom…'
+
+//: The one-click presets, used ONLY when the widget's own option list can't
+//: be read (a build that hands us no array). Normally the list is read off the
+//: backend's `INPUT_TYPES` at attach time, so a new preset needs no frontend
+//: change; tests/test_resolution.py pins this fallback equal to the backend's
+//: `RATIO_OPTIONS` so the two can't drift.
+const FALLBACK_RATIO_PRESETS = ['none', '1:1', '5:4', '4:5', '4:3', '3:4', '16:9', '9:16']
+
+//: The two button rows (M6). DOM-widget names -- unique on the node, never
+//: serialized -- and what each row's buttons are called inside it.
+const COPY_ROW_WIDGET_NAME = 'eps_resolution_copy_row'
+const PRESET_ROW_WIDGET_NAME = 'eps_resolution_preset_row'
 
 // --------------------------------------------------------------- utilities
 
@@ -1182,8 +1208,14 @@ function setWidgetValue(widget, value) {
  * deterministic math), never a second, different answer. */
 function writeSize(node, width, height) {
   const conformed = conformNodeSizeToRatio(node, width, height, 'width')
-  setWidgetValue(widgetByName(node, 'width'), conformed.width)
-  setWidgetValue(widgetByName(node, 'height'), conformed.height)
+  // Both writes are consequences of the conform above, not edits: under
+  // `withRatioDerivedWrite` the lock's wraps leave the pair exactly as
+  // computed (2026-10-05: they used to re-derive from it and could move the
+  // anchor by a pixel for an inexact ratio -- see that function).
+  withRatioDerivedWrite(node, () => {
+    setWidgetValue(widgetByName(node, 'width'), conformed.width)
+    setWidgetValue(widgetByName(node, 'height'), conformed.height)
+  })
   renderGrid(node)
 }
 
@@ -1965,6 +1997,8 @@ function attachSizeGrid(node) {
 //   override) does NOT rescue this -- it only reconciles a widget that
 //   toggled `forceInput`, and bails (`return widgetsValues` unchanged)
 //   whenever the widget/value counts disagree, which is exactly this case.
+//   (2026-10-05: `Save`/`Delete` are now ONE DOM-widget row, `eps_resolution_
+//   preset_row`, in the same slot -- the same reasoning applies unchanged.)
 //   So instead: `preset`/`Save`/`Delete` are inserted immediately AFTER
 //   every real backend widget (i.e. after `presets`) and BEFORE the M2 pad
 //   -- the same provably-safe tail region `GRID_WIDGET_NAME` already
@@ -2288,8 +2322,10 @@ function applyPresetValues(node, name) {
     if (Number.isFinite(requestedW) && Number.isFinite(requestedH)) {
       const conformed = conformNodeSizeToRatio(node, requestedW, requestedH, 'width')
       if (conformed.width !== requestedW || conformed.height !== requestedH) {
-        setWidgetValue(widgetByName(node, 'width'), conformed.width)
-        setWidgetValue(widgetByName(node, 'height'), conformed.height)
+        withRatioDerivedWrite(node, () => {
+          setWidgetValue(widgetByName(node, 'width'), conformed.width)
+          setWidgetValue(widgetByName(node, 'height'), conformed.height)
+        })
         toast(
           node,
           'warn',
@@ -2464,53 +2500,118 @@ async function loadPresets(node) {
 
 // --------------------------------------------------------- M3: Save (POST)
 
-/** `LGraphCanvas.prompt` where present, else `window.prompt` -- identical
- * fallback shape to `distributor.js`/`switcher.js`'s established
- * `promptForOutputLabel`. `window.prompt` returns `null` on Cancel (skip)
- * but `""` on an intentional OK-with-empty-field; either way an
- * empty/whitespace name is refused client-side (the backend would 400 it
- * anyway, but there is nothing useful to POST for an empty name). */
-function promptPresetName(node, prefill, onCommit, event) {
-  const canvas = app?.canvas ?? null
+/**
+ * Asks the user for one line of text -- the ONE prompt this file uses (the
+ * preset-name box and, since 2026-10-05, the custom-ratio box both go through
+ * it, so a fix to how a box opens or falls back reaches both).
+ *
+ * Tiers, each tried only when the one before is missing or throws, so a
+ * click can NEVER be a silent no-op:
+ *
+ * 0. `app.extensionManager.dialog.prompt` -- ONLY when `preferExtensionDialog`
+ *    (the custom-ratio box). The frontend's own modal prompt, the one ComfyUI
+ *    documents for extensions; a promise of the typed text, or `null` on
+ *    Cancel. A native widget callback under Nodes 2.0 hands us no pointer
+ *    event, so there is nothing to position a floating box with anyway. The
+ *    preset-name box does NOT opt in: Save has the real click event and its
+ *    small box opening at the pointer is the established behaviour.
+ * 1. `LGraphCanvas.prompt(title, value, callback, event)` -- positioned at
+ *    *event*, or centred on the canvas when *event* is absent (verified in
+ *    `LGraphCanvas.ts`: `if (event) ... else centre`). The EVENT is passed
+ *    through from the button's own click (owner report 2026-08-09: "clicking
+ *    save ... doesn't seem to do anything": this file used to hand it a null
+ *    event, and with neither it threw).
+ * 2. `window.prompt` -- `null` on Cancel, `""` on an intentional OK-with-empty.
+ * 3. A self-owned DOM dialog (`promptTextFallback`).
+ *
+ * `onCommit` receives the raw typed text (callers trim/validate); it is NOT
+ * called on Cancel (`null`/`undefined`). Every tier's own errors are caught
+ * and logged, never thrown into the click.
+ *
+ * @param {object} node
+ * @param {{title: string, message?: string, prefill?: string,
+ *   onCommit: (text: string) => void, event?: Event | null,
+ *   preferExtensionDialog?: boolean, confirmLabel?: string}} options
+ */
+function promptText(node, options) {
+  const {
+    title,
+    message,
+    prefill = '',
+    onCommit,
+    event = null,
+    preferExtensionDialog = false,
+    confirmLabel = 'OK'
+  } = options
+  const label = message || title
   const commit = (value) => {
     if (value === null || value === undefined) return
-    const trimmed = String(value).trim()
-    if (!trimmed) return
-    onCommit(trimmed)
+    onCommit(String(value))
   }
-  // The EVENT is passed through from the button widget's own callback
-  // (owner report 2026-08-09: "clicking save ... doesn't seem to do
-  // anything"): this file used to hand `canvas.prompt` a null event --
-  // the only such call site in the pack, unlike distributor.js/
-  // switcher.js, which pass theirs. `LGraphCanvas.prompt` reads
-  // `LGraphCanvas.active_canvas` and positions off the event; with
-  // neither it throws, and the window.prompt fallback below USED TO SIT
-  // OUTSIDE this try, so a browser that also refuses window.prompt
-  // (unsupported, or dialogs suppressed after a user checks "prevent
-  // additional dialogs") killed the click with no dialog and no message.
-  try {
-    if (canvas && typeof canvas.prompt === 'function') {
-      canvas.prompt('Preset name', prefill || '', commit, event ?? null)
-      return
+
+  const fromCanvasPrompt = () => {
+    const canvas = app?.canvas ?? null
+    try {
+      if (canvas && typeof canvas.prompt === 'function') {
+        canvas.prompt(label, prefill, commit, event ?? null)
+        return
+      }
+    } catch (error) {
+      console.warn(PREFIX, 'canvas.prompt failed; falling back', error)
     }
-  } catch (error) {
-    console.warn(PREFIX, 'canvas.prompt failed; falling back', error)
+    try {
+      commit(window.prompt(label, prefill))
+      return
+    } catch (error) {
+      console.warn(PREFIX, 'window.prompt unavailable; using the built-in dialog', error)
+    }
+    // Last resort, owned entirely by this file so the click can NEVER be a
+    // silent no-op: a minimal DOM dialog over the canvas.
+    promptTextFallback(node, { title: label, prefill, confirmLabel }, commit)
   }
-  try {
-    commit(window.prompt('Preset name', prefill || ''))
-    return
-  } catch (error) {
-    console.warn(PREFIX, 'window.prompt unavailable; using the built-in dialog', error)
+
+  if (preferExtensionDialog) {
+    const dialog = app?.extensionManager?.dialog
+    if (typeof dialog?.prompt === 'function') {
+      try {
+        Promise.resolve(dialog.prompt({ title, message: label, defaultValue: prefill }))
+          .then(commit, (error) => {
+            console.warn(PREFIX, 'extensionManager.dialog.prompt rejected; falling back', error)
+            fromCanvasPrompt()
+          })
+          // `commit` runs the caller's handler in a promise callback, where a
+          // throw would surface as an unhandled rejection instead of a log line.
+          .catch((error) => console.warn(PREFIX, 'the text box handler threw', error))
+        return
+      } catch (error) {
+        console.warn(PREFIX, 'extensionManager.dialog.prompt failed; falling back', error)
+      }
+    }
   }
-  // Last resort, owned entirely by this file so Save can NEVER be a silent
-  // no-op: a minimal DOM dialog over the canvas.
-  promptPresetNameFallback(node, prefill, commit)
+  fromCanvasPrompt()
 }
 
-/** Self-owned name dialog -- no litegraph, no window.prompt. Kept
+/** The preset-name box: a thin wrapper over `promptText` that trims and
+ * ignores an empty/whitespace name (the backend would 400 it anyway, but
+ * there is nothing useful to POST for an empty name). */
+function promptPresetName(node, prefill, onCommit, event) {
+  promptText(node, {
+    title: 'Preset name',
+    prefill: prefill || '',
+    event,
+    confirmLabel: 'Save',
+    onCommit: (value) => {
+      const trimmed = value.trim()
+      if (trimmed) onCommit(trimmed)
+    }
+  })
+}
+
+/** Self-owned text dialog -- no litegraph, no window.prompt. Kept
  * deliberately plain (one input, OK/Cancel, Enter/Escape) since it only
- * ever runs when both platform prompts have failed. */
-function promptPresetNameFallback(node, prefill, commit) {
+ * ever runs when both platform prompts have failed. The input stops
+ * `keydown` from propagating so canvas hotkeys never eat the typing. */
+function promptTextFallback(node, { title, prefill, confirmLabel }, commit) {
   try {
     const overlay = document.createElement('div')
     overlay.className = 'eps-res-prompt-overlay'
@@ -2518,7 +2619,7 @@ function promptPresetNameFallback(node, prefill, commit) {
     box.className = 'eps-res-prompt'
     const label = document.createElement('div')
     label.className = 'eps-res-prompt-label'
-    label.textContent = 'Preset name'
+    label.textContent = title
     const input = document.createElement('input')
     input.type = 'text'
     input.className = 'eps-res-prompt-input'
@@ -2528,7 +2629,7 @@ function promptPresetNameFallback(node, prefill, commit) {
     const cancel = document.createElement('button')
     cancel.textContent = 'Cancel'
     const ok = document.createElement('button')
-    ok.textContent = 'Save'
+    ok.textContent = confirmLabel
     row.append(cancel, ok)
     box.append(label, input, row)
     overlay.appendChild(box)
@@ -2551,8 +2652,8 @@ function promptPresetNameFallback(node, prefill, commit) {
     input.focus()
     input.select()
   } catch (error) {
-    console.warn(PREFIX, 'built-in preset-name dialog failed', error)
-    toast(node, 'error', 'Could not open the preset-name dialog.')
+    console.warn(PREFIX, 'built-in text dialog failed', error)
+    toast(node, 'error', 'Could not open the text box.')
   }
 }
 
@@ -2597,14 +2698,18 @@ export function presetActionShouldStart(state) {
  * ("Saving…"/"Deleting…", matching `lora_library/notebook.js`'s identical
  * in-progress wording). Returns *activeBtn*'s ORIGINAL label so
  * `endPresetAction` can restore it exactly, rather than hard-coding
- * "Save"/"Delete" back in. */
+ * "Save"/"Delete" back in.
+ *
+ * *activeBtn* is a real HTML `<button>` since 2026-10-05 (the two used to be
+ * litegraph button widgets, whose label was `.name`); the label is its
+ * `textContent`. */
 function beginPresetAction(node, state, activeBtn, pendingLabel) {
   state.presetActionPending = true
   for (const btn of [state.saveBtn, state.deleteBtn]) {
     if (btn) btn.disabled = true
   }
-  const originalLabel = activeBtn ? activeBtn.name : null
-  if (activeBtn) activeBtn.name = pendingLabel
+  const originalLabel = activeBtn ? activeBtn.textContent : null
+  if (activeBtn) activeBtn.textContent = pendingLabel
   node.setDirtyCanvas(true, true)
   return originalLabel
 }
@@ -2618,7 +2723,7 @@ function beginPresetAction(node, state, activeBtn, pendingLabel) {
  * must not leave Delete wrongly clickable afterward. */
 function endPresetAction(node, state, activeBtn, originalLabel) {
   state.presetActionPending = false
-  if (activeBtn && originalLabel != null) activeBtn.name = originalLabel
+  if (activeBtn && originalLabel != null) activeBtn.textContent = originalLabel
   if (state.saveBtn) state.saveBtn.disabled = false // Save has no selection-based gate of its own
   updateDeleteEnabled(node)
   node.setDirtyCanvas(true, true)
@@ -2682,7 +2787,7 @@ async function performDelete(node) {
   const state = presetsState(node)
   if (!state || !presetActionShouldStart(state)) return // finding 3: a click mid-request is ignored, not queued
   const active = state.selection.length === 1 ? state.selection[0] : null
-  if (!active) return // belt-and-suspenders with widget.disabled -- see createDeleteButton
+  if (!active) return // belt-and-suspenders with the button's `disabled` -- see createPresetButtonRow
   const body = { name: active }
   if (typeof state.mtime === 'number') body.base_mtime = state.mtime
   const originalLabel = beginPresetAction(node, state, state.deleteBtn, 'Deleting…')
@@ -2770,10 +2875,16 @@ function openMultiSelectMenu(node, opts) {
  * already ships `options.hidden: true` in INPUT_TYPES (nodes_resolution.py)
  * for the Vue-mode half; this sets it again anyway (idempotent, matches
  * checkpoint_switcher.js's identical belt-and-suspenders) since a frontend
- * cannot assume any particular backend already did its half. */
+ * cannot assume any particular backend already did its half.
+ *
+ * `options` is mutated IN PLACE (2026-10-05; it used to be replaced with a
+ * spread copy): Nodes 2.0 keeps a reference to the ORIGINAL options object --
+ * the widget store's `_state.options` -- so a replacement is invisible to it
+ * (audit V-02). Create it only when the widget somehow has none. */
 function hidePresetsWidget(widget) {
   widget.hidden = true
-  widget.options = { ...(widget.options || {}), hidden: true }
+  if (!widget.options) widget.options = {}
+  widget.options.hidden = true
 }
 
 function createPresetCombo(node, state) {
@@ -2823,63 +2934,70 @@ function createPresetCombo(node, state) {
   return combo
 }
 
-/** Plain button widgets, matching `image_grid.js`'s `addClearButton`
- * idiom exactly: an empty options bag, then the TOP-LEVEL `.serialize =
- * false` (the flag `LGraphNode.ts` actually checks for `widgets_values` --
- * `options.serialize` is a different, API-prompt-only flag; see that
- * file's "Clear button" section and this file's widget-order note above). */
-function createSaveButton(node) {
-  // litegraph hands a button callback (value, canvas, node, pos, event) --
-  // the event is what canvas.prompt needs (see promptPresetName).
-  const btn = node.addWidget(
-    'button',
-    'Save',
-    null,
-    (_value, _canvas, _node, _pos, event) => openSaveDialog(node, event),
-    // `options.serialize: false` keeps this button out of the API PROMPT --
-    // a DIFFERENT flag from `btn.serialize` below, which keeps it out of the
-    // workflow FILE (executionUtil.ts vs LGraphNode.ts). Rig-caught
-    // 2026-08-14 alongside the new copy button: every queued prompt was
-    // carrying phantom `"Save"`/`"Delete"` inputs for this node.
-    { serialize: false }
-  )
-  btn.serialize = false
-  btn.tooltip =
-    'Save the fields below as a named size preset, stored in your library ' +
-    'folder so every machine sharing it sees the same presets. Saving over ' +
-    'an existing name replaces it.'
-  return btn
-}
-
-function createDeleteButton(node, state) {
-  const btn = node.addWidget(
-    'button',
-    'Delete',
-    null,
-    () => {
-      // Belt-and-suspenders no-op guard (req. 3) alongside widget.disabled
-      // -- disabled excludes the widget from getWidgetOnPos() hit-testing
-      // on this rig's installed frontend (LGraphNode.ts, verified), but a
-      // future/forked build's click plumbing is not this file's to trust
-      // blindly.
-      if (!state.deleteBtn || state.deleteBtn.disabled) return
-      performDelete(node)
+/**
+ * `Save | Delete`, side by side in ONE row (owner ask 2026-10-05: "Save and
+ * Delete should be next to each other not stacked"). Two litegraph `button`
+ * widgets are always two stacked full-width rows, so this is a DOM widget of
+ * two real HTML buttons from the shared `addButtonRow` -- which also owns the
+ * invariants these two used to carry by hand (both serialize flags, so no
+ * phantom `"Save"`/`"Delete"` input reaches a queued prompt -- rig-caught
+ * 2026-08-14; the fixed height under both renderers; the hide flags).
+ *
+ * Wiring that stays exactly as it was:
+ * - Save opens the name box with the REAL click event (`canvas.prompt`
+ *   positions itself off `event.clientX/Y`); the HTML button hands us the
+ *   `MouseEvent` where a native widget callback under Nodes 2.0 hands us
+ *   none.
+ * - Delete starts disabled and `updateDeleteEnabled` keeps it in step with
+ *   the selection (it writes the `<button>`'s own `disabled`, which is what
+ *   the click handler checks too -- the belt-and-suspenders no-op guard).
+ * - The tooltips are the same text, as native `title`s (DOM widgets are
+ *   skipped by ComfyUI's own tooltip layer).
+ *
+ * Fills `state.row`/`state.saveBtn`/`state.deleteBtn`; returns the row, or
+ * `null` when this frontend can't host DOM widgets (the presets combo still
+ * works then; only the buttons are missing -- the pack's fail-soft stance).
+ */
+function createPresetButtonRow(node, state) {
+  const row = addButtonRow(node, PRESET_ROW_WIDGET_NAME, [
+    {
+      key: 'save',
+      label: 'Save',
+      title:
+        'Save the fields below as a named size preset, stored in your library ' +
+        'folder so every machine sharing it sees the same presets. Saving over ' +
+        'an existing name replaces it.',
+      onClick: (event) => openSaveDialog(node, event)
     },
-    { serialize: false } // out of the API prompt -- see createSaveButton
-  )
-  btn.serialize = false
-  btn.tooltip =
-    'Delete the currently picked preset from your library folder. ' +
-    'Available only when exactly one preset is picked.'
-  btn.disabled = true // no active preset yet -- updateDeleteEnabled() maintains this from here on
-  return btn
+    {
+      key: 'delete',
+      label: 'Delete',
+      title:
+        'Delete the currently picked preset from your library folder. ' +
+        'Available only when exactly one preset is picked.',
+      disabled: true, // no active preset yet -- updateDeleteEnabled() maintains this from here on
+      onClick: () => {
+        // Belt-and-suspenders no-op guard (req. 3) alongside `disabled`: the
+        // row's own click handler already refuses a disabled button, but a
+        // future/forked build's click plumbing is not this file's to trust
+        // blindly.
+        if (!state.deleteBtn || state.deleteBtn.disabled) return
+        performDelete(node)
+      }
+    }
+  ])
+  if (!row) return null
+  state.row = row
+  state.saveBtn = row.buttons.save
+  state.deleteBtn = row.buttons.delete
+  return row
 }
 
 /** Moves *widget* to immediately before the M2 pad widget (req. 3's "find
  * the pad widget's position... and splice before it"), or to the tail if
  * the pad hasn't attached (fail-soft -- still provably safe per the
  * widget-order section above, just not adjacent to a pad that doesn't
- * exist). Called once per new widget, in [combo, Save, Delete] order, so
+ * exist). Called once per new widget, in [combo, Save|Delete row] order, so
  * each relocation's "insert right before the pad" naturally stacks them in
  * that same order immediately above it. */
 function relocateBeforePad(node, widget) {
@@ -2896,9 +3014,11 @@ function relocateBeforePad(node, widget) {
 
 /** The "Presets" node property (req. 4, default true -- addProperty seeds
  * this silently, see file header's "Defaults flipped to OFF" for why a
- * caller must still apply it explicitly once). When false: the combo +
- * Save + Delete are hidden (BOTH flags each, same as `hidePresetsWidget`)
- * and the selection is forced empty so the backend runs classic mode
+ * caller must still apply it explicitly once). When false: the combo and the
+ * Save | Delete row are hidden (every hide flag each -- `widget.hidden` AND
+ * `widget.options.hidden`, the latter written IN PLACE; the row's own
+ * `setHidden` also covers its element, see `button_row.js`) and the
+ * selection is forced empty so the backend runs classic mode
  * (`commitSelection(node, [])`), matching req. 7's "byte-identical when
  * unused" bar -- with an empty selection, `applyPresetValues` never fires
  * and every M1/M2 code path is untouched by this file's own construction
@@ -2907,11 +3027,12 @@ function applyPresetsPropertyVisibility(node) {
   const state = presetsState(node)
   if (!state) return
   const enabled = node.properties?.[PROP_PRESETS_ENABLED] !== false
-  for (const widget of [state.combo, state.saveBtn, state.deleteBtn]) {
-    if (!widget) continue
-    widget.hidden = !enabled
-    widget.options = { ...(widget.options || {}), hidden: !enabled }
+  if (state.combo) {
+    state.combo.hidden = !enabled
+    if (!state.combo.options) state.combo.options = {}
+    state.combo.options.hidden = !enabled // in place: Nodes 2.0 holds the original object
   }
+  state.row?.setHidden(!enabled)
   if (!enabled && state.selection.length > 0) commitSelection(node, [])
   resyncSize(node)
   node.graph?.setDirtyCanvas(true, true)
@@ -2940,7 +3061,8 @@ function attachPresetsUi(node) {
     const state = {
       widget,
       combo: null,
-      saveBtn: null,
+      row: null, // the Save | Delete row (button_row.js handle)
+      saveBtn: null, // the row's two real <button> elements
       deleteBtn: null,
       presetsById: {},
       presetNames: [],
@@ -2955,11 +3077,9 @@ function attachPresetsUi(node) {
     wireManualEditClearsSelection(node, state)
 
     state.combo = createPresetCombo(node, state)
-    state.saveBtn = createSaveButton(node)
-    state.deleteBtn = createDeleteButton(node, state)
+    createPresetButtonRow(node, state) // fills state.row / saveBtn / deleteBtn
     relocateBeforePad(node, state.combo)
-    relocateBeforePad(node, state.saveBtn)
-    relocateBeforePad(node, state.deleteBtn)
+    if (state.row) relocateBeforePad(node, state.row.widget)
 
     node.addProperty(PROP_PRESETS_ENABLED, true, 'boolean')
     applyPresetsPropertyVisibility(node) // seeding alone fires no callback -- apply once explicitly (file header)
@@ -3023,20 +3143,102 @@ function attachPresetsUi(node) {
 // that EXACT flag for the ratio's own derived writes, so a ratio pick
 // never reads as a manual field edit and never clears an active selection.
 
-/** "W:H" -> `{w, h}` ints, or `null` for "none"/malformed/non-positive.
- * Mirrors nodes_resolution.py's `parse_ratio` exactly -- own
- * implementation, identical documented rule, tested against the same
- * cases on both sides (own-your-helpers). Pure; exported for tests.
+/** One number of a ratio: 1-6 integer digits, optionally `.` and 1-6
+ * decimals (`21`, `2.39`, `0.5`). `\d` is ASCII-only in a JS RegExp, which is
+ * exactly what nodes_resolution.py's `[0-9]` means -- the two agree on what a
+ * number is. The six-digit caps stop a typo like `1:99999999999` from
+ * becoming a billion-pixel request and keep `String(number)` on both sides
+ * free of exponent forms. */
+const RATIO_NUMBER = '(\\d{1,6}(?:\\.\\d{1,6})?)'
+
+/** `W:H` -- `:` canonical, but `x` / `X` / `×` / `/` with spaces around it are
+ * read too (`16x9`, `16 / 9`, `2.39 : 1`). Anchored. Mirrors nodes_
+ * resolution.py's `_RATIO_RE`. */
+const RATIO_INPUT_RE = new RegExp(`^${RATIO_NUMBER}\\s*[:xX×/]\\s*${RATIO_NUMBER}$`)
+
+/** "W:H" -> `{w, h}` numbers (decimals allowed), or `null` for "none"/
+ * malformed/non-positive. Mirrors nodes_resolution.py's `parse_ratio` exactly
+ * -- own implementation, identical documented rule, tested against the same
+ * cases on both sides (own-your-helpers). Since 2026-10-05 (owner: "I should
+ * be able to type in a ratio not just use presets") the two sides may be
+ * decimals (`2.39:1`) and the separator may be `x`, `X`, `×` or `/`.
+ * Pure; exported for tests.
  * @param {unknown} value @returns {{w:number,h:number}|null}
  */
 export function parseRatio(value) {
   if (typeof value !== 'string') return null
-  const match = /^(\d+):(\d+)$/.exec(value.trim())
+  const match = RATIO_INPUT_RE.exec(value.trim())
   if (!match) return null
   const w = Number(match[1])
   const h = Number(match[2])
   if (!(w > 0) || !(h > 0)) return null
   return { w, h }
+}
+
+/** A ratio number as text: no `.0`, no trailing zeros (`16` -> `"16"`,
+ * `2.390` -> `"2.39"`, `1.0` -> `"1"`). `toFixed(6)` first so a float's own
+ * noise (`0.1 + 0.2`) can never leak into a stored value; six decimals is
+ * also the most the input grammar accepts, so nothing real is rounded away.
+ * Pure; exported for tests.
+ * @param {number} n @returns {string} */
+export function formatRatioNumber(n) {
+  return String(Number(Number(n).toFixed(6)))
+}
+
+/**
+ * What the custom-ratio box's text means, as the canonical value the widget
+ * stores: `"16:9"`, `"2.39:1"` (`W:H`, no spaces, trailing `.0` trimmed) --
+ * or `"none"` for the off state -- or `null` when the text is not a ratio.
+ * `21x9`, `21 / 9` and `2.390 : 1.0` become `21:9`, `21:9`, `2.39:1`. Pure;
+ * exported for tests.
+ * @param {unknown} text @returns {string|null}
+ */
+export function normalizeRatioInput(text) {
+  if (typeof text !== 'string') return null
+  const trimmed = text.trim()
+  if (trimmed.toLowerCase() === 'none') return 'none'
+  const parsed = parseRatio(trimmed)
+  return parsed ? `${formatRatioNumber(parsed.w)}:${formatRatioNumber(parsed.h)}` : null
+}
+
+/**
+ * The ratio with its sides swapped, for the `rotate` button: `16:9` ->
+ * `9:16`, `2.39:1` -> `1:2.39`. Anything that is not a ratio (`none`,
+ * unreadable) and a square one (`1:1`) come back unchanged -- there is
+ * nothing to flip. Pure; exported for tests.
+ * @param {unknown} value @returns {unknown}
+ */
+export function flipRatioValue(value) {
+  const parsed = parseRatio(value)
+  if (!parsed || parsed.w === parsed.h) return value
+  return `${formatRatioNumber(parsed.h)}:${formatRatioNumber(parsed.w)}`
+}
+
+/**
+ * The ratio dropdown's option list: the one-click *presets*, then the ratio
+ * currently typed in when it is not one of them, then `custom…` -- so a
+ * custom value is always "in the list" (Nodes 2.0's select flags a value that
+ * is not in its list with a red invalid ring, and a combo that cannot show
+ * its own value is a bug), the presets stay one click away, and `custom…` is
+ * always last. Only a ratio that actually parses is folded in: a hand-edited
+ * `banana` SHOULD look invalid. `custom…` itself is never folded in -- it is
+ * a command, not a value. Pure; exported for tests.
+ * @param {unknown} presets  the backend's own list
+ * @param {unknown} current  the widget's current value
+ * @returns {string[]}
+ */
+export function ratioOptionValues(presets, current) {
+  const list = Array.isArray(presets) ? presets.slice() : FALLBACK_RATIO_PRESETS.slice()
+  if (
+    typeof current === 'string' &&
+    current !== RATIO_CUSTOM_OPTION &&
+    !list.includes(current) &&
+    parseRatio(current)
+  ) {
+    list.push(current)
+  }
+  list.push(RATIO_CUSTOM_OPTION)
+  return list
 }
 
 /** Rounds *value* to the nearest multiple of *multipleOf* -- mirrors
@@ -3050,8 +3252,31 @@ export function parseRatio(value) {
  */
 function roundToMultipleOf(value, multipleOf) {
   if (!(multipleOf > 0) || !(value > 0)) return value
-  const rounded = Math.round(value / multipleOf) * multipleOf
+  const rounded = roundHalfEven(value / multipleOf) * multipleOf
   return Math.max(multipleOf, rounded)
+}
+
+/** Round half to EVEN -- Python's own `round()` (what nodes_resolution.py's
+ * `_round_to_multiple` and `conform_to_ratio` use), NOT `Math.round`, which
+ * rounds a tie UP. The two differ only at an exact `.5` (562.5 -> Python 562,
+ * `Math.round` 563; 12.5 multiples of 64 -> 768 vs 832), and until 2026-10-05
+ * that was an accepted "≤1 px" divergence. It stopped being acceptable when
+ * typed ratios made inexact derivations the norm AND the lock stopped
+ * re-deriving its own derived writes (see `withRatioDerivedWrite`): the pad
+ * now shows exactly the number the lock computes, so that number must be the
+ * one the backend will compute from the same inputs -- "the box must never
+ * show one number while a different one is what the backend will actually
+ * run" (M5's standing principle). The operands are the same IEEE doubles on
+ * both sides (the same operations in the same order), so the tie test is
+ * exact. Pure on non-negative input; tested against the shared tie table in
+ * tests/test_resolution_ratio_js.py / tests/test_resolution.py.
+ * @param {number} x @returns {number} */
+function roundHalfEven(x) {
+  const floor = Math.floor(x)
+  const diff = x - floor
+  if (diff < 0.5) return floor
+  if (diff > 0.5) return floor + 1
+  return floor % 2 === 0 ? floor : floor + 1
 }
 
 /**
@@ -3080,11 +3305,11 @@ export function conformToRatio(dims, ratio, anchor, multipleOf) {
   if (!parsed) return { width, height }
   if (anchor === 'height') {
     if (!(height > 0)) return { width, height }
-    const derived = Math.max(1, Math.round((height * parsed.w) / parsed.h))
+    const derived = Math.max(1, roundHalfEven((height * parsed.w) / parsed.h))
     return { width: roundToMultipleOf(derived, multipleOf), height }
   }
   if (!(width > 0)) return { width, height }
-  const derived = Math.max(1, Math.round((width * parsed.h) / parsed.w))
+  const derived = Math.max(1, roundHalfEven((width * parsed.h) / parsed.w))
   return { width, height: roundToMultipleOf(derived, multipleOf) }
 }
 
@@ -3134,6 +3359,215 @@ function withRatioApplyGuard(node, fn) {
 }
 
 /**
+ * Runs *fn* -- a write of a value the lock has ALREADY derived -- with
+ * `node._epsRatioDeriving` held, so the width/height callback wraps below do
+ * not "helpfully" derive the OTHER axis back from it.
+ *
+ * Why this exists (2026-10-05, found while making typed ratios usable): the
+ * lock's wraps re-derive the other axis whenever either field's callback
+ * fires, and a derived write is itself a write that fires a callback. So one
+ * typed edit used to bounce: derive height from width, then (height's own
+ * callback) derive width from that height, then height again... which only
+ * settles where both directions agree. With a ratio that divides evenly
+ * (every preset at a round width) the first derivation is already exact and
+ * nothing moves; with an inexact one it walks away from what was typed --
+ * v1.5.0, 16:9, type width 1000: height 563, then width becomes 1001; typed
+ * ratio 2.39:1 at 1024 wide: width becomes 1023. A typed ratio makes the
+ * inexact case the common one, and the lock's own contract ("the dimension
+ * the user just edited is kept exactly") says it must not happen.
+ *
+ * The flag marks writes that are CONSEQUENCES, not edits: the other axis a
+ * wrap just derived, the height a ratio pick derived, the pre-conformed pair
+ * `writeSize` and a preset apply write. A real edit (typing, the arrows) never
+ * runs under it, so it still anchors on the field touched. Re-entrant (it
+ * restores the previous value), and a throwing *fn* can never leave it set.
+ */
+function withRatioDerivedWrite(node, fn) {
+  const previous = node._epsRatioDeriving
+  node._epsRatioDeriving = true
+  try {
+    fn()
+  } finally {
+    node._epsRatioDeriving = previous
+  }
+}
+
+// ------------------------------------------------ M6: typed ratio + custom… box
+//
+// Owner ask 2026-10-05: "For EPS resolution I should be able to type in a
+// ratio not just use presets." The `ratio` widget stays a COMBO -- the presets
+// stay one click away -- and gains a last entry, `custom…`. Picking it opens a
+// box to type a ratio in (`21:9`, `2.39:1`, `1.85:1`); the result becomes the
+// widget's value like any other pick, so the whole lock below (typed edits,
+// the pad, presets, copy from image, the backend) needs no special case for a
+// typed value -- it is just another `W:H` string.
+//
+// WHY it is built this way (each piece is load-bearing):
+//
+// - `custom…` is a COMMAND, never a value. Both renderers write the picked
+//   value onto the widget BEFORE calling its callback (`BaseWidget.setValue`
+//   on canvas, `createWidgetUpdateHandler` under Nodes 2.0), so the callback's
+//   first act is to put the widget straight back to what it held
+//   (`node._epsRatioCommitted`, the last real ratio). Nothing ever saves,
+//   queues or captures `custom…`.
+// - The option list is a FUNCTION (`ratioOptionValues`): presets, then the
+//   current value when it is a custom ratio, then `custom…`. Nodes 2.0's
+//   select validates its value against the list it shows (a missing value
+//   draws a red "invalid" ring) and re-reads a function-valued list whenever
+//   the value it reads inside changes -- the same trick `presetComboValues`
+//   already relies on -- so a typed ratio is never flagged. Classic shows the
+//   value as plain text either way. `options.values` is assigned IN PLACE:
+//   Nodes 2.0 keeps a reference to the ORIGINAL options object.
+// - The box is `app.extensionManager.dialog.prompt` when the frontend has it,
+//   else `canvas.prompt` (positioned at the click when the renderer gave us an
+//   event, centred otherwise), else the fallbacks `promptText` documents.
+// - A bad entry is refused with a toast and the previous ratio stays; Cancel
+//   keeps it too. (An INVALID value is also refused by the backend at queue
+//   time -- `EPSResolution.VALIDATE_INPUTS` -- which is the real check, since
+//   core's own "value not in list" check cannot be kept for a typed value.)
+
+/** The last REAL ratio the widget held -- what the widget is put back to when
+ * `custom…` is picked and what a refused entry leaves in place. Seeded from
+ * the widget at attach and re-synced after a restore (configure() assigns
+ * widget values with no callback, so nothing else would notice). Never
+ * `custom…`. */
+function committedRatio(node) {
+  return typeof node._epsRatioCommitted === 'string' && node._epsRatioCommitted
+    ? node._epsRatioCommitted
+    : 'none'
+}
+
+/** *value* as a value the ratio widget may HOLD: a string other than the
+ * `custom…` command, else `'none'`. */
+function settledRatioValue(value) {
+  return typeof value === 'string' && value && value !== RATIO_CUSTOM_OPTION ? value : 'none'
+}
+
+/** Replaces the `ratio` combo's static option list with the function-valued
+ * one (see the section comment) and seeds `node._epsRatioCommitted`. The
+ * presets come from the backend's own list as it arrived on the widget, so a
+ * preset added to `RATIO_OPTIONS` needs no change here. */
+function installRatioChoices(node, ratioWidget) {
+  if (!ratioWidget.options) ratioWidget.options = {}
+  const options = ratioWidget.options
+  const given = Array.isArray(options.values) ? options.values : FALLBACK_RATIO_PRESETS
+  const presets = given.filter((entry) => entry !== RATIO_CUSTOM_OPTION)
+  // IN PLACE (see the section comment). Reads `ratioWidget.value` at CALL
+  // time, never a cached copy: that read is what makes Nodes 2.0 re-run this
+  // when the value changes.
+  options.values = () => ratioOptionValues(presets, ratioWidget.value)
+  node._epsRatioCommitted = settledRatioValue(ratioWidget.value)
+}
+
+/**
+ * After ANY write to the ratio widget's value (a pick, an Apply from a
+ * Universal State, a typed entry): refuse what is not a ratio, store what is
+ * in canonical form, and remember it as the committed ratio.
+ *
+ * - Not a ratio at all (a hand-written Apply, a buggy caller): put back the
+ *   committed ratio and say so -- the widget must never hold a value the lock
+ *   cannot read, or the panel would show one thing while the backend runs
+ *   another ("a wrong number is worse than no number"). Silent for a
+ *   non-string (a cleared value is not worth a toast).
+ * - A valid ratio in another spelling (`16x9`): rewritten to `16:9`, so every
+ *   saved workflow and every state holds ONE form.
+ */
+function settleRatioValue(node, ratioWidget) {
+  const raw = ratioWidget.value
+  const canonical = normalizeRatioInput(raw)
+  if (canonical === null) {
+    const previous = committedRatio(node)
+    ratioWidget.value = previous
+    if (typeof raw === 'string' && raw.trim() !== '') {
+      toast(node, 'warn', `"${raw.trim()}" isn't a ratio -- the ratio stays ${previous}.`)
+    }
+    return
+  }
+  if (canonical !== raw) ratioWidget.value = canonical
+  node._epsRatioCommitted = canonical
+}
+
+/** Re-syncs after configure() (a workflow load, undo/redo, a paste), which
+ * restores widget values with a bare assignment and no callback. A saved
+ * value that is `custom…` (impossible from this build) or not text becomes
+ * `none`; a ratio in another spelling is rewritten canonical; a value that is
+ * not a ratio at all is KEPT (never destroy what a file says) but the lock is
+ * inert for it, so say so once -- the backend would refuse it at queue time
+ * anyway. */
+function resyncRatioAfterRestore(node) {
+  const ratioWidget = widgetByName(node, RATIO_WIDGET_NAME)
+  if (!ratioWidget) return
+  const raw = ratioWidget.value
+  if (typeof raw !== 'string' || raw === RATIO_CUSTOM_OPTION) {
+    ratioWidget.value = 'none'
+    node._epsRatioCommitted = 'none'
+    return
+  }
+  const canonical = normalizeRatioInput(raw)
+  if (canonical === null) {
+    node._epsRatioCommitted = 'none'
+    toast(
+      node,
+      'warn',
+      `The saved ratio "${raw}" isn't a ratio, so the lock is off until you pick one.`
+    )
+    return
+  }
+  if (canonical !== raw) ratioWidget.value = canonical
+  node._epsRatioCommitted = canonical
+}
+
+/** The `custom…` pick (see the section comment): puts the widget back, then
+ * asks for a ratio. *event* is the click litegraph's own callback passed (the
+ * 5th argument); Nodes 2.0 passes none, which `promptText` copes with. */
+function openCustomRatioBox(node, ratioWidget, event) {
+  const previous = committedRatio(node)
+  ratioWidget.value = previous // the command never stays as the value
+  node.setDirtyCanvas(true, true)
+  promptText(node, {
+    title: 'Custom ratio',
+    message: 'Ratio as width:height, like 21:9 or 2.39:1',
+    prefill: previous,
+    event: event ?? null,
+    preferExtensionDialog: true,
+    confirmLabel: 'Set',
+    onCommit: (text) => commitTypedRatio(node, ratioWidget, text)
+  })
+}
+
+/** The box's answer: a ratio becomes the widget's value through its own
+ * callback chain (so the lock, the pad and everything else react exactly as
+ * to a dropdown pick); anything else is refused with a toast and the previous
+ * ratio stays. Re-typing the current ratio is a quiet no-op. */
+function commitTypedRatio(node, ratioWidget, text) {
+  const typed = String(text ?? '').trim()
+  const normalized = normalizeRatioInput(typed)
+  const previous = committedRatio(node)
+  if (normalized === null) {
+    toast(
+      node,
+      'warn',
+      typed === ''
+        ? `Nothing typed -- the ratio stays ${previous}.`
+        : `"${typed}" isn't a ratio -- type width:height with positive numbers, like 21:9 or ` +
+            `2.39:1. The ratio stays ${previous}.`
+    )
+    return
+  }
+  if (normalized === ratioWidget.value) return
+  ratioWidget.value = normalized
+  try {
+    ratioWidget.callback?.(normalized, app.canvas, node)
+  } catch (error) {
+    console.warn(PREFIX, 'ratio callback threw after a typed ratio', error)
+  }
+  node.graph?.setDirtyCanvas(true, true)
+  // The Nodes 2.0 prompt dialog is not one the frontend's ChangeTracker
+  // watches (canvas.prompt is), so ask for the snapshot ourselves.
+  captureUndoState()
+}
+
+/**
  * Installs the ratio lock's live wiring on *node*:
  *
  * - The `ratio` widget's OWN pick: width is the anchor (owner tooltip
@@ -3165,17 +3599,30 @@ function withRatioApplyGuard(node, fn) {
 function wireRatioLock(node) {
   const ratioWidget = widgetByName(node, RATIO_WIDGET_NAME)
   if (ratioWidget) {
+    installRatioChoices(node, ratioWidget)
     const originalRatioCallback = ratioWidget.callback
     ratioWidget.callback = function (...args) {
+      // `custom…` is a command, not a value (M6 section): open the box and
+      // leave everything else untouched -- nothing changed yet.
+      if (args[0] === RATIO_CUSTOM_OPTION) {
+        openCustomRatioBox(node, ratioWidget, args[4])
+        return undefined
+      }
       let result
       try {
         result = originalRatioCallback?.apply(this, args)
       } finally {
+        // Refuse a non-ratio, canonicalise a valid one, remember it (M6) --
+        // BEFORE the lock below reads the widget.
+        settleRatioValue(node, ratioWidget)
         withRatioApplyGuard(node, () => {
           const w = Number(widgetByName(node, 'width')?.value) || 0
           const h = Number(widgetByName(node, 'height')?.value) || 0
           const conformed = conformNodeSizeToRatio(node, w, h, 'width')
-          setWidgetValue(widgetByName(node, 'height'), conformed.height)
+          // A derived write -- height's own wrap must not derive width back.
+          withRatioDerivedWrite(node, () =>
+            setWidgetValue(widgetByName(node, 'height'), conformed.height)
+          )
         })
         renderGrid(node)
       }
@@ -3192,11 +3639,19 @@ function wireRatioLock(node) {
       try {
         result = originalCallback?.apply(this, args)
       } finally {
-        const w = Number(widgetByName(node, 'width')?.value) || 0
-        const h = Number(widgetByName(node, 'height')?.value) || 0
-        const conformed = conformNodeSizeToRatio(node, w, h, name)
-        const otherName = name === 'width' ? 'height' : 'width'
-        setWidgetValue(widgetByName(node, otherName), conformed[otherName])
+        // A callback fired by one of OUR derived writes (see
+        // `withRatioDerivedWrite`) has nothing to derive: the pair is already
+        // the lock's answer, and deriving back from it is what walked an
+        // inexact ratio away from the number the user typed.
+        if (!node._epsRatioDeriving) {
+          const w = Number(widgetByName(node, 'width')?.value) || 0
+          const h = Number(widgetByName(node, 'height')?.value) || 0
+          const conformed = conformNodeSizeToRatio(node, w, h, name)
+          const otherName = name === 'width' ? 'height' : 'width'
+          withRatioDerivedWrite(node, () =>
+            setWidgetValue(widgetByName(node, otherName), conformed[otherName])
+          )
+        }
       }
       return result
     }
@@ -3209,11 +3664,19 @@ function wireRatioLock(node) {
       result = originalOnConfigure?.call(this, info)
     } finally {
       try {
+        // M6: the restore wrote the ratio with no callback -- re-sync what
+        // the custom… flow remembers, and canonicalise, before the reconcile
+        // below reads it.
+        resyncRatioAfterRestore(this)
         withRatioApplyGuard(this, () => {
           const w = Number(widgetByName(this, 'width')?.value) || 0
           const h = Number(widgetByName(this, 'height')?.value) || 0
           const conformed = conformNodeSizeToRatio(this, w, h, 'width')
-          if (conformed.height !== h) setWidgetValue(widgetByName(this, 'height'), conformed.height)
+          if (conformed.height !== h) {
+            withRatioDerivedWrite(this, () =>
+              setWidgetValue(widgetByName(this, 'height'), conformed.height)
+            )
+          }
         })
       } catch (error) {
         console.warn(PREFIX, 'ratio-lock post-configure reconcile failed', error)
@@ -3314,7 +3777,7 @@ function applyMultipleOfWidgetStep(node) {
  * keep ignoring `multiple_of` even after this fix.
  *
  * Skips entirely while `node._epsSuppressMultipleOfSnap` is set --
- * `attachCopyFromImage`'s own write is a deliberate, owner-endorsed
+ * `copyFromImage`'s own write is a deliberate, owner-endorsed
  * exception ("'copy' means copy": see that function's own comment) and
  * must land byte-exact, not snapped.
  *
@@ -3351,7 +3814,7 @@ function wireMultipleOfSnap(node) {
 
 /**
  * Runs *fn* with the M5 self-snap wrap (`wireMultipleOfSnap`) suppressed
- * for *node* -- `attachCopyFromImage`'s ONLY caller: that button's own
+ * for *node* -- `copyFromImage`'s ONLY caller: that button's own
  * doc is explicit ("'copy' means copy, and a set `multiple_of` then
  * rounds ... exactly as it would for a hand-typed size" -- true again
  * post-M5 since a hand-typed size is now ALSO snapped immediately, but
@@ -3569,12 +4032,17 @@ function scheduleImageConverge(node) {
 //: (owner ask 2026-08-14). Label is the owner's own wording.
 const COPY_FROM_IMAGE_LABEL = 'copy from image'
 
+//: The `rotate` button beside it (owner ask 2026-10-05: "Next to the copy
+//: from image button there should be a 'rotate' button that swaps the width
+//: and height values"). Lowercase to match its neighbour.
+const ROTATE_LABEL = 'rotate'
+
 /**
- * `copy from image`: writes the incoming image's own pixel size into
+ * `copy from image`'s click: writes the incoming image's own pixel size into
  * `width`/`height` (owner ask 2026-08-14, "sets the width/height to the
- * width/height of the input image with one click"). Sits ABOVE the size
- * fields, which is where the ask puts it and where it reads as a heading
- * for the two numbers it fills in.
+ * width/height of the input image with one click"). It lives in the row ABOVE
+ * the size fields, which is where the ask puts it and where it reads as a
+ * heading for the two numbers it fills in.
  *
  * The size comes from `readIncomingImageSize` -- the same live read the
  * source line uses, so the button is right whenever that line is (and the
@@ -3592,94 +4060,184 @@ const COPY_FROM_IMAGE_LABEL = 'copy from image'
  * Failure is never silent (§6.3): nothing wired and "wired but no decoded
  * image yet" are DIFFERENT toasts, because they need different fixes.
  */
-function attachCopyFromImage(node) {
-  const button = node.addWidget('button', COPY_FROM_IMAGE_LABEL, null, () => {
-    // 2026-08-28: the walk (`resolveIncomingImageSummary`) may now find
-    // SEVERAL differing reachable sizes through a switcher/distributor --
-    // "worse than no number" applies to picking one of those just as much
-    // as to a wrong pixel count, so this refuses with a message instead of
-    // guessing (owner ask: "make copy from image refuse-with-a-message
-    // rather than pick one").
-    const summary = resolveIncomingImageSummary(node)
-    if (summary.kind === 'mixed') {
-      const parts = summary.sizes.map((s) => `${s.width} x ${s.height}`).join(', ')
-      toast(
-        node,
-        'warn',
-        `The wired sources report different sizes (${parts}) -- copy from image won't guess ` +
-          'which one you mean. Wire a single unambiguous source, or set width/height by hand.'
-      )
-      return
+function copyFromImage(node) {
+  // 2026-08-28: the walk (`resolveIncomingImageSummary`) may now find
+  // SEVERAL differing reachable sizes through a switcher/distributor --
+  // "worse than no number" applies to picking one of those just as much
+  // as to a wrong pixel count, so this refuses with a message instead of
+  // guessing (owner ask: "make copy from image refuse-with-a-message
+  // rather than pick one").
+  const summary = resolveIncomingImageSummary(node)
+  if (summary.kind === 'mixed') {
+    const parts = summary.sizes.map((s) => `${s.width} x ${s.height}`).join(', ')
+    toast(
+      node,
+      'warn',
+      `The wired sources report different sizes (${parts}) -- copy from image won't guess ` +
+        'which one you mean. Wire a single unambiguous source, or set width/height by hand.'
+    )
+    return
+  }
+  if (summary.kind !== 'single') {
+    // v1.2.0 nested reach: "wired" means a REAL source resolves, not just
+    // that the input holds a link -- inside a subgraph the link can run to
+    // a subgraph input that nothing feeds outside, and "run the loader
+    // once" would send the user after an image that does not exist.
+    const slot = imageInputSlot(node)
+    const wired =
+      slot >= 0 &&
+      node.inputs?.[slot]?.link != null &&
+      upstreamSources(liveRootOf(node), { node }, slot).length > 0
+    toast(
+      node,
+      'warn',
+      wired
+        ? "The wired image hasn't loaded yet — run the loader once (or wait for its preview), then try again."
+        : 'Wire an image into this node first.'
+    )
+    return
+  }
+  const size = { width: summary.width, height: summary.height }
+  // Ratio lock wins here too (owner ask 2026-08-28): width kept, height
+  // recalculated -- and since the image asked for a SPECIFIC size, say so
+  // rather than silently handing back something else. `writeSize` itself
+  // performs the identical conform before writing; this second call is
+  // only to decide whether the two differ enough to be worth a toast.
+  const conformed = conformNodeSizeToRatio(node, size.width, size.height, 'width')
+  // M5: this write stays byte-exact even with multiple_of set -- see
+  // this function's own doc.
+  withMultipleOfSnapSuppressed(node, () => writeSize(node, size.width, size.height))
+  if (conformed.width !== size.width || conformed.height !== size.height) {
+    toast(
+      node,
+      'warn',
+      `The wired image is ${size.width} x ${size.height}; conformed to the locked ratio -- ` +
+        `applied ${conformed.width} x ${conformed.height}.`
+    )
+  }
+  node.graph?.setDirtyCanvas(true, true)
+}
+
+/**
+ * `rotate`'s click: swaps `width` and `height` (owner ask 2026-10-05), and a
+ * locked ratio flips with them -- `16:9` becomes `9:16`, `2.39:1` becomes
+ * `1:2.39`; `1:1` and `none` stay as they are. Landscape to portrait in one
+ * click, with the lock still agreeing with the numbers.
+ *
+ * It is a MANUAL edit, so it goes through `writeSize` -- the same write path
+ * `copy from image` and a pad drag use -- and the callbacks that path fires do
+ * the rest: the active size preset un-selects itself (the numbers shown are
+ * what runs), the pad and readout repaint, and a locked ratio conforms the
+ * pair to itself. Three choices worth knowing:
+ *
+ * - The ratio is flipped FIRST, with a bare assignment (no callback): the
+ *   ratio widget's own callback would re-derive height from width BEFORE the
+ *   swapped pair is written, and the swap would land on the wrong numbers.
+ *   `node._epsRatioCommitted` is kept in step, since the callback that
+ *   normally maintains it is skipped.
+ * - The swap runs under `withMultipleOfSnapSuppressed`, exactly like `copy
+ *   from image`: both values were already snapped when they were set, so
+ *   swapping them needs no re-snap, and a re-snap would only be able to
+ *   change a number the user did not ask to change.
+ * - Under a lock the swapped pair is CONFORMED to the flipped lock, width
+ *   anchored, like every other write -- because that is what the backend
+ *   does at run time (`conform_to_ratio`), and the panel must never show a
+ *   different number than the one that runs. So `1000 x 418` at `2.39:1`
+ *   rotates to `418 x 999` at `1:2.39`, not an exact `418 x 1000`: 418 wide
+ *   at 1:2.39 IS 999 tall. With numbers that divide evenly (the normal case
+ *   for the presets: 1024 x 576) it is an exact swap.
+ *
+ * Nothing to rotate (width == height and no ratio to flip) says so rather than
+ * doing nothing silently (§6.3: failure is never silent).
+ */
+function rotateSize(node) {
+  const widthWidget = widgetByName(node, 'width')
+  const heightWidget = widgetByName(node, 'height')
+  if (!widthWidget || !heightWidget) return
+  const width = Number(widthWidget.value) || 0
+  const height = Number(heightWidget.value) || 0
+  const ratioWidget = widgetByName(node, RATIO_WIDGET_NAME)
+  const ratioNow = currentRatioValue(node)
+  const ratioNext = flipRatioValue(ratioNow)
+  const flipsRatio = ratioWidget != null && ratioNext !== ratioNow
+
+  if (width === height && !flipsRatio) {
+    toast(node, 'info', 'Width and height are already the same -- nothing to rotate.')
+    return
+  }
+  if (flipsRatio) {
+    ratioWidget.value = ratioNext
+    node._epsRatioCommitted = ratioNext
+  }
+  withMultipleOfSnapSuppressed(node, () => writeSize(node, height, width))
+  node.graph?.setDirtyCanvas(true, true)
+}
+
+/**
+ * `copy from image | rotate`, side by side in one row ABOVE the size fields
+ * (owner asks 2026-08-14 and 2026-10-05). Built with the shared `addButtonRow`
+ * (`button_row.js`), which owns the invariants these buttons used to carry by
+ * hand: BOTH serialize flags -- `options.serialize` gates the API PROMPT,
+ * `widget.serialize` gates the workflow FILE, and they are NOT
+ * interchangeable (rig-caught 2026-08-14: with only the latter, every queued
+ * prompt carried a phantom `"copy from image": null` input) -- plus the fixed
+ * height and hide flags under both renderers.
+ *
+ * The row sits ABOVE the size fields, a NON-TAIL position. That is normally
+ * forbidden (FORMAT.md §8: `widgets_values` restores POSITIONALLY), and the
+ * reason is real -- litegraph SERIALIZES by array index, skipping
+ * `serialize:false` widgets and leaving a HOLE, but CONFIGURES with a
+ * compacted counter that skips them again. Rig-proven 2026-08-14: a leading
+ * skipped widget turned [333, 777, ...] into [null, 333, 777, ...] and every
+ * value shifted by one on the next load.
+ *
+ * So the hole is compacted back out on the way to disk (below). The saved
+ * `widgets_values` is then byte-identical to what a row-less build writes --
+ * and to what the two-separate-buttons build (v1.5.0 and before) wrote, which
+ * had the same one leading hole: swapping its two button widgets for this one
+ * row changes how many frontend-only widgets exist (and so the hole count in
+ * the raw array, none of which survive compaction), but not one saved byte.
+ * Old workflows load here AND workflows saved here still load on an older
+ * build -- no migration shim, no downgrade hazard. tests/test_resolution_rows_js.py
+ * proves both directions against a litegraph serialize/configure model.
+ * Chained, never replaced.
+ */
+function attachCopyRotateRow(node) {
+  const row = addButtonRow(node, COPY_ROW_WIDGET_NAME, [
+    {
+      key: 'copy',
+      label: COPY_FROM_IMAGE_LABEL,
+      title:
+        "Fill width and height with the wired image's own size, in one click. " +
+        'The exact pixels are copied; a locked ratio still conforms them.',
+      onClick: () => copyFromImage(node)
+    },
+    {
+      key: 'rotate',
+      label: ROTATE_LABEL,
+      title:
+        'Swap width and height. A locked ratio flips too (16:9 becomes 9:16); ' +
+        '1:1 and none stay as they are.',
+      onClick: () => rotateSize(node)
     }
-    if (summary.kind !== 'single') {
-      // v1.2.0 nested reach: "wired" means a REAL source resolves, not just
-      // that the input holds a link -- inside a subgraph the link can run to
-      // a subgraph input that nothing feeds outside, and "run the loader
-      // once" would send the user after an image that does not exist.
-      const slot = imageInputSlot(node)
-      const wired =
-        slot >= 0 &&
-        node.inputs?.[slot]?.link != null &&
-        upstreamSources(liveRootOf(node), { node }, slot).length > 0
-      toast(
-        node,
-        'warn',
-        wired
-          ? "The wired image hasn't loaded yet — run the loader once (or wait for its preview), then try again."
-          : 'Wire an image into this node first.'
-      )
-      return
-    }
-    const size = { width: summary.width, height: summary.height }
-    // Ratio lock wins here too (owner ask 2026-08-28): width kept, height
-    // recalculated -- and since the image asked for a SPECIFIC size, say so
-    // rather than silently handing back something else. `writeSize` itself
-    // performs the identical conform before writing; this second call is
-    // only to decide whether the two differ enough to be worth a toast.
-    const conformed = conformNodeSizeToRatio(node, size.width, size.height, 'width')
-    // M5: this write stays byte-exact even with multiple_of set -- see
-    // this function's own doc.
-    withMultipleOfSnapSuppressed(node, () => writeSize(node, size.width, size.height))
-    if (conformed.width !== size.width || conformed.height !== size.height) {
-      toast(
-        node,
-        'warn',
-        `The wired image is ${size.width} x ${size.height}; conformed to the locked ratio -- ` +
-          `applied ${conformed.width} x ${conformed.height}.`
-      )
-    }
-    node.graph?.setDirtyCanvas(true, true)
-  })
-  // BOTH flags, and they are NOT interchangeable (executionUtil.ts says so
-  // in as many words): `options.serialize` gates the API PROMPT,
-  // `widget.serialize` gates the WORKFLOW file. Rig-caught 2026-08-14 --
-  // with only the latter set, every queued prompt carried a phantom
-  // `"copy from image": null` input for this node.
-  button.serialize = false
-  button.options = { ...(button.options || {}), serialize: false }
-  // Move it above the size fields. A non-tail widget is normally forbidden
-  // (FORMAT.md §8: `widgets_values` restores POSITIONALLY), and the reason
-  // is real -- litegraph SERIALIZES by array index, skipping
-  // `serialize:false` widgets and leaving a HOLE, but CONFIGURES with a
-  // compacted counter that skips them again. Rig-proven 2026-08-14: a
-  // leading skipped widget turned [333, 777, ...] into [null, 333, 777,
-  // ...] and every value shifted by one on the next load.
-  const index = node.widgets.indexOf(button)
+  ])
+  if (!row) return
+  node._epsCopyRow = row
+
+  // Move it above the size fields (the non-tail position the doc above
+  // explains).
+  const index = node.widgets.indexOf(row.widget)
   if (index !== -1) node.widgets.splice(index, 1)
-  node.widgets.unshift(button)
+  node.widgets.unshift(row.widget)
 
   // ...which is why the hole is compacted back out on the way to disk (see
-  // above). The saved `widgets_values` is then byte-identical to what a
-  // button-less build writes, so old workflows load here AND workflows
-  // saved here still load on an older build -- no migration shim, no
-  // downgrade hazard. Chained, never replaced.
+  // above). `i in values` is the point: it is false exactly for the holes a
+  // skipped widget leaves, and true for a real stored `null`.
   const originalOnSerialize = node.onSerialize
   node.onSerialize = function (info) {
     const result = originalOnSerialize?.apply(this, arguments)
     try {
       const values = info?.widgets_values
-      // `i in values` is the point: it is false exactly for the holes a
-      // skipped widget leaves, and true for a real stored `null`.
       if (Array.isArray(values)) {
         info.widgets_values = values.filter((_, i) => i in values)
       }
@@ -3741,7 +4299,7 @@ export function attach(node) {
   // attachPresetsUi has run (fail-soft either way -- see that guard's doc).
   wireRatioLock(node)
   // Last, so the unshift lands above widgets that are all already present.
-  attachCopyFromImage(node)
+  attachCopyRotateRow(node)
 
   // v0.61.0 (FORMAT.md §6.5): height-first layout stamp + old-save value
   // migration, multi-image converge/reveal. The stamp is set on EVERY node

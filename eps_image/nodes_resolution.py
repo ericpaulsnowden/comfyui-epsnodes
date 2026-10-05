@@ -67,8 +67,24 @@ DEFAULT_PRESETS = "[]"
 #: MUST stay first/default: every hand-built `/prompt` payload that omits
 #: `ratio` entirely gets this same value via `resolve()`'s own default,
 #: so an API caller who has never heard of this feature runs unaffected.
-RATIO_OPTIONS = ["none", "1:1", "5:4", "4:5", "9:16", "16:9"]
+#:
+#: 2026-10-05 (owner: "3:4 and 4:3 should be added as presets"): 4:3 and
+#: 3:4 joined, and the portrait/landscape pairs now sit side by side
+#: (16:9 before 9:16). The values are plain STRINGS the workflow stores by
+#: value, never by position, so the new order and the two new entries
+#: disturb no saved workflow. The same list is what the panel offers as
+#: one-click presets: the panel adds its own `custom…` entry after these,
+#: but that is a COMMAND (it opens a typing box), never a value -- it is
+#: deliberately NOT in this list, so it can never reach a run.
+RATIO_OPTIONS = ["none", "1:1", "5:4", "4:5", "4:3", "3:4", "16:9", "9:16"]
 DEFAULT_RATIO = "none"
+
+#: The panel's last dropdown entry (``resolution.js``'s ``RATIO_CUSTOM_OPTION``
+#: -- the two are pinned equal by ``tests/test_resolution.py``). Picking it
+#: opens a typing box; it never stays as the widget's value. Named here only
+#: so :func:`ratio_problem` can answer a hand-built prompt that carries it
+#: with a message that says what to do instead.
+RATIO_CUSTOM_OPTION = "custom…"
 
 #: Maps our public interpolation names to the identifiers core's
 #: ``comfy.utils.common_upscale`` (and, beneath it, ``torch.nn.functional.
@@ -191,13 +207,45 @@ def _floor_to_multiple(value: int, multiple_of: int) -> int:
     return floored if floored >= multiple_of else value
 
 
-#: "W:H" (positive integers only) -- what a RATIO_OPTIONS entry other than
-#: "none" looks like. Anchored (fullmatch) so "1:1x" or "a1:1" never parse.
-_RATIO_RE = re.compile(r"(\d+):(\d+)")
+#: One number of a ratio: 1-6 integer digits, optionally ``.`` and 1-6 decimals
+#: (``21``, ``2.39``, ``0.5``). ASCII digits only on purpose -- the panel's
+#: ``parseRatio`` (resolution.js) is a JavaScript RegExp where ``\d`` can only
+#: ever be ASCII, so ``[0-9]`` here keeps the two readers agreeing on what a
+#: number is. The six-digit caps keep a typo like ``1:99999999999`` from
+#: becoming a billion-pixel request, and keep both languages printing a parsed
+#: number the same way (no exponent forms on either side).
+_RATIO_NUMBER = r"[0-9]{1,6}(?:\.[0-9]{1,6})?"
+
+#: ``W:H`` -- ``:`` is the canonical separator, but ``x`` / ``X`` / the
+#: multiplication sign (U+00D7, written as an escape so the source stays plain
+#: ASCII) / ``/`` and spaces around it are accepted too (``16x9``, ``16 / 9``,
+#: ``2.39 : 1``), because that is how people write a ratio. Anchored
+#: (``fullmatch``), so ``1:1x`` or ``a1:1`` never parse.
+_RATIO_RE = re.compile(rf"({_RATIO_NUMBER})\s*[:xX\u00d7/]\s*({_RATIO_NUMBER})")
+
+#: Regex (anchored, portable between Python ``re`` and a JavaScript RegExp)
+#: for what a Universal State may STORE as ``ratio`` (``EPS_STATE_WIDGETS``
+#: below): ``none`` or a canonical ``W:H``. Strict about the form (only ``:``,
+#: no spaces) because the panel always writes the canonical form -- a state is
+#: machine-written, not typed. The ``(?=[0-9.]*[1-9])`` lookahead is "has at
+#: least one non-zero digit", i.e. positive (``0:5`` and ``0.0:1`` fail).
+#: ``tests/test_resolution.py`` checks this pattern against :func:`parse_ratio`
+#: over a shared corpus, and ``tests/test_resolution_ratio_js.py`` runs the
+#: SAME pattern string through a real JavaScript RegExp.
+_RATIO_STATE_NUMBER = r"(?=[0-9.]*[1-9])[0-9]{1,6}(?:\.[0-9]{1,6})?"
+RATIO_STATE_PATTERN = rf"^(?:none|{_RATIO_STATE_NUMBER}:{_RATIO_STATE_NUMBER})$"
+#: Longest stored ratio string: ``999999.999999:999999.999999`` is 27 characters.
+RATIO_STATE_MAX_LEN = 32
 
 
-def parse_ratio(value: Any) -> tuple[int, int] | None:
-    """"W:H" -> ``(w, h)`` ints, or ``None`` for "none"/empty/malformed/
+def _ratio_number(text: str) -> int | float:
+    """``"16"`` -> ``16`` (an int, so a whole-number ratio does exactly the
+    integer arithmetic it always did), ``"2.39"`` -> ``2.39``."""
+    return float(text) if "." in text else int(text)
+
+
+def parse_ratio(value: Any) -> tuple[int | float, int | float] | None:
+    """"W:H" -> ``(w, h)``, or ``None`` for "none"/empty/malformed/
     non-positive (owner ask 2026-08-28, FORMAT.md §6.5). Mirrors
     ``resolution.js``'s ``parseRatio`` exactly -- own implementation, same
     documented rule, tested against the same cases on both sides
@@ -206,16 +254,64 @@ def parse_ratio(value: Any) -> tuple[int, int] | None:
     module never shipped, e.g. a hand-edited workflow or a future frontend
     build -- degrades to "no lock" rather than failing a run, the same
     fail-soft posture as :func:`_parse_preset_names` above.
+
+    2026-10-05 (owner: "I should be able to type in a ratio not just use
+    presets"): the two sides may be DECIMALS (``2.39:1``, ``1.85:1``) and the
+    separator may be ``:``, ``x``, ``X``, the multiplication sign or ``/`` with spaces around
+    it. Whole numbers come back as ints, so every ratio the dropdown ever
+    offered computes exactly as before; decimals come back as floats and the
+    same ``round(...)`` arithmetic in :func:`conform_to_ratio` handles them.
     """
     if not isinstance(value, str):
         return None
     match = _RATIO_RE.fullmatch(value.strip())
     if not match:
         return None
-    ratio_w, ratio_h = int(match.group(1)), int(match.group(2))
+    ratio_w, ratio_h = _ratio_number(match.group(1)), _ratio_number(match.group(2))
     if ratio_w <= 0 or ratio_h <= 0:
         return None
     return (ratio_w, ratio_h)
+
+
+def ratio_problem(value: Any) -> str | None:
+    """``None`` when *value* is something the ``ratio`` input may hold --
+    ``none``, or anything :func:`parse_ratio` reads -- else one plain-English
+    sentence saying what is wrong and what to type instead.
+
+    This is the whole of the ``ratio`` input's validation: the input is named
+    in :meth:`EPSResolution.VALIDATE_INPUTS`, which (ComfyUI ``execution.py``
+    ``validate_inputs``) turns core's own "value not in list" check OFF for
+    it -- and that check could no longer be kept anyway, since a typed ratio
+    like ``2.39:1`` is deliberately not one of the dropdown's entries.
+
+    ``None`` (an input wired from another node, whose value does not exist
+    yet at queue time) is accepted: it cannot be judged here, and
+    :meth:`EPSResolution.resolve` treats an unreadable ratio as "no lock"
+    rather than failing a run. A one-element list is unwrapped (this node
+    does not use ``INPUT_IS_LIST``, but a validator that tolerates it costs
+    nothing and ``nodes_save_image._unwrap`` set the precedent).
+    """
+    if isinstance(value, list) and len(value) == 1:
+        value = value[0]
+    if value is None:
+        return None
+    shown = f"{value!r}"
+    if not isinstance(value, str):
+        return f"EPS Resolution: ratio must be text like 16:9, not {shown}."
+    text = value.strip()
+    if text == DEFAULT_RATIO or parse_ratio(text) is not None:
+        return None
+    if text == RATIO_CUSTOM_OPTION:
+        return (
+            f"EPS Resolution: ratio is still on {RATIO_CUSTOM_OPTION!r}, which is only a "
+            "menu command that opens a box to type a ratio in. Pick a ratio or type one "
+            "(like 21:9 or 2.39:1)."
+        )
+    return (
+        f"EPS Resolution: ratio {shown} isn't a ratio. Use 'none', one of "
+        f"{', '.join(RATIO_OPTIONS[1:])}, or type width:height with positive numbers "
+        "(like 21:9 or 2.39:1; 21x9 and 21/9 also work)."
+    )
 
 
 def conform_to_ratio(
@@ -232,6 +328,11 @@ def conform_to_ratio(
     ratio, the documented trade for opting into a size constraint (same
     honesty :func:`_floor_to_multiple`'s docstring already applies to
     "keep aspect (fit)").
+
+    *ratio* may be a typed decimal ratio (``"2.39:1"``, 2026-10-05) as well as
+    one of :data:`RATIO_OPTIONS`: :func:`parse_ratio` hands back floats for it
+    and the same ``round(...)`` arithmetic applies, so ``1000`` wide at
+    ``2.39:1`` derives ``round(1000 * 1 / 2.39) == 418`` tall.
 
     ``ratio == "none"`` (or anything :func:`parse_ratio` can't read) is a
     no-op passthrough -- *width*/*height* come back unchanged, so a node
@@ -638,10 +739,13 @@ class EPSResolution:
         "connect them) and every one is resized to the same target in one "
         "run, each on its own resized_N output. The 'copy from image' "
         "button fills width/height with the wired image's own size in one "
-        "click. Lock 'ratio' to a fixed aspect and the other dimension is "
+        "click, and 'rotate' beside it swaps width and height (a locked "
+        "ratio flips too: 16:9 becomes 9:16). Lock 'ratio' to a fixed "
+        "aspect and the other dimension is "
         "always recalculated to match -- including from a preset or "
         "'copy from image', which then conform to the lock instead of "
-        "being applied as-is."
+        "being applied as-is. Pick a preset ratio from the list, or "
+        "choose 'custom...' and type your own (21:9, 2.39:1, 1.85:1)."
     )
 
     #: §6.16 state registry (v0.83.0): the widgets a Universal State
@@ -650,9 +754,18 @@ class EPSResolution:
     #: ``_parse_preset_names`` above / FORMAT.md §6.5 M3) -- a plain string
     #: array, nothing richer. The ``image``/``image_2``..``image_8`` sockets
     #: are IMAGE-typed, not widgets, and never appear here. ``ratio`` (owner
-    #: ask 2026-08-28) is a plain combo like ``resize_method``/
-    #: ``interpolation`` -- an Apply write to it goes through the same
-    #: widget ``.callback`` resolution.js already wraps for the ratio lock.
+    #: ask 2026-08-28) is applied through the same widget ``.callback``
+    #: resolution.js already wraps for the ratio lock.
+    #:
+    #: ``ratio`` is kind ``string`` WITH a ``pattern`` -- NOT ``choice`` (it was
+    #: ``choice`` until 2026-10-05). A ``choice`` is checked at Apply time
+    #: against the live widget's own options, but a ratio the owner TYPES
+    #: ("2.39:1") is by design not one of the dropdown's presets, so a state
+    #: that captured one would be refused on Apply as "value not in options".
+    #: The pattern is the real rule: ``none`` or a canonical ``W:H`` with
+    #: positive numbers (see :data:`RATIO_STATE_PATTERN`). Every value a
+    #: ``choice`` ratio ever stored (``none``, ``16:9`` ...) matches it, so
+    #: states saved before this change still apply unchanged.
     EPS_STATE_WIDGETS: ClassVar[dict[str, Any]] = {
         "format": 1,
         "widgets": {
@@ -662,7 +775,11 @@ class EPSResolution:
             "interpolation": {"kind": "choice"},
             "multiple_of": {"kind": "int", "min": MULTIPLE_OF_MIN, "max": MULTIPLE_OF_MAX},
             "presets": {"kind": "json_array", "items": "string"},
-            "ratio": {"kind": "choice"},
+            "ratio": {
+                "kind": "string",
+                "pattern": RATIO_STATE_PATTERN,
+                "max_len": RATIO_STATE_MAX_LEN,
+            },
         },
     }
 
@@ -812,7 +929,13 @@ class EPSResolution:
                             "image' is conformed to the lock the same way "
                             "-- width kept, height recalculated -- rather "
                             "than applied as-is; the panel says so when it "
-                            "happens. 'none' turns the lock off."
+                            "happens. 'none' turns the lock off. Choose "
+                            "'custom...' at the bottom of the list to type "
+                            "your own ratio instead -- width:height with "
+                            "positive numbers, decimals allowed (21:9, "
+                            "2.39:1, 1.85:1; 21x9 and 21/9 work too). The "
+                            "'rotate' button flips a locked ratio along "
+                            "with width and height (16:9 becomes 9:16)."
                         ),
                     },
                 ),
@@ -841,6 +964,36 @@ class EPSResolution:
         if not names:
             return "no-presets-selected"
         return f"{_presets_file_token(_context)}:{presets}"
+
+    @classmethod
+    def VALIDATE_INPUTS(cls, ratio: Any = DEFAULT_RATIO) -> bool | str:
+        """Queue-time check of the ``ratio`` input -- the ONLY check it gets.
+
+        Why this exists (read from the rig's ``execution.py``
+        ``validate_inputs``): core normally refuses a combo value that is not
+        in the widget's list ("value not in list"). A typed ratio such as
+        ``2.39:1`` is deliberately not in :data:`RATIO_OPTIONS` (owner ask
+        2026-10-05: "I should be able to type in a ratio not just use
+        presets"), so core's check would reject every one of them. Naming an
+        input in this signature switches core's check OFF for that input --
+        so :func:`ratio_problem` is now the check: ``none`` or anything
+        :func:`parse_ratio` reads passes, everything else is refused with a
+        message that says what to type instead. The returned string becomes
+        core's "Custom validation failed for node" text.
+
+        How core calls this: only inputs actually present in the prompt are
+        passed (the default covers an old API prompt that omits ``ratio``);
+        a LINKED ratio arrives as ``None`` -- its value does not exist yet --
+        which :func:`ratio_problem` accepts (``resolve`` degrades an
+        unreadable ratio to "no lock" instead of failing). This node does not
+        use ``INPUT_IS_LIST``, so the value arrives as a plain string, and the
+        helper unwraps a one-element list anyway. Only ``ratio`` is named, so
+        core's own min/max checks on ``width``/``height``/``multiple_of`` are
+        untouched. Core appends this error once per NAMED input, so a bad
+        ratio is reported once.
+        """
+        problem = ratio_problem(ratio)
+        return True if problem is None else problem
 
     def resolve(
         self,

@@ -77,7 +77,10 @@ _VALID_SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9-_]*$")
 
 #: The closed set of widget "kind"s a registry entry may declare
 #: (FORMAT.md §4.3 / §6.16's M0 registry). ``choice`` and ``lines`` accept
-#: any string -- see :func:`_check_kind`'s docstring for why.
+#: any string -- see :func:`_check_kind`'s docstring for why. (``string`` may
+#: additionally be held to a ``pattern`` -- 2026-10-05, EPS Resolution's
+#: typed ``ratio``; that is an optional key on an existing kind, not a new
+#: kind, so this set did not grow.)
 _SCALAR_KINDS = frozenset({"string", "lines", "choice", "int", "float"})
 
 
@@ -220,7 +223,14 @@ def _check_kind(label: str, spec: dict, value: object) -> object:
     dependency-free dispatcher -- every kind is checked with a plain
     ``isinstance``/range test, no schema library:
 
-    - ``string``: any string, optionally capped by ``spec["max_len"]``.
+    - ``string``: any string, optionally capped by ``spec["max_len"]`` and
+      optionally held to ``spec["pattern"]`` (an anchored regex, ``re.
+      fullmatch``, checked here and by ``validateStateValue`` in
+      ``universal_controller.js`` with the SAME pattern string). First user
+      (2026-10-05): EPS Resolution's ``ratio`` -- ``none`` or ``W:H`` with
+      positive numbers -- which a ``choice`` could not express, because a
+      ratio the owner types is by design not one of the dropdown's presets
+      and a ``choice`` is checked against the live widget's options on Apply.
     - ``lines``/``choice``: any string, unconstrained -- a ``choice``
       widget's valid OPTIONS are machine-specific (installed loras,
       checkpoints, ...), so the registry can't enumerate them here; the
@@ -256,6 +266,22 @@ def _check_kind(label: str, spec: dict, value: object) -> object:
             raise StateValidationError(
                 f"{label} must be at most {max_len} characters — FORMAT.md §4.3"
             )
+        pattern = spec.get("pattern")
+        if kind == "string" and isinstance(pattern, str) and pattern:
+            try:
+                matches = re.fullmatch(pattern, value) is not None
+            except re.error as exc:
+                # A broken descriptor is a bug in the node class, not in the
+                # state being saved -- say so instead of a bare traceback.
+                raise StateValidationError(
+                    f"{label}: the registry's pattern {pattern!r} is not a valid "
+                    f"regular expression ({exc}) — FORMAT.md §4.3"
+                ) from exc
+            if not matches:
+                raise StateValidationError(
+                    f"{label} {value!r} is not in the expected format "
+                    f"(pattern {pattern!r}) — FORMAT.md §4.3"
+                )
         return value
     if kind == "boolean":
         if not isinstance(value, bool):

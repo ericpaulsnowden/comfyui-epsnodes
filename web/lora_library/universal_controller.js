@@ -201,7 +201,7 @@ const NEW_GROUP_OPTION_LABEL = '＋ New group…'
 
 /**
  * ONE generic validator for every registry widget "kind" (the closed set:
- * string(max_len), int(min,max), float(min,max), choice(options?), lines,
+ * string(max_len, pattern?), int(min,max), float(min,max), choice(options?), lines,
  * boolean, json_array(items), json_object(key_pattern)). `boolean` (v0.99.0)
  * is the newest: a BOOLEAN toggle's value is a real `true`/`false` and would
  * fit none of the others -- EPS Bypass's `enabled` is the first user. Used identically at CAPTURE
@@ -209,8 +209,16 @@ const NEW_GROUP_OPTION_LABEL = '＋ New group…'
  * fields (the caller folds the LIVE widget's resolved options into `desc`
  * first -- see `applyPlan()`). Never throws; always returns `{ok: true}` or
  * `{ok: false, error}`.
- * @param {{kind: string, max_len?: number, min?: number, max?: number,
- *   options?: unknown[], items?: string, key_pattern?: string}} desc
+ * `string` may also carry a `pattern` (2026-10-05): an anchored regex the
+ * whole value must match -- the SAME pattern string `universal_states_store.
+ * _check_kind` runs through Python's `re.fullmatch`. First user: EPS
+ * Resolution's `ratio` (`none` or a canonical `W:H`), which a `choice`
+ * could not express -- a ratio the owner types is by design not one of the
+ * dropdown's presets, and `choice` is checked against the live widget's
+ * options on Apply. A `pattern` that is not a valid RegExp is a descriptor
+ * bug and fails the value (never throws) rather than silently accepting.
+ * @param {{kind: string, max_len?: number, pattern?: string, min?: number,
+ *   max?: number, options?: unknown[], items?: string, key_pattern?: string}} desc
  * @param {unknown} value
  */
 export function validateStateValue(desc, value) {
@@ -219,6 +227,15 @@ export function validateStateValue(desc, value) {
       if (typeof value !== 'string') return { ok: false, error: 'expected a string' }
       if (typeof desc.max_len === 'number' && value.length > desc.max_len) {
         return { ok: false, error: `exceeds max_len ${desc.max_len}` }
+      }
+      if (typeof desc.pattern === 'string' && desc.pattern) {
+        let re
+        try {
+          re = new RegExp(desc.pattern)
+        } catch {
+          return { ok: false, error: 'invalid pattern' }
+        }
+        if (!re.test(value)) return { ok: false, error: 'does not match the expected format' }
       }
       return { ok: true }
     }
