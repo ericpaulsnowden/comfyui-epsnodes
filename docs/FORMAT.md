@@ -4617,6 +4617,145 @@ onto comfyui and recreate just that image"). Shipped v0.70.0.
   (the kind added for §6.18's `enabled`), so one saved Universal State can
   flip every EPS Save Image between saving and previewing (a "draft" state and
   a "final" state).
+- **Formats (v1.5.0, owner request 2026-10-04: "There is an advanced image save node
+  that has options for format, bit depth, and color space. Can those be added
+  to the eps save image.").** The node he means is core ComfyUI's
+  `SaveImageAdvanced` ("Save Image (Advanced)", `comfy_extras/nodes_images.py`).
+  Its choices arrive as four more TAIL widgets, all in `optional`, appended
+  after `preview_only` (§8: `widgets_values` restores positionally, so they
+  are only ever appended):
+
+  | # | widget | type | default | notes |
+  |---|--------|------|---------|-------|
+  | 2 | `format` | COMBO `png`, `exr`, `avif` | `png` | visible |
+  | 3 | `bit_depth` | COMBO `auto`, `8-bit`, `10-bit`, `16-bit`, `32-bit float` | `auto` | `advanced` |
+  | 4 | `input_color_space` | COMBO `sRGB`, `linear`, `HDR (HLG)`, `HDR PQ` | `sRGB` | `advanced` |
+  | 5 | `avif_crf` | INT 1–63 | `18` | `advanced`; AVIF only, ignored otherwise |
+
+  So `widgets_values` = `[filename_prefix, preview_only, format, bit_depth,
+  input_color_space, avif_crf]`; `["EPS"]` and `["EPS", false]` (older saves)
+  load with the four defaults; a new array loads on an older EPS build, whose
+  frontend ignores the trailing values. `advanced: true` rides through V1
+  `INPUT_TYPES` into the widget's options: the Nodes 2.0 renderer
+  (`useProcessedWidgets.isWidgetVisible`) tucks those widgets behind "Show
+  advanced inputs", and the right-side panel lists them under "Advanced
+  inputs". As far as the shipping 1.52.7 bundle shows, the classic canvas
+  renderer reads `widget.advanced` (never set from `options.advanced` for a
+  server-defined widget), so there they simply stay visible — **UNCONFIRMED
+  on the rig**; core's own Save Image (Advanced) travels the same path.
+
+  **The matrix** (core's own, with `auto` accepted everywhere). `auto` means
+  png 8-bit, exr 32-bit float, and for avif core's own auto (8-bit YUV420 for
+  sRGB, 10-bit YUV420 for either HDR space — it is handed through to core
+  untouched). `input_color_space` says how the INPUT tensor is to be READ; it
+  never converts a PNG's pixels (core's `ImageColorSpace` node does that).
+
+  | format | bit_depth | input_color_space |
+  |--------|-----------|-------------------|
+  | `png` | `8-bit`, `16-bit` | `sRGB` |
+  | `exr` | `32-bit float` | `sRGB`, `linear`, `HDR (HLG)` |
+  | `avif` | `8-bit`, `10-bit` | `sRGB`, `HDR (HLG)`, `HDR PQ` |
+
+  **Delegation, never a copy.** `png` + (`auto`|`8-bit`) + `sRGB` — the
+  DEFAULTS — keep the exact PIL path above, byte for byte (checked against the
+  v1.4.0 module on real tensors: identical files). Every other combination
+  calls core's own helpers, imported LAZILY at call time (`importlib` on
+  `comfy_extras.nodes_images`; nothing at module scope) and detected BY NAME
+  (`callable(getattr(...))`): 16-bit PNG → `_encode_image(image, "png",
+  "16-bit", "sRGB")` then `inject_png_metadata`; EXR → `_encode_image(image,
+  "exr", "32-bit float", cs)` then `inject_exr_metadata(bytes, prompt, extra,
+  cs)`; AVIF → `_save_avif(image.unsqueeze(0), path, depth, cs, crf,
+  metadata=…)` (still images only: a batch of one frame per file, core's
+  own `images.unsqueeze(1)` shape). Argument mapping: our `HDR (HLG)` is core's
+  `HDR`; our AVIF `8-bit`/`10-bit` are core's `8-bit YUV420`/`10-bit YUV420`;
+  `auto` stays `auto` for AVIF. ComfyUI is GPL-3 and this pack is MIT:
+  calling it at runtime is fine, copying it is not — there is no encoder in
+  this repo, only routing, naming and validation (tests pin the routing with a
+  FAKE `comfy_extras.nodes_images`). Core registers its built-in extras under
+  their FILE-PATH module name, so the first non-default save imports a second,
+  ordinary copy of the module under `comfy_extras.nodes_images` (no
+  registration happens at import; **UNCONFIRMED on the rig** — look for
+  surprises in the log).
+
+  **Compatibility with older ComfyUI.** Core gained the helpers at different
+  times: `_encode_image` / `inject_png_metadata` / `inject_exr_metadata` by
+  v0.28.0 (PNG 16-bit, EXR), `_save_avif` in v0.35.0 (2026-08-26, core PR
+  #15891). A format whose helper is missing is REFUSED, never substituted:
+  `EPS Save Image: can't save avif -- your ComfyUI doesn't have this encoder
+  yet; update ComfyUI or pick png 8-bit (AVIF needs ComfyUI 0.35 or newer).
+  (missing: _save_avif)`. For AVIF a second, narrower probe also refuses at
+  queue time when PyAV has no `libsvtav1` encoder or no `avif` muxer — only on
+  a DEFINITE absence (`UnknownCodecError`, a `ValueError`); an `av` that can't
+  be imported or a probe API it doesn't recognise counts as "unknown", never
+  "missing". An alpha image saved as AVIF is core's own refusal (no alpha in
+  SVT-AV1), re-raised as `EPS Save Image: couldn't save avif (…): …` with a
+  half-written file removed.
+
+  **Queue-time validation (`VALIDATE_INPUTS`).** An overnight batch must be
+  refused at once, not on its first save. The classmethod takes `format`,
+  `bit_depth`, `input_color_space`, `preview_only` and returns a string (core
+  turns a non-`True` return into `custom_validation_failed`) listing the valid
+  choices FOR THAT FORMAT, e.g. `bit_depth '8-bit' isn't available for exr --
+  valid for exr: auto, 32-bit float.`, or the missing-encoder text above. How
+  core's `execution.py` `validate_inputs` treats it (read from the rig and
+  exercised against the real function): (1) an input NAMED in the signature
+  loses core's own min/max/combo-membership check — so `plan_for` does the
+  membership check itself, including values a hand-built prompt invented — and
+  `avif_crf` is deliberately NOT named, so core still enforces 1–63 on it; no
+  `**kwargs`, which would switch the checks off for every input; (2) only
+  inputs PRESENT in the prompt are passed, hence the signature defaults for an
+  old API prompt; (3) a LINKED input arrives as `None` (its value does not
+  exist yet): `format` linked → can't tell, `save()` decides; the other two →
+  their always-valid default; (4) this node has no `INPUT_IS_LIST`, so values
+  arrive as plain scalars (a 1-element list is still tolerated); (5) core
+  appends one error per NAMED input that is present, all with the same text —
+  four lines for one mistake, the only per-node shape V1 validation has;
+  (6) `preview_only` is named so a PREVIEW skips the check. A courtesy layer:
+  an unexpected failure inside returns `True` and `save()` raises the real
+  error. `save()` is the enforcement (a wired value, a hand-built prompt): it
+  resolves the plan FIRST — before the bake, any `folder_paths` call or any
+  file — and raises `FormatError` (a `ValueError`); a wired `avif_crf` outside
+  1–63 or not a whole number is refused the same way (AVIF only; ignored for
+  png/exr).
+
+  **`preview_only` wins.** A preview is always core `PreviewImage`'s plain
+  8-bit PNG in the temp folder, whatever `format`, `bit_depth`, `input_color_space`
+  or `avif_crf` say — they are not even read, no core encoder is needed, and an
+  invalid combination does not stop a preview from queueing.
+
+  **Provenance in every format.** The SAME baked objects the PNG path writes —
+  the prompt, every `extra_pnginfo` key (the workflow with `solo_run` and the
+  pins baked), and with `run_info` wired the `eps_run` record — are handed to
+  core's metadata helpers (as fresh dicts: the record never leaks into the
+  shared hidden objects; core JSON-encodes each value exactly as the PIL path
+  does, so the texts are identical). The v0.80.0 bake + `undo_bakes` `finally`
+  still wraps the whole loop, so the shared objects come out byte-identical
+  even when a core helper raises. `--disable-metadata` is honoured exactly as
+  core does: no inject helper is called (so no EXR `chromaticities` either) and
+  AVIF gets no metadata dict. Where it lands:
+
+  | format | where | how a user gets it back |
+  |--------|-------|-------------------------|
+  | `png` 16-bit | `tEXt` chunks `prompt`, `workflow`, `eps_run` (core inserts them right after `IHDR`) | drop the image: ComfyUI's own loader |
+  | `avif` | one Exif item: ASCII tags `prompt:{…}` (0x0110), then `workflow:{…}`, `eps_run:{…}` (0x010F, 0x010E, …); core rewrites the `avis` brand to `avif` | drop the image: the frontend's AVIF reader (`scripts/metadata/avif.ts`) reads the `prompt` and `workflow` keys (`eps_run` is ignored, harmless) — verified by running that reader, extracted from the 1.52.7 sources, on a real file |
+  | `exr` | string header attributes `prompt`, `workflow`, `eps_run`, plus `chromaticities` (Rec.709 for sRGB/linear, Rec.2020 for HDR (HLG)) | **cannot be dropped**: frontend 1.52.7 has no EXR metadata reader (`getWorkflowDataFromFile` returns nothing for it). The provenance IS in the header for tools that read it |
+
+  **Files.** Names keep EPS's `{name}_{counter:05}_.{ext}` with `ext` =
+  `png`/`exr`/`avif`. `folder_paths.get_save_image_path`'s counter reads the
+  digits before the first `.` and requires the prefix to end in `_`, so it is
+  extension-blind: one counter runs across the three formats (checked with the
+  real function on 24 mixed files: next counter 25). `ui.images` points at the
+  saved file with `type: "output"`; frontend 1.52.7 previews an `.exr` through
+  its HDR viewer (`utils/hdrFormatUtil.ts`), so no companion PNG is written.
+  Frontend: `tokenFromFileName` strips the extension generically, so the
+  run-token fallback reads `.avif`/`.exr` names; `applyFilenameSolo` accepts
+  `image/*` types, which covers `image/avif`, and since 2026-10-04 ignores a
+  `.exr` outright — an EXR can never have loaded a workflow, so soloing the
+  CURRENT canvas from its name would be a guess.
+
+  **§6.16 state registry:** `format`, `bit_depth`, `input_color_space` are kind
+  `choice` and `avif_crf` is kind `int` (min 1, max 63) — a "draft" state can
+  preview while a "final" state saves an EXR.
 - **`run_info` (STRING, optional, forceInput)** — the Run Multiplier's new
   tail output (§6.10 v0.70.0): one JSON per run, index-aligned with
   `save_prefix`; core maps this node per run so each file gets ITS run's
@@ -4687,7 +4826,15 @@ onto comfyui and recreate just that image"). Shipped v0.70.0.
   there too, the pins-still-bake case in `tests/test_m3_pinning.py`, the
   `_temp_xxxxx` token cases in `tests/test_save_image_js.py`, and the
   `boolean` declaration in `tests/test_state_registry.py` +
-  `tests/test_universal_states_store.py`.
+  `tests/test_universal_states_store.py`. 2026-10-04 formats:
+  `tests/test_save_image_formats.py` (the whole matrix, routing and argument
+  mapping against a FAKE `comfy_extras.nodes_images`, queue-time validation,
+  missing helpers and the PyAV probe, provenance reaching every format,
+  `preview_only` winning, positional compatibility), the byte-for-byte default
+  PNG against a restated v1.4.0 write there too, the `.avif`/`.exr` token and
+  `.exr`-guard cases in `tests/test_save_image_js.py` (+
+  `tests/nested_save_image_probe.mjs`), and the four widgets' state kinds in
+  `tests/test_state_registry.py` + `tests/test_universal_states_store.py`.
 
 **Nested subgraphs (v1.2.0, owner ask 2026-10-03; §7.10).** The Python side
 was already depth-correct and is now pinned by `tests/test_nested_subgraphs.py`:

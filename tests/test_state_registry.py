@@ -259,18 +259,37 @@ class TestSwitcherPatterns:
 class TestSaveImagePreviewOnly:
     """v1.1.0: EPS Save Image's `preview_only` toggle is state-capturable via
     the registry's `boolean` kind (v0.99.0), so one saved state can flip every
-    EPS Save Image between saving and previewing."""
+    EPS Save Image between saving and previewing. 2026-10-04: the four format
+    widgets joined it (choice x3 + a bounded int)."""
 
-    def test_declares_filename_prefix_and_preview_only(self) -> None:
+    def test_declares_every_widget(self) -> None:
         widgets = EPSSaveImage.EPS_STATE_WIDGETS["widgets"]
-        assert set(widgets) == {"filename_prefix", "preview_only"}
+        assert set(widgets) == {
+            "filename_prefix",
+            "preview_only",
+            "format",
+            "bit_depth",
+            "input_color_space",
+            "avif_crf",
+        }
         assert widgets["preview_only"] == {"kind": "boolean"}
+
+    def test_format_widgets_are_choices_and_a_bounded_int(self) -> None:
+        widgets = EPSSaveImage.EPS_STATE_WIDGETS["widgets"]
+        for name in ("format", "bit_depth", "input_color_space"):
+            assert widgets[name] == {"kind": "choice"}, name
+        # the int bounds are the widget's own min/max (one source of truth)
+        _kind, options = EPSSaveImage.INPUT_TYPES()["optional"]["avif_crf"]
+        assert widgets["avif_crf"] == {"kind": "int", "min": 1, "max": 63}
+        assert (options["min"], options["max"]) == (1, 63)
 
     def test_nothing_is_excluded_because_nothing_is_left_over(self) -> None:
         # images is a socket and run_info is forceInput: both are outside the
         # completeness universe, so no `excluded` block is needed.
         assert "excluded" not in EPSSaveImage.EPS_STATE_WIDGETS
-        assert _widget_bearing_inputs(EPSSaveImage) == {"filename_prefix", "preview_only"}
+        assert _widget_bearing_inputs(EPSSaveImage) == set(
+            EPSSaveImage.EPS_STATE_WIDGETS["widgets"]
+        )
 
     def test_the_registry_route_collects_the_boolean(self) -> None:
         registry = collect_state_registry({"EPSSaveImage": EPSSaveImage})

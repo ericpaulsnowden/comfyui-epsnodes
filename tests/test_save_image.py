@@ -225,7 +225,16 @@ class TestSaveRoundTrip:
         # v1.1.0: preview_only is a TAIL widget, in `optional` like every tail
         # widget this pack has added (a hand-built API prompt that predates it
         # must still validate). run_info is a forceInput socket: no widget slot.
-        assert list(spec["optional"]) == ["run_info", "preview_only"]
+        # 2026-10-04: the four format widgets are appended AFTER it, never
+        # before (widgets_values restores positionally, FORMAT.md §8).
+        assert list(spec["optional"]) == [
+            "run_info",
+            "preview_only",
+            "format",
+            "bit_depth",
+            "input_color_space",
+            "avif_crf",
+        ]
         assert spec["optional"]["run_info"][1]["forceInput"] is True
         assert spec["hidden"] == {"prompt": "PROMPT", "extra_pnginfo": "EXTRA_PNGINFO"}
         assert m.EPSSaveImage.OUTPUT_NODE is True
@@ -519,11 +528,21 @@ class TestPreviewOnlyWidgetShape:
         # widgets_values restores POSITIONALLY (FORMAT.md §8): filename_prefix
         # keeps index 0, preview_only is appended at 1; the `run_info`
         # forceInput socket and the `images` socket hold no slot.
+        # 2026-10-04 appended format/bit_depth/input_color_space/avif_crf AFTER
+        # them: the first two indices are FROZEN (a saved ["EPS", true] must
+        # keep meaning "prefix EPS, preview on").
         names = [name for name, _kind, _options in m._iter_widgets(m.EPSSaveImage)]
-        assert names == ["filename_prefix", "preview_only"]
+        assert names == [
+            "filename_prefix",
+            "preview_only",
+            "format",
+            "bit_depth",
+            "input_color_space",
+            "avif_crf",
+        ]
         assert m.widget_index(m.EPSSaveImage, "filename_prefix") == 0
         assert m.widget_index(m.EPSSaveImage, "preview_only") == 1
-        assert m.widget_defaults(m.EPSSaveImage) == ["EPS", False]
+        assert m.widget_defaults(m.EPSSaveImage) == ["EPS", False, "png", "auto", "sRGB", 18]
 
     @staticmethod
     def _restore(widget_names: list[str], defaults: list, saved: list) -> dict:
@@ -534,10 +553,16 @@ class TestPreviewOnlyWidgetShape:
         return values
 
     def test_an_old_workflow_loads_with_preview_off(self) -> None:
-        restored = self._restore(
-            ["filename_prefix", "preview_only"], m.widget_defaults(m.EPSSaveImage), ["EPS"]
-        )
-        assert restored == {"filename_prefix": "EPS", "preview_only": False}
+        names = [name for name, _kind, _options in m._iter_widgets(m.EPSSaveImage)]
+        restored = self._restore(names, m.widget_defaults(m.EPSSaveImage), ["EPS"])
+        assert restored == {
+            "filename_prefix": "EPS",
+            "preview_only": False,
+            "format": "png",
+            "bit_depth": "auto",
+            "input_color_space": "sRGB",
+            "avif_crf": 18,
+        }
 
     def test_a_new_workflow_loads_on_an_older_build(self) -> None:
         # An older EPS build has only filename_prefix; the saved ["EPS", True]
@@ -547,14 +572,20 @@ class TestPreviewOnlyWidgetShape:
 
     def test_a_short_saved_array_pads_to_the_real_index(self) -> None:
         # The baking helper pads a short widgets_values with the class's
-        # defaults before writing, so it lands at its real index for the
-        # two-widget layout (index 1) too.
+        # defaults before writing, so it lands at its real index (preview_only
+        # is still 1 with the format tail behind it).
         workflow = {"nodes": [{"id": 3, "type": "EPSSaveImage", "widgets_values": []}]}
         landed = m._bake_widget(
             workflow, None, 3, m.EPSSaveImage, "EPSSaveImage", m.PREVIEW_WIDGET, True
         )
         assert landed is True
         assert workflow["nodes"][0]["widgets_values"] == ["EPS", True]
+        # ... and a tail widget lands at ITS index, padded with defaults
+        workflow = {"nodes": [{"id": 3, "type": "EPSSaveImage", "widgets_values": ["x"]}]}
+        assert m._bake_widget(
+            workflow, None, 3, m.EPSSaveImage, "EPSSaveImage", m.FORMAT_WIDGET, "exr"
+        )
+        assert workflow["nodes"][0]["widgets_values"] == ["x", False, "exr"]
 
     def test_description_and_output_tooltip_mention_the_toggle(self) -> None:
         assert "preview_only" in m.EPSSaveImage.DESCRIPTION

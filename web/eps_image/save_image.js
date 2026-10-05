@@ -32,7 +32,12 @@ const SOLO_WIDGET = 'solo_run'
  * core Preview Image's `_temp_xxxxx` (five lowercase letters) between the
  * token and the counter (`Portrait_m2_i1_t3_temp_abcde_00001_.png`), so that
  * one optional segment is skipped -- otherwise a dragged-out preview would
- * silently lose its run token. */
+ * silently lose its run token.
+ *
+ * 2026-10-04 formats: the extension is stripped generically (`/\.[^.]+$/`), so
+ * the same names read the same with a `.avif` or `.exr` ending -- EPS Save
+ * Image's `format` widget writes `Portrait_m2_i1_t3_00001_.avif` / `.exr`
+ * with the identical `_NNNNN_` counter tail. */
 const TOKEN_AT_END_RE =
   /(?:^|_)((?:m\d+(?:_v\d+)?_)?(?:p\d+|i\d+_t\d+|t\d+))(?:_temp_[a-z]{5})?_\d{5}_?$/
 
@@ -77,6 +82,15 @@ export function decideFilenameSolo(token, multipliers) {
 
 function applyFilenameSolo(file) {
   if (!file || !/^image\//i.test(file.type || '')) return
+  // 2026-10-04 formats: an EXR (EPS Save Image's `format` = exr) keeps its
+  // workflow in the file header, but the frontend (1.52.7) has no EXR
+  // metadata reader -- `handleFile` can never have LOADED a workflow from it.
+  // Most browsers give a .exr an empty type (the check above already
+  // returns), but some systems label it `image/x-exr`; soloing whatever
+  // multiplier happens to be on the CURRENT canvas from such a file name
+  // would be a guess about a workflow nobody loaded. PNG and AVIF (the
+  // frontend reads AVIF's Exif item) are unaffected.
+  if (/\.exr$/i.test(file.name || '')) return
   const token = tokenFromFileName(file.name)
   if (!token) return
   const found = []

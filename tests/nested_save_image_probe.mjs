@@ -13,12 +13,12 @@ const multiplier = (id, solo = '') => {
 }
 const png = { type: 'image/png', name: 'Portrait_m2_i1_t3_00001_.png' }
 const out = {}
-const run = async (label, build) => {
+const run = async (label, build, file = png) => {
   toasts.length = 0
   const root = new FakeGraph()
   app.graph = root
   const probes = build(root)
-  await app.handleFile(png)
+  await app.handleFile(file)
   out[label] = { solos: probes.map((n) => n.widgets[0].value), toasts: [...toasts] }
 }
 
@@ -53,5 +53,15 @@ await run('baked', (root) => {
   const mult = S.subgraph.add(multiplier(2, 'm2_i1_t3'))
   return [mult]
 })
+
+// 5-7. (2026-10-04 formats) the file TYPE decides what the fallback does with
+//    the same file name stem: an AVIF is read like a PNG (the frontend loads
+//    its workflow from the Exif item), an EXR never loads a workflow so it
+//    must not solo the CURRENT canvas whatever MIME the browser gave it
+const single = (root) => [root.add(multiplier(1))]
+await run('avif', single, { type: 'image/avif', name: 'Portrait_m2_i1_t3_00001_.avif' })
+await run('exr_x', single, { type: 'image/x-exr', name: 'Portrait_m2_i1_t3_00001_.exr' })
+await run('exr_blank', single, { type: '', name: 'Portrait_m2_i1_t3_00001_.exr' })
+await run('exr_upper', single, { type: 'image/exr', name: 'PORTRAIT_m2_i1_t3_00001_.EXR' })
 
 console.log(JSON.stringify(out))

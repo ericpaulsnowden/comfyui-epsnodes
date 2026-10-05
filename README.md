@@ -50,7 +50,7 @@ section further down; this is the map.
 | [**EPS Resolution**](#eps-resolution-shipped) | Image-first resize + size in one node: target size (with a drag pad), four resize modes, and the original image + both sets of dimensions passed through. Named size presets are shared across your machines — tick several and one Run resizes once per preset. Wire in extra images and they all come out at the same target size in one Run. | Nothing — drag-and-drop with core nodes. |
 | [**EPS Image Grid**](#eps-image-grid-shipped) | Collects images across separate Runs into a buffer that survives restarts, shows them as a thumbnail grid, and fans the whole set out on demand. Add whole batches at once — a multiselect picker, a folder importer, or one big drag. | Nothing — drag-and-drop with core nodes. |
 | [**EPS Run Multiplier**](#eps-run-multiplier-shipped) | Multiplies whatever you wire in: a sweep group (LoRA Iterator, or Checkpoint Switcher with its VAEs) × images × texts, in one node — or just images × texts with no sweep at all — with per-run save paths so big runs land in tidy folders. | Any of: EPS LoRA Iterator / EPS Checkpoint Switcher / EPS Model + VAE Switchers (`models`→`model`, `models_low`→`model_low`, `vaes`→`vae`) on the sweep side; an Image Grid or Image Switcher plus a multi-select Prompt Notebook on the pair side. |
-| [**EPS Save Image**](#eps-save-image-shipped) | Save Image with provenance baked in: wire the Run Multiplier's `run_info` and every saved file carries a workflow already soloed to the run that made it — drop the image onto the canvas to recreate just that one. Without `run_info` it is exactly Save Image. A **preview_only** switch (v1.1.0) turns it into a Preview Image — nothing saved — without swapping nodes. | Nothing — a drop-in for the core Save Image node; `run_info` from EPS Run Multiplier unlocks the recreate-one-image drop. |
+| [**EPS Save Image**](#eps-save-image-shipped) | Save Image with provenance baked in: wire the Run Multiplier's `run_info` and every saved file carries a workflow already soloed to the run that made it — drop the image onto the canvas to recreate just that one. Without `run_info` it is exactly Save Image. A **preview_only** switch (v1.1.0) turns it into a Preview Image — nothing saved — without swapping nodes. A **format** choice (png, exr or avif — with bit depth and color space under *Show advanced inputs*) saves more than PNG. | Nothing — a drop-in for the core Save Image node; `run_info` from EPS Run Multiplier unlocks the recreate-one-image drop. exr and avif need a ComfyUI that has those encoders. |
 | [**EPS Frame Saver**](#eps-frame-saver-shipped) | Loads a video by path — or takes one from a wire — lets you scrub or play to a frame, and outputs that frame as an image. | A video file on the ComfyUI machine, or any `VIDEO` output in the workflow. |
 
 > **Status: pre-release.** Contracts live in
@@ -1602,6 +1602,53 @@ again — same node, same wires, no swapping.
   with it on **save** — nothing about your existing graphs changes. A workflow
   saved with the switch on still opens on an older EPSNodes, which just ignores
   the switch and saves as before.
+
+**Formats — png, exr, avif; bit depth; color space (v1.5.0).** The **format** row (right
+under `preview_only`) picks what kind of file gets written. Leave it on **png**
+and nothing changes: the same files, byte for byte, as before — every older
+workflow opens on it. The other choices come from the core **Save Image
+(Advanced)** node, built right in:
+
+| format | what it is | bit depth | input color space |
+|--------|------------|-----------|-------------------|
+| **png** (default) | what you always had | 8-bit (default), or 16-bit | sRGB |
+| **exr** | 32-bit float, for compositing and grading | 32-bit float | sRGB, linear, or HDR (HLG) |
+| **avif** | small, high-quality files; HDR-capable | 8-bit, or 10-bit | sRGB, HDR (HLG), or HDR PQ |
+
+- **Under *Show advanced inputs*:** `bit_depth`, `input_color_space` and
+  `avif_crf` (AVIF quality: **lower = better and bigger**, 18 is a good
+  everyday value). Leave `bit_depth` on **auto** and you get png 8-bit, exr
+  32-bit float, avif 8-bit (10-bit when the input is HDR). In the older
+  "classic" canvas view those rows may simply stay visible all the time.
+- **Input color space says what your pixels *are*** — it does not convert them.
+  Ordinary pictures are **sRGB**. Pick **linear** for renderer/compositor output
+  that is already linear light (exr only). An exr is always written as linear
+  light, so sRGB or HDR (HLG) pictures are converted on the way out; linear is
+  written untouched. For anything else, change the pixels first with core's
+  *Convert Image Color Space* node.
+- **A choice the format doesn't have is refused when you press Queue**, with the
+  valid choices in the message (for example "bit_depth '8-bit' isn't available
+  for exr -- valid for exr: auto, 32-bit float") — so an overnight batch is
+  rejected immediately instead of failing on its first image.
+- **AVIF needs a newer ComfyUI** (about 0.35 or later, with the AV1 encoder that
+  ships with it). On an older ComfyUI the node says so before it runs — "your
+  ComfyUI doesn't have this encoder yet; update ComfyUI or pick png 8-bit" — and
+  never quietly saves a different format. 16-bit png and exr need ComfyUI 0.28 or
+  later; both are standard in anything recent.
+- **The workflow still travels with every file.** Drop a **png** or an **avif**
+  on the canvas and the whole workflow loads, soloed to that run, exactly as
+  above. **An exr cannot be dropped** — ComfyUI's current frontend can't read a
+  workflow out of an exr — but the workflow, prompt and run record *are* inside
+  the file's header (attributes named `workflow`, `prompt`, `eps_run`) for tools
+  that read them. If you want to recreate a run from a file by dropping it, keep
+  a png or avif of it.
+- **Preview only always shows a plain png**, whatever format you picked — nothing
+  is saved, and a format your ComfyUI can't write never stops a preview.
+- **File names** are the same as ever (`name_00001_.png`, `name_00002_.exr`,
+  `name_00003_.avif` …); the counter just keeps going across formats.
+- **One switch for every saver.** The four rows are part of the Universal State
+  Controller's capture, so a "draft" state that previews and a "final" state that
+  saves an exr can flip every EPS Save Image at once.
 
 **Recreate one image — exactly (v0.72.0).** Beyond the solo, EPS Save Image
 now pins the **Prompt Notebook text** and the **Apply LoRA Set rows** at

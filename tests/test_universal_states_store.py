@@ -481,6 +481,40 @@ class TestEPSSaveImagePreviewIsAcceptedByTheStore:
             store.normalize_state(payload)
 
 
+class TestEPSSaveImageFormatIsAcceptedByTheStore:
+    """2026-10-04: the four format widgets through the REAL validator --
+    three choices (any string; the applier checks the live combo) and one
+    int bounded 1-63."""
+
+    def test_format_widgets_round_trip(self, fake_nodes) -> None:
+        from eps_image.nodes_save_image import EPSSaveImage
+
+        _register(fake_nodes, "EPSSaveImage", EPSSaveImage)
+        widgets = {
+            "format": "avif",
+            "bit_depth": "10-bit",
+            "input_color_space": "HDR PQ",
+            "avif_crf": 24,
+        }
+        node = {"class": "EPSSaveImage", "id": "8", "widgets": widgets}
+        payload = {"name": "hdr", "nodes": [node]}
+        normalized, foreign = store.normalize_state(payload)
+        assert foreign == []
+        assert normalized["nodes"][0]["widgets"] == widgets
+
+    @pytest.mark.parametrize("bad", [0, 64, 18.5, "18", True, None])
+    def test_an_out_of_range_or_non_int_crf_is_refused(self, fake_nodes, bad) -> None:
+        from eps_image.nodes_save_image import EPSSaveImage
+
+        _register(fake_nodes, "EPSSaveImage", EPSSaveImage)
+        payload = {
+            "name": "x",
+            "nodes": [{"class": "EPSSaveImage", "id": "8", "widgets": {"avif_crf": bad}}],
+        }
+        with pytest.raises(store.StateValidationError, match=r"EPSSaveImage.*avif_crf"):
+            store.normalize_state(payload)
+
+
 class TestForeignClass:
     """FORMAT.md §4.3: a class with no registry entry (a future EPSNodes
     build, a third-party pack, or simply not loaded in THIS process) is

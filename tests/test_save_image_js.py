@@ -29,6 +29,15 @@ TOKEN_CASES = [
     ("pair_01_m1_v2_p1_00003_.png", "m1_v2_p1"),
     ("Neon City_i2_t1_00001_.png", "i2_t1"),
     ("Alpha_t1_00001_.webp", "t1"),
+    # 2026-10-04 formats: EPS Save Image's `format` widget writes the SAME
+    # `_NNNNN_` counter tail with an .avif / .exr ending; the extension is
+    # stripped generically, so the token reads identically.
+    ("Portrait_m2_i1_t3_00001_.avif", "m2_i1_t3"),
+    ("pair_01_m1_v2_p1_00003_.avif", "m1_v2_p1"),
+    ("Neon City_i2_t1_00001_.exr", "i2_t1"),
+    ("Alpha_t1_00001_.EXR", "t1"),
+    ("plain_00001_.avif", None),
+    ("plain_00001_.exr", None),
     # v1.1.0 preview_only: core Preview Image's `_temp_xxxxx` sits between the
     # token and the counter and must not hide the token.
     ("Portrait_m2_i1_t3_temp_abcde_00001_.png", "m2_i1_t3"),
@@ -182,3 +191,25 @@ def test_drop_fallback_finds_a_multiplier_inside_a_subgraph(tmp_path: Path) -> N
     assert out["shared"] == {"solos": ["m2_i1_t3"], "toasts": ["info"]}
     assert out["ambiguous"] == {"solos": ["", ""], "toasts": ["warn"]}
     assert out["baked"] == {"solos": ["m2_i1_t3"], "toasts": []}
+
+
+def test_avif_is_read_like_a_png_but_an_exr_never_solos_the_canvas(tmp_path: Path) -> None:
+    """2026-10-04 formats. The frontend reads a workflow out of an AVIF's Exif
+    item (scripts/metadata/avif.ts) but has no EXR metadata reader (1.52.7), so
+    the drop fallback must act on an AVIF's name exactly as on a PNG's and must
+    NOT act on an EXR's -- whatever MIME type the browser reports for it."""
+    from nested_layout import build_layout, run_probe
+
+    layout = build_layout(
+        tmp_path,
+        eps_image=("save_image.js",),
+        app_stub="export const app = { graph: null }\n",
+    )
+    out = run_probe(layout, NESTED_DROP_PROBE_JS)
+    assert out["avif"] == {"solos": ["m2_i1_t3"], "toasts": ["info"]}
+    for case in ("exr_x", "exr_blank", "exr_upper"):
+        assert out[case] == {"solos": [""], "toasts": []}, case
+
+
+def test_the_exr_guard_is_in_the_source(source: str) -> None:
+    assert "/\\.exr$/i.test(file.name || '')" in source
