@@ -19,8 +19,8 @@
  * `num_N`, e.g. `{"num_1": {"name": "steps", "value": 30, "type": "INT"},
  * "num_2": {"name": "cfg", "value": 7.5, "type": "FLOAT"}}`. `name` is a
  * possibly-empty string, `value` a JSON number, `type` one of
- * `"INT"`/`"FLOAT"`/`"*"` (unwired) -- this file writes `type` so the
- * backend can coerce without re-deriving it. A slot with nothing worth
+ * `"INT"`/`"FLOAT"`/`"BOOLEAN"`/`"*"` (unwired) -- this file writes `type`
+ * so the backend can coerce without re-deriving it. A slot with nothing worth
  * remembering (unwired, unnamed, value at the blank default, never
  * disabled) is simply ABSENT from the map -- the same sparse convention
  * `distributor.js`'s `toggles` widget uses, kept minimal on purpose. Two
@@ -143,9 +143,9 @@
  * with no veto installed, `num_N` connected successfully to
  * `steps`(INT)/`cfg`(FLOAT) **and also** `sampler_name`(COMBO)/
  * `model`(MODEL)/`images`(IMAGE)/`filename_prefix`(STRING), no error, the
- * link just took the target's type. So `ALLOWED_TYPES = ['INT', 'FLOAT']`
- * is enforced the same way `distributor.js`'s mechanism 4 enforces its own
- * allowlist: `wireTypeVeto` below installs `node.onConnectOutput`, which
+ * link just took the target's type. So `ALLOWED_TYPES` (INT, FLOAT and, since
+ * 2026-10-25, BOOLEAN) is enforced the same way `distributor.js`'s mechanism
+ * 4 enforces its own allowlist: `wireTypeVeto` below installs `node.onConnectOutput`, which
  * `LGraphNode.ts`'s `connectSlots` calls right after `isValidConnection`
  * passes and aborts the connection the instant it returns exactly `false`
  * -- quiet (a toast, no exception) and non-destructive (the link simply
@@ -156,6 +156,58 @@
  * just reads the target input's live `.type` (falling back to the link's
  * own recorded `.type` for the same restore-ordering reason
  * `distributor.js`'s `collectLinkTypes` documents).
+ *
+ * **BOOLEAN rows (owner ask, verbatim, 2026-10-25: "For the number controller
+ * node it would be useful if one of the options was a boolean. A user would
+ * need to input a 0 or 1 but it could hook into boolean inputs that accept
+ * true or false.").** `BOOLEAN` joins `ALLOWED_TYPES`, so a row wired into a
+ * BOOLEAN socket -- a toggle widget's socket or an optional BOOLEAN input;
+ * both are ordinary `node.inputs` entries whose `.type` is `BOOLEAN`, exactly
+ * like `steps` is `INT` -- adopts it through the SAME `collectSlotLinkTypes`
+ * -> `resolveAdoptedType` -> `jsonTypeFor` chain INT/FLOAT already use; none
+ * of the three needed a BOOLEAN special case. Everything BOOLEAN-specific is
+ * in a few small pure helpers: `snapToBoolean`/`displayValueFor` (what the
+ * box shows), `parseBooleanInput` (what typing means), `kindsOfType`/
+ * `wouldMixKinds` (the one-kind-per-row rule) and `stateTextFor` (the
+ * true/false hint). Decisions, so nobody re-litigates them:
+ *   - **A row is ONE kind.** INT and FLOAT are both "a number" and keep
+ *     today's rule (first concrete type wins, a mismatch is only warned
+ *     about). BOOLEAN is a different KIND, and `wireTypeVeto` refuses to mix
+ *     it with either number type in both directions, with the same quiet
+ *     toast-and-`false` refusal as a non-number target. The veto reads the
+ *     row's LIVE links, not `output.type`, because `output.type` only narrows
+ *     after the deferred reconcile -- so a replug of several remembered
+ *     targets (`reconnectRememberedTargets`, which goes through `connect`)
+ *     is still guarded in the window where the output is still `*`.
+ *   - **Typing is 0 or 1.** `parseBooleanInput` accepts `0`/`1`, then
+ *     `true`/`false`, `on`/`off`, `yes`/`no` (case-insensitive) as
+ *     conveniences, and snaps any other complete number to 1 (non-zero) or 0
+ *     -- the way INT re-snaps a fraction. Anything else (`maybe`, a bare `-`,
+ *     an empty box) returns null, so the caller keeps the previous value: the
+ *     existing "incomplete input never commits" path, unchanged.
+ *   - **Adoption snaps the DISPLAY, not the stored number** (INT's rule): an
+ *     untyped row holding `2.5` wired to a BOOLEAN socket shows `1` while
+ *     `values` still stores `2.5`, so rewiring it to a FLOAT gets the `2.5`
+ *     back. The backend's `value != 0` agrees with the display by
+ *     construction. Only a value TYPED into a BOOLEAN row is stored snapped.
+ *   - **Display: a plain `1`/`0` box plus a small `true`/`false` word beside
+ *     it** (`stateTextFor`), not `1 (true)` inside the box. The box must stay
+ *     a number box you can select and retype; text inside it would have to
+ *     be parsed back or selected around, and 64px is too narrow for
+ *     `0 (false)` anyway. The word sits LEFT of the box, so the value box
+ *     and the type badge stay in the same columns as every INT/FLOAT row;
+ *     only the (flexible) name field gives up a little width, and only on
+ *     BOOLEAN rows (the word is `display: none` everywhere else).
+ *   - Link colour needs nothing new: `reconcileNode` already colours every
+ *     link by `LGraphCanvas.link_type_colors[type]`, so a BOOLEAN row's links
+ *     take the BOOLEAN colour wherever the active palette defines one (and
+ *     litegraph's default link colour where it does not -- the same as any
+ *     other type without a palette entry).
+ * Compatibility (FORMAT.md section 6.17): a BOOLEAN row opened on an older
+ * EPS build degrades to an untyped row -- see the backend's module docstring.
+ * Shared code: `bypass.js` imports the unplug/replug helpers from this file
+ * (none touched here) and `resolveAdoptedType` from `distributor.js`, not
+ * from here, so Bypass and Distributor behave exactly as before.
  *
  * **INT rounds half-away-from-zero (backend v-next, rig-verified: 2.5 ->
  * 3).** `Math.round` does NOT do this for negatives (`Math.round(-2.5)` is
@@ -314,12 +366,19 @@ export const MIN_SLOTS = 1
  * unwired-slot JSON type. */
 export const WILDCARD = '*'
 
-/** The only two concrete types a row may adopt (owner: "one type per node,
- * just do text for now" was Distributor's call for images/text; the owner's
- * equivalent instruction here is numbers only). Enforced by `wireTypeVeto`
- * below -- see module docstring's rig-finding paragraph for why this must
- * be an active refusal, not just a label. */
-export const ALLOWED_TYPES = ['INT', 'FLOAT']
+/** The concrete types a row may adopt (owner: "one type per node, just do
+ * text for now" was Distributor's call for images/text; the owner's
+ * equivalent instruction here is numbers only -- plus, since 2026-10-25,
+ * on/off switches: see the module docstring's BOOLEAN paragraph). Enforced
+ * by `wireTypeVeto` below -- see module docstring's rig-finding paragraph
+ * for why this must be an active refusal, not just a label. INT and FLOAT
+ * are one KIND ("number"), BOOLEAN another; `wouldMixKinds` is the rule
+ * that keeps a row to one kind. */
+export const ALLOWED_TYPES = ['INT', 'FLOAT', 'BOOLEAN']
+
+/** The ComfyUI type name of an on/off socket (a toggle widget's input, or an
+ * optional BOOLEAN input) -- and the row type tag written into `values`. */
+export const BOOLEAN_TYPE = 'BOOLEAN'
 
 /** `num_${n}` -- the backend's RETURN_NAMES naming rule. Exported for
  * tests, mirrors distributor.js's `outputName`. */
@@ -549,16 +608,81 @@ export function roundHalfAwayFromZero(value) {
 }
 
 /**
- * The number to SHOW in an INT-adopted row's box -- the stored *value*
- * unchanged for FLOAT/unwired rows, but snapped via
- * `roundHalfAwayFromZero` for an INT-adopted one, so the panel can never
- * display `2.5` while the socket actually sends `3` (module docstring).
- * Pure and re-derived on every render -- the STORED JSON value is never
- * mutated by this. Exported for tests.
+ * The on/off snap: `1` for any finite non-zero number, `0` for zero and for
+ * anything that is not a finite number (NaN, Infinity, a string, null). The
+ * backend's BOOLEAN coercion is `value != 0` over the same finite numbers, so
+ * the box and the socket cannot disagree -- the way
+ * `roundHalfAwayFromZero` mirrors the backend's INT rounding. Pure; exported
+ * for tests.
+ */
+export function snapToBoolean(value) {
+  return typeof value === 'number' && Number.isFinite(value) && value !== 0 ? 1 : 0
+}
+
+/**
+ * The number to SHOW in a typed row's box -- the stored *value* unchanged for
+ * FLOAT/unwired rows, snapped via `roundHalfAwayFromZero` for an INT-adopted
+ * one, and snapped to `1`/`0` for a BOOLEAN-adopted one, so the panel can
+ * never display `2.5` while the socket actually sends `3` (or `true`) --
+ * module docstring. Pure and re-derived on every render -- the STORED JSON
+ * value is never mutated by this. Exported for tests.
  */
 export function displayValueFor(value, jsonType) {
   const n = typeof value === 'number' && Number.isFinite(value) ? value : 0
+  if (jsonType === BOOLEAN_TYPE) return snapToBoolean(n)
   return jsonType === 'INT' ? roundHalfAwayFromZero(n) : n
+}
+
+/** Words a BOOLEAN row's box accepts besides numbers (2026-10-25), all
+ * case-insensitive. A Map, not an object literal: a typed word such as
+ * `constructor` must not find anything on `Object.prototype`. */
+const BOOLEAN_WORDS = new Map([
+  ['true', 1],
+  ['false', 0],
+  ['on', 1],
+  ['off', 0],
+  ['yes', 1],
+  ['no', 0]
+])
+
+/**
+ * What typing *text* means in a BOOLEAN row's box: `1` (on) or `0` (off), or
+ * `null` when the text is not (yet) a complete answer and the caller must
+ * keep the previous value -- the same contract as `parseNumericInput`, which
+ * decides everything that is not a word. Owner (2026-10-25): "A user would
+ * need to input a 0 or 1"; the words are conveniences. Any other COMPLETE
+ * number snaps (`2.5`, `-1`, `1e3` -> 1; `0.0`, `-0` -> 0), the way an INT
+ * row re-snaps a fraction. A half-typed word (`tr`, `o`) is junk until it is
+ * a whole word, so it returns null instead of clobbering the committed
+ * value mid-keystroke. Pure; exported for tests.
+ */
+export function parseBooleanInput(text) {
+  if (typeof text === 'string') {
+    const word = BOOLEAN_WORDS.get(text.trim().toLowerCase())
+    if (word !== undefined) return word
+  }
+  const n = parseNumericInput(text)
+  return n === null ? null : snapToBoolean(n)
+}
+
+/** The `true`/`false` word shown beside a BOOLEAN row's box (module docstring:
+ * why a word beside a plain box, not text inside it). *shownValue* is the
+ * already-snapped `displayValueFor` result. Empty string for every other row
+ * type, which is what keeps the word out of INT/FLOAT/untyped rows entirely.
+ * Pure; exported for tests. */
+export function stateTextFor(jsonType, shownValue) {
+  if (jsonType !== BOOLEAN_TYPE) return ''
+  return shownValue ? 'true' : 'false'
+}
+
+/** The row type tag to TRUST in a stored entry: exactly one of
+ * `ALLOWED_TYPES`, else the wildcard. Exact-match on purpose (not
+ * `jsonTypeFor`, which upper-cases): the backend only recognises the literal
+ * tags, so a hand-edited lowercase `"int"` is untyped THERE and must not be
+ * painted as typed HERE. Pure; exported for tests. */
+export function storedJsonType(entry) {
+  const type = entry?.type
+  return typeof type === 'string' && ALLOWED_TYPES.includes(type) ? type : WILDCARD
 }
 
 // ---------------------------------------------------------------------------
@@ -581,15 +705,79 @@ function isGenericSlotType(type) {
 /**
  * Whether *type* is compatible with `ALLOWED_TYPES`: true for litegraph's
  * generic forms, true when any comma-separated member of *type*
- * (case-insensitive) is `INT` or `FLOAT`, else false. This is the function
- * `wireTypeVeto` actually calls to decide whether to abort a connection --
- * see module docstring's rig-finding paragraph for why that veto has to
- * exist at all. Exported for tests.
+ * (case-insensitive) is `INT`, `FLOAT` or `BOOLEAN`, else false. This is the
+ * function `wireTypeVeto` actually calls to decide whether to abort a
+ * connection -- see module docstring's rig-finding paragraph for why that
+ * veto has to exist at all. Exported for tests.
  */
 export function isAllowedType(type) {
   if (isGenericSlotType(type)) return true
   const members = String(type).split(',')
   return members.some((member) => ALLOWED_TYPES.includes(member.trim().toUpperCase()))
+}
+
+/** Which KIND each allowed concrete type belongs to. INT and FLOAT are one
+ * kind -- today's rule lets a row feed both (first wins, a mismatch is only
+ * warned about) and that is unchanged; BOOLEAN is the other. A Map so a
+ * hostile type string can never hit `Object.prototype`. */
+const KIND_OF_TYPE = new Map([
+  ['INT', 'number'],
+  ['FLOAT', 'number'],
+  [BOOLEAN_TYPE, 'boolean']
+])
+
+/**
+ * The kinds (`'number'`, `'boolean'`; sorted) a socket of *type* can carry:
+ * one entry per distinct kind among its comma-separated, case-insensitive
+ * members, and `[]` for litegraph's generic forms and for any type this node
+ * does not carry at all (that case is `isAllowedType`'s to refuse, not
+ * ours). A union such as `INT,BOOLEAN` carries both kinds. Pure; exported
+ * for tests.
+ */
+export function kindsOfType(type) {
+  if (isGenericSlotType(type)) return []
+  const kinds = new Set()
+  for (const member of String(type).split(',')) {
+    const kind = KIND_OF_TYPE.get(member.trim().toUpperCase())
+    if (kind) kinds.add(kind)
+  }
+  return [...kinds].sort()
+}
+
+/**
+ * Whether wiring a row that already feeds *carriedType* (the type its live
+ * links resolved to) into a socket of *incomingType* would put two KINDS on
+ * one row -- the owner-decided rule (2026-10-25) that a row is ONE kind, so a
+ * number and an on/off switch can never share it. INT with FLOAT is the same
+ * kind and so never conflicts (today's behaviour, deliberately unchanged).
+ * True only when both sides are definitely known and share NO kind: an
+ * unwired row (`*`), a socket that accepts the row's kind as one member of a
+ * union, or a type this node does not carry all answer false. Pure; exported
+ * for tests.
+ */
+export function wouldMixKinds(carriedType, incomingType) {
+  const have = kindsOfType(carriedType)
+  const want = kindsOfType(incomingType)
+  if (have.length === 0 || want.length === 0) return false
+  return !want.some((kind) => have.includes(kind))
+}
+
+/** Plain-words name for what *type* is, for the refusal toast. */
+function describeKind(type) {
+  const kinds = kindsOfType(type)
+  if (kinds.length === 1 && kinds[0] === 'boolean') return 'an on/off (BOOLEAN) input'
+  return `a number (${String(type).toUpperCase()}) input`
+}
+
+/**
+ * The toast text for a refused kind mix, same quiet style as the
+ * not-a-number refusal. Pure; exported for tests.
+ */
+export function mixRefusalMessage(carriedType, incomingType) {
+  return (
+    `EPS Number Controller: a row is one kind -- this one already feeds ${describeKind(carriedType)}, ` +
+    `so it can't also feed ${describeKind(incomingType)}. Use another row.`
+  )
 }
 
 /**
@@ -617,10 +805,11 @@ export function resolveAdoptedType(candidates) {
  * Maps an adopted type (from `resolveAdoptedType`, which is NOT restricted
  * to `ALLOWED_TYPES` on its own -- it just picks the first concrete
  * candidate) down to exactly what the wire contract allows in the JSON:
- * `'INT'`/`'FLOAT'`, or `'*'` for the wildcard AND for any foreign concrete
- * type that should never reach here in practice (the veto blocks it at
- * connect time) but is defended against anyway -- a hand-edited workflow
- * can always produce a link this file never approved. Exported for tests.
+ * `'INT'`/`'FLOAT'`/`'BOOLEAN'`, or `'*'` for the wildcard AND for any
+ * foreign concrete type that should never reach here in practice (the veto
+ * blocks it at connect time) but is defended against anyway -- a
+ * hand-edited workflow can always produce a link this file never approved.
+ * Exported for tests.
  */
 export function jsonTypeFor(adoptedType) {
   if (isGenericSlotType(adoptedType)) return WILDCARD
@@ -629,9 +818,11 @@ export function jsonTypeFor(adoptedType) {
 }
 
 /** Short badge text for a row's type indicator -- `'INT'`/`'FLOAT'` as-is,
+ * `'BOOL'` for BOOLEAN (the badge is 36px wide; `BOOLEAN` does not fit),
  * `'any'` for the wildcard (lowercase, matching distributor.js's own `'any'`
  * label for its unwired `image` input). Exported for tests. */
 export function typeBadgeFor(jsonType) {
+  if (jsonType === BOOLEAN_TYPE) return 'BOOL'
   return jsonType === 'INT' || jsonType === 'FLOAT' ? jsonType : 'any'
 }
 
@@ -1333,9 +1524,17 @@ function reconcileNode(state) {
       const signature = distinct.join(',')
       if (mixedWarnings[key] !== signature) {
         mixedWarnings[key] = signature
+        // The veto keeps a number and an on/off switch off one row, so this
+        // only fires for wiring that never went through it (a hand-edited or
+        // scripted workflow). Nothing is disconnected -- the first concrete
+        // type stays -- but say plainly why the other wire is off-kind.
+        const crossKind = new Set(distinct.flatMap(kindsOfType)).size > 1
         console.warn(
           PREFIX,
-          `${key} has mismatched wired types (${distinct.join(', ')}); keeping ${type}.`
+          `${key} has mismatched wired types (${distinct.join(', ')}); keeping ${type}.` +
+            (crossKind
+              ? ' A row is one kind: move the number wire or the on/off wire to another row.'
+              : '')
         )
       }
     } else if (mixedWarnings[key]) {
@@ -1438,6 +1637,9 @@ const CSS_TEXT = `
 .epsnc-row-index { flex: 0 0 auto; width: 16px; text-align: right; color: var(--descrip-text, #999); font-size: 10px; }
 .epsnc-row-name { flex: 1 1 auto; min-width: 0; background: var(--comfy-menu-bg, #262626); border: 1px solid var(--border-color, #444); color: var(--input-text, #ccc); border-radius: 3px; padding: 3px 6px; font-size: 11px; }
 .epsnc-row-value { flex: 0 0 auto; width: 64px; text-align: right; background: var(--comfy-menu-bg, #262626); border: 1px solid var(--border-color, #444); color: var(--input-text, #ccc); border-radius: 3px; padding: 3px 6px; font-size: 11px; }
+.epsnc-row-state { display: none; flex: 0 0 auto; width: 30px; text-align: right; font-size: 10px; }
+.epsnc-row-state-on { display: block; color: #a8dd93; }
+.epsnc-row-state-off { display: block; color: var(--descrip-text, #999); }
 .epsnc-row-type { flex: 0 0 auto; width: 36px; text-align: center; font-size: 9.5px; font-weight: 600; letter-spacing: 0.03em; border-radius: 3px; padding: 3px 0; }
 .epsnc-row-type-any { color: var(--descrip-text, #999); border: 1px solid var(--border-color, #444); }
 .epsnc-row-type-set { color: #a8dd93; border: 1px solid #4f9a44; background: rgba(79, 154, 68, 0.15); }
@@ -1472,7 +1674,18 @@ function el(tag, options = {}, children = []) {
 function tooltipForType(jsonType) {
   if (jsonType === 'INT') return "Wired as a whole number (INT) -- matches what it's plugged into."
   if (jsonType === 'FLOAT') return "Wired as a decimal (FLOAT) -- matches what it's plugged into."
-  return 'Not wired yet. Connect this output to fix it as a whole number or a decimal.'
+  if (jsonType === BOOLEAN_TYPE) return 'Wired as an on/off switch (BOOLEAN) -- 1 = true, 0 = false.'
+  return 'Not wired yet. Connect this output to fix it as a whole number, a decimal or an on/off switch.'
+}
+
+const NUMBER_BOX_TOOLTIP = 'The number this output sends. Type a whole number or a decimal.'
+const BOOLEAN_BOX_TOOLTIP =
+  'Type 1 for on (true) or 0 for off (false). true/false, on/off and yes/no work too, ' +
+  'and any other number counts as on unless it is 0.'
+
+/** The value box's tooltip for a row of *jsonType* -- Exported for tests. */
+export function tooltipForValue(jsonType) {
+  return jsonType === BOOLEAN_TYPE ? BOOLEAN_BOX_TOOLTIP : NUMBER_BOX_TOOLTIP
 }
 
 /**
@@ -1552,6 +1765,15 @@ function currentPanelHeight(state) {
  * it (`renderRows` always sets `.checked` unconditionally) -- its `change`
  * handler goes straight to `setRowEnabled`, the owner's checkbox feature
  * (module docstring).
+ *
+ * A row that is currently BOOLEAN reads its box with `parseBooleanInput`
+ * (0/1, true/false, on/off, yes/no, any other number snapped) instead of
+ * `parseNumericInput` -- the SAME commit-or-wait contract (null = keep the
+ * previous value), so everything above about incomplete input holds for
+ * both. The kind is read from the row's STORED type (`rowIsBoolean`), the
+ * one place the adopted type is already durable. The extra `stateEl` child
+ * is the true/false word beside the box (`stateTextFor`); it sits between
+ * the name and the value so the value box and the badge keep their columns.
  */
 function buildRowEl(state, n) {
   const enabledInput = el('input', {
@@ -1580,9 +1802,10 @@ function buildRowEl(state, n) {
       type: 'text',
       inputmode: 'decimal',
       spellcheck: 'false',
-      title: 'The number this output sends. Type a whole number or a decimal.'
+      title: NUMBER_BOX_TOOLTIP
     }
   })
+  const stateEl = el('span', { className: 'epsnc-row-state' })
   const typeEl = el('span', { className: 'epsnc-row-type' })
 
   enabledInput.addEventListener('change', () => {
@@ -1593,7 +1816,9 @@ function buildRowEl(state, n) {
     syncNode(state)
   })
   valueInput.addEventListener('input', () => {
-    const parsed = parseNumericInput(valueInput.value)
+    const parsed = rowIsBoolean(state, n)
+      ? parseBooleanInput(valueInput.value)
+      : parseNumericInput(valueInput.value)
     if (parsed === null) return // incomplete number -- wait for more keystrokes
     writeSlotField(state.node, n, { value: parsed })
     syncNode(state)
@@ -1613,10 +1838,18 @@ function buildRowEl(state, n) {
     enabledInput,
     indexEl,
     nameInput,
+    stateEl,
     valueInput,
     typeEl
   ])
-  return { n, el: rowEl, enabledInput, nameInput, valueInput, typeEl }
+  return { n, el: rowEl, enabledInput, nameInput, stateEl, valueInput, typeEl }
+}
+
+/** Whether slot *n* is currently a BOOLEAN row, per its STORED type tag (the
+ * durable record `reconcileNode` keeps in step with the wiring). */
+function rowIsBoolean(state, n) {
+  const map = state.widget ? parseValues(state.widget.value) : {}
+  return storedJsonType(map[slotName(n)]) === BOOLEAN_TYPE
 }
 
 /** Adds/removes row ELEMENTS (never their content) to make `state.rows`
@@ -1667,13 +1900,24 @@ function renderRows(state) {
     const name = typeof entry?.name === 'string' ? entry.name : ''
     const rawValue =
       typeof entry?.value === 'number' && Number.isFinite(entry.value) ? entry.value : 0
-    const jsonType = entry?.type === 'INT' || entry?.type === 'FLOAT' ? entry.type : WILDCARD
+    const jsonType = storedJsonType(entry)
     const shownValue = displayValueFor(rawValue, jsonType)
     const enabled = isRowEnabled(entry)
 
     if (activeElement !== row.nameInput) row.nameInput.value = name
     if (activeElement !== row.valueInput) row.valueInput.value = String(shownValue)
     row.enabledInput.checked = enabled
+    row.valueInput.title = tooltipForValue(jsonType)
+
+    // BOOLEAN rows get a true/false word beside the box; every other row
+    // gets an empty, `display: none` one (module docstring), so INT/FLOAT/
+    // untyped rows lay out exactly as before this feature existed.
+    const stateText = stateTextFor(jsonType, shownValue)
+    row.stateEl.textContent = stateText
+    row.stateEl.title = stateText ? '1 = true (on), 0 = false (off).' : ''
+    row.stateEl.className = stateText
+      ? `epsnc-row-state ${shownValue ? 'epsnc-row-state-on' : 'epsnc-row-state-off'}`
+      : 'epsnc-row-state'
 
     row.typeEl.textContent = typeBadgeFor(jsonType)
     row.typeEl.title = tooltipForType(jsonType)
@@ -1692,7 +1936,7 @@ function buildUi(state) {
   injectStyles()
   const hint = el('div', {
     className: 'epsnc-hint',
-    text: 'One row per number. Name it if you like -- wire an output to fix it as a whole number or a decimal.'
+    text: 'One row per number. Name it if you like -- wire an output to fix it as whole, decimal or on/off (1/0).'
   })
   state.listEl = el('div', { className: 'epsnc-list' })
   state.root = el('div', { className: 'epsnc-root' }, [hint, state.listEl])
@@ -1905,14 +2149,38 @@ function wireRowSync(state) {
  * the connection the instant it returns exactly `false` -- quiet (a toast,
  * no exception) and non-destructive (the link simply never forms).
  * Chained with whatever else installed `onConnectOutput` first.
+ *
+ * Two refusals, in this order: a target type outside `ALLOWED_TYPES`
+ * (`isAllowedType`), and -- since 2026-10-25 -- a target of a DIFFERENT KIND
+ * than the row already feeds (`wouldMixKinds`: a number against an on/off
+ * switch, either way round). Both use the same quiet toast-and-`false` path.
  */
 function wireTypeVeto(node) {
   const original = node.onConnectOutput
   node.onConnectOutput = function (outputIndex, inputType, input, targetNode, inputIndex) {
     const output = this.outputs?.[outputIndex]
-    if (output && OUTPUT_NAME_RE.test(output.name || '') && !isAllowedType(inputType)) {
-      toast(this, 'warn', `EPS Number Controller only carries whole numbers or decimals -- not ${inputType}.`)
-      return false
+    if (output && OUTPUT_NAME_RE.test(output.name || '')) {
+      if (!isAllowedType(inputType)) {
+        toast(
+          this,
+          'warn',
+          `EPS Number Controller only carries whole numbers, decimals or on/off (BOOLEAN) values -- not ${inputType}.`
+        )
+        return false
+      }
+      // One row, one KIND (owner decision 2026-10-25): a number wire and an
+      // on/off wire may not share a row, in either direction. INT with FLOAT
+      // is the same kind and stays allowed, exactly as before. The row's
+      // current kind comes from its LIVE links (the same per-slot read the
+      // adoption pass uses), not `output.type`: that only narrows after the
+      // deferred reconcile, so a replug that connects several remembered
+      // targets back to back would otherwise slip a mixed pair through while
+      // the output still reads `*`.
+      const carriedType = resolveAdoptedType(collectSlotLinkTypes(this, outputIndex)).type
+      if (wouldMixKinds(carriedType, inputType)) {
+        toast(this, 'warn', mixRefusalMessage(carriedType, inputType))
+        return false
+      }
     }
     if (typeof original === 'function') return original.apply(this, arguments)
     return undefined

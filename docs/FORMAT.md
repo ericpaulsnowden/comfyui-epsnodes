@@ -5237,17 +5237,20 @@ frontend `web/eps_image/number_controller.js`. Class id `EPSNumberController`
 (FROZEN, §8), category `EPSNodes`.
 
 Shape decisions the owner made when asked, so nobody re-litigates them: rows
-are untyped until wired and then ADOPT INT or FLOAT from the socket; every row
-carries a NAME; a row is otherwise a plain number box — he explicitly declined
-min/max, seed-style randomize, and step/scrub.
+are untyped until wired and then ADOPT INT or FLOAT from the socket (and, since
+2026-10-25, BOOLEAN — see "BOOLEAN rows" below); every row carries a NAME; a
+row is otherwise a plain number box — he explicitly declined min/max,
+seed-style randomize, and step/scrub.
 
 - **Contract.** `RETURN_TYPES = ("*",) * 16`, `RETURN_NAMES = num_1..num_16`.
   Sixteen is a CEILING, not a preference: outputs restore POSITIONALLY (§8), so
   the count is frozen at registration. Raising it later is safe (new slots
   append); LOWERING it would orphan wires in every saved workflow. One hidden
   required STRING widget `values` holds everything as a JSON object keyed
-  `num_N` → `{name, value, type, enabled?, links?}` (`links` items are `{node,
-  input}`; `node: -20` names the owning subgraph's own output node, v1.2.0).
+  `num_N` → `{name, value, type, enabled?, links?}` where `type` is `"INT"`,
+  `"FLOAT"`, `"BOOLEAN"` (2026-10-25) or `"*"` (unwired) (`links` items are
+  `{node, input}`; `node: -20` names the owning subgraph's own output node,
+  v1.2.0).
   `RETURN_NAMES` is
   class-level and therefore generic — the FRONTEND sets each socket's `.label`
   from the row's own name.
@@ -5271,10 +5274,24 @@ min/max, seed-style randomize, and step/scrub.
   banker's rounding answers 2 for 2.5 and reads as a plain bug to an artist.
   This path is reachable in ordinary use: a row holds whatever was typed while
   it was still unwired, so wiring it to an INT socket afterwards genuinely
-  arrives with a fraction. `"FLOAT"` → `float()`. `"*"`/absent → whichever
+  arrives with a fraction. `"FLOAT"` → `float()`. `"BOOLEAN"` → `value != 0`,
+  a real Python `bool` (table below). `"*"`/absent/any other tag → whichever
   Python type round-trips exactly. JS's `Math.round` differs on negatives, so
   the frontend mirrors this as `Math.sign(v) * Math.round(Math.abs(v))` for
   DISPLAY only — the stored value stays exactly as typed.
+
+  | `type` | `value` | socket receives |
+  |---|---|---|
+  | `"INT"` | `2.5` / `-2.5` / `30.0` | `3` / `-3` / `30` (`int`) |
+  | `"FLOAT"` | `7` | `7.0` (`float`) |
+  | `"BOOLEAN"` | `0`, `0.0`, `-0.0` | `False` |
+  | `"BOOLEAN"` | `1`, `-1`, `2.5`, `0.4`, `1e308` | `True` |
+  | `"BOOLEAN"` | `NaN`, `±Infinity`, missing/`null`/string/JSON-bool, an integer too big for a float (e.g. `10**400`) | `False` + one logged warning |
+  | `"*"`, absent, unknown tag | `1` / `0` / `2.5` | `1` / `0` / `2.5` (`int` / `int` / `float`) |
+
+  A broken entry that is not even an object has no readable `type` and reads
+  the long-standing `0`; a broken BOOLEAN row reads `False` (a damaged toggle
+  never switches a feature ON).
 - **Per-row enable checkbox** (owner ask, 2026-09-01: *"a checkbox that can be
   turned off to allow the thing it is connected to to use it's original
   value"*). Rig-verified mechanism: ComfyUI has NO execution pass-through and an
@@ -5305,6 +5322,84 @@ min/max, seed-style randomize, and step/scrub.
   mirroring §6.11's absent-key default); a broken entry → that slot warns and
   reads 0 without touching its neighbours.
 - **§6.16 registry:** `values` declared `json_object`, `key_pattern "^num_\d+$"`.
+  Nothing validates INSIDE a row — not `universal_states_store._check_kind`, not
+  the frontend's `validateStateValue` — so a BOOLEAN row (or a tag from some
+  future build) round-trips through a saved state untouched. Pinned by tests.
+
+**BOOLEAN rows (2026-10-25; owner ask, verbatim: *"For the number controller
+node it would be useful if one of the options was a boolean. A user would need
+to input a 0 or 1 but it could hook into boolean inputs that accept true or
+false."*).** A row wired into a BOOLEAN socket — a toggle WIDGET's socket or an
+optional BOOLEAN input; both are ordinary `node.inputs` entries with
+`.type === "BOOLEAN"`, exactly as `steps` is `INT` — adopts `BOOLEAN` through the
+same `collectSlotLinkTypes` → `resolveAdoptedType` → `jsonTypeFor` chain INT and
+FLOAT use; the backend then emits a real `bool`. No new widget and no new output
+type: the kind lives in the existing `values` JSON, so `widgets_values` is
+positionally identical to every older save and `RETURN_TYPES` stays `*` (core
+accepts `*` on either side of a link, which is what lets a `*` output feed a
+BOOLEAN socket at all). Decisions, so nobody re-litigates them:
+
+- **A row is ONE kind.** INT and FLOAT are one kind ("number") and keep the
+  rule that always existed: first concrete type wins and a mismatch is only
+  warned about. BOOLEAN is a different kind and is **refused in both directions**
+  — a BOOLEAN row cannot be wired into an INT/FLOAT socket and a number row
+  cannot be wired into a BOOLEAN socket — by `wireTypeVeto`
+  (`node.onConnectOutput`), the same quiet toast-and-`false` path as a
+  non-number target ("EPS Number Controller: a row is one kind -- this one
+  already feeds … so it can't also feed …. Use another row."). A union socket
+  (`INT,BOOLEAN`) that accepts the row's own kind is allowed. The veto reads the
+  row's LIVE links, not `output.type` (which only narrows after the deferred
+  reconcile), so a re-tick that replugs several remembered targets back to back
+  is guarded in the window where the output still reads `*`; it also runs on the
+  `SubgraphOutput.connect` path, so a nested wire cannot smuggle a second kind
+  in. Wiring that never went through the veto (a hand-edited or scripted
+  workflow) keeps today's behaviour: first concrete type wins, nothing is
+  disconnected, one console warning, now with a plain-words hint.
+- **Typing is 0 or 1.** In a BOOLEAN row the box accepts `0`/`1`, and as
+  conveniences `true`/`false`, `on`/`off`, `yes`/`no` (case-insensitive), all
+  normalised to 1/0; any other COMPLETE number snaps to 1 if non-zero and 0 if
+  zero (`2.5`, `-1`, `0.4` → 1; `0.0` → 0 — not rounded, because the backend
+  sends `True` for any non-zero number). Anything else (`maybe`, a half-typed
+  `tr`, `-`, empty) is ignored and the previous value is kept — the existing
+  incomplete-input path — and the box reverts on blur. The parser is chosen from
+  the row's STORED type, so an unwired row (type `*`) is still a plain number
+  box: words only work once the row is wired.
+- **Adoption snaps the DISPLAY, not the stored number** (INT's rule): an untyped
+  row holding `2.5` wired to a BOOLEAN socket shows `1` while `values` still
+  stores `2.5`, so unwiring (or rewiring to a FLOAT) gets `2.5` back. Only a
+  value TYPED into a BOOLEAN row is stored snapped (0/1).
+- **Display.** Type badge `BOOL` (the badge is 36px wide; `BOOLEAN` does not
+  fit); badge tooltip *"Wired as an on/off switch (BOOLEAN) -- 1 = true, 0 =
+  false."* The value stays a plain `1`/`0` number box with a small `true`/`false`
+  word beside it (green when true, grey when false), NOT `1 (true)` inside the
+  box: text inside the box would have to be parsed back or selected around
+  before retyping, `0 (false)` does not fit the 64px box, and the pack's
+  "just a plain number box" ethos is kept. The word sits LEFT of the box so the
+  value box and the badge keep their columns in every row; only the flexible
+  name field gives up ~35px, and only on BOOLEAN rows (the word is
+  `display: none` everywhere else, so INT/FLOAT/untyped rows lay out exactly as
+  before). The word is a DOM `<span>` — no canvas drawing, no mouse hooks —
+  so it is identical under Nodes 2.0.
+- **Everything else is unchanged:** unplug/replug on untick, the 16-output
+  positional ceiling, names, nested-subgraph handling (a SubgraphNode input
+  declared BOOLEAN adopts BOOLEAN), link colour (the code colours each link by
+  `LGraphCanvas.link_type_colors[type]`, so a BOOLEAN row's links take the
+  BOOLEAN colour wherever the active palette defines one and litegraph's
+  default link colour where it does not, like any type without an entry), and
+  the Universal State `values` kind. Shared code: EPS Bypass imports the
+  unplug/replug helpers from `number_controller.js` (none touched) and
+  `resolveAdoptedType` from `distributor.js`, not from here; Distributor keeps
+  its own `ALLOWED_TYPES`. Neither node's behaviour moved.
+- **Compatibility.** Old workflows (INT/FLOAT/`*` rows) behave exactly as
+  before. A workflow saved with a BOOLEAN row and opened on an OLDER EPS build:
+  its backend falls into the unrecognised-tag path (the row is treated as
+  untyped), so the socket receives `1`/`0` as a plain `int` (a stored `2.5`,
+  which the panel only displays as `1`, arrives as the float `2.5`) instead of
+  `True`/`False` — identical for any consumer that tests truthiness, different
+  for one that tests `is True`. Its FRONTEND shows the row as `any`, refuses NEW
+  wires into BOOLEAN sockets, and rewrites the tag to `*` the next time it
+  syncs; nothing is lost, because the type is always re-derived from the live
+  wiring when the workflow is opened on a current build.
 
 
 **The panel FILLS the node's available height (v0.89.0, owner: "Increasing the
@@ -5599,7 +5694,7 @@ paste-a-path only takes server paths. So a remote viewer had no way in.
 
 **Nested subgraphs (v1.2.0, §7.10; owner ask 2026-10-03).** A row wired into a
 SubgraphNode input behaves like any other wire and adopts that input's declared
-INT/FLOAT. A row inside a subgraph wired to the subgraph's own output (link
+INT/FLOAT/BOOLEAN. A row inside a subgraph wired to the subgraph's own output (link
 `target_id` -20) used to be skipped by the checkbox, leaving a row marked OFF
 while the wire still carried the number. The shared unplug helpers
 (`collectOutputTargets` / `disconnectAllTargets` / `reconnectRememberedTargets`,
@@ -5611,7 +5706,7 @@ fails soft on its own). A graph that is not a real Subgraph degrades to the old
 behaviour (the link is neither remembered nor touched). A row wired only to a
 subgraph output stays untyped (`*`) and renders as a plain int-or-float number.
 The Number Controller has no required-input guard: its checkbox contract relies
-on the wire going to a widget-backed or promoted INT/FLOAT input.
+on the wire going to a widget-backed or promoted INT/FLOAT/BOOLEAN input.
 
 ## §6.18 `EPSBypass` (display: "EPS Bypass", v0.99.0) — switch a wire off, and what it feeds sees nothing
 

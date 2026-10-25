@@ -45,7 +45,7 @@ section further down; this is the map.
 | [**EPS Bypass**](#eps-bypass-shipped) | Plug anything into it — audio, an image, a model, a mask — and switch it off: whatever it feeds then behaves exactly as if nothing were connected, and the wire comes back when you switch it on. For inputs that are optional (a video node's audio, an optional mask); if what it feeds needs that input, the switch refuses and names the node. The Universal State Controller can save and recall the on/off state. *(v0.99.0)* | Nothing — drag-and-drop with core nodes. |
 | [**EPS Splat Placement**](#eps-splat-placement-shipped) | Makes core **Render Splat** draw a gaussian splat exactly as the 3D viewer (Save Splat, Preview Splat, Load 3D) shows it, by moving, rotating and scaling the splat the way the viewer did. Without it, a splat you fitted to the viewer renders as a dot. *(v0.100.0)* | Core's Get Splat and Render Splat, plus the viewer node's `model_3d_info` and `camera_info`. |
 | [**EPS Node Audit**](#eps-node-audit-shipped) | A plain-language look at what your other installed node packs can reach: their web routes, where they've called out to, and a scan of their code for a few patterns worth knowing about — green/yellow/red per pack, with a verbose toggle for the technical detail. | Nothing — reads whatever else is installed. |
-| [**EPS Number Controller**](#eps-number-controller-shipped) | Every number a workflow uses, kept in one place: named rows, each a plain number box. Wire one into a socket and it quietly becomes the right kind of number for it — whole or decimal. Untick a row and whatever it was plugged into goes back to its own value. The Universal State Controller can save and recall the whole set, including which rows are switched on. | Nothing — drag-and-drop with core nodes. |
+| [**EPS Number Controller**](#eps-number-controller-shipped) | Every number a workflow uses, kept in one place: named rows, each a plain number box. Wire one into a socket and it quietly becomes the right kind of number for it — whole, decimal, or an on/off switch you drive with a 1 or a 0. Untick a row and whatever it was plugged into goes back to its own value. The Universal State Controller can save and recall the whole set, including which rows are switched on. | Nothing — drag-and-drop with core nodes. |
 | [**EPS Checkpoint Switcher**](#eps-checkpoint-switcher-shipped) | Tick several checkpoint files in a list; one queue runs the workflow once per ticked checkpoint, with each run's model, CLIP, and VAE kept together and a label for save paths. | Your checkpoint files — drag-and-drop with core nodes. |
 | [**EPS Resolution**](#eps-resolution-shipped) | Image-first resize + size in one node: target size (with a drag pad, a ratio lock you can type your own ratio into, and a rotate button), four resize modes, and the original image + both sets of dimensions passed through. Named size presets are shared across your machines — tick several and one Run resizes once per preset. Wire in extra images and they all come out at the same target size in one Run. | Nothing — drag-and-drop with core nodes. |
 | [**EPS Image Grid**](#eps-image-grid-shipped) | Collects images across separate Runs into a buffer that survives restarts, shows them as a thumbnail grid, and fans the whole set out on demand. Add whole batches at once — a multiselect picker, a folder importer, or one big drag. | Nothing — drag-and-drop with core nodes. |
@@ -857,6 +857,26 @@ save and recall the whole set at once — which is the point of it.
   rounds to `3` the way school arithmetic says it should, and the box updates
   so it shows you what it is actually sending. Wires to things that aren't
   numbers — a model, an image — are simply refused.
+
+- **Drive an on/off switch with a 1 or a 0 (v1.7.0).** Wire a row into any true/false
+  input — the "use this" toggle on a node, an optional on/off socket — and the
+  row becomes an on/off row: a small `BOOL` tag appears and a `true` or `false`
+  word shows beside the box, so you can read it at a glance. Type `1` for on and
+  `0` for off. If you'd rather type a word, `true`/`false`, `on`/`off` and
+  `yes`/`no` work too (in any capitalisation) and turn into 1 or 0; any other
+  number counts as on unless it is `0` — the same way a whole-number row rounds a
+  fraction. Something that isn't a number or one of those words is ignored, and
+  the box goes back to its last good value when you click away. A new row you
+  haven't wired yet is still a plain number box, so type your `1` or `0` in it
+  as a number, then wire it. **One row is one kind of thing:** a row that feeds
+  an on/off input can't also feed a number input, and the other way round — the
+  wire is refused with a short message. Use another row. (Whole-number versus
+  decimal behaves exactly as it always did — that rule only separates on/off
+  from numbers.)
+  *Opened on an older EPSNodes?* The workflow loads, but the on/off rows show as
+  plain untyped numbers and send `1`/`0` instead of `true`/`false` — fine for an
+  ordinary toggle. Open it on a current version and the rows pick their on/off
+  type up again from the wires.
 
 - **Untick a row to hand control back.** The checkbox switches a row off, which
   unplugs its wire, and **whatever it was connected to goes back to using its

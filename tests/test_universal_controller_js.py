@@ -275,7 +275,21 @@ out.validateJsonObject = {
   badKey: m.validateStateValue({ kind: 'json_object', key_pattern: '^[a-z]+$' }, { AB: 1 }),
   noPattern: m.validateStateValue({ kind: 'json_object' }, { ANY: 1 }),
   notObject: m.validateStateValue({ kind: 'json_object' }, 'nope'),
-  arrayRejected: m.validateStateValue({ kind: 'json_object' }, [1, 2])
+  arrayRejected: m.validateStateValue({ kind: 'json_object' }, [1, 2]),
+  // EPS Number Controller's real `values` descriptor with a BOOLEAN row
+  // (2026-10-25): nothing validates INSIDE a row, so the new tag needs no change.
+  numberControllerBoolean: m.validateStateValue(
+    { kind: 'json_object', key_pattern: '^num_\\d+$' },
+    {
+      num_1: { name: 'steps', value: 30, type: 'INT' },
+      num_2: { name: 'use_upscale', value: 1, type: 'BOOLEAN' },
+      num_3: { name: 'off_row', value: 0, type: 'BOOLEAN', enabled: false, links: [] }
+    }
+  ),
+  numberControllerBadKey: m.validateStateValue(
+    { kind: 'json_object', key_pattern: '^num_\\d+$' },
+    { bool_1: { name: 'x', value: 1, type: 'BOOLEAN' } }
+  )
 }
 out.validateUnknownKind = m.validateStateValue({ kind: 'nope' }, 1)
 
@@ -901,6 +915,13 @@ class TestValidateStateValue:
         assert v["noPattern"] == {"ok": True}
         assert v["notObject"]["ok"] is False
         assert v["arrayRejected"]["ok"] is False
+
+    def test_json_object_accepts_boolean_number_controller_rows(
+        self, controller_api: dict
+    ) -> None:
+        v = controller_api["validateJsonObject"]
+        assert v["numberControllerBoolean"] == {"ok": True}
+        assert v["numberControllerBadKey"]["ok"] is False
 
     def test_unknown_kind(self, controller_api: dict) -> None:
         expected = {"ok": False, "error": 'unknown kind "nope"'}

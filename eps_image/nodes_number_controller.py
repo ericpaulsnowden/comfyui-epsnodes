@@ -13,16 +13,31 @@ answer, verbatim: "just a plain number box"). Its entire job is to be one
 place many otherwise-scattered numbers can live, so the Universal State
 Controller (FORMAT.md §6.16) can save and recall all of them together.
 
-**Untyped until wired, then adopts INT or FLOAT (owner answer).** A row
-starts as a plain number with no ComfyUI type. The FRONTEND is what
-notices a row got wired to a socket and records that socket's concrete
-type (INT/FLOAT) into this node's own `values` widget -- the backend never
-inspects the graph to decide this (this module has no `prompt`/`unique_id`
-hidden inputs at all, unlike EPSDistributor's wiring-aware `check_lazy_
-status`: nothing here is gated, so there is nothing that needs graph
-access). The backend's whole job is the last mile: given a row's recorded
-`type` and its typed-in `value`, hand back a Python `int` or `float` that
-actually behaves like one downstream.
+**Untyped until wired, then adopts INT, FLOAT or BOOLEAN (owner answer;
+BOOLEAN added 2026-10-25).** A row starts as a plain number with no ComfyUI
+type. The FRONTEND is what notices a row got wired to a socket and records
+that socket's concrete type (INT/FLOAT/BOOLEAN) into this node's own
+`values` widget -- the backend never inspects the graph to decide this (this
+module has no `prompt`/`unique_id` hidden inputs at all, unlike
+EPSDistributor's wiring-aware `check_lazy_status`: nothing here is gated, so
+there is nothing that needs graph access). The backend's whole job is the
+last mile: given a row's recorded `type` and its typed-in `value`, hand back
+a Python `int`, `float` or `bool` that actually behaves like one downstream.
+
+**BOOLEAN (owner ask, verbatim, 2026-10-25: "For the number controller node
+it would be useful if one of the options was a boolean. A user would need to
+input a 0 or 1 but it could hook into boolean inputs that accept true or
+false.").** The user still types a plain number -- `0` or `1` -- into the
+same number box; the row just adopts BOOLEAN when it is wired into a BOOLEAN
+socket (a toggle widget's socket, or an optional BOOLEAN input), and this
+backend then emits a real Python `bool` (`value != 0`) instead of an `int`.
+There is NO new widget and NO new output type: the kind lives in the
+existing `values` JSON's per-row `type` tag, so `widgets_values` stays
+positionally identical to every older save, and `RETURN_TYPES` stays `*`
+(core's `validate_node_input` accepts `*` on either side of a link, which is
+what lets a `*` output feed a BOOLEAN socket in the first place). A row is
+ONE kind: the FRONTEND refuses to wire one row into both a BOOLEAN socket and
+an INT/FLOAT socket, so this backend never has to decide between them.
 
 **Coercion is the reason this node exists on the backend at all.**
 ComfyUI's own INT-typed sockets/widgets genuinely misbehave when fed a
@@ -68,7 +83,7 @@ node's own widgets changing at all -- nothing analogous is true here).
 `num_1`..`num_MAX_OUTPUTS` (FORMAT.md §6.16's JSON-bridge pattern, same
 generic shape EPSDistributor's `toggles` and the Prompt Notebook's
 `pinned`/`drafts` widgets use).** Each present key maps to `{"name": str,
-"value": <JSON number>, "type": "INT" | "FLOAT" | "*"}`. `required`, not
+"value": <JSON number>, "type": "INT" | "FLOAT" | "BOOLEAN" | "*"}`. `required`, not
 `optional` -- unlike EPSDistributor's `toggles` (where an ABSENT widget
 still has a sensible default: "every output enabled"), `values` IS this
 node's entire reason for being; there is no meaningful "everything reads a
@@ -104,11 +119,14 @@ validation time, not what `get_numbers` does once it runs.
   `null`, a bool, a string, or any other non-numeric JSON type; its `value`
   is `NaN`/`Infinity`/`-Infinity`; its `value` is a JSON number too large
   for a Python `float` to represent) -> that row logs a WARNING and reads
-  `0`. `type` is never validated this strictly -- an unrecognized `type`
-  (anything other than the literal strings `"INT"`/`"FLOAT"`) is treated
-  exactly like `"*"` (module docstring's coercion table), silently, since a
-  foreign/future type tag is not evidence of corrupted data the way a
-  non-numeric `value` is.
+  `0` -- or `False` when the row's own `type` is `"BOOLEAN"`, so a toggle
+  socket never receives a number it did not ask for (a row whose entry is
+  not even an object has no readable `type`, and reads `0`). `type` is never
+  validated this strictly -- an unrecognized `type` (anything other than the
+  literal strings `"INT"`/`"FLOAT"`/`"BOOLEAN"`) is treated exactly like
+  `"*"` (module docstring's coercion table), silently, since a foreign/
+  future type tag is not evidence of corrupted data the way a non-numeric
+  `value` is.
 - `TypeError`/`ValueError` is the parse catch (mirrors every other JSON
   bridge in this pack): `UnicodeDecodeError` is itself a `ValueError`
   subclass, so a `values` payload handed in as raw undecodable bytes by
@@ -117,13 +135,32 @@ validation time, not what `get_numbers` does once it runs.
 
 **Coercion table, per row, once `value` is confirmed a finite non-bool
 `int`/`float`:**
-- `type == "INT"` -> ``int(round(value))``.
+- `type == "INT"` -> ``int(round(value))`` (half away from zero).
 - `type == "FLOAT"` -> ``float(value)``.
+- `type == "BOOLEAN"` -> ``value != 0``, a real Python `bool`: `0`/`0.0`/
+  `-0.0` -> `False`; `1`, `-1`, `2.5` and any other finite non-zero number
+  (`1e308` included) -> `True`. Exactly the "any other number snaps to 1 if
+  non-zero" rule the panel shows, so the box and the socket can never
+  disagree. A non-finite, non-numeric or unrepresentable `value` degrades to
+  `False` (degrade table above).
 - `type == "*"`, absent, or any unrecognized tag (not yet wired) ->
   whichever Python type ROUND-TRIPS EXACTLY: `30` (or `30.0`) stays an
   `int`; `7.5` stays a `float`. This is the one case where the row's OWN
   number decides its Python type, because there is no wired socket to
   defer to yet.
+
+**Compatibility (2026-10-25).** `BOOLEAN` is a new tag, so an OLDER EPSNodes
+build reading a workflow saved with a BOOLEAN row falls into the last bullet
+above (its backend only knows INT/FLOAT): the row is treated as untyped and
+the socket receives ``1``/``0`` as a plain `int` (a stored fraction such as
+`2.5`, which the panel only DISPLAYS as `1`, arrives as `2.5`) instead of
+``True``/``False``. Every ordinary toggle reads that identically (`if flag:`),
+a node that tests ``flag is True`` would not. An older FRONTEND additionally
+shows the row as `any`, refuses NEW wires into BOOLEAN sockets, and rewrites
+the tag to `*` the next time it syncs -- which loses nothing, because the
+type is always re-derived from the live wiring when the workflow is opened
+again on a current build. Old workflows (INT/FLOAT/`*` rows) are untouched by
+this feature: nothing about their coercion moved.
 """
 
 from __future__ import annotations
@@ -191,13 +228,13 @@ def _parse_values(values: Any) -> dict[str, Any]:
     return parsed
 
 
-def _coerce_slot(slot_key: str, entry: Any) -> int | float:
-    """Turn one `values[slot_key]` entry into the Python number its adopted
+def _coerce_slot(slot_key: str, entry: Any) -> int | float | bool:
+    """Turn one `values[slot_key]` entry into the Python value its adopted
     `type` calls for -- module docstring's coercion table. Never raises:
     every way an entry can be broken (not an object, a missing/non-numeric/
-    NaN/inf/oversized `value`) degrades to `0` plus a logged WARNING, and
-    nothing here shares state with any other slot, so one bad row can never
-    drag a neighbour down with it.
+    NaN/inf/oversized `value`) degrades to `0` (`False` for a BOOLEAN row)
+    plus a logged WARNING, and nothing here shares state with any other
+    slot, so one bad row can never drag a neighbour down with it.
     """
     if not isinstance(entry, dict):
         logger.warning(
@@ -207,6 +244,15 @@ def _coerce_slot(slot_key: str, entry: Any) -> int | float:
         )
         return 0
 
+    slot_type = entry.get("type")
+    # What a broken row reads as. A BOOLEAN row degrades to a real `False`,
+    # not `0` (2026-10-25): its socket asked for an on/off value, and `False`
+    # is also the safe answer for a toggle -- "off" never switches a feature
+    # on because the data was damaged. (`False == 0`, so a consumer that only
+    # tests truthiness cannot tell the difference; one that checks `is False`
+    # gets what it expects.)
+    degraded: int | bool = False if slot_type == "BOOLEAN" else 0
+
     raw_value = entry.get("value")
     # `bool` is an `int` subclass in Python -- rejected explicitly so a
     # stray JSON `true`/`false` (never something a user typed into a number
@@ -214,11 +260,12 @@ def _coerce_slot(slot_key: str, entry: Any) -> int | float:
     # becoming 1/0.
     if isinstance(raw_value, bool) or not isinstance(raw_value, (int, float)):
         logger.warning(
-            "EPS Number Controller: %s `value` is not a number (got %r); reads as 0",
+            "EPS Number Controller: %s `value` is not a number (got %r); reads as %r",
             slot_key,
             raw_value,
+            degraded,
         )
-        return 0
+        return degraded
     try:
         # `math.isnan`/`math.isinf` convert their argument to `float`
         # internally, which is exactly where a huge JSON integer (arbitrary
@@ -228,13 +275,25 @@ def _coerce_slot(slot_key: str, entry: Any) -> int | float:
         # represent as a float", not "this number is not finite".
         if math.isnan(raw_value) or math.isinf(raw_value):
             logger.warning(
-                "EPS Number Controller: %s `value` is not finite (%r); reads as 0",
+                "EPS Number Controller: %s `value` is not finite (%r); reads as %r",
                 slot_key,
                 raw_value,
+                degraded,
             )
-            return 0
+            return degraded
 
-        slot_type = entry.get("type")
+        if slot_type == "BOOLEAN":
+            # 2026-10-25 (owner ask: wire a row into a true/false input and
+            # type 0 or 1). A real `bool`, not 0/1: ComfyUI never type-checks
+            # a linked value at run time, but a node that tests `flag is
+            # True` (or serialises the flag) needs the actual object. ANY
+            # finite non-zero number is True -- `2.5` and `-1` included --
+            # which is the same snap the panel displays, so the box and the
+            # socket cannot disagree. `!=` on an int/float already yields a
+            # `bool`, and -0.0 != 0 is False, so there is nothing to special-
+            # case. The NaN/inf screen above has already run, so the garbage
+            # reading (False) is decided by the degrade path, not here.
+            return raw_value != 0
         if slot_type == "INT":
             # Deliberately NOT `round()`: Python rounds halves to EVEN
             # (2.5 -> 2 but 3.5 -> 4), which reads as a plain bug to anyone
@@ -265,33 +324,35 @@ def _coerce_slot(slot_key: str, entry: Any) -> int | float:
         # literal) -- pathological, but "never raise" means even this
         # degrades rather than crashing the node.
         logger.warning(
-            "EPS Number Controller: %s `value` is too large to represent (%r); reads as 0",
+            "EPS Number Controller: %s `value` is too large to represent (%r); reads as %r",
             slot_key,
             raw_value,
+            degraded,
         )
-        return 0
+        return degraded
 
 
 class EPSNumberController:
     """Any number of named, plain-number rows in one node, each adopting
-    INT or FLOAT once wired (class docstring's framing; see the module
-    docstring for the full rationale behind every choice below).
+    INT, FLOAT or BOOLEAN once wired (class docstring's framing; see the
+    module docstring for the full rationale behind every choice below).
 
     RETURN_TYPES/RETURN_NAMES are both built from MAX_OUTPUTS -- never
     hand-typed -- so the two can never drift apart in length.
     `get_numbers` always returns a fixed-length MAX_OUTPUTS-tuple of plain
-    Python `int`/`float` values, one per slot, unconditionally: there is no
-    "off" state and nothing to gate, unlike EPSDistributor's per-slot
+    Python `int`/`float`/`bool` values, one per slot, unconditionally: there
+    is no "off" state and nothing to gate, unlike EPSDistributor's per-slot
     `ExecutionBlocker`.
     """
 
     CATEGORY = "EPSNodes/Controllers"
     # "*" (matches EPSDistributor's own contract): the socket is
     # type-agnostic server side -- ComfyUI's own `validate_node_input`
-    # accepts `*` on either side of a link, so an INT- or FLOAT-typed
-    # downstream input both validate cleanly. The FRONTEND is what narrows
-    # each wired row's adopted type and feeds it back into `values`; the
-    # backend's job is only to coerce the NUMBER, never to police the wire.
+    # accepts `*` on either side of a link, so an INT-, FLOAT- or BOOLEAN-
+    # typed downstream input all validate cleanly. The FRONTEND is what
+    # narrows each wired row's adopted type and feeds it back into `values`;
+    # the backend's job is only to coerce the NUMBER, never to police the
+    # wire.
     RETURN_TYPES = ("*",) * MAX_OUTPUTS
     # Class-level and therefore generic -- see module docstring's
     # "RETURN_NAMES is class-level" section for why this can never carry
@@ -302,8 +363,9 @@ class EPSNumberController:
     # renamable outputs use.
     RETURN_NAMES = _SLOT_KEYS
     OUTPUT_TOOLTIPS = (
-        "This row's number -- a whole number or one with a decimal, "
-        "whichever kind the socket you wire it into expects.",
+        "This row's number -- a whole number, one with a decimal, or an "
+        "on/off value (1 = true, 0 = false), whichever kind the socket you "
+        "wire it into expects.",
     ) * MAX_OUTPUTS
     FUNCTION = "get_numbers"
     DESCRIPTION = (
@@ -312,7 +374,9 @@ class EPSNumberController:
         "separate nodes. Each row is just a name and a plain number box. "
         "Wire a row into a socket and it quietly becomes the right kind of "
         "number for that socket -- a whole number or one with a decimal -- "
-        "you never have to choose. A new row appears as you use the last "
+        "you never have to choose. To drive an on/off switch (a true/false "
+        "input), wire a row into it and type 1 for on or 0 for off. A new "
+        "row appears as you use the last "
         f"one, up to {MAX_OUTPUTS}. Because every number lives on this one "
         "node, the EPS Universal State Controller can save and recall the "
         "whole set together, even across different computers."
@@ -366,15 +430,15 @@ class EPSNumberController:
         }
 
     def get_numbers(self, values: str = DEFAULT_VALUES) -> tuple[Any, ...]:
-        """Return one coerced Python number per `num_N` slot, in order,
+        """Return one coerced Python value per `num_N` slot, in order,
         always MAX_OUTPUTS long.
 
-        Every failure mode degrades to `0` for just that slot (module
-        docstring's degrade table) -- this never raises, and one bad row
-        never affects any other.
+        Every failure mode degrades to `0` (`False` for a BOOLEAN row) for
+        just that slot (module docstring's degrade table) -- this never
+        raises, and one bad row never affects any other.
         """
         parsed = _parse_values(values)
-        results: list[int | float] = []
+        results: list[int | float | bool] = []
         for slot_key in _SLOT_KEYS:
             entry = parsed.get(slot_key)
             if entry is None:

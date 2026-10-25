@@ -6,7 +6,10 @@ type-adoption contract into PURE exported functions (`parseValues`,
 `serializeValues`, `slotCarriesContent`, `computeVisibleRowCount`,
 `labelForSlot`, `parseNumericInput`, `roundHalfAwayFromZero`,
 `displayValueFor`, `isAllowedType`, `resolveAdoptedType`, `jsonTypeFor`,
-`typeBadgeFor`, `isOutputConnected`, `slotName`/`parseSlotNumber`) precisely
+`typeBadgeFor`, `isOutputConnected`, `slotName`/`parseSlotNumber`, and, for
+the 2026-10-25 BOOLEAN rows, `snapToBoolean`, `parseBooleanInput`,
+`kindsOfType`, `wouldMixKinds`, `mixRefusalMessage`, `stateTextFor`,
+`storedJsonType`, `tooltipForValue`) precisely
 so this file can drive them under Node without a litegraph node stub --
 ``tests/test_distributor_js.py``'s exact convention (that file's own
 docstring explains the served-layout mirroring this fixture copies).
@@ -32,6 +35,13 @@ litegraph primitives `number_controller.js` actually touches
 `attach()` export against it end to end -- no new export was added to make
 this possible; the DOM tree handed to `addDOMWidget` is intercepted by the
 fake and walked directly. See `test_rebuild_then_repaint_preserves_a_mid_edit_field`.
+
+**BOOLEAN rows (owner ask 2026-10-25).** The probe's ``bool`` section (tests
+B-A..B-J) drives adoption, typing, the one-kind veto (both directions, the
+replug window, nested subgraph outputs), untick/re-tick, Universal State
+apply, link colour and the structural invariants through the same fake graph;
+``tests/test_number_controller.py`` covers the backend's real-``bool``
+coercion and the Universal State registry.
 
 Skips cleanly when Node isn't installed; the LIVE mechanics (an actual
 connection reaching `onConnectOutput`, a real tab switch, the property
@@ -252,6 +262,17 @@ DISPLAY_VALUE_CASES = [
     ((30, "INT"), 30),
     ((None, "FLOAT"), 0),
     (("nan-ish", "INT"), 0),
+    # BOOLEAN (owner ask 2026-10-25): ANY non-zero number shows 1 -- including
+    # a fraction below 0.5, which a rounding snap would wrongly send to 0 while
+    # the backend's `value != 0` sends True. Zero, junk and NaN show 0.
+    ((1, "BOOLEAN"), 1),
+    ((0, "BOOLEAN"), 0),
+    ((2.5, "BOOLEAN"), 1),
+    ((-1, "BOOLEAN"), 1),
+    ((0.4, "BOOLEAN"), 1),
+    ((-0.0, "BOOLEAN"), 0),
+    ((None, "BOOLEAN"), 0),
+    (("nan-ish", "BOOLEAN"), 0),
 ]
 
 #: (type, expected isAllowedType()). Only INT/FLOAT are concrete-allowed;
@@ -268,6 +289,13 @@ IS_ALLOWED_TYPE_CASES = [
     ("IMAGE", False),
     ("MODEL", False),
     ("COMBO", False),
+    # BOOLEAN joined the allowlist 2026-10-25 -- a toggle widget's socket and
+    # an optional BOOLEAN input both carry exactly this type string.
+    ("BOOLEAN", True),
+    ("boolean", True),  # case-insensitive
+    ("BOOLEAN,STRING", True),  # union: one allowed member is enough
+    ("BOOL", False),  # not a ComfyUI type name
+    ("BOOLEANS", False),
 ]
 
 #: (candidates, expected {type, mixed}). One slot's own links only -- the
@@ -279,6 +307,13 @@ RESOLVE_ADOPTED_TYPE_CASES = [
     (["INT", "FLOAT"], {"type": "INT", "mixed": True}),
     (["FLOAT", "FLOAT"], {"type": "FLOAT", "mixed": False}),
     (["INT"], {"type": "INT", "mixed": False}),
+    # BOOLEAN needs no special case in the adoption rule: first concrete wins.
+    (["BOOLEAN"], {"type": "BOOLEAN", "mixed": False}),
+    (["*", "BOOLEAN", "BOOLEAN"], {"type": "BOOLEAN", "mixed": False}),
+    # ...and a cross-kind pair (which only a wire the veto never saw can make)
+    # keeps the FIRST and is flagged, never resolved by disconnecting anything.
+    (["BOOLEAN", "INT"], {"type": "BOOLEAN", "mixed": True}),
+    (["INT", "BOOLEAN"], {"type": "INT", "mixed": True}),
 ]
 
 #: (adoptedType, expected jsonTypeFor()). Defensive fallback to '*' for any
@@ -290,6 +325,10 @@ JSON_TYPE_FOR_CASES = [
     (None, "*"),
     ("int", "INT"),  # uppercased
     ("STRING", "*"),  # foreign type, defended against
+    ("BOOLEAN", "BOOLEAN"),
+    ("boolean", "BOOLEAN"),  # uppercased
+    ("BOOL", "*"),  # not a ComfyUI type name
+    ("INT,BOOLEAN", "*"),  # a union socket stays untyped, same as INT,STRING always did
 ]
 
 #: (jsonType, expected typeBadgeFor()).
@@ -298,6 +337,8 @@ TYPE_BADGE_FOR_CASES = [
     ("FLOAT", "FLOAT"),
     ("*", "any"),
     ("STRING", "any"),
+    ("BOOLEAN", "BOOL"),  # the badge is 36px wide: BOOLEAN would not fit
+    ("BOOL", "any"),  # only the stored tag BOOLEAN earns the badge
 ]
 
 #: (label, JS expression building the `output`, expected isOutputConnected()).
@@ -351,9 +392,143 @@ RESOLVE_DOM_WIDGET_MARGIN_CASES = [
     (None, 10),
 ]
 
+#: (text, expected parseBooleanInput()). BOOLEAN rows (owner ask 2026-10-25:
+#: "A user would need to input a 0 or 1"): 0/1 first, then the conveniences
+#: true/false, on/off, yes/no (case-insensitive), then any OTHER complete
+#: number snaps to 1 (non-zero) / 0 (zero). `null` = not a complete answer:
+#: the caller keeps the previous value (the existing incomplete-input path).
+PARSE_BOOLEAN_INPUT_CASES = [
+    ("1", 1),
+    ("0", 0),
+    ("  1  ", 1),
+    ("true", 1),
+    ("false", 0),
+    ("TRUE", 1),
+    ("False", 0),
+    ("on", 1),
+    ("OFF", 0),
+    ("yes", 1),
+    ("No", 0),
+    ("  yes  ", 1),
+    ("2.5", 1),
+    ("-1", 1),
+    ("42", 1),
+    ("0.0", 0),
+    ("-0", 0),
+    ("0.4", 1),  # NOT rounded: the backend sends True for any non-zero number
+    ("1e3", 1),
+    (1, 1),
+    (0, 0),
+    (2.5, 1),
+    (-3, 1),
+    # not (yet) an answer -> null
+    ("", None),
+    ("   ", None),
+    ("-", None),
+    (".", None),
+    ("maybe", None),
+    ("tr", None),  # half a word
+    ("o", None),  # prefix of on/off
+    ("y", None),
+    ("n", None),
+    ("1 (true)", None),  # not an answer unless it is the whole word or number
+    ("NaN", None),
+    ("Infinity", None),
+    ("constructor", None),  # must not find anything on Object.prototype
+    ("__proto__", None),
+    ("toString", None),
+    (None, None),
+]
+
+#: (type, expected kindsOfType()). INT and FLOAT are one KIND ("number"),
+#: BOOLEAN another; generics and types this node does not carry have none.
+KINDS_OF_TYPE_CASES = [
+    ("INT", ["number"]),
+    ("FLOAT", ["number"]),
+    ("float", ["number"]),
+    ("BOOLEAN", ["boolean"]),
+    ("boolean", ["boolean"]),
+    (" BOOLEAN ", ["boolean"]),
+    ("INT,BOOLEAN", ["boolean", "number"]),
+    ("INT,FLOAT", ["number"]),
+    ("INT,STRING", ["number"]),
+    ("STRING", []),
+    ("*", []),
+    ("", []),
+    (None, []),
+    (0, []),
+]
+
+#: (carriedType, incomingType, expected wouldMixKinds()). True ONLY when both
+#: are known and share no kind. INT<->FLOAT stays allowed (today's rule).
+WOULD_MIX_KINDS_CASES = [
+    ("BOOLEAN", "INT", True),
+    ("BOOLEAN", "FLOAT", True),
+    ("INT", "BOOLEAN", True),
+    ("FLOAT", "BOOLEAN", True),
+    ("boolean", "int", True),
+    ("INT", "FLOAT", False),
+    ("FLOAT", "INT", False),
+    ("INT", "INT", False),
+    ("BOOLEAN", "BOOLEAN", False),
+    ("*", "BOOLEAN", False),  # an unwired row takes anything allowed
+    ("BOOLEAN", "*", False),
+    ("BOOLEAN", "", False),
+    (None, "INT", False),
+    ("BOOLEAN", "STRING", False),  # not ours to judge: isAllowedType refuses it
+    ("BOOLEAN", "INT,BOOLEAN", False),  # a union that accepts the row's kind
+    ("INT", "INT,BOOLEAN", False),
+    ("INT,BOOLEAN", "BOOLEAN", False),
+    ("INT,BOOLEAN", "INT", False),
+    ("BOOLEAN", "INT,STRING", True),
+]
+
+#: ((jsonType, shownValue), expected stateTextFor()) -- the true/false word
+#: beside a BOOLEAN row's box; empty for every other row type.
+STATE_TEXT_CASES = [
+    (("BOOLEAN", 1), "true"),
+    (("BOOLEAN", 0), "false"),
+    (("INT", 1), ""),
+    (("FLOAT", 0), ""),
+    (("*", 1), ""),
+    ((None, 1), ""),
+    (("BOOL", 1), ""),
+]
+
+#: (entry, expected storedJsonType()). Exact-match on the literal tags (the
+#: backend only recognises those), else the wildcard.
+STORED_JSON_TYPE_CASES = [
+    ({"type": "BOOLEAN"}, "BOOLEAN"),
+    ({"type": "INT"}, "INT"),
+    ({"type": "FLOAT"}, "FLOAT"),
+    ({"type": "*"}, "*"),
+    ({"type": "int"}, "*"),  # the backend treats lowercase as untyped, so must the panel
+    ({"type": "boolean"}, "*"),
+    ({"type": "BOOL"}, "*"),
+    ({"type": 5}, "*"),
+    ({}, "*"),
+    (None, "*"),
+    ("BOOLEAN", "*"),  # not an entry
+]
+
+#: (value, expected snapToBoolean()) for the JSON-able inputs; NaN/Infinity/
+#: junk are driven from inside the probe.
+SNAP_TO_BOOLEAN_CASES = [
+    (0, 0),
+    (1, 1),
+    (-1, 1),
+    (2.5, 1),
+    (1e-9, 1),
+    (1e308, 1),
+    (-0.0, 0),
+]
+
 PROBE_JS = """
 import * as nc from './extensions/comfyui-epsnodes/eps_image/number_controller.js'
 import * as io from './nested_subgraph_io.mjs'
+// The SAME module instance number_controller.js imports (same resolved file),
+// so the BOOLEAN tests can install a toast sink on it.
+import { app } from './scripts/app.js'
 
 // ---------------------------------------------------------------------------
 // Part 1: pure-helper probing (no DOM involved).
@@ -373,6 +548,7 @@ out.pure.constants = {
   minSlots: nc.MIN_SLOTS,
   wildcard: nc.WILDCARD,
   allowedTypes: nc.ALLOWED_TYPES,
+  booleanType: nc.BOOLEAN_TYPE,
   minNodeWidth: nc.MIN_NODE_WIDTH
 }
 
@@ -618,16 +794,19 @@ function makeFakeNode(valuesJson, id) {
 
 // Row elements live at `panelRoot.children[1]` (the list div, after the hint
 // div) -- `.children[i]` for row i (0-based), each row's own children being
-// [enabled checkbox, index, nameInput, valueInput, typeEl] per buildRowEl()'s
-// own append order.
+// [enabled checkbox, index, nameInput, stateEl, valueInput, typeEl] per
+// buildRowEl()'s own append order. (stateEl -- the BOOLEAN true/false word --
+// joined between the name and the value on 2026-10-25; it is empty and
+// `display: none` for every non-BOOLEAN row.)
 function rowsOf(node) {
   const listEl = node.__panelRoot.children[1]
   return listEl.children.map((rowEl) => ({
     el: rowEl,
     enabledInput: rowEl.children[0],
     nameInput: rowEl.children[2],
-    valueInput: rowEl.children[3],
-    typeEl: rowEl.children[4]
+    stateEl: rowEl.children[3],
+    valueInput: rowEl.children[4],
+    typeEl: rowEl.children[5]
   }))
 }
 
@@ -1287,6 +1466,466 @@ const tickMs = () => new Promise((resolve) => setTimeout(resolve, 5))
   dom.nestedUserUnplug = { badgeWired, badgeAfter: rowsOf(node)[0].typeEl.textContent }
 }
 
+
+// ===========================================================================
+// BOOLEAN ROWS (owner ask 2026-10-25: "For the number controller node it would
+// be useful if one of the options was a boolean. A user would need to input a
+// 0 or 1 but it could hook into boolean inputs that accept true or false.") --
+// Tests B-A..B-J. Every top-level name here starts with `b` or lives in a
+// block, so nothing collides with the sections above. No percent signs in
+// here: this whole string goes through Python's percent-formatting.
+// ===========================================================================
+
+const bd = (dom.bool = {})
+const bToasts = []
+app.extensionManager = { toast: { add: (t) => bToasts.push(t) } }
+const bStored = (node, key = 'num_1') => JSON.parse(node.widgets[0].value)[key] || {}
+/** What a row SHOWS: badge, tooltips, the box, the true/false word. */
+const bView = (row) => ({
+  badge: row.typeEl.textContent,
+  badgeTitle: row.typeEl.title,
+  badgeClass: row.typeEl.className,
+  box: row.valueInput.value,
+  boxTitle: row.valueInput.title,
+  stateText: row.stateEl.textContent,
+  stateClass: row.stateEl.className
+})
+/** Typing into a row's value box the way a user does: focus, edit, input event. */
+const bType = (node, rowIndex, text) => {
+  const row = rowsOf(node)[rowIndex]
+  fakeDocument.activeElement = row.valueInput
+  row.valueInput.value = text
+  row.valueInput.dispatch('input')
+}
+const bBlur = (node, rowIndex) => rowsOf(node)[rowIndex].valueInput.blur()
+/** What litegraph's `connect` does around the veto: ask `onConnectOutput`
+ * first, and only make a link when it does not answer exactly `false`. */
+const bVetoedConnect = (node) => {
+  const rawConnect = node.connect.bind(node)
+  node.connect = function (slot, target, targetSlot) {
+    const input = target.inputs[targetSlot]
+    const verdict = this.onConnectOutput
+      ? this.onConnectOutput(slot, input.type, input, target, targetSlot)
+      : undefined
+    if (verdict === false) {
+      return null
+    }
+    return rawConnect(slot, target, targetSlot)
+  }
+}
+const bVerdict = (result) => (result === false ? 'refused' : 'allowed')
+
+// --- B-A: ADOPTION. An untyped row holding 2.5 is wired into a BOOLEAN
+// socket (a toggle WIDGET's socket): it adopts BOOLEAN, the badge says BOOL,
+// the box re-snaps to 1 with a `true` word beside it -- while `values` still
+// STORES 2.5 (INT's rule), so unwiring or rewiring to a FLOAT gets it back.
+{
+  const graph = makeFakeGraph()
+  const node = makeFakeNode(JSON.stringify({ num_1: { name: 'gate', value: 2.5, type: '*' } }), 601)
+  graph.register(node)
+  const toggle = makeFakeTargetNode(602, 'enabled', 'BOOLEAN')
+  toggle.inputs[0].widget = { name: 'enabled' }
+  graph.register(toggle)
+  nc.attach(node)
+  const untyped = bView(rowsOf(node)[0])
+
+  node.connect(0, toggle, 0)
+  node.__epsNcReload()
+  const wired = bView(rowsOf(node)[0])
+  const wiredStored = bStored(node)
+  const wiredOutput = { type: node.outputs[0].type, label: node.outputs[0].label }
+
+  toggle.disconnectInput(0)
+  node.__epsNcReload()
+  const unwired = bView(rowsOf(node)[0])
+
+  const cfg = makeFakeTargetNode(603, 'cfg', 'FLOAT')
+  graph.register(cfg)
+  node.connect(0, cfg, 0)
+  node.__epsNcReload()
+  const asFloat = bView(rowsOf(node)[0])
+  bd.adoption = { untyped, wired, wiredStored, wiredOutput, unwired, asFloat }
+}
+
+// --- B-B: TYPING in a BOOLEAN row. 0/1 and the words commit (snapped to 1/0),
+// any other complete number snaps, junk and half-typed words keep the previous
+// value (the existing incomplete-input path) and the box reverts on blur. A
+// row that is NOT boolean keeps its old numeric rules exactly.
+{
+  const graph = makeFakeGraph()
+  const node = makeFakeNode(JSON.stringify({ num_1: { name: 'gate', value: 1, type: '*' } }), 611)
+  graph.register(node)
+  const toggle = makeFakeTargetNode(612, 'enabled', 'BOOLEAN')
+  graph.register(toggle)
+  nc.attach(node)
+  node.connect(0, toggle, 0)
+  node.__epsNcReload()
+
+  const steps = []
+  const probe = (text) => {
+    bType(node, 0, text)
+    const row = rowsOf(node)[0]
+    steps.push({
+      typed: text, stored: bStored(node).value, boxWhileFocused: row.valueInput.value,
+      stateText: row.stateEl.textContent
+    })
+  }
+  const typed = ['0', 'true', 'off', 'YES', 'No', 'ON', '2.5', '-1', '0.0', '-', 'maybe', 'tr', '']
+  for (const text of typed) {
+    probe(text)
+  }
+  probe('1')
+  bBlur(node, 0)
+  const afterBlur = bView(rowsOf(node)[0])
+
+  // junk typed over a good value reverts on blur to the last COMMITTED value
+  bType(node, 0, 'maybe')
+  bBlur(node, 0)
+  const afterJunkBlur = bView(rowsOf(node)[0])
+
+  // a plain unwired row: words are NOT numbers there, numbers stay numbers
+  const plain = makeFakeNode(JSON.stringify({ num_1: { name: '', value: 5, type: '*' } }), 613)
+  graph.register(plain)
+  nc.attach(plain)
+  bType(plain, 0, 'true')
+  const plainWord = bStored(plain).value
+  bType(plain, 0, '2.5')
+  const plainFraction = bStored(plain).value
+
+  // an INT row keeps its old rules too: the fraction is stored, only DISPLAYED snapped
+  const intNode = makeFakeNode('{}', 614)
+  graph.register(intNode)
+  const stepsIn = makeFakeTargetNode(615, 'steps', 'INT')
+  graph.register(stepsIn)
+  nc.attach(intNode)
+  intNode.connect(0, stepsIn, 0)
+  intNode.__epsNcReload()
+  bType(intNode, 0, 'true')
+  const intWord = bStored(intNode).value
+  bType(intNode, 0, '2.5')
+  const intFraction = bStored(intNode).value
+  bBlur(intNode, 0)
+  const intShown = bView(rowsOf(intNode)[0])
+
+  bd.typing = {
+    steps, afterBlur, afterJunkBlur, plainWord, plainFraction, intWord, intFraction, intShown
+  }
+}
+
+// --- B-C: THE VETO. One row = one KIND. A row feeding a BOOLEAN socket refuses
+// INT/FLOAT and vice versa, judged from the row's LIVE links (so it holds in
+// the window where output.type is still the wildcard); INT with FLOAT is the
+// same kind and stays allowed exactly as before; unions, generics, unwired
+// rows and a chained original hook behave as documented.
+{
+  const askAll = (node, types) => {
+    const result = {}
+    for (const type of types) {
+      result[type] = bVerdict(node.onConnectOutput(0, type, { type }, null, 0))
+    }
+    return result
+  }
+  const TYPES = [
+    'INT', 'FLOAT', 'BOOLEAN', 'int', 'boolean', 'INT,BOOLEAN', '*', '', 'STRING', 'IMAGE'
+  ]
+
+  const makeRow = (targetType, reconcile) => {
+    const graph = makeFakeGraph()
+    const node = makeFakeNode('{}', 621)
+    graph.register(node)
+    nc.attach(node)
+    if (targetType) {
+      const target = makeFakeTargetNode(622, 'in', targetType)
+      graph.register(target)
+      node.connect(0, target, 0)
+      if (reconcile) node.__epsNcReload()
+    }
+    return node
+  }
+
+  const boolFirst = makeRow('BOOLEAN', false)
+  const boolFirstOutputType = boolFirst.outputs[0].type
+  bToasts.length = 0
+  const boolFirstVerdicts = askAll(boolFirst, TYPES)
+  const boolFirstToasts = bToasts.map((t) => t.detail)
+
+  bd.veto = {
+    boolFirstOutputType,
+    boolFirst: boolFirstVerdicts,
+    boolFirstToasts,
+    boolFirstReconciled: askAll(makeRow('BOOLEAN', true), TYPES),
+    intFirst: askAll(makeRow('INT', false), TYPES),
+    floatFirst: askAll(makeRow('FLOAT', true), TYPES),
+    unwired: askAll(makeRow(null, true), TYPES)
+  }
+
+  // the chained, previously-installed hook is still consulted
+  const graph = makeFakeGraph()
+  const chained = makeFakeNode('{}', 623)
+  chained.onConnectOutput = function () { return 'original-hook-answer' }
+  graph.register(chained)
+  nc.attach(chained)
+  bd.vetoChained = {
+    allowed: chained.onConnectOutput(0, 'BOOLEAN', {}, null, 0),
+    refusedBeforeTheHook: chained.onConnectOutput(0, 'MODEL', {}, null, 0)
+  }
+}
+
+// --- B-D: a REPLUG that would mix kinds is guarded by the same veto. A row
+// switched off remembers a BOOLEAN socket and an INT socket (a hand-edited
+// memory; the UI can no longer build this): re-ticking reconnects the first and
+// the veto declines the second, through the real connect path, softly.
+{
+  const graph = makeFakeGraph()
+  const memory = [{ node: 632, input: 'enabled' }, { node: 633, input: 'steps' }]
+  const node = makeFakeNode(
+    JSON.stringify({ num_1: { name: 'gate', value: 1, type: '*', enabled: false, links: memory } }),
+    631
+  )
+  graph.register(node)
+  const toggle = makeFakeTargetNode(632, 'enabled', 'BOOLEAN')
+  const steps = makeFakeTargetNode(633, 'steps', 'INT')
+  graph.register(toggle)
+  graph.register(steps)
+  bVetoedConnect(node)
+  nc.attach(node)
+  bToasts.length = 0
+  const row = rowsOf(node)[0]
+  row.enabledInput.checked = true
+  row.enabledInput.dispatch('change')
+  bd.replugMix = {
+    toggleWired: toggle.inputs[0].link != null,
+    stepsWired: steps.inputs[0].link != null,
+    toastCount: bToasts.length,
+    storedType: bStored(node).type,
+    badge: rowsOf(node)[0].typeEl.textContent
+  }
+}
+
+// --- B-E: UNTICK / RE-TICK a BOOLEAN row (checkbox feature unchanged): the
+// wire goes, the row reads `any` with no true/false word, and re-ticking puts
+// the SAME wire back and the row is BOOLEAN again with its number intact.
+{
+  const graph = makeFakeGraph()
+  const node = makeFakeNode(JSON.stringify({ num_1: { name: 'gate', value: 1, type: '*' } }), 641)
+  graph.register(node)
+  const toggle = makeFakeTargetNode(642, 'enabled', 'BOOLEAN')
+  graph.register(toggle)
+  nc.attach(node)
+  node.connect(0, toggle, 0)
+  node.__epsNcReload()
+  const on = bView(rowsOf(node)[0])
+
+  let row = rowsOf(node)[0]
+  row.enabledInput.checked = false
+  row.enabledInput.dispatch('change')
+  const offMap = bStored(node)
+  const off = {
+    view: bView(rowsOf(node)[0]),
+    wired: toggle.inputs[0].link != null,
+    remembered: nc.normalizeRememberedLinks(offMap.links),
+    enabled: nc.isRowEnabled(offMap),
+    outputType: node.outputs[0].type
+  }
+  row = rowsOf(node)[0]
+  row.enabledInput.checked = true
+  row.enabledInput.dispatch('change')
+  const backMap = bStored(node)
+  const back = {
+    view: bView(rowsOf(node)[0]),
+    wired: toggle.inputs[0].link != null,
+    sameTarget: graph.links.get(toggle.inputs[0].link)?.target_id === 642,
+    storedType: backMap.type,
+    storedValue: backMap.value,
+    remembered: nc.normalizeRememberedLinks(backMap.links)
+  }
+  bd.untick = { on, off, back }
+}
+
+// --- B-F: UNIVERSAL STATE. Applying a state whose row is BOOLEAN (and later
+// one that switches it off) repaints and re-wires like any other row.
+{
+  const graph = makeFakeGraph()
+  const node = makeFakeNode('{}', 651)
+  graph.register(node)
+  const toggle = makeFakeTargetNode(652, 'enabled', 'BOOLEAN')
+  graph.register(toggle)
+  nc.attach(node)
+  node.connect(0, toggle, 0)
+  node.__epsNcReload()
+  node.widgets[0].value = JSON.stringify({ num_1: { name: 'gate', value: 0, type: 'BOOLEAN' } })
+  node.__epsNcReload()
+  const appliedOff = bView(rowsOf(node)[0])
+  node.widgets[0].value = JSON.stringify({ num_1: { name: 'gate', value: 1, type: 'BOOLEAN' } })
+  node.__epsNcReload()
+  const appliedOn = bView(rowsOf(node)[0])
+  node.widgets[0].value = JSON.stringify({
+    num_1: { name: 'gate', value: 1, type: 'BOOLEAN', enabled: false }
+  })
+  node.__epsNcReload()
+  bd.apply = {
+    appliedOff, appliedOn,
+    detached: toggle.inputs[0].link == null,
+    remembered: nc.normalizeRememberedLinks(bStored(node).links)
+  }
+}
+
+// --- B-G: LINK COLOUR comes from the generic by-type lookup: a BOOLEAN row's
+// link takes the BOOLEAN colour, an INT row's the INT colour. (LGraphCanvas is
+// a browser global; set for this block only.)
+{
+  globalThis.LGraphCanvas = { link_type_colors: { BOOLEAN: '#boolcolor', INT: '#intcolor' } }
+  try {
+    const graph = makeFakeGraph()
+    // row 2 holds content so the panel really has an output 2 to wire (attach()
+    // prunes the fake's 16 raw outputs down to the visible rows)
+    const node = makeFakeNode(JSON.stringify({ num_2: { name: 'b', value: 1, type: '*' } }), 661)
+    graph.register(node)
+    const toggle = makeFakeTargetNode(662, 'enabled', 'BOOLEAN')
+    const steps = makeFakeTargetNode(663, 'steps', 'INT')
+    graph.register(toggle)
+    graph.register(steps)
+    nc.attach(node)
+    node.connect(0, toggle, 0)
+    node.connect(1, steps, 0)
+    node.__epsNcReload()
+    bd.colour = {
+      boolean: graph.links.get(toggle.inputs[0].link)?.color,
+      int: graph.links.get(steps.inputs[0].link)?.color
+    }
+  } finally {
+    delete globalThis.LGraphCanvas
+  }
+}
+
+// --- B-H: NOTHING STRUCTURAL MOVES. A BOOLEAN row at the ceiling keeps its
+// positional output, the node gains no widget (the type lives in `values`),
+// and the stored entry is the same {name, value, type} shape.
+{
+  const graph = makeFakeGraph()
+  // content in row 16 so the panel grows to the full 16 outputs before wiring
+  const node = makeFakeNode(JSON.stringify({ num_16: { name: 'last', value: 1, type: '*' } }), 671)
+  graph.register(node)
+  const toggle = makeFakeTargetNode(672, 'enabled', 'BOOLEAN')
+  graph.register(toggle)
+  nc.attach(node)
+  node.connect(15, toggle, 0)
+  node.__epsNcReload()
+  bd.structure = {
+    outputCount: node.outputs.length,
+    last: { name: node.outputs[15].name, type: node.outputs[15].type },
+    widgetNames: node.widgets.map((w) => w.name),
+    storedKeys: Object.keys(bStored(node, 'num_16')).sort(),
+    storedType: bStored(node, 'num_16').type
+  }
+}
+
+// --- B-I: NESTED. A row wired into a SubgraphNode INPUT declared BOOLEAN adopts
+// BOOLEAN and survives untick/re-tick; a row feeding a BOOLEAN socket inside a
+// subgraph cannot also be wired to a subgraph OUTPUT typed INT (the veto runs
+// on the SubgraphOutput.connect path too).
+{
+  const graph = makeFakeGraph()
+  const node = makeFakeNode('{}', 681)
+  graph.register(node)
+  const sg = makeFakeTargetNode(682, 'enabled', 'BOOLEAN')
+  sg.subgraph = io.asSubgraph(makeFakeGraph(), {
+    name: 'Inner', rootGraph: graph, inputs: [{ name: 'enabled', type: 'BOOLEAN' }]
+  })
+  graph.register(sg)
+  nc.attach(node)
+  node.connect(0, sg, 0)
+  node.__epsNcReload()
+  const intoSubgraphNode = bView(rowsOf(node)[0])
+  let row = rowsOf(node)[0]
+  row.enabledInput.checked = false
+  row.enabledInput.dispatch('change')
+  const offWired = sg.inputs[0].link != null
+  row = rowsOf(node)[0]
+  row.enabledInput.checked = true
+  row.enabledInput.dispatch('change')
+  const backView = bView(rowsOf(node)[0])
+  const backWired = sg.inputs[0].link != null
+
+  // inside a subgraph: BOOLEAN socket first, then an INT-typed subgraph output
+  const { sub } = makeFakeSubgraph([{ name: 'steps_out', type: 'INT' }])
+  const inner = makeFakeNode('{}', 683)
+  sub.register(inner)
+  const innerToggle = makeFakeTargetNode(684, 'enabled', 'BOOLEAN')
+  sub.register(innerToggle)
+  nc.attach(inner)
+  inner.connect(0, innerToggle, 0)
+  const refused = sub.outputs[0].connect(inner.outputs[0], inner)
+
+  // a BOOLEAN-typed subgraph output is the same kind: allowed, and adopted
+  // from the link's recorded type
+  const same = makeFakeSubgraph([{ name: 'gate_out', type: 'BOOLEAN' }])
+  const innerSame = makeFakeNode('{}', 685)
+  same.sub.register(innerSame)
+  nc.attach(innerSame)
+  innerSame.outputs[0].type = 'BOOLEAN'
+  const link = same.sub.outputs[0].connect(innerSame.outputs[0], innerSame)
+  innerSame.__epsNcReload()
+  bd.nested = {
+    intoSubgraphNode, offWired, backWired, backBadge: backView.badge,
+    refused: refused === undefined, refusedInnerLinks: innerLinksOf(sub).length,
+    sameKindLinked: !!link, sameKindBadge: rowsOf(innerSame)[0].typeEl.textContent,
+    sameKindStored: bStored(innerSame).type
+  }
+}
+
+// --- B-J: MIXED WIRING THAT NEVER WENT THROUGH THE VETO (a hand-edited or
+// scripted workflow). Nothing is disconnected; the first concrete type wins
+// (today's rule) and a plain-words warning is logged once.
+{
+  const warns = []
+  const realWarn = console.warn
+  console.warn = (...args) => warns.push(args.join(' '))
+  try {
+    const graph = makeFakeGraph()
+    const node = makeFakeNode('{}', 691)
+    graph.register(node)
+    const steps = makeFakeTargetNode(692, 'steps', 'INT')
+    const toggle = makeFakeTargetNode(693, 'enabled', 'BOOLEAN')
+    graph.register(steps)
+    graph.register(toggle)
+    nc.attach(node)
+    node.connect(0, steps, 0)
+    node.connect(0, toggle, 0)
+    node.__epsNcReload()
+    node.__epsNcReload()
+    bd.mixedLoad = {
+      badge: rowsOf(node)[0].typeEl.textContent,
+      storedType: bStored(node).type,
+      stepsWired: steps.inputs[0].link != null,
+      toggleWired: toggle.inputs[0].link != null,
+      warnings: warns.filter((w) => w.includes('mismatched wired types'))
+    }
+  } finally {
+    console.warn = realWarn
+  }
+}
+
+// --- pure helpers added for BOOLEAN -----------------------------------------
+out.pure.parseBoolean = %(parse_boolean_inputs)s.map((v) => nc.parseBooleanInput(v))
+out.pure.kindsOfType = %(kinds_inputs)s.map((v) => nc.kindsOfType(v))
+out.pure.wouldMixKinds = %(would_mix_inputs)s.map(([a, b]) => nc.wouldMixKinds(a, b))
+out.pure.stateText = %(state_text_inputs)s.map(([t, v]) => nc.stateTextFor(t, v))
+out.pure.storedJsonType = %(stored_type_inputs)s.map((v) => nc.storedJsonType(v))
+out.pure.snapToBoolean = %(snap_inputs)s.map((v) => nc.snapToBoolean(v))
+out.pure.snapToBooleanJunk = [NaN, Infinity, -Infinity, null, undefined, '1', true, {}, [1]]
+  .map((v) => nc.snapToBoolean(v))
+out.pure.messages = {
+  boolThenInt: nc.mixRefusalMessage('BOOLEAN', 'INT'),
+  intThenBool: nc.mixRefusalMessage('INT', 'BOOLEAN'),
+  floatThenBool: nc.mixRefusalMessage('float', 'boolean')
+}
+out.pure.valueTooltips = {
+  boolean: nc.tooltipForValue('BOOLEAN'),
+  int: nc.tooltipForValue('INT'),
+  wildcard: nc.tooltipForValue('*')
+}
+
 process.stdout.write(JSON.stringify(out))
 """
 
@@ -1351,6 +1990,12 @@ def number_controller_api(tmp_path_factory: pytest.TempPathFactory) -> dict:
             "panel_content_inputs": json.dumps([n for n, _ in PANEL_CONTENT_HEIGHT_CASES]),
             "panel_height_inputs": json.dumps([[n, m] for n, m in PANEL_HEIGHT_FOR_MARGIN_CASES]),
             "margin_widget_inputs": json.dumps([w for w, _ in RESOLVE_DOM_WIDGET_MARGIN_CASES]),
+            "parse_boolean_inputs": json.dumps([v for v, _ in PARSE_BOOLEAN_INPUT_CASES]),
+            "kinds_inputs": json.dumps([v for v, _ in KINDS_OF_TYPE_CASES]),
+            "would_mix_inputs": json.dumps([[a, b] for a, b, _ in WOULD_MIX_KINDS_CASES]),
+            "state_text_inputs": json.dumps([list(v) for v, _ in STATE_TEXT_CASES]),
+            "stored_type_inputs": json.dumps([v for v, _ in STORED_JSON_TYPE_CASES]),
+            "snap_inputs": json.dumps([v for v, _ in SNAP_TO_BOOLEAN_CASES]),
         },
         encoding="utf-8",
     )
@@ -1407,7 +2052,8 @@ def test_constants(number_controller_api: dict) -> None:
     assert constants["maxSlots"] == 16
     assert constants["minSlots"] == 1
     assert constants["wildcard"] == "*"
-    assert constants["allowedTypes"] == ["INT", "FLOAT"]
+    assert constants["allowedTypes"] == ["INT", "FLOAT", "BOOLEAN"]
+    assert constants["booleanType"] == "BOOLEAN"
     assert constants["minNodeWidth"] >= 150
 
 
@@ -1585,8 +2231,8 @@ def test_display_value_for(number_controller_api: dict) -> None:
 
 
 def test_is_allowed_type(number_controller_api: dict) -> None:
-    """Only INT/FLOAT are concrete-allowed -- deliberately narrower than
-    distributor.js's IMAGE/STRING allowlist (rig finding: without this,
+    """Only INT/FLOAT/BOOLEAN are concrete-allowed -- deliberately narrower
+    than distributor.js's IMAGE/STRING allowlist (rig finding: without this,
     every wildcard num_N output connects to ANY target type)."""
     pairs = zip(IS_ALLOWED_TYPE_CASES, number_controller_api["pure"]["isAllowed"], strict=True)
     for (given, expected), got in pairs:
@@ -1623,6 +2269,315 @@ def test_type_badge_for(number_controller_api: dict) -> None:
     pairs = zip(TYPE_BADGE_FOR_CASES, number_controller_api["pure"]["typeBadgeFor"], strict=True)
     for (given, expected), got in pairs:
         assert got == expected, f"typeBadgeFor({given!r}) -> {got!r}, wanted {expected!r}"
+
+
+# ------------------------------------------------------------ BOOLEAN rows
+# Owner ask, verbatim, 2026-10-25: "For the number controller node it would be
+# useful if one of the options was a boolean. A user would need to input a 0 or
+# 1 but it could hook into boolean inputs that accept true or false."
+# Pure helpers first, then the end-to-end rows through the fake graph (B-A..B-J
+# in the probe), then source pins for the parts that only run inside attach().
+
+
+def test_parse_boolean_input(number_controller_api: dict) -> None:
+    """0/1, then true/false, on/off, yes/no (any case), then any OTHER complete
+    number snaps to 1/0; anything that is not a complete answer is null so the
+    caller keeps the previous value (the existing incomplete-input path)."""
+    pairs = zip(
+        PARSE_BOOLEAN_INPUT_CASES, number_controller_api["pure"]["parseBoolean"], strict=True
+    )
+    for (given, expected), got in pairs:
+        assert got == expected, f"parseBooleanInput({given!r}) -> {got!r}, wanted {expected!r}"
+
+
+def test_snap_to_boolean(number_controller_api: dict) -> None:
+    pure = number_controller_api["pure"]
+    pairs = zip(SNAP_TO_BOOLEAN_CASES, pure["snapToBoolean"], strict=True)
+    for (given, expected), got in pairs:
+        assert got == expected, f"snapToBoolean({given!r}) -> {got!r}, wanted {expected!r}"
+    # NaN, +-Infinity, null, undefined, a string, a boolean, an object: all 0
+    assert pure["snapToBooleanJunk"] == [0] * 9
+
+
+def test_kinds_of_type(number_controller_api: dict) -> None:
+    pairs = zip(KINDS_OF_TYPE_CASES, number_controller_api["pure"]["kindsOfType"], strict=True)
+    for (given, expected), got in pairs:
+        assert got == expected, f"kindsOfType({given!r}) -> {got!r}, wanted {expected!r}"
+
+
+def test_would_mix_kinds(number_controller_api: dict) -> None:
+    """THE MIXING RULE (owner-decided 2026-10-25): a row is ONE kind. BOOLEAN
+    never mixes with INT/FLOAT, in either direction; INT with FLOAT is one kind
+    and keeps today's behaviour (allowed)."""
+    pairs = zip(WOULD_MIX_KINDS_CASES, number_controller_api["pure"]["wouldMixKinds"], strict=True)
+    for (carried, incoming, expected), got in pairs:
+        assert got is expected, f"wouldMixKinds({carried!r}, {incoming!r}) -> {got!r}"
+
+
+def test_state_text_for(number_controller_api: dict) -> None:
+    pairs = zip(STATE_TEXT_CASES, number_controller_api["pure"]["stateText"], strict=True)
+    for (given, expected), got in pairs:
+        assert got == expected, f"stateTextFor{given!r} -> {got!r}, wanted {expected!r}"
+
+
+def test_stored_json_type_is_exact_match(number_controller_api: dict) -> None:
+    pairs = zip(
+        STORED_JSON_TYPE_CASES, number_controller_api["pure"]["storedJsonType"], strict=True
+    )
+    for (given, expected), got in pairs:
+        assert got == expected, f"storedJsonType({given!r}) -> {got!r}, wanted {expected!r}"
+
+
+def test_mix_refusal_message_names_both_kinds_in_plain_words(number_controller_api: dict) -> None:
+    messages = number_controller_api["pure"]["messages"]
+    assert messages["boolThenInt"] == (
+        "EPS Number Controller: a row is one kind -- this one already feeds an on/off "
+        "(BOOLEAN) input, so it can't also feed a number (INT) input. Use another row."
+    )
+    assert messages["intThenBool"] == (
+        "EPS Number Controller: a row is one kind -- this one already feeds a number (INT) "
+        "input, so it can't also feed an on/off (BOOLEAN) input. Use another row."
+    )
+    assert "a number (FLOAT) input" in messages["floatThenBool"]  # case-folded
+
+
+def test_value_box_tooltip_explains_the_boolean_entry_rules(number_controller_api: dict) -> None:
+    tips = number_controller_api["pure"]["valueTooltips"]
+    assert "1 for on" in tips["boolean"] and "0 for off" in tips["boolean"]
+    assert "true/false" in tips["boolean"] and "yes/no" in tips["boolean"]
+    assert tips["int"] == tips["wildcard"] == (
+        "The number this output sends. Type a whole number or a decimal."
+    )
+
+
+def test_boolean_adoption_resnaps_the_display_but_not_the_stored_number(
+    number_controller_api: dict,
+) -> None:
+    """An untyped row holding 2.5 wired into a toggle WIDGET's BOOLEAN socket:
+    badge BOOL (green, with the owner-specified tooltip), the box re-snaps to
+    1 with a `true` word beside it -- and `values` still stores 2.5, so
+    unwiring gives 2.5 back and rewiring to a FLOAT keeps it."""
+    r = number_controller_api["dom"]["bool"]["adoption"]
+
+    assert r["untyped"]["badge"] == "any"
+    assert r["untyped"]["box"] == "2.5"
+    assert r["untyped"]["stateText"] == ""
+
+    wired = r["wired"]
+    assert wired["badge"] == "BOOL"
+    assert wired["badgeTitle"] == "Wired as an on/off switch (BOOLEAN) -- 1 = true, 0 = false."
+    assert wired["badgeClass"] == "epsnc-row-type epsnc-row-type-set"
+    assert wired["box"] == "1", "the box must show what the socket actually sends"
+    assert wired["stateText"] == "true"
+    assert wired["stateClass"] == "epsnc-row-state epsnc-row-state-on"
+    assert "1 for on" in wired["boxTitle"]
+    assert r["wiredStored"] == {"name": "gate", "value": 2.5, "type": "BOOLEAN"}
+    assert r["wiredOutput"] == {"type": "BOOLEAN", "label": "gate"}
+
+    unwired = r["unwired"]
+    assert (unwired["badge"], unwired["box"], unwired["stateText"]) == ("any", "2.5", "")
+    assert unwired["stateClass"] == "epsnc-row-state", "the word must hide again"
+
+    as_float = r["asFloat"]
+    assert (as_float["badge"], as_float["box"], as_float["stateText"]) == ("FLOAT", "2.5", "")
+
+
+def test_typing_into_a_boolean_row(number_controller_api: dict) -> None:
+    """0/1 and the words commit snapped; other complete numbers snap; junk and
+    half-typed words keep the previous value; the focused box is never
+    rewritten mid-typing and reverts to the committed value on blur."""
+    r = number_controller_api["dom"]["bool"]["typing"]
+    by_typed = [(step["typed"], step["stored"]) for step in r["steps"]]
+    assert by_typed == [
+        ("0", 0),
+        ("true", 1),
+        ("off", 0),
+        ("YES", 1),
+        ("No", 0),
+        ("ON", 1),
+        ("2.5", 1),
+        ("-1", 1),
+        ("0.0", 0),
+        ("-", 0),  # incomplete -> keeps the previous value
+        ("maybe", 0),  # junk -> keeps the previous value
+        ("tr", 0),  # half a word -> keeps the previous value
+        ("", 0),  # emptied -> keeps the previous value
+        ("1", 1),
+    ]
+    # what the user typed stays in the focused box untouched
+    shown = [step["boxWhileFocused"] for step in r["steps"]]
+    assert shown == [step["typed"] for step in r["steps"]]
+    # the word beside the box follows each COMMITTED value
+    words = {step["typed"]: step["stateText"] for step in r["steps"]}
+    assert words["0"] == "false" and words["true"] == "true" and words["off"] == "false"
+    assert words["maybe"] == "false", "junk must not move the word either"
+
+    assert r["afterBlur"]["box"] == "1" and r["afterBlur"]["stateText"] == "true"
+    assert r["afterJunkBlur"]["box"] == "1", "an abandoned junk edit reverts to the committed value"
+
+
+def test_non_boolean_rows_keep_their_old_numeric_rules(number_controller_api: dict) -> None:
+    """Old workflows behave exactly as before: an untyped row ignores words and
+    keeps fractions; an INT row stores the fraction and only DISPLAYS it
+    snapped."""
+    r = number_controller_api["dom"]["bool"]["typing"]
+    assert r["plainWord"] == 5, "'true' is not a number in an untyped row"
+    assert r["plainFraction"] == 2.5
+    assert r["intWord"] == 0
+    assert r["intFraction"] == 2.5
+    assert (r["intShown"]["badge"], r["intShown"]["box"]) == ("INT", "3")
+    assert r["intShown"]["stateText"] == ""
+
+
+_KINDS = ["INT", "FLOAT", "BOOLEAN", "int", "boolean", "INT,BOOLEAN", "*", "", "STRING", "IMAGE"]
+
+
+def test_veto_refuses_a_boolean_row_into_a_number_socket(number_controller_api: dict) -> None:
+    """BOOLEAN row -> INT/FLOAT socket is refused, judged from the row's LIVE
+    links even though its output.type is still the wildcard (the window before
+    the deferred reconcile that a back-to-back replug lives in)."""
+    v = number_controller_api["dom"]["bool"]["veto"]
+    assert v["boolFirstOutputType"] == "*", "this case is about the still-untyped output"
+    assert v["boolFirst"] == {
+        "INT": "refused",
+        "FLOAT": "refused",
+        "BOOLEAN": "allowed",
+        "int": "refused",
+        "boolean": "allowed",
+        "INT,BOOLEAN": "allowed",  # a union that accepts the row's own kind
+        "*": "allowed",
+        "": "allowed",
+        "STRING": "refused",  # the existing non-number refusal, unchanged
+        "IMAGE": "refused",
+    }
+    # the same answers once the output has narrowed to BOOLEAN
+    assert number_controller_api["dom"]["bool"]["veto"]["boolFirstReconciled"] == v["boolFirst"]
+
+
+def test_veto_refuses_a_number_row_into_a_boolean_socket(number_controller_api: dict) -> None:
+    v = number_controller_api["dom"]["bool"]["veto"]
+    assert v["intFirst"] == {
+        "INT": "allowed",
+        "FLOAT": "allowed",  # TODAY'S rule, deliberately unchanged: one kind
+        "BOOLEAN": "refused",
+        "int": "allowed",
+        "boolean": "refused",
+        "INT,BOOLEAN": "allowed",
+        "*": "allowed",
+        "": "allowed",
+        "STRING": "refused",
+        "IMAGE": "refused",
+    }
+    assert v["floatFirst"] == v["intFirst"]
+
+
+def test_an_unwired_row_may_still_become_any_allowed_kind(number_controller_api: dict) -> None:
+    v = number_controller_api["dom"]["bool"]["veto"]
+    for kind in ("INT", "FLOAT", "BOOLEAN"):
+        assert v["unwired"][kind] == "allowed"
+    assert v["unwired"]["STRING"] == v["unwired"]["IMAGE"] == "refused"
+
+
+def test_veto_refusals_toast_in_plain_words(number_controller_api: dict) -> None:
+    toasts = number_controller_api["dom"]["bool"]["veto"]["boolFirstToasts"]
+    assert len(toasts) == 5  # INT, FLOAT, int, STRING, IMAGE
+    mixes = [t for t in toasts if "a row is one kind" in t]
+    assert len(mixes) == 3
+    assert all("already feeds an on/off (BOOLEAN) input" in t for t in mixes)
+    others = [t for t in toasts if "a row is one kind" not in t]
+    assert others == [
+        "EPS Number Controller only carries whole numbers, decimals or on/off (BOOLEAN) "
+        f"values -- not {kind}."
+        for kind in ("STRING", "IMAGE")
+    ]
+
+
+def test_veto_still_chains_to_a_previously_installed_hook(number_controller_api: dict) -> None:
+    r = number_controller_api["dom"]["bool"]["vetoChained"]
+    assert r["allowed"] == "original-hook-answer"
+    assert r["refusedBeforeTheHook"] is False
+
+
+def test_a_replug_cannot_smuggle_a_second_kind_onto_a_row(number_controller_api: dict) -> None:
+    """Re-ticking a row whose memory holds a BOOLEAN socket and an INT socket:
+    the first reconnects, the veto declines the second through the real
+    connect path, softly (a toast, no exception, nothing else touched)."""
+    r = number_controller_api["dom"]["bool"]["replugMix"]
+    assert r["toggleWired"] is True
+    assert r["stepsWired"] is False
+    assert r["toastCount"] == 1
+    assert (r["storedType"], r["badge"]) == ("BOOLEAN", "BOOL")
+
+
+def test_unticking_a_boolean_row_unplugs_and_replugs_like_any_other(
+    number_controller_api: dict,
+) -> None:
+    r = number_controller_api["dom"]["bool"]["untick"]
+    assert (r["on"]["badge"], r["on"]["box"], r["on"]["stateText"]) == ("BOOL", "1", "true")
+
+    assert r["off"]["wired"] is False, "unticking must unplug the BOOLEAN socket"
+    assert r["off"]["enabled"] is False
+    assert r["off"]["remembered"] == [{"node": 642, "input": "enabled"}]
+    assert r["off"]["outputType"] == "*", "nothing left to derive the type from"
+    assert (r["off"]["view"]["badge"], r["off"]["view"]["stateText"]) == ("any", "")
+
+    assert r["back"]["wired"] is True and r["back"]["sameTarget"] is True
+    assert r["back"]["storedType"] == "BOOLEAN"
+    assert r["back"]["storedValue"] == 1
+    assert r["back"]["remembered"] == [], "one attempt, then the memory is forgotten"
+    assert (r["back"]["view"]["badge"], r["back"]["view"]["stateText"]) == ("BOOL", "true")
+
+
+def test_universal_state_apply_of_a_boolean_row_repaints_and_rewires(
+    number_controller_api: dict,
+) -> None:
+    r = number_controller_api["dom"]["bool"]["apply"]
+    assert (r["appliedOff"]["box"], r["appliedOff"]["stateText"]) == ("0", "false")
+    assert r["appliedOff"]["stateClass"] == "epsnc-row-state epsnc-row-state-off"
+    assert (r["appliedOn"]["box"], r["appliedOn"]["stateText"]) == ("1", "true")
+    assert r["detached"] is True, "an applied enabled:false must really unplug the socket"
+    assert r["remembered"] == [{"node": 652, "input": "enabled"}]
+
+
+def test_boolean_links_take_the_boolean_type_colour(number_controller_api: dict) -> None:
+    colours = number_controller_api["dom"]["bool"]["colour"]
+    assert colours == {"boolean": "#boolcolor", "int": "#intcolor"}
+
+
+def test_a_boolean_row_changes_nothing_structural(number_controller_api: dict) -> None:
+    """16-output ceiling and positional outputs intact; NO new widget (the kind
+    lives in the existing `values` JSON, so widgets_values is byte-identical to
+    every older save); the entry keeps the {name, value, type} shape."""
+    r = number_controller_api["dom"]["bool"]["structure"]
+    assert r["outputCount"] == 16
+    assert r["last"] == {"name": "num_16", "type": "BOOLEAN"}
+    assert r["widgetNames"] == ["values", "eps_nc_panel"]
+    assert r["storedKeys"] == ["name", "type", "value"]
+    assert r["storedType"] == "BOOLEAN"
+
+
+def test_boolean_rows_work_across_subgraph_boundaries(number_controller_api: dict) -> None:
+    r = number_controller_api["dom"]["bool"]["nested"]
+    iv = r["intoSubgraphNode"]
+    assert (iv["badge"], iv["box"], iv["stateText"]) == ("BOOL", "0", "false")
+    assert r["offWired"] is False and r["backWired"] is True and r["backBadge"] == "BOOL"
+    # the veto runs on the SubgraphOutput.connect path too
+    assert r["refused"] is True and r["refusedInnerLinks"] == 0
+    assert r["sameKindLinked"] is True
+    assert (r["sameKindBadge"], r["sameKindStored"]) == ("BOOL", "BOOLEAN")
+
+
+def test_mixed_wiring_that_skipped_the_veto_is_kept_and_warned_once(
+    number_controller_api: dict,
+) -> None:
+    """A hand-edited/scripted workflow can carry both kinds on one row. Today's
+    rule holds: first concrete type wins, nothing is disconnected, one warning."""
+    r = number_controller_api["dom"]["bool"]["mixedLoad"]
+    assert (r["badge"], r["storedType"]) == ("INT", "INT")
+    assert r["stepsWired"] is True and r["toggleWired"] is True
+    assert len(r["warnings"]) == 1
+    assert "A row is one kind" in r["warnings"][0]
+    assert "(INT, BOOLEAN); keeping INT." in r["warnings"][0]
 
 
 def test_is_output_connected_counts_floating_links_too(number_controller_api: dict) -> None:
@@ -2155,6 +3110,65 @@ def test_write_slot_field_is_the_sole_user_mutation_point(source: str) -> None:
     assert "widget.value = json" in body
     assert "map[key] = { ...existing, ...patch }" in body
     assert body.count("type") == 1, "the only type-shaped default may live in the fallback object"
+
+
+def test_veto_judges_the_kind_from_live_links_and_runs_after_the_allowlist(source: str) -> None:
+    """The kind check must read the row's LIVE links (`collectSlotLinkTypes` ->
+    `resolveAdoptedType`, the same per-slot read adoption uses) -- not
+    `output.type`, which only narrows after the deferred reconcile -- and it
+    must run AFTER the allowlist refusal so a non-number target still gets the
+    original message. Same quiet `return false`, no exception."""
+    body = _function_body(source, "wireTypeVeto(node)")
+    allow_at = body.index("isAllowedType(inputType)")
+    kind_at = body.index("wouldMixKinds(carriedType, inputType)")
+    assert allow_at < kind_at
+    assert "resolveAdoptedType(collectSlotLinkTypes(this, outputIndex)).type" in body
+    code = "\n".join(ln for ln in body.splitlines() if not ln.strip().startswith("//"))
+    assert "output.type" not in code
+    assert "mixRefusalMessage(carriedType, inputType)" in body
+    assert "throw" not in body
+
+
+def test_value_input_picks_its_parser_by_the_rows_stored_type(source: str) -> None:
+    """A BOOLEAN row reads its box with parseBooleanInput, every other row
+    keeps parseNumericInput -- chosen from the STORED type (the durable record),
+    and both feed the SAME `if (parsed === null) return` incomplete-input path."""
+    body = _function_body(source, "buildRowEl(state, n)")
+    assert "rowIsBoolean(state, n)" in body
+    assert "? parseBooleanInput(valueInput.value)" in body
+    assert ": parseNumericInput(valueInput.value)" in body
+    assert body.index("parseBooleanInput(valueInput.value)") < body.index(
+        "if (parsed === null) return"
+    )
+    is_bool = _function_body(source, "rowIsBoolean(state, n)")
+    assert "storedJsonType(" in is_bool and "BOOLEAN_TYPE" in is_bool
+
+
+def test_render_reads_the_type_tag_through_the_shared_exact_match_reader(source: str) -> None:
+    """One reader for the stored tag (`storedJsonType`), so the panel and the
+    backend can never disagree about which tags are real -- the old inline
+    `=== 'INT' || === 'FLOAT'` test is gone from the render path."""
+    body = _function_body(source, "renderRows(state)")
+    assert "storedJsonType(entry)" in body
+    assert "entry?.type ===" not in body
+    assert "stateTextFor(jsonType, shownValue)" in body
+
+
+def test_the_true_false_word_is_hidden_unless_the_row_is_boolean(source: str) -> None:
+    """Old rows must lay out exactly as before: the word's base class is
+    `display: none`, and only a BOOLEAN row's render adds an -on/-off class."""
+    assert ".epsnc-row-state { display: none;" in source
+    assert ".epsnc-row-state-on { display: block;" in source
+    assert ".epsnc-row-state-off { display: block;" in source
+    body = _function_body(source, "renderRows(state)")
+    assert ": 'epsnc-row-state'" in body
+
+
+def test_the_state_word_sits_between_the_name_and_the_value_box(source: str) -> None:
+    """Keeps the value box and the type badge in the same columns as every
+    INT/FLOAT row (the word takes its width from the flexible name field)."""
+    body = _function_body(source, "buildRowEl(state, n)")
+    assert "nameInput,\n    stateEl,\n    valueInput,\n    typeEl\n" in body
 
 
 def test_value_input_skips_incomplete_numbers(source: str) -> None:
