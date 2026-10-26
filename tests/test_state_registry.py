@@ -36,6 +36,7 @@ from eps_image.nodes_number_controller import EPSNumberController
 from eps_image.nodes_resolution import EPSResolution
 from eps_image.nodes_save_image import EPSSaveImage
 from eps_image.nodes_switcher import (
+    EPSAudioSwitcher,
     EPSClipSwitcher,
     EPSModelSwitcher,
     EPSSwitcher,
@@ -75,6 +76,7 @@ _STATE_BEARING_SPECS: list[tuple[str, type, str]] = [
     ("EPSModelSwitcher", EPSModelSwitcher, "EPS Model Switcher"),
     ("EPSClipSwitcher", EPSClipSwitcher, "EPS CLIP Switcher"),
     ("EPSVaeSwitcher", EPSVaeSwitcher, "EPS VAE Switcher"),
+    ("EPSAudioSwitcher", EPSAudioSwitcher, "EPS Audio Switcher"),
     ("EPSResolution", EPSResolution, "EPS Resolution"),
     ("EPSImageGrid", EPSImageGrid, "EPS Image Grid"),
     ("EPSFrameSaver", EPSFrameSaver, "EPS Frame Saver"),
@@ -251,6 +253,7 @@ class TestSwitcherPatterns:
             (EPSModelSwitcher, r"^model_\d+$"),
             (EPSClipSwitcher, r"^clip_\d+$"),
             (EPSVaeSwitcher, r"^vae_\d+$"),
+            (EPSAudioSwitcher, r"^audio_\d+$"),
         ],
     )
     def test_each_switcher_carries_its_own_toggles_pattern(
@@ -260,12 +263,18 @@ class TestSwitcherPatterns:
         assert toggles["kind"] == "json_object"
         assert toggles["key_pattern"] == expected_pattern
 
-    def test_the_four_patterns_are_all_distinct(self) -> None:
+    def test_the_five_patterns_are_all_distinct(self) -> None:
         patterns = {
             cls.EPS_STATE_WIDGETS["widgets"]["toggles"]["key_pattern"]
-            for cls in (EPSSwitcher, EPSModelSwitcher, EPSClipSwitcher, EPSVaeSwitcher)
+            for cls in (
+                EPSSwitcher,
+                EPSModelSwitcher,
+                EPSClipSwitcher,
+                EPSVaeSwitcher,
+                EPSAudioSwitcher,
+            )
         }
-        assert len(patterns) == 4
+        assert len(patterns) == 5
 
 
 # ------------------------------------------------------- EPS Save Image

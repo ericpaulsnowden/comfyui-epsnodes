@@ -109,6 +109,9 @@ _IMAGE_INPUT_PATTERN = re.compile(r"image_(\d+)")
 _MODEL_INPUT_PATTERN = re.compile(r"model_(\d+)")
 _CLIP_INPUT_PATTERN = re.compile(r"clip_(\d+)")
 _VAE_INPUT_PATTERN = re.compile(r"vae_(\d+)")
+#: v1.8.0 (owner ask 2026-10-25: "add an EPS Audio Switcher to the switcher
+#: list") -- the fifth parameterization of the same shape.
+_AUDIO_INPUT_PATTERN = re.compile(r"audio_(\d+)")
 
 #: Per-type hover tooltip for slot 1 and every dynamically-grown slot alike,
 #: so e.g. model_2+ reads identically to model_1 on hover -- see
@@ -140,6 +143,11 @@ _CLIP_INPUT_TOOLTIP = (
 _VAE_INPUT_TOOLTIP = (
     "A VAE to include when enabled. Toggle it from the row on the node; "
     "when off, nothing upstream of this socket runs at all."
+)
+_AUDIO_INPUT_TOOLTIP = (
+    "An audio clip to include when enabled. Toggle it from the row on the "
+    "node; when off, nothing upstream of this socket runs at all (a Load "
+    "Audio feeding a switched-off row never even reads its file)."
 )
 
 #: Default ``toggles`` widget value: no overrides recorded yet, so every
@@ -1024,4 +1032,60 @@ EPSVaeSwitcher = _make_switcher_ns(
         "unless you give it an explicit per-VAE list."
     ),
     class_doc=_EPS_VAE_SWITCHER_CLASS_DOC,
+)
+
+
+# ---------------------------------------------------------- EPSAudioSwitcher
+
+_EPS_AUDIO_SWITCHER_CLASS_DOC = """Any number of ``audio_N`` inputs, each independently on/off,
+fanned into one ``AUDIO`` list output (FORMAT.md §6.4b; v1.8.0, owner ask
+2026-10-25: "add an EPS Audio Switcher to the switcher list"). The fifth
+parameterization of ``_make_switcher_ns`` -- the identical shape as
+``EPSSwitcher`` with "audio" in place of "image"; see that class's own
+docstring for the full mechanism write-up.
+
+``INPUT_IS_LIST = True``: a list-producing upstream is merged element-wise
+into the output. Each ``audio_N`` slot is ALSO ``lazy``: a toggled-off
+slot's upstream -- a Load Audio, a text-to-speech or music node feeding a
+disabled row -- is never requested and so never executes at all.
+
+Zero enabled clips -- everything toggled off, or nothing connected -- is a
+VALID queue: ``execute`` returns an ``ExecutionBlocker``, so the queue
+succeeds and the downstream audio branch simply doesn't run. (To feed a
+consumer whose audio input is OPTIONAL "nothing" instead -- a video
+combine that should just render silent -- use EPS Bypass, FORMAT.md
+§6.17: a blocker on any input skips the consumer entirely.)
+"""
+
+EPSAudioSwitcher = _make_switcher_ns(
+    class_id="EPSAudioSwitcher",
+    prefix="audio",
+    pattern=_AUDIO_INPUT_PATTERN,
+    io_type="AUDIO",
+    # The family's `<prefix>s` list naming (images/models/clips/vaes) --
+    # this output IS a list, one clip per enabled row.
+    output_name="audios",
+    log_prefix="EPS Audio Switcher",
+    # The log noun reads "no audio inputs are connected" -- the same
+    # "no <noun> inputs" phrasing as the siblings.
+    noun="audio",
+    input_tooltip=_AUDIO_INPUT_TOOLTIP,
+    output_tooltip=(
+        "Every enabled audio clip, in slot order, as a list -- the rest of "
+        "the workflow runs once per clip."
+    ),
+    description=(
+        "Toggle any number of audio inputs on or off; the enabled ones fan "
+        "out in slot order, so N enabled clips make the rest of the "
+        "workflow run N times. A toggled-off input's upstream branch never "
+        "executes at all -- a Load Audio or a speech/music generator "
+        "feeding a disabled row never runs, not just filtered out "
+        "afterward. Turning every input off, or connecting none at all, is "
+        "a valid state: the queue still succeeds and the downstream branch "
+        "simply doesn't run (to send 'no audio' into an optional audio "
+        "input instead, use EPS Bypass). A value wired further downstream "
+        "that isn't itself a list, like a fixed seed, repeats identically "
+        "across every run."
+    ),
+    class_doc=_EPS_AUDIO_SWITCHER_CLASS_DOC,
 )

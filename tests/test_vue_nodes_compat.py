@@ -38,6 +38,7 @@ from eps_image.nodes_distributor import EPSDistributor
 from eps_image.nodes_frame_saver import EPSFrameSaver
 from eps_image.nodes_image_grid import EPSImageGrid
 from eps_image.nodes_switcher import (
+    EPSAudioSwitcher,
     EPSClipSwitcher,
     EPSModelSwitcher,
     EPSSwitcher,
@@ -67,6 +68,7 @@ def _input_options(node_class, name: str) -> dict:
         (EPSModelSwitcher, "toggles"),
         (EPSClipSwitcher, "toggles"),
         (EPSVaeSwitcher, "toggles"),
+        (EPSAudioSwitcher, "toggles"),
         (EPSCheckpointSwitcher, "selection"),
         (EPSImageGrid, "grid_uuid"),
         (EPSFrameSaver, "video_path"),

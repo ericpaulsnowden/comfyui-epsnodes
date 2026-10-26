@@ -209,13 +209,16 @@ const attachedNodes = new WeakSet()
 // Pure estimator -- exported so tests can drive it under Node (see header)
 // ---------------------------------------------------------------------------
 
-/** The four §6.4/§6.4b switcher class ids -> their growing-input prefix
- * (switcher.js `SWITCHER_CLASSES`, nodes_switcher.py's slot patterns). */
+/** The five §6.4/§6.4b switcher class ids -> their growing-input prefix
+ * (switcher.js `SWITCHER_CLASSES`, nodes_switcher.py's slot patterns).
+ * EPSAudioSwitcher joined in v1.8.0 so an audio fan-out upstream of a
+ * multiplier counts as its enabled rows, not an unknown `≥` source. */
 export const SWITCHER_PREFIXES = {
   EPSSwitcher: 'image',
   EPSModelSwitcher: 'model',
   EPSClipSwitcher: 'clip',
-  EPSVaeSwitcher: 'vae'
+  EPSVaeSwitcher: 'vae',
+  EPSAudioSwitcher: 'audio'
 }
 
 /** Reroute node types followed straight through (core + rgthree). */

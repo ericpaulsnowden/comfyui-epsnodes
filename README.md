@@ -15,12 +15,12 @@ then pick a folder:
 | **Controllers** | Number Controller, Universal State Controller |
 | **Utilities** | Node Audit, Distributor, Bypass, Splat Placement, Run Multiplier |
 | **LoRA** | LoRA Picker, Apply LoRA Set, LoRA Iterator, Lora Loader State Controller |
-| **Switchers** | Image, Model, CLIP, VAE, and Checkpoint Switchers |
+| **Switchers** | Image, Model, CLIP, VAE, Audio, and Checkpoint Switchers |
 
 Moving a node between folders only changes where it sits in that menu —
 workflows you've already saved are unaffected, and nothing needs updating.
 
-## The twenty-two nodes
+## The twenty-three nodes
 
 No third-party packs required — every node here runs on ComfyUI alone;
 the Lora Loader State Controller is built to extend rgthree-comfy, but only
@@ -41,6 +41,7 @@ section further down; this is the map.
 | [**EPS LoRA Iterator**](#eps-lora-iterator-shipped) | Auditions any `LORA_STACK` by strength: set min/max/increment and one queue runs your workflow once per step (per lora, or all together). | A `LORA_STACK` source (usually Apply LoRA Set) + a model. |
 | [**EPS Image Switcher**](#eps-image-switcher-shipped) | Any number of image inputs, each independently on/off; the enabled ones fan out (N enabled → N runs). Disabled branches never execute. | Nothing — drag-and-drop with core nodes. |
 | [**EPS Model / CLIP / VAE Switcher**](#eps-model--clip--vae-switcher-shipped) | The image Switcher's exact mechanism for models, CLIPs, and VAEs: any number of inputs, each on/off, enabled ones fan out (N enabled → N runs), disabled branches — including their checkpoint loads — never execute. | Nothing — drag-and-drop with core nodes. |
+| [**EPS Audio Switcher**](#eps-audio-switcher-shipped) | The same switcher for audio: any number of audio inputs, each on/off, enabled ones fan out (N enabled → N runs), and a switched-off clip's Load Audio (or speech/music generator) never runs. *(v1.8.0)* | Nothing — drag-and-drop with core nodes. |
 | [**EPS Distributor**](#eps-distributor-shipped) | The mirror of the Switcher: one image — or one text — in, up to sixteen branches out, each independently on/off. New outputs appear as you wire them up. Toggle a branch off and only that branch is skipped — everything happens in one run. | Nothing — drag-and-drop with core nodes. |
 | [**EPS Bypass**](#eps-bypass-shipped) | Plug anything into it — audio, an image, a model, a mask — and switch it off: whatever it feeds then behaves exactly as if nothing were connected, and the wire comes back when you switch it on. For inputs that are optional (a video node's audio, an optional mask); if what it feeds needs that input, the switch refuses and names the node. The Universal State Controller can save and recall the on/off state. *(v0.99.0)* | Nothing — drag-and-drop with core nodes. |
 | [**EPS Splat Placement**](#eps-splat-placement-shipped) | Makes core **Render Splat** draw a gaussian splat exactly as the 3D viewer (Save Splat, Preview Splat, Load 3D) shows it, by moving, rotating and scaling the splat the way the viewer did. Without it, a splat you fitted to the viewer renders as a dot. *(v0.100.0)* | Core's Get Splat and Render Splat, plus the viewer node's `model_3d_info` and `camera_info`. |
@@ -803,6 +804,35 @@ several models/VAEs in one queue".
 - Loading several checkpoints in one queue is heavy on disk and RAM/VRAM;
   ComfyUI offloads between runs, but start with two or three, not ten.
 
+
+## EPS Audio Switcher (shipped)
+
+`EPSNodes → Switchers → EPS Audio Switcher` *(v1.8.0)*: the [EPS Image
+Switcher](#eps-image-switcher-shipped) for audio. Wire in any number of audio
+clips — Load Audio nodes, a text-to-speech or music generator, anything with
+an `AUDIO` output — tick them on and off, and the enabled ones fan out in
+slot order: three enabled clips means the rest of the workflow runs three
+times, once per clip. Built for "try the same video with several soundtracks
+or voice takes in one queue".
+
+- **Everything the other switchers do, identically:** growing sockets (wire
+  the last one and a new one appears), per-row toggles, Toggle All,
+  double-click rename, and the Universal State Controller saves and recalls
+  which rows are on.
+- **A toggled-off clip never runs at all.** A Load Audio feeding a switched-off
+  row never even reads its file, and a speech or music generator feeding one
+  never generates — not made-then-discarded.
+- **All off is valid:** the queue succeeds and whatever the switcher feeds
+  simply doesn't run. If you instead want a video node with an *optional*
+  audio input to render **silent**, use [EPS Bypass](#eps-bypass-shipped) —
+  switched off, it makes that input look unplugged.
+- **One switcher = one axis**, exactly like the others: two fanned lists into
+  the same node pair up index-by-index rather than multiplying. The
+  [Run Multiplier](#eps-run-multiplier-shipped)'s run count counts an Audio
+  Switcher upstream as its enabled rows.
+- **Nodes 2.0:** like the other switchers, its per-row toggles are drawn on
+  the classic canvas, so in the Nodes 2.0 look only Toggle All responds for
+  now (the switchers' Nodes 2.0 rework is planned).
 ## EPS Node Audit (shipped)
 
 `EPSNodes → EPS Node Audit`: a plain-language look at what your *other*

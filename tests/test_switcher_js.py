@@ -55,12 +55,14 @@ PREFIXES: dict[str, str] = {
     "EPSModelSwitcher": "model",
     "EPSClipSwitcher": "clip",
     "EPSVaeSwitcher": "vae",
+    "EPSAudioSwitcher": "audio",
 }
 TYPES: dict[str, str] = {
     "EPSSwitcher": "IMAGE",
     "EPSModelSwitcher": "MODEL",
     "EPSClipSwitcher": "CLIP",
     "EPSVaeSwitcher": "VAE",
+    "EPSAudioSwitcher": "AUDIO",
 }
 
 #: (class name, candidate input name, expected inputRe.test() result) --
@@ -215,7 +217,7 @@ def test_module_exports_entry_points_and_registry(switcher_api: dict) -> None:
 # --------------------------------------------------------------- registry
 
 
-def test_registry_has_exactly_the_four_classes(switcher_api: dict) -> None:
+def test_registry_has_exactly_the_five_classes(switcher_api: dict) -> None:
     assert set(switcher_api["classNames"]) == set(PREFIXES)
 
 

@@ -52,6 +52,7 @@ def _fake_execution_blocker(monkeypatch: pytest.MonkeyPatch):
 
 from eps_image import nodes_switcher
 from eps_image.nodes_switcher import (
+    EPSAudioSwitcher,
     EPSClipSwitcher,
     EPSModelSwitcher,
     EPSSwitcher,
@@ -67,6 +68,9 @@ _SWITCHER_TYPES = [
     pytest.param(EPSModelSwitcher, "model", "MODEL", "models", id="model"),
     pytest.param(EPSClipSwitcher, "clip", "CLIP", "clips", id="clip"),
     pytest.param(EPSVaeSwitcher, "vae", "VAE", "vaes", id="vae"),
+    # v1.8.0 (owner ask 2026-10-25): the fifth class, driven through every
+    # generic test below exactly like its siblings.
+    pytest.param(EPSAudioSwitcher, "audio", "AUDIO", "audios", id="audio"),
 ]
 
 #: Round-robin sibling for cross-type checks: a DIFFERENT registered
@@ -76,13 +80,14 @@ _SWITCHER_TYPES = [
 _OTHER_SWITCHER = {
     EPSModelSwitcher: (EPSClipSwitcher, "clip"),
     EPSClipSwitcher: (EPSVaeSwitcher, "vae"),
-    EPSVaeSwitcher: (EPSModelSwitcher, "model"),
+    EPSVaeSwitcher: (EPSAudioSwitcher, "audio"),
+    EPSAudioSwitcher: (EPSModelSwitcher, "model"),
 }
 
 #: A different new-class prefix, for "rejects a sibling class's own prefix"
 #: coverage (distinct from "rejects image_N", which every test below also
 #: checks directly).
-_OTHER_PREFIX = {"model": "clip", "clip": "vae", "vae": "model"}
+_OTHER_PREFIX = {"model": "clip", "clip": "vae", "vae": "audio", "audio": "model"}
 
 
 def _toggles(**overrides: bool) -> str:
@@ -693,6 +698,7 @@ class TestClassShape:
             "model": "EPSModelSwitcher",
             "clip": "EPSClipSwitcher",
             "vae": "EPSVaeSwitcher",
+            "audio": "EPSAudioSwitcher",
         }[prefix]
 
 
@@ -710,7 +716,11 @@ class TestDescriptionAndTooltipWording:
     def test_description_mentions_a_checkpoint_load_never_running(
         self, cls, prefix, io_type, output_name
     ) -> None:
-        assert "checkpoint" in cls.DESCRIPTION.lower()
+        # The upstream a disabled row skips is named per type: a checkpoint
+        # load for model/clip/vae, a Load Audio for the v1.8.0 audio class
+        # (audio never comes from a checkpoint).
+        upstream = "load audio" if prefix == "audio" else "checkpoint"
+        assert upstream in cls.DESCRIPTION.lower()
         assert "never run" in cls.DESCRIPTION.lower() or "never execute" in cls.DESCRIPTION.lower()
 
     def test_input_tooltip_does_not_leak_image_wording(

@@ -143,6 +143,7 @@ _NODE_SPECS = [
     ("eps_image.nodes_switcher", "EPSModelSwitcher", "EPS Model Switcher"),
     ("eps_image.nodes_switcher", "EPSClipSwitcher", "EPS CLIP Switcher"),
     ("eps_image.nodes_switcher", "EPSVaeSwitcher", "EPS VAE Switcher"),
+    ("eps_image.nodes_switcher", "EPSAudioSwitcher", "EPS Audio Switcher"),
     ("eps_image.nodes_resolution", "EPSResolution", "EPS Resolution"),
     ("eps_image.nodes_image_grid", "EPSImageGrid", "EPS Image Grid"),
     ("eps_image.nodes_frame_saver", "EPSFrameSaver", "EPS Frame Saver"),
