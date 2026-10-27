@@ -292,12 +292,14 @@ AUTO_GROW_VALUE_CASES = [
 #: clamps to [SPLIT_FRACTION_MIN, SPLIT_FRACTION_MAX].
 SPLIT_FRACTION_CASES = [
     ("0.5", 0.5),
-    ("0.15", 0.15),
+    ("0.05", 0.05),
+    ("0.95", 0.95),
+    ("0.15", 0.15),  # the pre-v0.100.1 floor is now an ordinary in-range value
     ("0.85", 0.85),
-    ("0", 0.15),
-    ("1", 0.85),
-    ("-5", 0.15),
-    ("99", 0.85),
+    ("0", 0.05),
+    ("1", 0.95),
+    ("-5", 0.05),
+    ("99", 0.95),
     ("'0.3'", 0.3),
     ("'junk'", 0.5),
     ("undefined", 0.5),
@@ -312,13 +314,40 @@ SPLIT_FRACTION_CASES = [
 #: negative).
 SPLIT_HEIGHTS_CASES = [
     ((400, 0.5, 50, 50), {"top": 200, "bottom": 200}),
-    ((400, 0.05, 50, 50), {"top": 60, "bottom": 340}),  # fraction clamped up to 0.15 first
-    ((400, 2, 50, 50), {"top": 340, "bottom": 60}),  # fraction clamped down to 0.85 first
+    ((400, 0.01, 10, 10), {"top": 20, "bottom": 380}),  # fraction clamped up to 0.05 first
+    ((400, 2, 10, 10), {"top": 380, "bottom": 20}),  # fraction clamped down to 0.95 first
+    ((400, 0.05, 50, 50), {"top": 50, "bottom": 350}),  # top floor wins over a tiny fraction
+    ((400, 0.95, 50, 80), {"top": 320, "bottom": 80}),  # bottom floor wins over a big fraction
     ((400, 0.15, 100, 50), {"top": 100, "bottom": 300}),  # top floor wins over the fraction
     ((400, 0.85, 50, 120), {"top": 280, "bottom": 120}),  # bottom floor wins over the fraction
     ((50, 0.5, 40, 60), {"top": 20, "bottom": 30}),  # degenerate: floors alone exceed the total
     ((0, 0.5, 40, 60), {"top": 0, "bottom": 0}),
     ((-100, 0.5, 10, 10), {"top": 0, "bottom": 0}),
+]
+
+#: ((renderedPx, layoutPx), expected panelScale()) -- v0.100.1: the
+#: panel's live CSS-transform zoom, 1 whenever either side is unmeasurable.
+PANEL_SCALE_CASES = [
+    ((514, 514), 1),
+    ((308.4, 514), 0.6),
+    ((1028, 514), 2),
+    ((0, 514), 1),
+    ((514, 0), 1),
+    ((-5, 514), 1),
+]
+
+#: ((startTopPx, deltaClientY, scale, totalPx), expected dragSplitFraction())
+#: -- v0.100.1: pointer travel converted to layout px on top of the RENDERED
+#: start height, so the divider tracks the pointer 1:1 at any zoom.
+DRAG_SPLIT_CASES = [
+    ((100, 100, 1, 400), 0.5),  # 1:1 at zoom 1
+    ((100, 60, 0.6, 400), 0.5),  # zoomed out: 60 screen px = 100 layout px
+    ((100, 200, 2, 400), 0.5),  # zoomed in: 200 screen px = 100 layout px
+    ((100, 0, 1, 400), 0.25),  # no travel: exactly the rendered start height
+    ((100, -500, 1, 400), 0.05),  # clamped at the floor fraction
+    ((100, 5000, 1, 400), 0.95),  # clamped at the ceiling fraction
+    ((100, 100, 0, 400), 0.5),  # unmeasurable scale degrades to 1
+    ((100, 100, 1, 0), None),  # no total: no fraction, the DOM is left alone
 ]
 
 #: ((autoGrow, count), expected selectedListFloorRows()) -- every row while
@@ -438,6 +467,8 @@ const out = {
     hasClampSplitFraction: typeof m.clampSplitFraction === 'function',
     hasSplitHeights: typeof m.splitHeights === 'function',
     hasSplitFractionFromNode: typeof m.splitFractionFromNode === 'function',
+    hasPanelScale: typeof m.panelScale === 'function',
+    hasDragSplitFraction: typeof m.dragSplitFraction === 'function',
     // 2026-08-26 while-running round: loadPicker's content gate
     hasFeedContentEqual: typeof m.feedContentEqual === 'function',
     // §6.13 "Live sync" round
@@ -466,6 +497,10 @@ const out = {
   clampSplitFraction: [%(split_fraction_values)s].map((v) => m.clampSplitFraction(v)),
   splitHeights: %(split_heights_inputs)s.map(
     ([total, fraction, minTop, minBottom]) => m.splitHeights(total, fraction, minTop, minBottom)
+  ),
+  panelScale: %(panel_scale_inputs)s.map(([r, l]) => m.panelScale(r, l)),
+  dragSplitFraction: %(drag_split_inputs)s.map(
+    ([start, delta, scale, total]) => m.dragSplitFraction(start, delta, scale, total)
   ),
   splitFractionFromNode: {
     noNode: m.splitFractionFromNode(null),
@@ -577,6 +612,8 @@ def picker_api(tmp_path_factory: pytest.TempPathFactory) -> dict:
             "floor_rows_inputs": json.dumps([list(args) for args, _ in FLOOR_ROWS_CASES]),
             "split_fraction_values": ", ".join(js for js, _ in SPLIT_FRACTION_CASES),
             "split_heights_inputs": json.dumps([list(args) for args, _ in SPLIT_HEIGHTS_CASES]),
+            "panel_scale_inputs": json.dumps([list(args) for args, _ in PANEL_SCALE_CASES]),
+            "drag_split_inputs": json.dumps([list(args) for args, _ in DRAG_SPLIT_CASES]),
             "feed_content_equal_inputs": json.dumps([[a, b] for a, b, _ in FEED_CONTENT_EQUAL_CASES]),
             "move_selected_row_inputs": json.dumps(
                 [list(args) for args, _ in MOVE_SELECTED_ROW_CASES]
@@ -660,6 +697,8 @@ def test_module_exports_the_entry_point_and_pure_helpers(picker_api: dict) -> No
         "hasClampSplitFraction": True,
         "hasSplitHeights": True,
         "hasSplitFractionFromNode": True,
+        "hasPanelScale": True,
+        "hasDragSplitFraction": True,
         "hasFeedContentEqual": True,
         # §6.13 "Live sync" round: drag-reorder math + the linked-loader
         # sync decision cores
@@ -2259,7 +2298,8 @@ class TestUiRound20260814:
         of the always-every-row `state.selection.loras.length` term."""
         assert "max-height: 132px" not in source
         assert (
-            ".eps-lp-selected-list { flex: 0 0 auto; padding: 0 3px 4px; border-bottom:" in source
+            ".eps-lp-selected-list { flex: 0 0 auto; box-sizing: border-box; padding: 0 3px 4px; "
+            "border-bottom:" in source
         )
         grow = _function_body(source, "syncSelectedGrowth(state)")
         assert "(count - previous) * SELECTED_ROW_PX" in grow
@@ -2773,8 +2813,9 @@ class TestFixedHeightRound20260822:
     def test_css_fixed_class_scrolls_the_list_and_splits_the_height(self, source: str) -> None:
         """`.eps-lp-fixed` on the root: the Selected list becomes a shrinkable
         item capped at half the panel with its own scrollbar and a
-        FIXED_SELECTED_ROWS-row minimum; the browser keeps `flex: 1 1 auto;
-        min-height: 0` and takes the rest. The base (ON) rule is untouched.
+        FIXED_SELECTED_ROWS-row minimum; the browser is `flex: 1 1 0;
+        min-height: 0` and takes the rest (basis 0 since v0.100.1 -- see
+        TestDividerTracksPointer_v0_100_1). The base (ON) rule is untouched.
         `max-height: 50%` resolves because `.eps-lp-root` is `height: 100%`
         of the DOM-widget element, which litegraph sizes in px."""
         assert (
@@ -2783,7 +2824,7 @@ class TestFixedHeightRound20260822:
             "overflow-y: auto; overflow-x: hidden; }" in source
         )
         assert (
-            ".eps-lp-browser { flex: 1 1 auto; display: flex; flex-direction: column; "
+            ".eps-lp-browser { flex: 1 1 0; display: flex; flex-direction: column; "
             "min-height: 0; overflow: hidden; }" in source
         )
         assert ".eps-lp-root { display: flex; flex-direction: column; width: 100%; height: 100%;" in source
@@ -2857,8 +2898,8 @@ class TestSplitDividerRoundM5:
     def test_split_property_name_and_fraction_constants(self, picker_api: dict) -> None:
         constants = picker_api["constants"]
         assert constants["propSelectedSplit"] == "Selected split"
-        assert constants["splitFractionMin"] == 0.15
-        assert constants["splitFractionMax"] == 0.85
+        assert constants["splitFractionMin"] == 0.05
+        assert constants["splitFractionMax"] == 0.95
         assert constants["defaultSplitFraction"] == 0.5
 
     def test_clamp_split_fraction_cases(self, picker_api: dict) -> None:
@@ -2879,7 +2920,7 @@ class TestSplitDividerRoundM5:
             "noProperties": 0.5,
             "unset": 0.5,
             "set": 0.3,
-            "outOfRange": 0.85,
+            "outOfRange": 0.95,
         }
 
     # -- DOM placement --------------------------------------------------------
@@ -2897,7 +2938,7 @@ class TestSplitDividerRoundM5:
 
     def test_divider_has_a_title_and_row_resize_cursor(self, source: str) -> None:
         assert "title: 'Drag to resize" in source
-        assert ".eps-lp-split-divider { flex: 0 0 auto; height: 8px; cursor: row-resize;" in source
+        assert ".eps-lp-split-divider { flex: 0 0 auto; height: 12px; cursor: row-resize;" in source
 
     # -- pointer capture / cleanup ---------------------------------------------
 
@@ -2952,13 +2993,17 @@ class TestSplitDividerRoundM5:
         """Every pointermove updates the DOM directly; the node property is
         untouched until drop, so a drag can't spam onPropertyChanged/undo."""
         move = _function_body(source, "moveSplitDivider(state, drag, clientY)")
-        assert "drag.liveFraction = clampSplitFraction(drag.startFraction + deltaFraction)" in move
+        expected_fraction_call = (
+            "dragSplitFraction(drag.startTopPx, clientY - drag.startClientY, "
+            "drag.scale, drag.totalPx)"
+        )
+        assert expected_fraction_call in move
+        assert "drag.liveFraction = fraction" in move
         expected_split_call = (
             "splitHeights(drag.totalPx, drag.liveFraction, SPLIT_MIN_TOP_PX, SPLIT_MIN_BOTTOM_PX)"
         )
         assert expected_split_call in move
-        assert "state.selectedListEl.style.flexBasis" in move
-        assert "state.selectedListEl.style.maxHeight" in move
+        assert "setSelectedListHeight(state, top)" in move
         assert "persistSplitFraction" not in move
 
     def test_drop_persists_the_live_fraction_through_set_property(self, source: str) -> None:
@@ -3022,6 +3067,7 @@ class TestSplitDividerRoundM5:
         assert "if (!shouldAutoGrow(state.node)) {" in body
         assert "state.selectedListEl.style.flexBasis = ''" in body
         assert "state.selectedListEl.style.maxHeight = ''" in body
+        assert "state.selectedListEl.style.flexShrink = ''" in body
 
     def test_never_calls_set_size(self, source: str) -> None:
         """The divider only redistributes height the node already has --
@@ -3054,6 +3100,90 @@ class TestSplitDividerRoundM5:
         assert "new ResizeObserver(() => applySplit(state))" in body
         assert "observer.observe(state.root)" in body
         assert "installSplitResizeObserver(state)" in _function_body(source, "buildUi(state)")
+
+
+class TestDividerTracksPointer_v0_100_1:
+    """Owner report 2026-10-27: dragging the split divider "doesn't follow
+    the drag of the mouse, and there is a limit on where it can be dragged
+    that is pretty extreme so the top section is always very small". Two
+    rig-reproduced causes: (1) the Selected list was a SHRINKABLE flex item
+    next to a browser whose flex basis was its whole list, so a long folder
+    squeezed a 229px split to the 2-row floor (69px rendered); (2) the drag
+    divided screen-px pointer travel by a layout-px total, so at canvas zoom
+    0.6 the divider ran 1.67x ahead of the pointer."""
+
+    @pytest.fixture(scope="class")
+    def source(self) -> str:
+        return PICKER_JS.read_text(encoding="utf-8")
+
+    # -- pure helpers, driven under Node --------------------------------------
+
+    def test_panel_scale_cases(self, picker_api: dict) -> None:
+        pairs = zip(PANEL_SCALE_CASES, picker_api["panelScale"], strict=True)
+        for (args, expected), got in pairs:
+            assert got == pytest.approx(expected), (
+                f"panelScale{args} -> {got!r}, wanted {expected!r}"
+            )
+
+    def test_drag_split_fraction_cases(self, picker_api: dict) -> None:
+        pairs = zip(DRAG_SPLIT_CASES, picker_api["dragSplitFraction"], strict=True)
+        for (args, expected), got in pairs:
+            if expected is None:
+                assert got is None, f"dragSplitFraction{args} -> {got!r}, wanted None"
+            else:
+                assert got == pytest.approx(expected), (
+                    f"dragSplitFraction{args} -> {got!r}, wanted {expected!r}"
+                )
+
+    # -- (1) the squeeze -------------------------------------------------------
+
+    def test_selected_list_height_is_pinned_unshrinkable(self, source: str) -> None:
+        """flex-shrink 0 is the load-bearing write -- without it the flex
+        algorithm hands the overflow out by basis and the browser wins."""
+        body = _function_body(source, "setSelectedListHeight(state, topPx)")
+        assert "style.flexShrink = '0'" in body
+        assert "style.flexBasis = `${topPx}px`" in body
+        assert "style.maxHeight = `${topPx}px`" in body
+        assert "setSelectedListHeight(state, top)" in _function_body(source, "applySplit(state)")
+
+    def test_browser_basis_is_zero_and_selected_list_is_border_box(self, source: str) -> None:
+        """The browser takes only what is left; border-box keeps the list's
+        offsetHeight equal to the height written, so a drag starting from
+        the rendered height never creeps by the padding + border."""
+        assert ".eps-lp-browser { flex: 1 1 0;" in source
+        assert ".eps-lp-browser { flex: 1 1 auto;" not in source
+        assert ".eps-lp-selected-list { flex: 0 0 auto; box-sizing: border-box;" in source
+
+    def test_apply_split_keeps_a_live_drag_through_a_repaint(self, source: str) -> None:
+        body = _function_body(source, "applySplit(state)")
+        assert "state.splitDrag?.liveFraction ?? splitFractionFromNode(state.node)" in body
+
+    # -- (2) the zoom ------------------------------------------------------------
+
+    def test_drag_records_rendered_start_height_and_panel_zoom(self, source: str) -> None:
+        wire = _function_body(source, "wireSplitDivider(state)")
+        assert "startTopPx: state.selectedListEl.offsetHeight" in wire
+        assert (
+            "scale: panelScale(state.root.getBoundingClientRect().height, state.root.offsetHeight)"
+            in wire
+        )
+        assert "startFraction" not in wire  # the old fraction-delta math is gone
+        ensure_at = wire.index("ensureFixedForDrag(state)")
+        start_at = wire.index("startTopPx:")
+        assert ensure_at < start_at  # measured AFTER the flip has applied the split
+
+    def test_grabbing_while_auto_grow_seeds_the_on_screen_height(self, source: str) -> None:
+        """No jump under the pointer on press: the fraction is seeded from
+        the Selected list's current height before auto-grow flips off."""
+        ensure = _function_body(source, "ensureFixedForDrag(state)")
+        assert "const current = state.selectedListEl?.offsetHeight || 0" in ensure
+        assert "persistSplitFraction(state, current / total)" in ensure
+        seed_at = ensure.index("persistSplitFraction(state, current / total)")
+        flip_at = ensure.index("node.setProperty(PROP_AUTO_GROW, false)")
+        assert seed_at < flip_at
+
+    def test_divider_is_easier_to_grab(self, source: str) -> None:
+        assert ".eps-lp-split-divider::after { content: '';" in source
 
 
 class TestStrengthEditSurvivesTeardown20260901:

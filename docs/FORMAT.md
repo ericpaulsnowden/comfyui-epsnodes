@@ -3653,7 +3653,7 @@ warns and aborts — probe artifact, not a bug). Dragging while
 `Auto-grow with selection` is ON flips it OFF first (`ensureFixedForDrag` —
 the corner-drag "hand on the height" rule; no toast, the divider tooltip
 explains). The fraction persists as `node.properties['Selected split']`
-(clamped 0.15–0.85, default 0.5) — a PROPERTY, not a widget (§8-safe),
+(clamped 0.15–0.85 until v0.100.1, now 0.05–0.95; default 0.5) — a PROPERTY, not a widget (§8-safe),
 restored through litegraph's own configure loop and re-applied by
 `applySplit`, which under auto-grow clears the inline override back to the
 base CSS so a dragged fraction never leaks into grow mode; a
@@ -3661,6 +3661,29 @@ base CSS so a dragged fraction never leaks into grow mode; a
 `clampSplitFraction`/`splitHeights` (floors scale down proportionally on
 degenerate totals, never negative)/`splitFractionFromNode` are the
 headless test surface.
+
+**Divider tracks the pointer (v0.100.1, owner report 2026-10-27: "it
+doesn't follow the drag of the mouse, and there is a limit … so the top
+section is always very small").** Two defects, both rig-reproduced:
+(1) *Squeeze:* fixed-mode `.eps-lp-selected-list` was `flex: 0 1 auto` and
+`.eps-lp-browser` `flex: 1 1 auto`, so on overflow the two shrank in
+proportion to their flex BASES — and the browser's basis was its whole
+list (60 loras ≈ 1300px). A 229px split rendered at 69px (the 2-row
+min-height), and a drag moved the divider a fraction of the pointer.
+Fix: `setSelectedListHeight` pins the list with inline `flex-shrink: 0`
+(+ basis/max-height), and the browser's basis is now `0` so it takes the
+remainder. (2) *Zoom:* the drag divided SCREEN px (`clientY`) by a LAYOUT-px
+total, so the divider moved 1/zoom × the pointer (1.67× at 0.6). Fix:
+`panelScale(rect.height, offsetHeight)` reads the live CSS-transform zoom
+(classic overlay and the Nodes 2.0 TransformPane alike) and
+`dragSplitFraction(startTopPx, Δy, scale, total)` works in layout px from
+the list's RENDERED height at drag start (no first-move jump when a floor
+had overridden the fraction). `ensureFixedForDrag` now seeds
+`Selected split` from the on-screen height before flipping auto-grow off,
+so a press never jumps either; `applySplit` honours an in-flight drag's
+live fraction if a repaint lands mid-drag. Range widened to 0.05–0.95 —
+the pixel floors (2 rows top, 80px = breadcrumb + search + a row bottom)
+are the real stops now. Divider 8 → 12px with a centred grip.
 
 
 **Height policy (v0.73.0, owner report 2026-08-22: "it should not change
