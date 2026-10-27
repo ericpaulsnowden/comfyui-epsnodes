@@ -92,6 +92,12 @@
  * manual-resize watch above never come into it. The Send row -- unchanged
  * behaviour, only position -- is now the LAST section, below Selected and
  * the browser, with only the collapsible status footer after it.
+ * v0.100.1 (owner report: the divider "doesn't follow the drag of the
+ * mouse" and the top section "is always very small"): the list is pinned
+ * with `flex-shrink: 0` so a long browse folder can no longer squeeze it
+ * (`setSelectedListHeight`), and the drag converts pointer travel through
+ * the panel's own CSS zoom (`panelScale` / `dragSplitFraction`) so the
+ * divider stays under the pointer at any canvas zoom.
  *
  * No window-level listeners: every interaction is a plain element-level
  * click/change/input, so §7.5's capture-phase requirement never comes up.
@@ -218,11 +224,15 @@ export const PROP_BROWSE_PATH = 'Browse folder'
  */
 export const PROP_LINKED_LOADER = 'Linked loader'
 
-/** clampSplitFraction()'s usable range -- generous enough that either
- * section can dominate, never so extreme that the other collapses to a
- * sliver no wider than its own chrome. */
-export const SPLIT_FRACTION_MIN = 0.15
-export const SPLIT_FRACTION_MAX = 0.85
+/** clampSplitFraction()'s usable range. v0.100.1 (owner report: the
+ * divider's range "is pretty extreme so the top section is always very
+ * small") widened it from 0.15-0.85: the real stops are now the two pixel
+ * floors below (SPLIT_MIN_TOP_PX / SPLIT_MIN_BOTTOM_PX), which mean
+ * something on screen -- two Selected rows, or the breadcrumb + search +
+ * a row of the browser -- where a fraction meant a different size on
+ * every node. */
+export const SPLIT_FRACTION_MIN = 0.05
+export const SPLIT_FRACTION_MAX = 0.95
 
 /** The pre-divider CSS behaviour (`.eps-lp-fixed .eps-lp-selected-list`'s
  * flat `max-height: 50%`) -- the fallback whenever the property is unset,
@@ -242,9 +252,11 @@ export const FIXED_SELECTED_ROWS = 2
  * fixed-mode floor already guarantees. */
 const SPLIT_MIN_TOP_PX = FIXED_SELECTED_ROWS * SELECTED_ROW_PX
 
-/** The browse section's floor while dragging -- room for its search input
- * plus a couple of rows, so the divider can never squash it to nothing. */
-const SPLIT_MIN_BOTTOM_PX = 60
+/** The browse section's floor while dragging -- its breadcrumb and search
+ * input plus about one row (v0.100.1: 60 left the list itself ~18px once
+ * the wider fraction range let the divider reach it), so the divider can
+ * never squash it to nothing. */
+const SPLIT_MIN_BOTTOM_PX = 80
 
 /** ~360px floor (§6.13) -- same Linux-font-overflow rationale as every
  * DOM-widget node in this pack (FORMAT.md §7.2); self-contained
@@ -612,11 +624,12 @@ const CSS_TEXT = `
 .eps-lp-icon-btn:hover { color: var(--input-text, #ccc); }
 .eps-lp-crumb-clear { margin-left: auto; }
 .eps-lp-section-header { flex: 0 0 auto; padding: 4px 6px 2px; font-size: 9.5px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; color: var(--descrip-text, #999); }
-.eps-lp-selected-list { flex: 0 0 auto; padding: 0 3px 4px; border-bottom: 1px solid var(--border-color, #444); }
+.eps-lp-selected-list { flex: 0 0 auto; box-sizing: border-box; padding: 0 3px 4px; border-bottom: 1px solid var(--border-color, #444); }
 .eps-lp-fixed .eps-lp-selected-list { flex: 0 1 auto; min-height: ${FIXED_SELECTED_ROWS * SELECTED_ROW_PX}px; max-height: 50%; overflow-y: auto; overflow-x: hidden; }
-.eps-lp-split-divider { flex: 0 0 auto; height: 8px; cursor: row-resize; touch-action: none; position: relative; }
-.eps-lp-split-divider::before { content: ''; position: absolute; left: 6px; right: 6px; top: 3px; height: 1px; background: var(--border-color, #444); }
-.eps-lp-split-divider:hover::before, .eps-lp-split-divider-dragging::before { background: var(--input-text, #ccc); }
+.eps-lp-split-divider { flex: 0 0 auto; height: 12px; cursor: row-resize; touch-action: none; position: relative; }
+.eps-lp-split-divider::before { content: ''; position: absolute; left: 6px; right: 6px; top: 5px; height: 1px; background: var(--border-color, #444); }
+.eps-lp-split-divider::after { content: ''; position: absolute; left: 50%; width: 32px; margin-left: -16px; top: 4px; height: 3px; border-radius: 2px; background: var(--descrip-text, #999); opacity: 0.7; }
+.eps-lp-split-divider:hover::before, .eps-lp-split-divider-dragging::before, .eps-lp-split-divider:hover::after, .eps-lp-split-divider-dragging::after { background: var(--input-text, #ccc); opacity: 1; }
 .eps-lp-send { flex: 0 0 auto; display: flex; align-items: center; gap: 6px; padding: 4px 6px; border-bottom: 1px solid var(--border-color, #444); }
 .eps-lp-send-label { flex: 0 0 auto; color: var(--descrip-text, #999); cursor: help; }
 .eps-lp-pll-select { flex: 1 1 auto; min-width: 0; background: var(--comfy-menu-bg, #262626); border: 1px solid var(--border-color, #444); color: var(--input-text, #ccc); border-radius: 3px; padding: 1px 3px; font-size: 11px; font-family: inherit; }
@@ -629,7 +642,7 @@ const CSS_TEXT = `
 .eps-lp-row-missing { color: var(--error-text, #ff4444); font-style: italic; }
 .eps-lp-row-ghost { opacity: 0.55; }
 .eps-lp-strength { flex: 0 0 auto; width: 56px; box-sizing: border-box; background: var(--comfy-menu-bg, #262626); border: 1px solid var(--border-color, #444); color: var(--input-text, #ccc); border-radius: 3px; padding: 1px 3px; font-size: 11px; font-family: inherit; }
-.eps-lp-browser { flex: 1 1 auto; display: flex; flex-direction: column; min-height: 0; overflow: hidden; }
+.eps-lp-browser { flex: 1 1 0; display: flex; flex-direction: column; min-height: 0; overflow: hidden; }
 .eps-lp-search { flex: 0 0 auto; box-sizing: border-box; width: calc(100% - 12px); margin: 4px 6px 2px; background: var(--comfy-menu-bg, #262626); border: 1px solid var(--border-color, #444); color: var(--input-text, #ccc); border-radius: 3px; padding: 2px 5px; font-size: 11px; font-family: inherit; }
 .eps-lp-thumb { flex: 0 0 auto; width: 26px; height: 26px; object-fit: cover; border-radius: 3px; background: var(--comfy-menu-bg, #262626); }
 .eps-lp-drag-handle { flex: 0 0 auto; cursor: grab; touch-action: none; user-select: none; color: var(--descrip-text, #999); padding: 0 2px; font-size: 12px; line-height: 1; }
@@ -804,6 +817,47 @@ export function splitHeights(totalPx, fraction, minTopPx = 0, minBottomPx = 0) {
  * @param {object} node @returns {number} */
 export function splitFractionFromNode(node) {
   return clampSplitFraction(node?.properties?.[PROP_SELECTED_SPLIT])
+}
+
+/**
+ * v0.100.1 (owner report: the divider "doesn't follow the drag of the
+ * mouse"): how many SCREEN pixels one LAYOUT pixel of the panel covers.
+ * Both renderers scale the panel with a CSS transform -- the classic
+ * DOM-widget overlay by the canvas zoom, Nodes 2.0's TransformPane the
+ * same way -- so a pointer's clientY moves in screen px while every height
+ * this file measures or writes (offsetHeight, clientHeight, flex-basis) is
+ * in layout px. The rendered/layout height ratio IS that zoom, read off the
+ * live element so no renderer internals are touched. 1 when either side is
+ * unmeasurable (not laid out yet, a zero-height mid-layout read).
+ * @param {number} renderedPx  getBoundingClientRect().height
+ * @param {number} layoutPx    offsetHeight
+ * @returns {number}
+ */
+export function panelScale(renderedPx, layoutPx) {
+  if (!Number.isFinite(renderedPx) || !Number.isFinite(layoutPx)) return 1
+  if (renderedPx <= 0 || layoutPx <= 0) return 1
+  return renderedPx / layoutPx
+}
+
+/**
+ * v0.100.1: the split fraction a divider drag has reached, in layout px so
+ * the divider stays under the pointer at any zoom: the Selected list's
+ * height when the drag began, plus the pointer's travel converted from
+ * screen to layout px, as a share of the space the two sections split.
+ * Starting from the RENDERED height (not the saved fraction) is what keeps
+ * the first move from jumping whenever a floor had overridden the
+ * fraction. Clamped like every other fraction; `null` when there is no
+ * measured total to divide by (the caller then leaves the DOM alone).
+ * @param {number} startTopPx @param {number} deltaClientY
+ * @param {number} scale @param {number} totalPx
+ * @returns {number|null}
+ */
+export function dragSplitFraction(startTopPx, deltaClientY, scale, totalPx) {
+  if (!Number.isFinite(totalPx) || totalPx <= 0) return null
+  const zoom = Number.isFinite(scale) && scale > 0 ? scale : 1
+  const start = Number.isFinite(startTopPx) ? startTopPx : 0
+  const delta = Number.isFinite(deltaClientY) ? deltaClientY : 0
+  return clampSplitFraction((start + delta / zoom) / totalPx)
 }
 
 // --- State ---
@@ -2045,14 +2099,34 @@ function applySplit(state) {
   if (!shouldAutoGrow(state.node)) {
     const total = measureSplittableTotalPx(state)
     if (total > 0) {
-      const { top } = splitHeights(total, splitFractionFromNode(state.node), SPLIT_MIN_TOP_PX, SPLIT_MIN_BOTTOM_PX)
-      state.selectedListEl.style.flexBasis = `${top}px`
-      state.selectedListEl.style.maxHeight = `${top}px`
+      // A repaint landing mid-drag (a feed refresh, an apply) keeps the
+      // live preview rather than snapping back to the last saved value.
+      const fraction = state.splitDrag?.liveFraction ?? splitFractionFromNode(state.node)
+      const { top } = splitHeights(total, fraction, SPLIT_MIN_TOP_PX, SPLIT_MIN_BOTTOM_PX)
+      setSelectedListHeight(state, top)
       return
     }
   }
   state.selectedListEl.style.flexBasis = ''
   state.selectedListEl.style.maxHeight = ''
+  state.selectedListEl.style.flexShrink = ''
+}
+
+/**
+ * Pins the Selected list to exactly *topPx*. v0.100.1 (owner report: "the
+ * top section is always very small"): `flex-shrink: 0` is the load-bearing
+ * part. Without it the Selected list (fixed-mode CSS `flex: 0 1 auto`)
+ * shared the overflow with the browser in proportion to their flex bases,
+ * and the browser's basis was its whole list's height -- so a folder of 60
+ * loras squeezed a 229px split down to the 2-row min-height, and dragging
+ * moved the divider a fraction of the pointer's travel. The browser's
+ * basis is now 0 as well (CSS), so it simply takes what is left.
+ */
+function setSelectedListHeight(state, topPx) {
+  const style = state.selectedListEl.style
+  style.flexShrink = '0'
+  style.flexBasis = `${topPx}px`
+  style.maxHeight = `${topPx}px`
 }
 
 /** Re-applies the split on any change to `state.root`'s OWN rendered size
@@ -2078,6 +2152,12 @@ function installSplitResizeObserver(state) {
 function ensureFixedForDrag(state) {
   const node = state.node
   if (!shouldAutoGrow(node)) return
+  // v0.100.1: start the fixed split from the height the Selected list has
+  // on screen RIGHT NOW, so grabbing the divider never makes it jump to
+  // the old saved (or default 50%) fraction under the pointer.
+  const total = measureSplittableTotalPx(state)
+  const current = state.selectedListEl?.offsetHeight || 0
+  if (total > 0 && current > 0) persistSplitFraction(state, current / total)
   if (typeof node.setProperty === 'function') {
     node.setProperty(PROP_AUTO_GROW, false)
   } else {
@@ -2129,7 +2209,10 @@ function wireSplitDivider(state) {
     const drag = {
       pointerId: event.pointerId,
       startClientY: event.clientY,
-      startFraction: splitFractionFromNode(state.node),
+      // v0.100.1: the RENDERED height (layout px) and the panel's zoom, so
+      // the divider tracks the pointer 1:1 at any canvas zoom.
+      startTopPx: state.selectedListEl.offsetHeight,
+      scale: panelScale(state.root.getBoundingClientRect().height, state.root.offsetHeight),
       totalPx: measureSplittableTotalPx(state),
       liveFraction: null
     }
@@ -2176,19 +2259,21 @@ function wireSplitDivider(state) {
   })
 }
 
-/** Live preview while the pointer moves: the fraction tracks *clientY*'s
- * offset from the drag's start as a share of the measured total (frozen at
- * drag start -- the node's own size never changes mid-drag, only the
- * internal split does), clamped, and applied straight to the DOM. The node
- * property is NOT written here (`persistSplitFraction` runs once, on drop)
- * so a hundred pointermoves never spam onPropertyChanged/undo. */
+/** Live preview while the pointer moves: `dragSplitFraction` turns the
+ * pointer's travel since the drag began into layout px (divided by the
+ * panel's zoom, v0.100.1) on top of the Selected list's rendered height at
+ * the start, as a share of the measured total (frozen at drag start -- the
+ * node's own size never changes mid-drag, only the internal split does),
+ * clamped, and applied straight to the DOM. The node property is NOT
+ * written here (`persistSplitFraction` runs once, on drop) so a hundred
+ * pointermoves never spam onPropertyChanged/undo. */
 function moveSplitDivider(state, drag, clientY) {
   if (drag.totalPx <= 0) return
-  const deltaFraction = (clientY - drag.startClientY) / drag.totalPx
-  drag.liveFraction = clampSplitFraction(drag.startFraction + deltaFraction)
+  const fraction = dragSplitFraction(drag.startTopPx, clientY - drag.startClientY, drag.scale, drag.totalPx)
+  if (fraction == null) return
+  drag.liveFraction = fraction
   const { top } = splitHeights(drag.totalPx, drag.liveFraction, SPLIT_MIN_TOP_PX, SPLIT_MIN_BOTTOM_PX)
-  state.selectedListEl.style.flexBasis = `${top}px`
-  state.selectedListEl.style.maxHeight = `${top}px`
+  setSelectedListHeight(state, top)
 }
 
 /** Drop commit: persists the live fraction if the drag actually moved (a

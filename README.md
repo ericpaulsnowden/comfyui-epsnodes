@@ -617,6 +617,11 @@ favorites or recently-used anywhere in the ecosystem.
   room. The split saves with the workflow. Grabbing it while *Auto-grow
   with selection* is on switches that off first (your hand is on the
   height now), same as a corner drag.
+- **The divider follows your mouse (v0.100.1).** It now stays under the
+  pointer at any canvas zoom, and a long folder in the browser no longer
+  squeezes the Selected list down to two rows — drag it as far as you
+  like, until either side is down to its last usable row. The grab bar
+  is a little taller, with a visible grip in the middle.
 - **The link row lives at the bottom (v0.78.0).** It moved below the
   browser, so the panel reads top-to-bottom: Selected, divider, browse,
   link.
