@@ -1705,17 +1705,51 @@ function attachDomWidget(node, rootEl, state) {
   return domWidget
 }
 
+/** Same contract as picker.js's `panelScale` (hand copy, this pack's
+ * convention -- keep the two in step): how many SCREEN px one LAYOUT px of
+ * the panel covers. Both renderers scale DOM widgets with a CSS transform
+ * (the classic overlay by the canvas zoom, Nodes 2.0's TransformPane the
+ * same way), so pointer clientX travels in screen px while `flex-basis`
+ * and offsetWidth are layout px. 1 when either side is unmeasurable.
+ * @param {number} renderedPx @param {number} layoutPx @returns {number} */
+export function panelScale(renderedPx, layoutPx) {
+  if (!Number.isFinite(renderedPx) || !Number.isFinite(layoutPx)) return 1
+  if (renderedPx <= 0 || layoutPx <= 0) return 1
+  return renderedPx / layoutPx
+}
+
+/** The left pane's next width (layout px) during a splitter drag.
+ * v0.100.2 (found fixing the LoRA Picker divider, owner report 2026-10-27:
+ * "doesn't follow the drag of the mouse"): this used to add SCREEN-px
+ * pointer travel to the pane's SCREEN-px rendered width and write the sum
+ * as LAYOUT px -- so at canvas zoom 0.6 the pane snapped to 60% of its
+ * width on the first move and then lagged the pointer, and zoomed in it
+ * jumped wider and ran ahead. Now: layout-px start width + pointer travel
+ * divided by the zoom, clamped to [80, rootWidth - 160] (the right pane's
+ * reserve), all in layout px.
+ * @param {number} startWidth layout px (offsetWidth at pointerdown)
+ * @param {number} deltaClientX screen px
+ * @param {number} scale panelScale() at pointerdown
+ * @param {number} rootWidth layout px (state.root.offsetWidth)
+ * @returns {number} */
+export function splitterLeftWidth(startWidth, deltaClientX, scale, rootWidth) {
+  const minLeft = 80
+  const maxLeft = Math.max(minLeft, (Number.isFinite(rootWidth) ? rootWidth : 0) - 160)
+  const zoom = Number.isFinite(scale) && scale > 0 ? scale : 1
+  const start = Number.isFinite(startWidth) ? startWidth : minLeft
+  const delta = Number.isFinite(deltaClientX) ? deltaClientX : 0
+  return Math.min(maxLeft, Math.max(minLeft, start + delta / zoom))
+}
+
 function wireSplitter(state, splitter) {
   let dragging = false
   let startX = 0
   let startWidth = 0
+  let scale = 1
 
   const onPointerMove = (event) => {
     if (!dragging) return
-    const rootRect = state.root.getBoundingClientRect()
-    const minLeft = 80
-    const maxLeft = Math.max(minLeft, rootRect.width - 160)
-    const next = Math.min(maxLeft, Math.max(minLeft, startWidth + (event.clientX - startX)))
+    const next = splitterLeftWidth(startWidth, event.clientX - startX, scale, state.root.offsetWidth)
     state.leftPane.style.flex = `0 0 ${next}px`
   }
   const stopDragging = (event) => {
@@ -1732,7 +1766,9 @@ function wireSplitter(state, splitter) {
   splitter.addEventListener('pointerdown', (event) => {
     dragging = true
     startX = event.clientX
-    startWidth = state.leftPane.getBoundingClientRect().width
+    // v0.100.2: LAYOUT px + the panel's zoom (see splitterLeftWidth).
+    startWidth = state.leftPane.offsetWidth
+    scale = panelScale(state.root.getBoundingClientRect().width, state.root.offsetWidth)
     try {
       splitter.setPointerCapture(event.pointerId)
     } catch {
