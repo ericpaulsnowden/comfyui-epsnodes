@@ -284,6 +284,10 @@ captions).
   view — the sections you never want to see there stop re-opening. (It's a
   right-click node property, `Collapsed sections`, if you ever want to
   hand-edit it.)
+- **The pane splitter follows your mouse (v0.100.2).** Dragging the bar
+  between the prompt list and the editor now stays under the pointer at any
+  canvas zoom; before, zoomed out it snapped narrower on the first move and
+  lagged, and zoomed in it jumped and ran ahead.
 
 ## EPS Prompt Builder (shipped)
 

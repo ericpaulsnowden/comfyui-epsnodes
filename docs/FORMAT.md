@@ -4444,6 +4444,19 @@ live fraction if a repaint lands mid-drag. Range widened to 0.05–0.95 —
 the pixel floors (2 rows top, 80px = breadcrumb + search + a row bottom)
 are the real stops now. Divider 8 → 12px with a centred grip.
 
+**Same bug, Notebook pane splitter (v0.100.2).** The shared-panel-code
+sweep after v0.100.1 (every `clientX/Y` delta in `web/`) found one sibling:
+notebook.js `wireSplitter` added screen-px pointer travel to the left pane's
+screen-px `getBoundingClientRect().width` and wrote the sum as a layout-px
+`flex-basis` — a jump on the first move and 1/zoom tracking after it. Now
+`startWidth = offsetWidth` (layout) and the pure `splitterLeftWidth(start,
+Δx, panelScale(…), root.offsetWidth)` divides the travel by the zoom (same
+[80, root − 160] clamp). `panelScale` is a hand copy of picker.js's — keep
+them in step. Every other drag in `web/` compares like with like (client
+coords against rects, or a threshold on raw travel) and needs no change.
+Rule for new code: a pointer delta is SCREEN px; divide it by
+`panelScale(rect, offset)` before adding it to any layout size.
+
 
 **Height policy (v0.73.0, owner report 2026-08-22: "it should not change
 the overall height of the node once a user sets it … the top section

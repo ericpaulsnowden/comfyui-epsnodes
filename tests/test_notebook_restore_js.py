@@ -494,6 +494,8 @@ const out = {
     notebookCacheSet: typeof nb.notebookCacheSet === 'function',
     isUnchangedResponse: typeof nb.isUnchangedResponse === 'function',
     parseCollapsedSections: typeof nb.parseCollapsedSections === 'function',
+    panelScale: typeof nb.panelScale === 'function',
+    splitterLeftWidth: typeof nb.splitterLeftWidth === 'function',
     toggleCollapsedSection: typeof nb.toggleCollapsedSection === 'function',
     isSectionCollapsed: typeof nb.isSectionCollapsed === 'function',
     parseDraftsWidgetValue: typeof nb.parseDraftsWidgetValue === 'function',
@@ -696,6 +698,19 @@ out.drafts = {
     differentNamesDontCollide: nb.categoryDraftKey('Cat') !== nb.categoryDraftKey('Other')
   }
 }
+// v0.100.2 splitter zoom fix: [startWidth, deltaClientX, scale, rootWidth]
+out.panelScale = [[500, 500], [300, 500], [1000, 500], [0, 500], [500, 0]].map(
+  ([r, l]) => nb.panelScale(r, l)
+)
+out.splitterLeftWidth = [
+  [200, 60, 1, 800],
+  [200, 60, 0.6, 800],
+  [200, 120, 2, 800],
+  [200, -1000, 1, 800],
+  [200, 5000, 1, 800],
+  [200, 60, 0, 800],
+  [200, 0, 0.6, 800]
+].map(([w, d, s, r]) => nb.splitterLeftWidth(w, d, s, r))
 process.stdout.write(JSON.stringify(out))
 """
 
@@ -1250,12 +1265,21 @@ def test_collapsed_sections_export_list_is_additive(source: str) -> None:
     added_v0_87_5 = ("export function parseOpenCategoryProperty(raw)",)
     for signature in added_v0_87_5:
         assert signature in source, signature
+    # v0.100.2: the pane splitter's zoom-correct width math, exported so
+    # TestSplitterTracksPointer_v0_100_2 can drive it under Node.
+    added_v0_100_2 = (
+        "export function panelScale(renderedPx, layoutPx)",
+        "export function splitterLeftWidth(startWidth, deltaClientX, scale, rootWidth)",
+    )
+    for signature in added_v0_100_2:
+        assert signature in source, signature
     assert source.count("\nexport function ") == (
         len(pre_existing)
         + len(added_this_round)
         + len(added_v0_86_0)
         + len(added_v0_87_4)
         + len(added_v0_87_5)
+        + len(added_v0_100_2)
     )
 
 
@@ -2332,3 +2356,39 @@ class TestOpenCategorySurvivesARebuild:
         # WITH THE WORKFLOW, never a browser-local stash) -- pinned again
         # here since this round adds a second node property.
         assert "localStorage" not in source
+
+
+class TestSplitterTracksPointer_v0_100_2:
+    """Found while fixing the LoRA Picker divider (owner report 2026-10-27:
+    "doesn't follow the drag of the mouse"): the Notebook's pane splitter
+    added screen-px pointer travel to the pane's screen-px rendered width
+    and wrote the sum as a layout-px flex-basis, so at any canvas zoom but
+    1 the pane jumped on the first move and then lagged or ran ahead."""
+
+    def test_panel_scale(self, cache_api: dict) -> None:
+        assert cache_api["panelScale"] == pytest.approx([1, 0.6, 2, 1, 1])
+
+    def test_splitter_width_tracks_pointer_at_any_zoom(self, cache_api: dict) -> None:
+        assert cache_api["splitterLeftWidth"] == pytest.approx([
+            260,  # zoom 1: 60 screen px = 60 layout px
+            300,  # zoom 0.6: 60 screen px = 100 layout px
+            260,  # zoom 2: 120 screen px = 60 layout px
+            80,  # left floor
+            640,  # right pane keeps its 160px reserve
+            260,  # unmeasurable zoom degrades to 1
+            200,  # no travel: no jump, whatever the zoom
+        ])
+
+    def test_drag_measures_layout_px_and_the_zoom(self, source: str) -> None:
+        body = _body(source, "wireSplitter(state, splitter)")
+        assert "startWidth = state.leftPane.offsetWidth" in body
+        assert (
+            "scale = panelScale(state.root.getBoundingClientRect().width, state.root.offsetWidth)"
+            in body
+        )
+        assert (
+            "splitterLeftWidth(startWidth, event.clientX - startX, scale, state.root.offsetWidth)"
+            in body
+        )
+        assert "getBoundingClientRect().width\n" not in body.split("scale = ")[0]
+        assert "state.leftPane.getBoundingClientRect()" not in body
