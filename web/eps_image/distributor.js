@@ -1775,6 +1775,12 @@ function addHeaderWidget(node) {
     // backend (the real enabled-set lives in the `toggles` widget above).
     serialize: false,
     serializeValue: () => undefined,
+    // v0.100.4: `LGraphNode.setProperty` (right-click > Properties > Outputs,
+    // the properties panel's Assign) scans EVERY widget's `options.property`
+    // with no guard on `options` itself -- without this object the property
+    // applied and then the dialog threw. The prompt-side twin of the flag
+    // above; neither payload changes. switcher.js's header: same object.
+    options: { serialize: false },
     computeSize(width) {
       return [width ?? 0, HEADER_ROW_HEIGHT]
     },

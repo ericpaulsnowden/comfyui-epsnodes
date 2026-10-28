@@ -1375,6 +1375,31 @@ changing the widget kind.
 
 ## §6.4 `EPSSwitcher` (display: "EPS Image Switcher") — image toggle + fan-out
 
+**v0.100.4 — paste with links keeps every row; Properties no longer
+throws.** (1) Ctrl+Shift+V of a wired switcher came back with only
+`<prefix>_1` wired. On 1.52.7 the copy half (`_serializeItems`) calls
+`node.clone()`, which configures a snapshot with every input link nulled
+and serializes it in the SAME tick; the configure wrap's post-restore
+converge ran synchronously in `finally`, so it collapsed the snapshot to
+`[<prefix>_1]` (dropping row labels with the removed inputs) before the
+clipboard was written, and the paste's `connect()` calls, which go by slot
+INDEX, found nothing to land on. The post-configure pass now goes through
+the live path's deferred `scheduleConverge`; the runner skips a node that
+is not in a graph (the never-added clipboard clone) and a node whose
+`configure()` restarted, and the pass is idempotent. Paste with links now
+keeps every wire, the spare, `toggles` and labels (high/low pairs too);
+plain Ctrl+V and Clone give a tidy one-spare node with `toggles` kept.
+This supersedes §7's note that the post-restore reconverge runs
+synchronously: it still runs only AFTER the restore lands, one macrotask
+later. (2) `LGraphNode.setProperty` (right-click → Properties, the
+properties panel's Assign) scans every widget's `options.property` with
+no guard on `options`; the header custom widget had none, so the property
+applied and then the dialog threw (no `afterChange`, no repaint). The
+header now carries `options: { serialize: false }`, the prompt-side twin
+of its `serialize: false`, so neither payload changes. §6.11's Distributor
+header had the identical gap and the identical fix. Pinned by
+`tests/test_switcher_js.py`'s clipboard/paste/clone/setProperty probes.
+
 **v0.100.3 — a row's `false` is STICKY to its row number (owner report
 2026-10-27: "5 models connected but only model 1 turned on, I still get 2
 videos", and every video's embedded workflow showed rows 1 AND 5 on).**
