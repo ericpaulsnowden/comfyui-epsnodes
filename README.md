@@ -779,6 +779,14 @@ off means three runs.
   long for its width, widen that node — its box has to stay clear of the
   socket to remain clickable.
 - Toggle states save with the workflow and survive reload.
+- **An off row stays off, whatever happens to its wire** (since
+  v0.100.3). Unplug a row's wire and plug it back in, swap its loader, or
+  delete the loader and add a new one: if the row was off, it is still off.
+  Before, any of those could quietly turn the row back on, so the next
+  queue made an extra run (five models wired, only model 1 on, two videos
+  out). Only a click on the row or on Toggle All changes it. Workflows and
+  videos saved before the fix still load with that row on, because that is
+  what they recorded.
 
 ## EPS Model / CLIP / VAE Switcher (shipped)
 
@@ -799,7 +807,8 @@ several models/VAEs in one queue".
   consumes `models_low`.
 - **Everything the image Switcher does, identically:** growing sockets (wire
   the last one and a new one appears), per-row toggles, Toggle All,
-  double-click rename, all-off is valid (queue succeeds, downstream skips).
+  double-click rename, all-off is valid (queue succeeds, downstream skips),
+  and an off row stays off when you re-plug or swap its model (v0.100.3).
 - **A toggled-off branch never runs at all.** Wire three Load Checkpoint
   nodes into a Model Switcher, tick one off, and that checkpoint is never
   even loaded — not loaded-then-discarded. Verified against a real loader.

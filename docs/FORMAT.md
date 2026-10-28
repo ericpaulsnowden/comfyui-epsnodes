@@ -1411,6 +1411,35 @@ resolves by path / node identity. `comparePathIds` is the shared
 
 ## §6.4 `EPSSwitcher` (display: "EPS Image Switcher") — image toggle + fan-out
 
+**v0.100.3 — a row's `false` is STICKY to its row number (owner report
+2026-10-27: "5 models connected but only model 1 turned on, I still get 2
+videos", and every video's embedded workflow showed rows 1 AND 5 on).**
+`pruneToggles` used to drop the key of every slot that was UNWIRED at the
+moment a converge ran, so a freshly (re)wired socket always started
+enabled. Converge runs after every link change (deferred one macrotask) and
+after every `configure()`, and a row is unwired for the whole of any
+gesture that lifts its wire: picking the wire up and dropping it back
+(litegraph disconnects on pick-up, so the converge fires mid-drag), parking
+it on the canvas, deleting and re-adding the loader. The row the user had
+switched off came back ON, the queued `toggles` lacked its `false`, and the
+backend ran it. Rig-reproduced on 1.52.7 with real mouse drags; on that
+frontend the drawn boxes, the widget, `graphToPrompt()`'s `toggles` and the
+workflow copy were always the same value, so the box DID read ON at queue
+time, just unnoticed. Now only keys that cannot name a row at all (not
+`<prefix>_N` shaped) are pruned; a real row's `false` is cleared only by a
+click on that row or the header. Safe because every reader already ignores
+an unwired slot's key (backend `execute`, `_switcher_is_statically_all_off`,
+`allRowsState`/the header count), so a sticky key on a spare changes nothing
+until something is wired in, and then the row is DRAWN off with its box
+right there. The rule this replaces ("a re-wired slot starts enabled") is
+therefore withdrawn: the failure it guarded against is visible, while the
+one it caused was an extra run nobody asked for. Already-saved workflows and
+videos that lost the key can't be repaired (the absence carries no intent)
+and load with that row ON, honestly drawn. The Distributor's
+visibility-driven clear (§6.11) is a different mechanism and is unchanged.
+Pinned by `tests/test_switcher_js.py`'s attach probe (lift, drop back,
+pairs, configure gap, in-place swap, foreign keys).
+
 **v0.68.1 audit round (backend, high/low pairs):** `check_lazy_status`
 requests a row's `_low` only when that row's HIGH is itself wanted
 (connected, toggled on, not in the lazy skip set) — a high fed by a
