@@ -73,11 +73,17 @@
  *    time the `setTimeout` fires, no litegraph-internal call frame is still
  *    holding a slot index or input reference into `this.inputs`, so the
  *    restructuring can never race a caller that assumes indices stay put.
- *    `configure()`'s own post-restore converge above is UNCHANGED (still
- *    synchronous, in `finally`, once per `configure()` call) -- that path is
- *    never nested inside a live litegraph mutation, so deferring it would
- *    only add risk (e.g. a paste/undo immediately followed by another
- *    `configure()` before the deferred call fires) for no benefit.
+ *    `configure()`'s own post-restore converge stayed synchronous (in
+ *    `finally`, once per call) until v0.100.4, when it joined the same
+ *    deferred path: litegraph's `clone()` -- what `_serializeItems` puts
+ *    on the clipboard for Ctrl+C, and what Alt-drag makes -- configures a
+ *    snapshot with every input link nulled and serializes it in the SAME
+ *    tick, so a synchronous collapse there stripped every row past the
+ *    first from the clipboard and Ctrl+Shift+V came back with one wire
+ *    (rig 1.52.7, real keys). A paste/undo followed by another
+ *    `configure()` before the deferred call fires is harmless: the runner
+ *    checks `state.restoring`, and the pass is idempotent over whatever
+ *    wiring it finds.
  *
  * 2. **Per-row on/off toggle** -- rgthree Power Lora Loader's per-row dot
  *    (`web/comfyui/power_lora_loader.js` `PowerLoraLoaderWidget.onToggleDown`)
@@ -770,12 +776,13 @@ function wireImageInputGrowth(node) {
   const state = { restoring: false, convergeScheduled: false }
 
   /**
-   * Runs the actual convergeImageInputs() pass for a DEFERRED (live,
-   * post-setTimeout) call. Guarded against a `configure()` having started
-   * in the meantime (that path runs its own synchronous converge in
-   * `finally` once restore completes, so a deferred call left over from
-   * before the configure() would be redundant at best) and against the
-   * node having been removed from the graph while the timeout was pending.
+   * Runs the actual convergeImageInputs() pass for a DEFERRED call -- a
+   * live link change, or (v0.100.4) a `configure()` that just completed.
+   * Guarded against a `configure()` having started in the meantime (it
+   * schedules its own pass once restore completes, so one left over from
+   * before it would be redundant at best) and against the node not being
+   * in a graph: removed while the timeout was pending, or a `clone()`
+   * litegraph made only to serialize for the clipboard and never added.
    * @param {object} target
    */
   function runDeferredConverge(target) {
@@ -809,11 +816,17 @@ function wireImageInputGrowth(node) {
       return originalConfigure.apply(this, args)
     } finally {
       state.restoring = false
-      try {
-        convergeImageInputs(this)
-      } catch (error) {
-        console.warn(PREFIX, 'convergeImageInputs (post-configure) failed', error)
-      }
+      // v0.100.4: DEFERRED -- the live path's own macrotask, never run
+      // inside configure() itself. litegraph's `clone()` (the copy half of
+      // Ctrl+C / Ctrl+Shift+V via `_serializeItems`, and Alt-drag)
+      // configures a snapshot with EVERY input link nulled and serializes
+      // it in the same tick; a synchronous collapse here emptied that
+      // clipboard of every row past the first, and the paste then
+      // reconnected the original links by slot INDEX into slots that no
+      // longer existed, so only model_1 came back. By the time this fires
+      // the paste's own connect() calls have landed and the pass sees the
+      // real wiring; the runner skips a clone that never joins a graph.
+      scheduleConverge(this)
     }
   }
 
@@ -1175,6 +1188,15 @@ function addHeaderWidget(node) {
     // backend (the real enabled-set lives in the `toggles` widget above).
     serialize: false,
     serializeValue: () => undefined,
+    // v0.100.4: `LGraphNode.setProperty` (right-click > Properties, the
+    // properties panel's Assign) scans EVERY widget's `options.property`
+    // with no guard on `options` itself -- without this object the
+    // property applied and then the dialog threw. `serialize: false` here
+    // is the PROMPT-side twin of the flag above (graphToPrompt reads
+    // `options.serialize`; the workflow's widgets_values reads
+    // `widget.serialize`), so neither payload changes. distributor.js's
+    // header carries the identical object.
+    options: { serialize: false },
     computeSize(width) {
       return [width ?? 0, HEADER_ROW_HEIGHT]
     },

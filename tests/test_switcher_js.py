@@ -557,17 +557,24 @@ def test_configure_wrap_reconverges_only_after_the_real_restore_completes(
     switcher_source: str,
 ) -> None:
     """The wrap must call the ORIGINAL configure() (litegraph's own restore
-    of widgets_values/properties/inputs/outputs) before its own
-    convergeImageInputs() reconcile runs, and that reconcile must live in
-    the `finally` -- not a parallel branch a throwing original configure()
-    could skip -- so it always sees the restore's actual result, never a
-    stale pre-restore construction default."""
+    of widgets_values/properties/inputs/outputs) before its own reconcile
+    is even SCHEDULED, and that scheduling must live in the `finally` --
+    not a parallel branch a throwing original configure() could skip -- so
+    the pass always sees the restore's actual result, never a stale
+    pre-restore construction default. v0.100.4: the pass is DEFERRED
+    (scheduleConverge, the live path's own macrotask), never run inside
+    configure() itself -- litegraph's clone() configures a links-nulled
+    snapshot and serializes it in the same tick (copy/paste), and a
+    synchronous collapse there emptied the clipboard of every row."""
     body = _function_body(switcher_source, "wireImageInputGrowth(node)")
     assert "} finally {" in body
     restore = body.index("return originalConfigure.apply(this, args)")
     finally_kw = body.index("} finally {")
-    reconverge = body.index("convergeImageInputs(this)")
+    reconverge = body.index("scheduleConverge(this)")
     assert restore < finally_kw < reconverge
+    # The deferred runner is the one place the pass actually executes.
+    assert "convergeImageInputs(this)" not in body
+    assert "convergeImageInputs(target)" in body
 
 
 def test_converge_reaches_toggles_and_pairing_every_pass(switcher_source: str) -> None:
@@ -791,6 +798,19 @@ function makeSwitcher(id) {
     addOutput(name, type) { this.outputs.push({ name, type, links: null }) },
     removeOutput(idx) { this.outputs.splice(idx, 1) },
     addCustomWidget(widget) { this.widgets.push(widget); return widget },
+    // LGraphNode.setProperty (1.52.7): set, notify, then scan EVERY widget
+    // for one bound to the property -- `w.options.property`, with no guard
+    // on `options` itself. Reached by right-click > Properties and by the
+    // properties panel's Assign button.
+    setProperty(name, value) {
+      if (value === this.properties[name]) return
+      const prev = this.properties[name]
+      this.properties[name] = value
+      if (this.onPropertyChanged?.(name, value, prev) === false) this.properties[name] = prev
+      for (const widget of this.widgets) {
+        if (widget && widget.options.property == name) { widget.value = value; break }
+      }
+    },
     // One 20px row per input index -- what drawRowToggles/rowAtLocalY read.
     getConnectionPos(isInput, slot) { return [0, 10 + slot * 20] },
     // LGraphNode.configure (1.52.7): inputs/outputs/properties land first
@@ -798,7 +818,17 @@ function makeSwitcher(id) {
     // input gets onConnectionsChange(..., true, ...) -- `isConnected`
     // HARDCODED true even for an unwired slot -- then widgets_values.
     configure(info) {
-      if (info.inputs) this.inputs = info.inputs.map((input) => ({ ...input }))
+      if (info.inputs) {
+        // ComfyNode.configure (app.ts, 1.52.7) runs first: the DEF's own
+        // slots keep their order and take the saved slot of the same
+        // name; every other saved slot follows in file order.
+        const saved = new Map(info.inputs.map((input) => [input.name, input]))
+        const defSlots = this.inputs.map((input) => ({ ...(saved.get(input.name) ?? input) }))
+        const extras = info.inputs
+          .filter((input) => !this.inputs.some((current) => current.name === input.name))
+          .map((input) => ({ ...input }))
+        this.inputs = [...defSlots, ...extras]
+      }
       if (info.outputs) this.outputs = info.outputs.map((output) => ({ ...output }))
       for (const [name, value] of Object.entries(info.properties || {})) {
         this.properties[name] = value
@@ -968,6 +998,150 @@ const out = {}
   out.foreignKeys = { toggles: togglesOf(sw) }
 }
 
+// ---------------------------------------------------------------------------
+// Copy / paste / clone -- litegraph 1.52.7's exact order, read from the
+// bundle: `_serializeItems` puts `node.clone().serialize()` on the
+// clipboard plus the ORIGINAL node's input links (`target_slot` = original
+// index); `LGraphNode.clone()` is createNode -> serialize -> null every
+// `input.link` -> configure(data), never added to a graph;
+// `_deserializeItems` is createNode -> graph.add -> configure(clip) -> for
+// each link `origin.connect(origin_slot, pasted, target_slot)` by INDEX.
+// Alt-drag is clone() then graph.add().
+// ---------------------------------------------------------------------------
+
+// LGraphNode.serialize(): inputs keep `label`; widgets_values skips
+// `serialize === false` widgets; properties cloned.
+function serializeLike(node) {
+  return {
+    inputs: node.inputs.map((input) => ({
+      name: input.name, type: input.type, link: input.link,
+      ...(input.label ? { label: input.label } : {}),
+      ...(input.widget ? { widget: { ...input.widget } } : {})
+    })),
+    outputs: node.outputs.map((output) => ({
+      name: output.name, type: output.type, links: output.links ? [...output.links] : null
+    })),
+    properties: { ...node.properties },
+    widgets_values: node.widgets.filter((w) => w.serialize !== false).map((w) => w.value)
+  }
+}
+
+function cloneLike(node) {
+  const data = serializeLike(node)
+  for (const input of data.inputs) input.link = null
+  for (const output of data.outputs) if (output.links) output.links.length = 0
+  const copy = makeSwitcher(node.id)
+  s.attach(copy) // nodeCreated
+  copy.configure(data) // clone() configures BEFORE any graph.add
+  return copy
+}
+
+// `_serializeItems` for ONE selected switcher.
+function copyLike(node, graph) {
+  const clip = { node: serializeLike(cloneLike(node)), links: [] }
+  for (const [idx, input] of node.inputs.entries()) {
+    if (input.link == null) continue
+    const link = graph.links.get(input.link)
+    clip.links.push({
+      origin_id: link.origin_id, origin_slot: link.origin_slot,
+      target_id: node.id, target_slot: idx
+    })
+  }
+  return clip
+}
+
+// `_deserializeItems` with connectInputs (Ctrl+Shift+V); plain Ctrl+V of
+// the switcher alone is the same call with no links.
+async function pasteLike(clip, graph, id, { connectInputs }) {
+  const pasted = makeSwitcher(id)
+  s.attach(pasted)
+  graph.add(pasted)
+  pasted.configure(clip.node)
+  if (connectInputs) {
+    for (const link of clip.links) {
+      graph.getNodeById(link.origin_id).connect(link.origin_slot, pasted, link.target_slot)
+    }
+  }
+  await settle()
+  return pasted
+}
+
+const pasteSnapshot = (node) => ({
+  rows: rowsOf(node), toggles: togglesOf(node), enabledWired: enabledWired(node),
+  labels: node.inputs.filter((input) => input.label).map((input) => `${input.name}=${input.label}`),
+  outputs: node.outputs.map((output) => output.name)
+})
+
+// --- F: Ctrl+C then Ctrl+Shift+V of a 5-row switcher, rows 2-5 off, one
+// renamed row. ---
+{
+  const { graph, sw } = await wireFiveAndSwitchOffTwoToFive()
+  sw.inputs.find((input) => input.name === 'model_3').label = 'wan high'
+  const clip = copyLike(sw, graph)
+  const clipboard = {
+    rows: clip.node.inputs.filter((input) => /^model_/.test(input.name)).map((input) => input.name),
+    labels: clip.node.inputs.filter((input) => input.label).map((input) => input.label),
+    widgetsValues: clip.node.widgets_values,
+    linkSlots: clip.links.map((link) => link.target_slot)
+  }
+  const pasted = await pasteLike(clip, graph, 2, { connectInputs: true })
+  out.pasteWithLinks = { clipboard, pasted: pasteSnapshot(pasted), original: pasteSnapshot(sw) }
+}
+
+// --- G: plain Ctrl+V of the switcher alone (no links come along). ---
+{
+  const { graph, sw } = await wireFiveAndSwitchOffTwoToFive()
+  const clip = copyLike(sw, graph)
+  const pasted = await pasteLike(clip, graph, 2, { connectInputs: false })
+  out.pastePlain = pasteSnapshot(pasted)
+}
+
+// --- H: Alt-drag clone (clone() then graph.add()), and a clone that is
+// never added anywhere (what _serializeItems itself makes). ---
+{
+  const { graph, sw } = await wireFiveAndSwitchOffTwoToFive()
+  const copy = cloneLike(sw)
+  graph.add(copy)
+  await settle()
+  const orphan = cloneLike(sw)
+  let orphanThrew = null
+  try { await settle() } catch (error) { orphanThrew = String(error) }
+  out.altDragClone = { added: pasteSnapshot(copy), orphanRows: rowsOf(orphan), orphanThrew }
+}
+
+// --- I: High/low pairs ON, highs AND lows wired, Ctrl+C / Ctrl+Shift+V. ---
+{
+  const { graph, sw, loaders } = await wireFiveAndSwitchOffTwoToFive()
+  sw.properties[PROP_HIGH_LOW] = true
+  sw.onPropertyChanged(PROP_HIGH_LOW, true, false)
+  const lowLoaders = []
+  for (let i = 0; i < 5; i++) {
+    const loader = makeLoader(20 + i)
+    graph.add(loader)
+    lowLoaders.push(loader)
+    loader.connect(0, sw, `model_${i + 1}_low`)
+  }
+  await settle()
+  const clip = copyLike(sw, graph)
+  const pasted = await pasteLike(clip, graph, 2, { connectInputs: true })
+  out.pastePairs = { original: pasteSnapshot(sw), pasted: pasteSnapshot(pasted) }
+  void loaders
+}
+
+// --- J: node.setProperty() -- the right-click > Properties path. ---
+{
+  const { sw } = await wireFiveAndSwitchOffTwoToFive()
+  const header = sw.widgets.find((w) => w.name === '__eps_switcher_toggle_all')
+  let threw = null
+  try { sw.setProperty(PROP_HIGH_LOW, true) } catch (error) { threw = String(error) }
+  await settle()
+  out.setProperty = {
+    threw, rows: rowsOf(sw), outputs: sw.outputs.map((output) => output.name),
+    headerSerialize: header.serialize, headerOptionsSerialize: header.options?.serialize,
+    widgetsValues: serializeLike(sw).widgets_values
+  }
+}
+
 process.stdout.write(JSON.stringify(out))
 """
 
@@ -1087,3 +1261,108 @@ def test_foreign_toggle_keys_are_still_pruned(switcher_attach_api: dict) -> None
     hand-edited workflow, a sibling class's prefix) -- only the
     unwired-means-drop rule is gone."""
     assert switcher_attach_api["foreignKeys"]["toggles"] == {"model_2": False}
+
+
+# -------------------------------------------- copy / paste / clone (v0.100.4)
+#
+# Side finding of the 2026-10-27 round: Ctrl+Shift+V of a 5-row switcher
+# came back with only model_1 wired. litegraph's `_serializeItems` puts
+# `node.clone().serialize()` on the clipboard, and `clone()` nulls every
+# input link BEFORE configure(data) -- so the wrapper's synchronous
+# post-configure converge collapsed `model_2..6` on the throwaway clone
+# before it was serialized. The clipboard node had two slots; the paste
+# then connected the original links by `target_slot` index (0, 2, 3, 4, 5)
+# into slots that did not exist, and only model_1 landed.
+
+FIVE_WIRED_PLUS_SPARE = [
+    "model_1:wired", "model_2:wired", "model_3:wired", "model_4:wired",
+    "model_5:wired", "model_6:-",
+]
+
+
+def test_clipboard_carries_every_row_of_the_copied_switcher(switcher_attach_api: dict) -> None:
+    """The throwaway clone `_serializeItems` serializes must still hold all
+    six slots (five rows + spare), the renamed label and the toggles -- the
+    collapse of its unwired slots must not happen before serialize()."""
+    clipboard = switcher_attach_api["pasteWithLinks"]["clipboard"]
+    assert clipboard["rows"] == ["model_1", "model_2", "model_3", "model_4", "model_5", "model_6"]
+    assert clipboard["labels"] == ["wan high"]
+    assert clipboard["widgetsValues"] == [json.dumps(OFF_2_TO_5, separators=(",", ":"))]
+    assert clipboard["linkSlots"] == [0, 2, 3, 4, 5]  # original indices; toggles sits at 1
+
+
+def test_paste_with_links_keeps_all_wires_spare_toggles_and_labels(
+    switcher_attach_api: dict,
+) -> None:
+    """Ctrl+Shift+V: five wires land by index, the spare follows, rows 2-5
+    stay off and the renamed row keeps its label -- the pasted switcher is
+    the original, not a one-row stub."""
+    pasted = switcher_attach_api["pasteWithLinks"]["pasted"]
+    assert pasted["rows"] == FIVE_WIRED_PLUS_SPARE
+    assert pasted["toggles"] == OFF_2_TO_5
+    assert pasted["enabledWired"] == 1
+    assert pasted["labels"] == ["model_3=wan high"]
+    assert pasted["outputs"] == ["models"]
+    # ...and the original is untouched by being copied.
+    assert switcher_attach_api["pasteWithLinks"]["original"]["rows"] == FIVE_WIRED_PLUS_SPARE
+
+
+def test_plain_paste_is_a_tidy_one_spare_node_with_toggles(switcher_attach_api: dict) -> None:
+    """Ctrl+V of the switcher alone brings no links: the one-trailing-spare
+    invariant collapses it to `model_1`, toggles ride along (sticky keys
+    are harmless on unwired rows), nothing throws."""
+    pasted = switcher_attach_api["pastePlain"]
+    assert pasted["rows"] == ["model_1:-"]
+    assert pasted["toggles"] == OFF_2_TO_5
+    assert pasted["enabledWired"] == 0
+
+
+def test_alt_drag_clone_is_tidy_and_an_orphan_clone_never_throws(
+    switcher_attach_api: dict,
+) -> None:
+    """Alt-drag = clone() then graph.add(): the deferred converge runs once
+    the clone is in a graph and leaves one spare. A clone that is never
+    added (what _serializeItems makes) must simply be skipped, not throw."""
+    alt = switcher_attach_api["altDragClone"]
+    assert alt["added"]["rows"] == ["model_1:-"]
+    assert alt["added"]["toggles"] == OFF_2_TO_5
+    assert alt["orphanThrew"] is None
+    assert alt["orphanRows"][0] == "model_1:-"
+
+
+def test_pairs_paste_keeps_highs_lows_order_and_low_output(switcher_attach_api: dict) -> None:
+    """High/low pairs ON with every high AND low wired: the paste must land
+    all ten wires at the interleaved indices (the def-first merge plus the
+    pairing re-seat restore the clipboard order before links connect), keep
+    the spare pair, the `models_low` output and the toggles."""
+    pairs = switcher_attach_api["pastePairs"]
+    expected_rows = [
+        "model_1:wired", "model_1_low:wired", "model_2:wired", "model_2_low:wired",
+        "model_3:wired", "model_3_low:wired", "model_4:wired", "model_4_low:wired",
+        "model_5:wired", "model_5_low:wired", "model_6:-", "model_6_low:-",
+    ]
+    assert pairs["original"]["rows"] == expected_rows
+    assert pairs["pasted"]["rows"] == expected_rows
+    assert pairs["pasted"]["toggles"] == OFF_2_TO_5
+    assert pairs["pasted"]["enabledWired"] == 1
+    assert pairs["pasted"]["outputs"] == ["models", "models_low"]
+
+
+# ------------------------------------------------- setProperty (v0.100.4)
+
+
+def test_set_property_does_not_throw_on_the_header_widget(switcher_attach_api: dict) -> None:
+    """Right-click > Properties > 'High/low pairs' (and the panel's Assign)
+    go through LGraphNode.setProperty, which scans `w.options.property` on
+    EVERY widget. The header custom widget had no `options` at all, so the
+    property applied and then the dialog threw. The widget now carries an
+    `options` object; serialization is unchanged on both sides (the
+    workflow's widgets_values still skip it via `serialize: false`, the
+    prompt skips it via `options.serialize: false`)."""
+    result = switcher_attach_api["setProperty"]
+    assert result["threw"] is None
+    assert result["rows"][:2] == ["model_1:wired", "model_1_low:-"]
+    assert result["outputs"] == ["models", "models_low"]
+    assert result["headerSerialize"] is False
+    assert result["headerOptionsSerialize"] is False
+    assert result["widgetsValues"] == [json.dumps(OFF_2_TO_5, separators=(",", ":"))]

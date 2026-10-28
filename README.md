@@ -787,6 +787,11 @@ off means three runs.
   out). Only a click on the row or on Toggle All changes it. Workflows and
   videos saved before the fix still load with that row on, because that is
   what they recorded.
+- **Copy and paste keeps the wires** (since v0.100.4). Ctrl+Shift+V (paste
+  with connections) of a wired switcher used to come back with only the
+  first row wired. Now every wire, every on/off state and every renamed
+  row comes along, high/low pairs included. Plain Ctrl+V still gives a
+  clean, unwired copy with the same on/off states.
 
 ## EPS Model / CLIP / VAE Switcher (shipped)
 
@@ -808,7 +813,8 @@ several models/VAEs in one queue".
 - **Everything the image Switcher does, identically:** growing sockets (wire
   the last one and a new one appears), per-row toggles, Toggle All,
   double-click rename, all-off is valid (queue succeeds, downstream skips),
-  and an off row stays off when you re-plug or swap its model (v0.100.3).
+  an off row stays off when you re-plug or swap its model (v0.100.3), and
+  Ctrl+Shift+V keeps every wire (v0.100.4).
 - **A toggled-off branch never runs at all.** Wire three Load Checkpoint
   nodes into a Model Switcher, tick one off, and that checkpoint is never
   even loaded — not loaded-then-discarded. Verified against a real loader.
