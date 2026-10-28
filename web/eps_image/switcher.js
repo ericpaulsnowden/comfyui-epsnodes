@@ -187,8 +187,10 @@
  * toggle/connection-change call here keeps it in
  * lockstep so the backend's filtering (which is authoritative; this file
  * only drives what the backend already trusts) always matches what's on
- * screen, and pruned to slots that still exist so it never grows unbounded
- * across many connect/disconnect cycles.
+ * screen. A row's `false` is STICKY to its row number (v0.100.3,
+ * `pruneToggles`): nothing but a click on that row or the header clears
+ * it -- not a rewire, not a reload -- and only keys that cannot name a row
+ * at all are ever pruned, so the map stays bounded by the row count.
  *
  * **0.28.1 caveat**: this file was built and live-verified against the dev
  * rig's ComfyUI 0.28.0 / `comfyui-frontend-package` 1.45.21. Every litegraph
@@ -362,29 +364,42 @@ function toggleRowEnabled(node, name) {
 }
 
 /**
- * Drops toggle-map entries for slots that no longer exist OR are currently
- * disconnected. A disconnected slot's on/off override is meaningless (the
- * backend ignores an unconnected slot entirely), and -- the bug this guards
- * against -- keeping a stale `false` on a disconnected MIDDLE (gap) slot
- * would silently disable a DIFFERENT value later re-wired into that same
- * slot number. Clearing it on every converge means a freshly (re)wired socket
- * always starts enabled, matching the backend's absent-key-means-enabled
- * contract. A CONNECTED slot deliberately toggled off keeps its `false`
- * (toggling doesn't call converge, and converge preserves connected keys), so
- * an intentional off-state survives adding/removing OTHER slots and reload.
+ * Drops toggle-map entries that cannot name a row of this node at all -- a
+ * key that is not `<prefix>_N` shaped (a hand-edited workflow, a sibling
+ * class's prefix applied by mistake). Every real row key is otherwise
+ * STICKY: a row's `false` belongs to the ROW NUMBER, not to the wire in it,
+ * and only a click on that row (or the header) ever clears it. Bounded by
+ * construction -- at most one key per row number ever switched off.
+ *
+ * v0.100.3 (owner report 2026-10-27: "5 models connected but only model 1
+ * turned on, I still get 2 videos", and every video's embedded workflow
+ * showed rows 1 AND 5 on): this used to ALSO drop every key whose slot was
+ * UNWIRED at the moment a converge ran, so that a freshly (re)wired socket
+ * always started enabled. But converge runs after every link change and
+ * every configure(), and a row is unwired for the whole of any gesture that
+ * lifts its wire -- picking it up and dropping it back (litegraph
+ * disconnects on pick-up, the deferred converge fires mid-drag), parking
+ * it on the canvas, deleting and re-adding the loader. The row the user had
+ * switched off came back ON with nothing but its checkbox to say so, the
+ * queued `toggles` lacked its `false`, and the backend ran it. Keeping the
+ * key is the safe direction: a re-wired row that stays off is DRAWN off,
+ * its box right there to click, whereas a row that flips on runs a model
+ * nobody asked for. The old rationale (a stale `false` on a gap slot would
+ * "silently" disable a different value re-wired there) is exactly that
+ * visible case -- the backend ignores an unwired slot's key, allRowsState /
+ * the header count read wired rows only, so a sticky key on an unwired
+ * spare changes nothing until something is wired into it, and then it
+ * shows. Rig-verified 1.52.7 (tests/test_switcher_js.py's attach probe
+ * drives the same gestures under Node).
  */
 function pruneToggles(node) {
+  const spec = switcherSpecOf(node)
   const widget = getTogglesWidget(node)
-  if (!widget) return
+  if (!widget || !spec) return
   const map = readToggles(node)
-  const connectedNames = new Set(
-    imageInputEntries(node)
-      .filter((entry) => entry.connected)
-      .map((entry) => entry.name)
-  )
   let changed = false
   for (const key of Object.keys(map)) {
-    if (!connectedNames.has(key)) {
+    if (!spec.inputRe.test(key)) {
       delete map[key]
       changed = true
     }

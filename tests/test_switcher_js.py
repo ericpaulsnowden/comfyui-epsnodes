@@ -581,24 +581,26 @@ def test_converge_reaches_toggles_and_pairing_every_pass(switcher_source: str) -
     assert "convergePairOutput(node)" in body
 
 
-def test_prune_toggles_reads_current_connections_not_a_stale_snapshot(
-    switcher_source: str,
-) -> None:
+def test_prune_toggles_never_reads_wiring_at_all(switcher_source: str) -> None:
     """The dangerous shape this bug class hunts for is a stale-vs-fresh
     comparison that wipes real data (notebook.js: a repaint's `textarea ===
     lastSavedText` check cleared a draft it hadn't actually repainted yet).
-    pruneToggles() has no equivalent stale snapshot to disagree with: the
-    connected-names set it prunes against comes from imageInputEntries()
-    (live node.inputs, `.link` restored directly by configure()) read in
-    the SAME call as the toggles map it prunes -- both sides are always
-    the current post-restore truth, and a key is only ever dropped when it
-    is genuinely absent from that live set."""
+    pruneToggles() used to prune against the live connected-names set --
+    not stale, but WRONG in kind (v0.100.3, owner report 2026-10-27): a row
+    is unwired for the whole of any gesture that lifts its wire, so the
+    converge that ran mid-gesture dropped the row's `false` and the row
+    came back ON. The prune now consults the toggles map and the class's
+    own `<prefix>_N` key shape only -- never `.connected`, never
+    imageInputEntries() -- so no wiring state, live or restored, can ever
+    clear a key the user set. The behavioural half (the gestures
+    themselves) is driven for real by the attach probe below."""
     body = _function_body(switcher_source, "pruneToggles(node)")
     assert "const map = readToggles(node)" in body
-    assert "imageInputEntries(node)" in body
-    assert ".filter((entry) => entry.connected)" in body
-    assert "if (!connectedNames.has(key)) {" in body
+    assert "spec.inputRe.test(key)" in body
     assert "delete map[key]" in body
+    assert "connected" not in body
+    assert "imageInputEntries" not in body
+    assert ".link" not in body
     # a no-op write when nothing is actually stale -- never a blind rewrite.
     assert "if (changed) writeToggles(node, map)" in body
 
@@ -665,3 +667,421 @@ def test_width_floor_lifts_through_set_size_not_a_dead_is_array_guard(
     assert "if (Array.isArray(size))" not in floor
     ceiling = _function_body(switcher_source, "outputSafeColumnX(node)")
     assert "const width = node.size ? node.size[0] : 0" in ceiling
+
+
+# ------------------------------------------- sticky row toggles (v0.100.3)
+#
+# Owner report 2026-10-27: "If I have 5 models connected but only model 1
+# turned on I still get 2 videos. Also if I drag any video back onto the
+# canvas the proper model and the 5th model (last one in the queue) is also
+# selected." Root cause: pruneToggles() dropped a row's `false` whenever
+# that row was UNWIRED at the moment a converge ran -- and converge runs
+# after every link change (deferred one macrotask) and after every
+# configure(), so any gesture that lifts a wire for even a moment (picking
+# it up and dropping it back, parking it on the canvas, deleting and
+# re-adding the loader) silently flipped the row back ON. The queued
+# `toggles` then lacked `model_5: false`, the backend ran model 5 too, and
+# the embedded workflow in every video showed rows 1 and 5 enabled.
+#
+# The tests below drive the REAL attach() export against a from-scratch
+# litegraph-node stub (tests/test_number_controller_js.py's convention --
+# no jsdom in this repo) through exactly those gestures, and read what a
+# queue would read: the `toggles` widget value, and the enabled+wired row
+# count nodes_switcher.py's execute() derives from it.
+
+ATTACH_PROBE_JS = """
+import * as s from './extensions/comfyui-epsnodes/eps_image/switcher.js'
+
+const INPUT = 1 // litegraph NodeSlotType.INPUT
+const PROP_HIGH_LOW = 'High/low pairs'
+const tick = () => new Promise((resolve) => setTimeout(resolve, 0))
+// The live converge switcher.js schedules from onConnectionsChange is a
+// setTimeout(fn, 0); two macrotasks cover a re-schedule from its own
+// removeInput() dispatch.
+const settle = async () => { await tick(); await tick() }
+
+let nextLinkId = 1
+
+function makeGraph() {
+  const graph = { links: new Map(), _nodes: [], setDirtyCanvas() {} }
+  graph.add = (node) => { graph._nodes.push(node); node.graph = graph }
+  graph.getNodeById = (id) => graph._nodes.find((n) => n.id === id) || null
+  return graph
+}
+
+function makeLoader(id) {
+  return {
+    id, comfyClass: 'CheckpointLoaderSimple', inputs: [], widgets: [],
+    outputs: [{ name: 'MODEL', type: 'MODEL', links: [] }],
+    // LGraphNode.connect(): an already-wired target input is disconnected
+    // FIRST (its onConnectionsChange fires), then the new link lands and
+    // the target hears about that too -- all in one synchronous call.
+    connect(slot, target, targetSlot) {
+      const idx = typeof targetSlot === 'string'
+        ? target.inputs.findIndex((i) => i.name === targetSlot)
+        : targetSlot
+      const input = target.inputs[idx]
+      if (!input) return null
+      if (input.link != null) target.disconnectInput(idx)
+      const link = {
+        id: nextLinkId++, origin_id: this.id, origin_slot: slot,
+        target_id: target.id, target_slot: idx, type: input.type
+      }
+      this.graph.links.set(link.id, link)
+      this.outputs[slot].links.push(link.id)
+      input.link = link.id
+      target.onConnectionsChange?.(INPUT, idx, true, link, input)
+      return link
+    }
+  }
+}
+
+function makeSwitcher(id) {
+  return {
+    id, comfyClass: 'EPSModelSwitcher', pos: [0, 0], size: [270, 100],
+    flags: {}, properties: {},
+    // The def's own slots (nodes_switcher.py INPUT_TYPES): model_1 plus
+    // the hidden `toggles` STRING -- which on frontend 1.52.7 ALSO owns a
+    // widget-input slot sitting between model_1 and the grown rows
+    // (rig-observed order: model_1, toggles, model_2, ...).
+    inputs: [
+      { name: 'model_1', type: 'MODEL', link: null },
+      { name: 'toggles', type: 'STRING', link: null, widget: { name: 'toggles' } }
+    ],
+    outputs: [
+      { name: 'models', type: 'MODEL', links: null },
+      { name: 'models_low', type: 'MODEL', links: null }
+    ],
+    widgets: [{ name: 'toggles', type: 'text', value: '{}', options: {} }],
+    addProperty(name, value) { this.properties[name] = value },
+    setSize(size) { this.size = size },
+    computeSize() { return [270, 100] },
+    setDirtyCanvas() {},
+    addInput(name, type, extra) {
+      const input = { name, type, link: null, ...(extra || {}) }
+      this.inputs.push(input)
+      return input
+    },
+    // LGraphNode.removeInput: disconnectInput() first (which dispatches
+    // onConnectionsChange), then splice and re-seat the later links.
+    removeInput(slot) {
+      this.disconnectInput(slot)
+      this.inputs.splice(slot, 1)
+      for (let i = slot; i < this.inputs.length; i++) {
+        const link = this.graph?.links.get(this.inputs[i].link)
+        if (link) link.target_slot = i
+      }
+    },
+    disconnectInput(slot) {
+      const input = this.inputs[slot]
+      if (!input || input.link == null) return false
+      const link = this.graph?.links.get(input.link)
+      input.link = null
+      if (link) {
+        this.graph.links.delete(link.id)
+        const origin = this.graph.getNodeById(link.origin_id)
+        const out = origin?.outputs?.[link.origin_slot]
+        if (out?.links) out.links = out.links.filter((linkId) => linkId !== link.id)
+      }
+      this.onConnectionsChange?.(INPUT, slot, false, link, input)
+      return true
+    },
+    addOutput(name, type) { this.outputs.push({ name, type, links: null }) },
+    removeOutput(idx) { this.outputs.splice(idx, 1) },
+    addCustomWidget(widget) { this.widgets.push(widget); return widget },
+    // One 20px row per input index -- what drawRowToggles/rowAtLocalY read.
+    getConnectionPos(isInput, slot) { return [0, 10 + slot * 20] },
+    // LGraphNode.configure (1.52.7): inputs/outputs/properties land first
+    // (onPropertyChanged fires per saved property), then every restored
+    // input gets onConnectionsChange(..., true, ...) -- `isConnected`
+    // HARDCODED true even for an unwired slot -- then widgets_values.
+    configure(info) {
+      if (info.inputs) this.inputs = info.inputs.map((input) => ({ ...input }))
+      if (info.outputs) this.outputs = info.outputs.map((output) => ({ ...output }))
+      for (const [name, value] of Object.entries(info.properties || {})) {
+        this.properties[name] = value
+        this.onPropertyChanged?.(name, value)
+      }
+      for (const [i, input] of this.inputs.entries()) {
+        const link = input.link != null ? this.graph?.links.get(input.link) : null
+        this.onConnectionsChange?.(INPUT, i, true, link, input)
+      }
+      if (info.widgets_values) {
+        let n = 0
+        for (const widget of this.widgets) {
+          if (widget.serialize === false) continue
+          if (n >= info.widgets_values.length) break
+          widget.value = info.widgets_values[n++]
+        }
+      }
+    }
+  }
+}
+
+function makeCtx() {
+  const noop = () => {}
+  const ctx = {
+    texts: [], save: noop, restore: noop, beginPath: noop, roundRect: noop,
+    rect: noop, fill: noop, stroke: noop, moveTo: noop, lineTo: noop
+  }
+  ctx.fillText = (text) => ctx.texts.push(text)
+  return ctx
+}
+
+const togglesOf = (node) => JSON.parse(node.widgets.find((w) => w.name === 'toggles').value)
+const rowsOf = (node) => node.inputs
+  .filter((input) => /^model_\\d+(_low)?$/.test(input.name))
+  .map((input) => `${input.name}:${input.link == null ? '-' : 'wired'}`)
+// What nodes_switcher.py's execute() derives from the same two facts: a
+// wired `model_N` runs unless its key is literally false.
+const enabledWired = (node) => {
+  const toggles = togglesOf(node)
+  return node.inputs.filter(
+    (input) =>
+      /^model_\\d+$/.test(input.name) && input.link != null && toggles[input.name] !== false
+  ).length
+}
+const headerText = (node) => {
+  const ctx = makeCtx()
+  node.widgets.find((w) => w.name === '__eps_switcher_toggle_all').draw(ctx, node, 270, 0, 20)
+  return ctx.texts[0]
+}
+const snapshot = (node) => ({
+  rows: rowsOf(node), toggles: togglesOf(node), enabledWired: enabledWired(node),
+  header: headerText(node)
+})
+// A real row click: draw (caches the hit rects) then onMouseDown inside
+// that row's box -- the exact path a canvas click takes.
+function clickRow(node, name) {
+  node.onDrawForeground(makeCtx(), null, null)
+  const rect = node.__epsSwitcherRowRects.find((r) => r.name === name)
+  if (!rect) throw new Error(`no toggle box drawn for ${name}`)
+  node.onMouseDown({}, [rect.x + 1, rect.y + 1], null)
+}
+
+function build() {
+  const graph = makeGraph()
+  const sw = makeSwitcher(1)
+  graph.add(sw)
+  const loaders = []
+  for (let i = 0; i < 5; i++) {
+    const loader = makeLoader(10 + i)
+    graph.add(loader)
+    loaders.push(loader)
+  }
+  s.attach(sw)
+  return { graph, sw, loaders }
+}
+
+async function wireFiveAndSwitchOffTwoToFive() {
+  const rig = build()
+  for (let i = 0; i < 5; i++) {
+    rig.loaders[i].connect(0, rig.sw, `model_${i + 1}`)
+    await settle() // the deferred converge grows the next spare
+  }
+  for (const n of [2, 3, 4, 5]) clickRow(rig.sw, `model_${n}`)
+  return rig
+}
+
+const out = {}
+
+// --- A: pick the last row's wire up (litegraph disconnects on pick-up),
+// let the deferred converge run, then drop it back on the same row. ---
+{
+  const { sw, loaders } = await wireFiveAndSwitchOffTwoToFive()
+  const wired = snapshot(sw)
+  sw.disconnectInput(sw.inputs.findIndex((input) => input.name === 'model_5'))
+  await settle()
+  const lifted = snapshot(sw)
+  loaders[4].connect(0, sw, 'model_5')
+  await settle()
+  const dropped = snapshot(sw)
+  out.liftAndDropBack = { wired, lifted, dropped }
+}
+
+// --- B: swap the loader by dragging another output onto the WIRED row
+// (connect() disconnects + reconnects synchronously). ---
+{
+  const { sw, loaders } = await wireFiveAndSwitchOffTwoToFive()
+  loaders[3].connect(0, sw, 'model_5')
+  await settle()
+  out.swapInPlace = { rows: rowsOf(sw), toggles: togglesOf(sw), enabledWired: enabledWired(sw) }
+}
+
+// --- C: the same lift-and-drop-back with High/low pairs ON. ---
+{
+  const { sw, loaders } = await wireFiveAndSwitchOffTwoToFive()
+  sw.properties[PROP_HIGH_LOW] = true
+  sw.onPropertyChanged(PROP_HIGH_LOW, true, false)
+  const paired = { rows: rowsOf(sw), toggles: togglesOf(sw) }
+  sw.disconnectInput(sw.inputs.findIndex((input) => input.name === 'model_5'))
+  await settle()
+  const lifted = { rows: rowsOf(sw), toggles: togglesOf(sw) }
+  loaders[4].connect(0, sw, 'model_5')
+  await settle()
+  const dropped = { rows: rowsOf(sw), toggles: togglesOf(sw), enabledWired: enabledWired(sw) }
+  out.pairsLiftAndDropBack = { paired, lifted, dropped }
+}
+
+// --- D: a workflow restored with a saved GAP (model_3 unwired, switched
+// off) -- configure()'s post-restore converge, then re-wiring the gap. ---
+{
+  const { graph, sw, loaders } = build()
+  const wire = (loader, slot) => {
+    const link = {
+      id: nextLinkId++, origin_id: loader.id, origin_slot: 0,
+      target_id: sw.id, target_slot: slot, type: 'MODEL'
+    }
+    graph.links.set(link.id, link)
+    loader.outputs[0].links.push(link.id)
+    return link.id
+  }
+  sw.configure({
+    inputs: [
+      { name: 'model_1', type: 'MODEL', link: wire(loaders[0], 0) },
+      { name: 'toggles', type: 'STRING', link: null, widget: { name: 'toggles' } },
+      { name: 'model_2', type: 'MODEL', link: wire(loaders[1], 2) },
+      { name: 'model_3', type: 'MODEL', link: null },
+      { name: 'model_4', type: 'MODEL', link: wire(loaders[3], 4) },
+      { name: 'model_5', type: 'MODEL', link: null }
+    ],
+    properties: { [PROP_HIGH_LOW]: false },
+    widgets_values: ['{"model_3":false,"model_4":false}']
+  })
+  const restored = { rows: rowsOf(sw), toggles: togglesOf(sw), enabledWired: enabledWired(sw) }
+  loaders[2].connect(0, sw, 'model_3')
+  await settle()
+  const rewired = { rows: rowsOf(sw), toggles: togglesOf(sw), enabledWired: enabledWired(sw) }
+  out.configureGap = { restored, rewired }
+}
+
+// --- E: keys that cannot name a row of this node are still pruned. ---
+{
+  const { sw, loaders } = await wireFiveAndSwitchOffTwoToFive()
+  sw.widgets[0].value = JSON.stringify({
+    junk: false, image_1: false, model_2: false, 'model_': false
+  })
+  loaders[2].connect(0, sw, 'model_3') // any link change: one deferred converge
+  await settle()
+  out.foreignKeys = { toggles: togglesOf(sw) }
+}
+
+process.stdout.write(JSON.stringify(out))
+"""
+
+#: The owner's setup, as the queue reads it: rows 2-5 switched off, model_1
+#: (absent key) enabled -- the ONE state every gesture below must preserve.
+OFF_2_TO_5 = {"model_2": False, "model_3": False, "model_4": False, "model_5": False}
+
+
+@pytest.fixture(scope="module")
+def switcher_attach_api(tmp_path_factory: pytest.TempPathFactory) -> dict:
+    """Runs ATTACH_PROBE_JS against the REAL switcher.js in the same
+    served-layout tmp dir shape as `switcher_api` (module docstring)."""
+    layout = tmp_path_factory.mktemp("web_root_attach")
+    module_dir = layout / "extensions" / "comfyui-epsnodes" / "eps_image"
+    module_dir.mkdir(parents=True)
+    shutil.copyfile(SWITCHER_JS, module_dir / "switcher.js")
+    scripts = layout / "scripts"
+    scripts.mkdir(parents=True, exist_ok=True)
+    (scripts / "app.js").write_text("export const app = {}\n", encoding="utf-8")
+    probe = layout / "probe.mjs"
+    probe.write_text(ATTACH_PROBE_JS, encoding="utf-8")
+    result = subprocess.run(
+        [NODE, str(probe)], capture_output=True, text=True, timeout=60, cwd=layout
+    )
+    assert result.returncode == 0, f"attach probe failed:\n{result.stderr}"
+    return json.loads(result.stdout)
+
+
+def test_attach_probe_wires_five_rows_and_switches_four_off(switcher_attach_api: dict) -> None:
+    """The setup itself, through real row clicks: five wired rows plus the
+    trailing spare, rows 2-5 off, one enabled row, and the header agrees."""
+    wired = switcher_attach_api["liftAndDropBack"]["wired"]
+    assert wired["rows"] == [
+        "model_1:wired", "model_2:wired", "model_3:wired", "model_4:wired",
+        "model_5:wired", "model_6:-",
+    ]
+    assert wired["toggles"] == OFF_2_TO_5
+    assert wired["enabledWired"] == 1
+    assert wired["header"] == "Toggle All  (1/5 enabled)"
+
+
+def test_lifting_the_last_wire_keeps_that_row_off(switcher_attach_api: dict) -> None:
+    """Picking the wire up disconnects the row (litegraph) and the deferred
+    converge collapses the trailing spare onto it -- the row's `false` must
+    SURVIVE that, not be pruned because the slot is momentarily unwired. The
+    header still counts wired rows only, so a sticky key on the now-unwired
+    spare never leaks into the count."""
+    lifted = switcher_attach_api["liftAndDropBack"]["lifted"]
+    assert lifted["rows"] == [
+        "model_1:wired", "model_2:wired", "model_3:wired", "model_4:wired", "model_5:-",
+    ]
+    assert lifted["toggles"]["model_5"] is False
+    assert lifted["enabledWired"] == 1
+    assert lifted["header"] == "Toggle All  (1/4 enabled)"
+
+
+def test_dropping_the_wire_back_queues_one_run_not_two(switcher_attach_api: dict) -> None:
+    """The owner's two symptoms are one state: after the drop-back the
+    queued `toggles` must still switch model_5 off, so the backend runs ONE
+    row (one video), and the workflow embedded in that video shows rows
+    2-5 off -- not "the proper model and the 5th model"."""
+    dropped = switcher_attach_api["liftAndDropBack"]["dropped"]
+    assert dropped["rows"] == [
+        "model_1:wired", "model_2:wired", "model_3:wired", "model_4:wired",
+        "model_5:wired", "model_6:-",
+    ]
+    assert dropped["toggles"] == OFF_2_TO_5
+    assert dropped["enabledWired"] == 1
+    assert dropped["header"] == "Toggle All  (1/5 enabled)"
+
+
+def test_swapping_the_loader_in_place_keeps_the_row_off(switcher_attach_api: dict) -> None:
+    """Dragging a different output onto the WIRED row: litegraph disconnects
+    and reconnects inside one call, so the deferred converge sees it wired.
+    This path was already safe; pinned so the sticky rule covers both."""
+    swapped = switcher_attach_api["swapInPlace"]
+    assert swapped["toggles"]["model_5"] is False
+    assert swapped["enabledWired"] == 1
+
+
+def test_pairs_lift_and_drop_back_keeps_the_row_off(switcher_attach_api: dict) -> None:
+    """WAN high/low pairs ON: the same gesture on the HIGH wire, with the
+    `_low` partners interleaved, re-seated and re-collapsed around it."""
+    pairs = switcher_attach_api["pairsLiftAndDropBack"]
+    assert pairs["paired"]["rows"] == [
+        "model_1:wired", "model_1_low:-", "model_2:wired", "model_2_low:-",
+        "model_3:wired", "model_3_low:-", "model_4:wired", "model_4_low:-",
+        "model_5:wired", "model_5_low:-", "model_6:-", "model_6_low:-",
+    ]
+    assert pairs["paired"]["toggles"]["model_5"] is False
+    assert pairs["lifted"]["toggles"]["model_5"] is False
+    assert pairs["dropped"]["toggles"] == OFF_2_TO_5
+    assert pairs["dropped"]["enabledWired"] == 1
+    assert pairs["dropped"]["rows"] == pairs["paired"]["rows"]
+
+
+def test_restored_gap_keeps_its_off_state_through_configure(switcher_attach_api: dict) -> None:
+    """A workflow saved with a disconnected, switched-off middle row: the
+    post-configure converge must not drop `model_3: false`, and wiring a
+    model into that gap later leaves the row off -- drawn off, so the user
+    sees it, rather than silently running."""
+    gap = switcher_attach_api["configureGap"]
+    assert gap["restored"]["rows"] == [
+        "model_1:wired", "model_2:wired", "model_3:-", "model_4:wired", "model_5:-",
+    ]
+    assert gap["restored"]["toggles"] == {"model_3": False, "model_4": False}
+    assert gap["restored"]["enabledWired"] == 2
+    assert gap["rewired"]["rows"] == [
+        "model_1:wired", "model_2:wired", "model_3:wired", "model_4:wired", "model_5:-",
+    ]
+    assert gap["rewired"]["toggles"] == {"model_3": False, "model_4": False}
+    assert gap["rewired"]["enabledWired"] == 2
+
+
+def test_foreign_toggle_keys_are_still_pruned(switcher_attach_api: dict) -> None:
+    """Pruning still removes keys that cannot name a row of THIS node (a
+    hand-edited workflow, a sibling class's prefix) -- only the
+    unwired-means-drop rule is gone."""
+    assert switcher_attach_api["foreignKeys"]["toggles"] == {"model_2": False}

@@ -939,12 +939,17 @@ function toggleRowEnabled(node, name) {
  * "everything off" on canvas really is all-off to the backend and the
  * upstream is genuinely skipped. Verified on the rig both ways.
  *
- * The just-became-visible half is switcher.js's own anti-stale rationale
- * (its pruneToggles drops entries for no-longer-CONNECTED `image_N`:
- * "keeping a stale `false` on a disconnected... slot would silently disable
- * a DIFFERENT image later re-wired into that same slot number"). Same
- * hazard here in reverse: without the clear, raising `Outputs` would reveal
- * a socket that is already switched off for no reason the user can see.
+ * The just-became-visible half was borrowed from switcher.js's ORIGINAL
+ * pruneToggles rationale (dropping entries for no-longer-CONNECTED
+ * `image_N`, so a re-wired slot always started enabled). switcher.js has
+ * since abandoned that rule (v0.100.3: a row's `false` is sticky to its row
+ * number -- a wire lifted for a moment was clearing rows the user had
+ * switched off, and the queued run included them); this file's clear is a
+ * different mechanism and stays: it fires only on the user's own `Outputs`
+ * change, on the slots THAT change reveals, where the `false` was written
+ * by this file for a hidden slot -- never by the user. Without the clear,
+ * raising `Outputs` would reveal a socket that is already switched off for
+ * no reason the user can see.
  */
 function pruneToggles(node) {
   const widget = getTogglesWidget(node)
