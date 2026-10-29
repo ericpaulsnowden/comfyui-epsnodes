@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import re
 from typing import Any, ClassVar
 
@@ -85,6 +86,25 @@ DEFAULT_RATIO = "none"
 #: so :func:`ratio_problem` can answer a hand-built prompt that carries it
 #: with a message that says what to do instead.
 RATIO_CUSTOM_OPTION = "custom…"
+
+#: FORMAT.md §6.5 `scale_multiplier` (v0.101.0, owner spec 2026-10-29) --
+#: the widget's bounds, named like WIDTH_MIN/MAX above. ``0.0`` is OFF and
+#: MUST stay the default: every workflow saved before the field existed
+#: (one entry short in `widgets_values`, §8) and every hand-built `/prompt`
+#: that omits it gets this value through :meth:`EPSResolution.resolve`'s own
+#: default, so the node runs exactly as it did before the feature. The
+#: ``round`` of 0.01 mirrors core's own ``KSampler.cfg`` declaration
+#: (``nodes.py``: ``"step": 0.1, "round": 0.01``): the frontend derives the
+#: display precision from `step` (one decimal, so arrows step 0.1 -> 0.2 ->
+#: 0.3 and never show 0.30000000000000004 -- `useFloatWidget.ts`'s
+#: `onFloatValueChange` re-rounds every commit), while the finer `round`
+#: leaves room for a user who raised `Comfy.FloatRoundingPrecision` to type
+#: 1.25 and keep it.
+SCALE_MULTIPLIER_MIN = 0.0
+SCALE_MULTIPLIER_MAX = 4.0
+SCALE_MULTIPLIER_STEP = 0.1
+SCALE_MULTIPLIER_ROUND = 0.01
+DEFAULT_SCALE_MULTIPLIER = 0.0
 
 #: Maps our public interpolation names to the identifiers core's
 #: ``comfy.utils.common_upscale`` (and, beneath it, ``torch.nn.functional.
@@ -236,6 +256,97 @@ _RATIO_STATE_NUMBER = r"(?=[0-9.]*[1-9])[0-9]{1,6}(?:\.[0-9]{1,6})?"
 RATIO_STATE_PATTERN = rf"^(?:none|{_RATIO_STATE_NUMBER}:{_RATIO_STATE_NUMBER})$"
 #: Longest stored ratio string: ``999999.999999:999999.999999`` is 27 characters.
 RATIO_STATE_MAX_LEN = 32
+
+
+def coerce_scale_multiplier(raw: Any) -> float:
+    """The `scale_multiplier` widget value as a usable float, or ``0.0``
+    ("off") for anything that isn't a finite positive number -- ``None``,
+    a non-numeric string from a hand-edited workflow, NaN/inf. Degrade-
+    don't-crash, the same posture as :func:`_parse_preset_names` and
+    :func:`parse_ratio`: a garbled multiplier must never fail a run
+    that would have been fine before the field existed. Mirrors
+    ``resolution.js``'s ``parseScaleMultiplier`` (own implementation, same
+    rule, tests on both).
+    """
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return 0.0
+    if not math.isfinite(value) or value <= 0:
+        return 0.0
+    return value
+
+
+def round_half_up(value: float) -> int:
+    """Nearest whole number with an exact ``.5`` rounding UP (owner spec:
+    "round half up"), never Python's banker's ``round()``. The product is
+    first rounded to six decimals so binary float noise can't flip a tie
+    the wrong way: ``0.3 * 1005`` is ``301.49999999999994`` in binary, but
+    the user typed ``0.3`` and expects ``301.5 -> 302``. Six decimals is far
+    coarser than any noise a ``size <= 16384`` x ``multiplier <= 4``
+    product can carry and far finer than the half-pixel that matters.
+    Mirrors ``resolution.js``'s ``roundHalfUp`` exactly (``Math.round(v *
+    1e6) / 1e6`` then ``Math.floor(v + 0.5)``).
+    """
+    return math.floor(round(value, 6) + 0.5)
+
+
+def scale_side(size: int, multiplier: float) -> int:
+    """One axis of a size scaled by *multiplier*: ``round_half_up(size *
+    multiplier)``, floored at ``1`` so a tiny image times a small multiplier
+    can never collapse to a 0-pixel side (FORMAT.md §6.5). A NON-POSITIVE
+    *size* is returned unchanged: that is the no-image ``0`` "derive" axis
+    sentinel, which the spec says stays ``0`` (nothing to scale), and a real
+    image never has a 0 side. Mirrors ``resolution.js``'s ``scaleSide``.
+    """
+    if size <= 0:
+        return size
+    return max(1, round_half_up(size * multiplier))
+
+
+def scale_dimensions(
+    width: int, height: int, multiplier: float, source: str
+) -> tuple[int, int]:
+    """Both axes through :func:`scale_side`, then the WIDTH_MAX/HEIGHT_MAX
+    guard (owner spec: "If any scaled side would exceed 16384 ... fail the
+    run with a clear error naming the image size, the multiplier and the
+    result. Don't clamp silently"). *source* is the human-readable thing
+    being scaled -- "the wired image" / "the node's own size" -- so the
+    message reads correctly from either caller. Raises ``ValueError``, the
+    same exception family the preset-missing path already uses, so core
+    reports it on the node like any other failed run.
+    """
+    scaled_w = scale_side(width, multiplier)
+    scaled_h = scale_side(height, multiplier)
+    if scaled_w > WIDTH_MAX or scaled_h > HEIGHT_MAX:
+        raise ValueError(
+            f"EPS Resolution: {source} is {width} x {height} and scale_multiplier "
+            f"{multiplier:g} would make it {scaled_w} x {scaled_h}, past the "
+            f"{WIDTH_MAX} x {HEIGHT_MAX} maximum -- lower the multiplier or "
+            "resize the source first"
+        )
+    return scaled_w, scaled_h
+
+
+def _image_size(image: Any) -> tuple[int, int]:
+    """``(width, height)`` of a ``[B, H, W, C]`` IMAGE tensor."""
+    return int(image.shape[2]), int(image.shape[1])
+
+
+def _scale_image(image: Any, multiplier: float, interpolation: str) -> tuple[Any, int, int]:
+    """*image* at its OWN size times *multiplier* (FORMAT.md §6.5
+    `scale_multiplier`, v0.101.0): ``(resized, width, height)``. A plain
+    stretch resize to the scaled size -- aspect is preserved by construction
+    (both axes carry the same factor, up to the half-pixel rounding each
+    side gets independently), so `resize_method`'s fit/crop/pad machinery
+    has nothing to do here and is deliberately bypassed; only
+    `interpolation` (the resampling filter) still applies. Shared by the
+    single-image path in :func:`_resolve_one` and the per-image loop in
+    :func:`_resolve_run`'s MULTI mode so both scale identically.
+    """
+    width, height = _image_size(image)
+    scaled_w, scaled_h = scale_dimensions(width, height, multiplier, "the wired image")
+    return _resize_tensor(image, scaled_w, scaled_h, interpolation, "disabled"), scaled_w, scaled_h
 
 
 def _ratio_number(text: str) -> int | float:
@@ -431,8 +542,21 @@ def _resolve_run(
     image: Any,
     extra_images: dict[int, Any],
     ratio: str = DEFAULT_RATIO,
+    scale_multiplier: float = DEFAULT_SCALE_MULTIPLIER,
 ) -> tuple[Any, ...]:
     """One run's 13-tuple of output values (FORMAT.md §6.5 v0.61.0).
+
+    *scale_multiplier* > 0 with ANY image wired (v0.101.0, owner spec
+    2026-10-29) switches BOTH modes to "each image at its own size times
+    the multiplier" (:func:`_scale_image`): in MULTI mode every wired
+    image scales from ITS OWN size -- different-sized inputs stay
+    different sizes, the owner's explicit choice -- `width`/`height`
+    report the FIRST wired image's scaled size, and the passthrough /
+    original-size outputs block exactly as they do today. The typed
+    width/height, `multiple_of`, `ratio` and `resize_method` are all
+    ignored in this mode (the panel greys them), so neither the shared-box
+    probe below nor the ratio lock runs. Multiplier 0 (the default) is
+    byte-identical to before the field existed.
 
     SINGLE mode (no ``image_N`` wired): exactly the pre-v0.61.0 six values
     from :func:`_resolve_one`, plus one ``ExecutionBlocker`` per unrevealed
@@ -458,11 +582,31 @@ def _resolve_run(
     never a second, possibly-different answer.
     """
     if not extra_images:
-        base = _resolve_one(width, height, resize_method, interpolation, multiple_of, image, ratio)
+        base = _resolve_one(
+            width, height, resize_method, interpolation, multiple_of, image, ratio, scale_multiplier
+        )
         blocker = _execution_blocker()
         return base + (blocker,) * 7
 
     first = image if image is not None else extra_images[min(extra_images)]
+
+    if scale_multiplier > 0:
+        # v0.101.0: own-size scaling per image; `width`/`height` = the
+        # FIRST wired image's scaled size (its size is computed WITHOUT a
+        # second resize of that image -- the loop below resizes each image
+        # exactly once).
+        first_w, first_h = scale_dimensions(
+            *_image_size(first), scale_multiplier, "the wired image"
+        )
+
+        def _scaled(img: Any) -> Any:
+            if img is None:
+                return _execution_blocker()
+            return _scale_image(img, scale_multiplier, interpolation)[0]
+
+        blocker = _execution_blocker()
+        tail = tuple(_scaled(extra_images.get(index)) for index in range(2, 9))
+        return (blocker, _scaled(image), first_w, first_h, blocker, blocker, *tail)
     # The shared target is the BOX -- a 0 axis derived from the FIRST
     # image's aspect, multiple_of applied -- probed with "stretch" so a
     # "keep aspect (fit)" run never takes the first image's FITTED size as
@@ -532,6 +676,7 @@ def _resolve_one(
     multiple_of: int,
     image: Any,
     ratio: str = DEFAULT_RATIO,
+    scale_multiplier: float = DEFAULT_SCALE_MULTIPLIER,
 ) -> tuple[Any, Any, int, int, int, int]:
     """The exact pre-M3 computation: resize *image* (or act as a pure size
     calculator when *image* is ``None``) per FORMAT.md §6.5. Factored out of
@@ -542,7 +687,24 @@ def _resolve_one(
     composed into its ``OUTPUT_IS_LIST`` lists. Body unchanged from the
     pre-M3 ``resolve()`` method it was extracted from, except for the
     *ratio* lock (owner ask 2026-08-28) applied right after the existing
-    0-axis derivation below.
+    0-axis derivation below, and *scale_multiplier* (v0.101.0, owner spec
+    2026-10-29), which has TWO meanings by whether an image is wired:
+
+    - IMAGE wired, multiplier > 0: the image comes out at ITS OWN size
+      times the multiplier (:func:`_scale_image`); width/height/
+      multiple_of/ratio/resize_method are ignored outright, so this
+      returns before any of the box math below runs. `width`/`height` =
+      the scaled size, the originals = the image's size.
+    - NO image: `original_width`/`original_height` now report the node's
+      OWN size -- the typed width/height after the ratio lock, NOT
+      `multiple_of`-rounded, a 0 axis staying 0 (they were a literal 0
+      before v0.101.0; the owner asked for the node's values). Multiplier
+      0 leaves `width`/`height` exactly as before (typed size,
+      `multiple_of`-rounded); multiplier > 0 makes them
+      ``round_half_up(original * multiplier)`` THEN `multiple_of`-rounded
+      -- 1000 x 1000 at 1.5 with multiple_of 64 is 1472 x 1472, originals
+      1000 x 1000. The same WIDTH_MAX guard applies as for an image
+      (a pure size source emitting 40000 silently is the same hazard).
     """
     original_width = original_height = 0
     target_w, target_h = width, height
@@ -565,6 +727,13 @@ def _resolve_one(
     if image is not None:
         # IMAGE tensors are [B, H, W, C] (ComfyUI convention).
         original_height, original_width = int(image.shape[1]), int(image.shape[2])
+
+        if scale_multiplier > 0:
+            # v0.101.0 scale mode -- everything below (0-axis derivation,
+            # ratio lock, resize_method box math, multiple_of) is ignored
+            # by the owner's spec; the panel greys those widgets to match.
+            resized, scaled_w, scaled_h = _scale_image(image, scale_multiplier, interpolation)
+            return (image, resized, scaled_w, scaled_h, original_width, original_height)
 
         # 0 on an axis = derive it from the other axis + the image's
         # aspect (mirrors core ImageScale's own derivation, nodes.py). A
@@ -624,6 +793,14 @@ def _resolve_one(
     else:
         # Pure size-source path (no image, or nothing left to derive):
         # multiple_of still applies so this node is useful standalone.
+        if image is None:
+            # v0.101.0: the originals are the node's OWN size -- after the
+            # ratio lock above, BEFORE multiple_of (a 0 axis stays 0).
+            original_width, original_height = target_w, target_h
+            if scale_multiplier > 0:
+                final_w, final_h = scale_dimensions(
+                    target_w, target_h, scale_multiplier, "the node's own size"
+                )
         final_w = _round_to_multiple(final_w, multiple_of)
         final_h = _round_to_multiple(final_h, multiple_of)
 
@@ -696,17 +873,27 @@ class EPSResolution:
         "nothing to resize. With more than one size preset selected, this "
         "is a list, one element per preset, in selection order.",
         "The target width actually used, after deriving from aspect ratio "
-        "(if 0) and rounding to multiple_of. With more than one size "
-        "preset selected, this is a list, one element per preset.",
+        "(if 0) and rounding to multiple_of. With scale_multiplier set and "
+        "an image wired, the (first) image's own width times the "
+        "multiplier; with no image, the typed width times the multiplier, "
+        "then rounded to multiple_of. With more than one size preset "
+        "selected, this is a list, one element per preset.",
         "The target height actually used, after deriving from aspect ratio "
-        "(if 0) and rounding to multiple_of. With more than one size "
-        "preset selected, this is a list, one element per preset.",
-        "The input image's width before resizing. 0 if nothing is wired. "
+        "(if 0) and rounding to multiple_of. With scale_multiplier set and "
+        "an image wired, the (first) image's own height times the "
+        "multiplier; with no image, the typed height times the multiplier, "
+        "then rounded to multiple_of. With more than one size preset "
+        "selected, this is a list, one element per preset.",
+        "The input image's width before resizing. With no image wired, the "
+        "node's own width as set (after the ratio lock, before "
+        "multiple_of; 0 stays 0). "
         "With more than one size preset selected, this is a list, one "
         "element per preset (the same value repeated -- it's the same "
         "input image every time). In multi-image mode this output blocks "
         "whatever consumes it (no single original).",
-        "The input image's height before resizing. 0 if nothing is wired. "
+        "The input image's height before resizing. With no image wired, "
+        "the node's own height as set (after the ratio lock, before "
+        "multiple_of; 0 stays 0). "
         "With more than one size preset selected, this is a list, one "
         "element per preset (the same value repeated -- it's the same "
         "input image every time). In multi-image mode this output blocks "
@@ -745,7 +932,15 @@ class EPSResolution:
         "always recalculated to match -- including from a preset or "
         "'copy from image', which then conform to the lock instead of "
         "being applied as-is. Pick a preset ratio from the list, or "
-        "choose 'custom...' and type your own (21:9, 2.39:1, 1.85:1)."
+        "choose 'custom...' and type your own (21:9, 2.39:1, 1.85:1). "
+        "Set 'scale_multiplier' above 0 and a wired "
+        "image comes out at its own size times that number (2 doubles it, "
+        "0.5 halves it; each extra image scales from its own size), with "
+        "the typed size, multiple_of, ratio (and its custom box), "
+        "resize_method, presets and 'rotate' all ignored and greyed out; "
+        "with no image wired the multiplier "
+        "scales the typed size instead, and the original-size outputs "
+        "report the size you typed."
     )
 
     #: §6.16 state registry (v0.83.0): the widgets a Universal State
@@ -766,6 +961,11 @@ class EPSResolution:
     #: positive numbers (see :data:`RATIO_STATE_PATTERN`). Every value a
     #: ``choice`` ratio ever stored (``none``, ``16:9`` ...) matches it, so
     #: states saved before this change still apply unchanged.
+    #:
+    #: ``scale_multiplier`` (v0.101.0) is a plain ``float`` with the
+    #: widget's own bounds, like ``nodes_sets.py``'s ``strength_scale``;
+    #: an Apply write to it fires the callback resolution.js wraps to
+    #: re-grey the size controls.
     EPS_STATE_WIDGETS: ClassVar[dict[str, Any]] = {
         "format": 1,
         "widgets": {
@@ -779,6 +979,11 @@ class EPSResolution:
                 "kind": "string",
                 "pattern": RATIO_STATE_PATTERN,
                 "max_len": RATIO_STATE_MAX_LEN,
+            },
+            "scale_multiplier": {
+                "kind": "float",
+                "min": SCALE_MULTIPLIER_MIN,
+                "max": SCALE_MULTIPLIER_MAX,
             },
         },
     }
@@ -939,6 +1144,43 @@ class EPSResolution:
                         ),
                     },
                 ),
+                # §8 LAW again (v0.101.0): appended LAST, after `ratio`, for
+                # the same positional-restore reason -- a workflow saved
+                # before this field runs one entry short and the widget
+                # stays at 0.0 ("off"), matching `resolve()`'s own default
+                # for a hand-built `/prompt` that omits it. Every widget
+                # resolution.js adds itself (preset combo, Save, Delete,
+                # copy-from-image, the pad) is `serialize: false` on both
+                # flags, so none of them occupies a `widgets_values` slot a
+                # new backend tail could shift (the §6.2 `pinned_state`
+                # hazard does not apply here -- see that file's v0.101.0
+                # section for the check).
+                "scale_multiplier": (
+                    "FLOAT",
+                    {
+                        "default": DEFAULT_SCALE_MULTIPLIER,
+                        "min": SCALE_MULTIPLIER_MIN,
+                        "max": SCALE_MULTIPLIER_MAX,
+                        "step": SCALE_MULTIPLIER_STEP,
+                        "round": SCALE_MULTIPLIER_ROUND,
+                        "tooltip": (
+                            "0 = off. Above 0, a wired image comes out at "
+                            "its own size times this number (2 doubles "
+                            "it, 0.5 halves it; every extra image scales "
+                            "from its own size), resampled with "
+                            "'interpolation'. Width, height, multiple_of, "
+                            "ratio (and its custom box), resize_method, "
+                            "presets and rotate are then "
+                            "ignored and greyed out -- set it back to 0 "
+                            "to get them back, nothing is lost. With no "
+                            "image wired it scales the typed width/height "
+                            "instead (then rounds to multiple_of), and the "
+                            "original-size outputs report the typed size. "
+                            "A result past 16384 on either side fails the "
+                            "run with a message rather than clamping."
+                        ),
+                    },
+                ),
             }),
         }
 
@@ -1005,6 +1247,7 @@ class EPSResolution:
         image: Any = None,
         presets: str = DEFAULT_PRESETS,
         ratio: str = DEFAULT_RATIO,
+        scale_multiplier: Any = DEFAULT_SCALE_MULTIPLIER,
         **extra: Any,
     ) -> tuple[list[Any], ...]:
         # v0.61.0 (FORMAT.md §6.5 multi-image): collect wired image_N
@@ -1016,7 +1259,18 @@ class EPSResolution:
             if match and value is not None:
                 extra_images[int(match.group(1))] = value
 
+        multiplier = coerce_scale_multiplier(scale_multiplier)
         names = _parse_preset_names(presets)
+
+        # v0.101.0 (FORMAT.md §6.5): an image wired + multiplier > 0 is ONE
+        # run from the image's own size -- ticked presets do NOT fan out
+        # (owner spec), and are not even consulted: a preset renamed
+        # elsewhere must not fail a run that ignores presets anyway. The
+        # §6.10 estimator (cross_sweep.js `resolutionScaleModeActive`)
+        # counts 1 for exactly this condition. With NO image the presets
+        # still fan out, each run scaling its own preset's size.
+        if names and multiplier > 0 and (image is not None or extra_images):
+            names = []
 
         if not names:
             # Unchanged M1 behavior for the single-image case -- each value
@@ -1031,6 +1285,7 @@ class EPSResolution:
                 image,
                 extra_images,
                 ratio,
+                multiplier,
             )
             return tuple([value] for value in run)  # type: ignore[return-value]
 
@@ -1067,6 +1322,7 @@ class EPSResolution:
                 image,
                 extra_images,
                 ratio,
+                multiplier,
             )
             for column, value in zip(columns, run, strict=True):
                 column.append(value)

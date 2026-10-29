@@ -18,6 +18,13 @@
  * the shared `addButtonRow` in `button_row.js` instead of four stacked
  * litegraph buttons.
  *
+ * v0.101.0 adds the backend's `scale_multiplier` FLOAT widget's frontend
+ * half -- greying the size controls while a wired image is being scaled
+ * from its own size, and a readout that says what will come out. See the
+ * "v0.101.0: scale multiplier" section for the design and the 1.52.7
+ * `widget.disabled` verification trail for BOTH renderers. On this line it
+ * also greys `rotate` and the `custom…` ratio box.
+ *
  * ---- Hideable outputs: how, and why it's two different mechanisms ----
  *
  * FORMAT.md §6.5 says "Frontend does the hide (litegraph output `hidden`
@@ -514,6 +521,15 @@ const DOM_WIDGET_MARGIN_FALLBACK = 10 // BaseDOMWidgetImpl.DEFAULT_MARGIN (front
 const GRID_STYLE_TAG_ID = 'eps-resolution-grid-style'
 let gridStylesInjected = false
 
+// DOM widgets are skipped by ComfyUI's own tooltip layer on purpose
+// ("these use native browser tooltips" -- NodeTooltip.vue), so the pad
+// documents itself with a plain `title`. Hoisted (v0.101.0) so the scale
+// mode can swap it for GRID_INERT_TITLE and put it back exactly.
+const GRID_TITLE =
+  'Drag inside the pad to set the target size. The readout below the pad ' +
+  'shows width x height, the aspect ratio, and the megapixel count. ' +
+  'Drag the far edge of the node to make the pad bigger.'
+
 // The Notebook's CSS (web/lora_library/notebook.js CSS_TEXT) is the house
 // reference palette: dark panel bg / muted border / two text tones, all
 // theme-CSS-variables-with-fallback so it reads on both Comfy themes.
@@ -528,6 +544,16 @@ const GRID_CSS_TEXT = `
   cursor: crosshair;
   touch-action: none;
   user-select: none;
+}
+/* v0.101.0 scale mode: the pad is inert -- dimmed and untouchable -- in
+   BOTH renderers via this one class, since neither WidgetDOM.vue (Vue) nor
+   the classic overlay reliably greys a DOM widget for us (section
+   "v0.101.0: scale multiplier"). pointer-events: none is the real gate;
+   attachGridDrag's own pointerdown guard is the belt-and-suspenders. */
+.eps-res-grid-canvas.eps-res-grid-inert {
+  opacity: 0.5;
+  pointer-events: none;
+  cursor: default;
 }
 .eps-res-prompt-overlay {
   position: fixed; inset: 0; z-index: 10000;
@@ -1467,7 +1493,13 @@ function drawGrid(node, ctx, cssW) {
   // wrapped onto its own line. Line 2: the reduced aspect, muted. The
   // strip sits directly below the square (which ends at plotY + side) and
   // spans the pad's full width, matching the square's flush edges.
-  const lines = getReadoutLines(disp)
+  // v0.101.0: in scale mode line 1 says what will actually COME OUT
+  // (`out 3840 x 2160 (2x)` with an image, `2048 x 2048 (2x of 1024 x
+  // 1024)` without) instead of the typed target -- `currentScaleReadoutLine`
+  // is null whenever the multiplier is 0, so the pre-v0.101.0 line below is
+  // untouched for every node that never set it.
+  const scaleLine = currentScaleReadoutLine(node)
+  const lines = scaleLine || getReadoutLines(disp)
   const baseY = plotY + side + READOUT_LINE1_BASELINE
   ctx.save()
   ctx.textBaseline = 'alphabetic'
@@ -1482,9 +1514,27 @@ function drawGrid(node, ctx, cssW) {
   const dimsWidth = ctx.measureText(lines.dims).width
   ctx.font = READOUT_FONT
   ctx.fillStyle = colors.muted
-  ctx.fillText(lines.aspect, READOUT_INSET_X + dimsWidth + READOUT_ASPECT_GAP, baseY)
-  ctx.textAlign = 'right'
-  ctx.fillText(lines.mp, cssW - READOUT_INSET_X, baseY)
+  // Scale mode: the "(2x)" / "(2x of 1024 x 1024)" tag takes the aspect's
+  // slot (the aspect follows it when there is one); otherwise exactly the
+  // aspect, as always.
+  const mutedText = scaleLine
+    ? [scaleLine.tag, scaleLine.aspect].filter(Boolean).join(' ')
+    : lines.aspect
+  const mutedX = READOUT_INSET_X + dimsWidth + READOUT_ASPECT_GAP
+  ctx.fillText(mutedText, mutedX, baseY)
+  if (lines.mp) {
+    // The scale-mode tag can be long on a narrow pad; the megapixels are
+    // dropped rather than drawn over it (compact, never garbled). The
+    // pre-v0.101.0 line keeps its unconditional draw.
+    const mpFits =
+      !scaleLine ||
+      cssW - READOUT_INSET_X - ctx.measureText(lines.mp).width >=
+        mutedX + ctx.measureText(mutedText).width + READOUT_ASPECT_GAP
+    if (mpFits) {
+      ctx.textAlign = 'right'
+      ctx.fillText(lines.mp, cssW - READOUT_INSET_X, baseY)
+    }
+  }
 
   // Line 2 (2026-07-29 owner ask, widened 2026-08-28 to walk through
   // pass-through nodes): the INCOMING image, same shape as line 1 -- dims,
@@ -1685,6 +1735,10 @@ function attachGridDrag(node, canvasEl) {
 
   canvasEl.addEventListener('pointerdown', (event) => {
     if (event.button > 0) return // primary mouse button / touch / pen only
+    // v0.101.0: inert in scale mode (the CSS `pointer-events: none` is
+    // what normally stops the event ever arriving; this is the guard for
+    // a build whose overlay re-enables pointer events on the element).
+    if (node._epsGrid?.scaleInert) return
     const rect = canvasEl.getBoundingClientRect()
     const disp = computeDisplayWH(node)
     drag = {
@@ -1736,13 +1790,7 @@ function attachSizeGrid(node) {
 
     const canvasEl = document.createElement('canvas')
     canvasEl.className = 'eps-res-grid-canvas'
-    // DOM widgets are skipped by ComfyUI's own tooltip layer on purpose
-    // ("these use native browser tooltips" -- NodeTooltip.vue), so the pad
-    // documents itself with a plain `title`.
-    canvasEl.title =
-      'Drag inside the pad to set the target size. The readout below the pad ' +
-      'shows width x height, the aspect ratio, and the megapixel count. ' +
-      'Drag the far edge of the node to make the pad bigger.'
+    canvasEl.title = GRID_TITLE // see the constant's own comment
 
     const domWidget = node.addDOMWidget(GRID_WIDGET_NAME, GRID_WIDGET_TYPE, canvasEl, {
       hideOnZoom: true,
@@ -1780,7 +1828,11 @@ function attachSizeGrid(node) {
       sourceProbe: null,
       // Pending requestAnimationFrame id for the coalesced repaint (v0.68.1)
       // -- see renderGrid.
-      renderRaf: null
+      renderRaf: null,
+      // v0.101.0: true while the scale mode makes the pad inert -- the
+      // pointerdown guard in attachGridDrag reads it (applyScaleMultiplierState
+      // writes it alongside the GRID_INERT_CLASS toggle).
+      scaleInert: false
     }
 
     node.addProperty(PROP_SHOW_GRID, true, 'boolean')
@@ -2389,7 +2441,10 @@ function renderPresetCombo(node) {
 function updateDeleteEnabled(node) {
   const state = presetsState(node)
   if (!state || !state.deleteBtn) return
-  state.deleteBtn.disabled = state.selection.length !== 1
+  // v0.101.0: the scale mode greys the whole preset cluster too -- composed
+  // here, in the ONE place Delete's enabled state is derived, so neither
+  // gate can ever re-enable the button behind the other's back.
+  state.deleteBtn.disabled = state.selection.length !== 1 || isScaleModeActive(node)
 }
 
 /**
@@ -2451,6 +2506,10 @@ function installExternalWriteSubscription() {
   subscribeWidgetsChangedExternally((entries) => {
     for (const entry of entries || []) {
       if (entry?.node?._epsPresets) reconcilePresetsUi(entry.node)
+      // v0.101.0: an Apply that wrote `scale_multiplier` already fired the
+      // wrapped callback; this covers an Apply that wrote NOTHING of ours
+      // but still rebuilt panels, and is idempotent either way.
+      if (entry?.node?._epsScale) applyScaleMultiplierState(entry.node)
     }
   })
 }
@@ -2724,7 +2783,9 @@ function beginPresetAction(node, state, activeBtn, pendingLabel) {
 function endPresetAction(node, state, activeBtn, originalLabel) {
   state.presetActionPending = false
   if (activeBtn && originalLabel != null) activeBtn.textContent = originalLabel
-  if (state.saveBtn) state.saveBtn.disabled = false // Save has no selection-based gate of its own
+  // Save has no selection-based gate of its own -- only the v0.101.0 scale
+  // mode's (the request may have settled after the multiplier was set).
+  if (state.saveBtn) state.saveBtn.disabled = isScaleModeActive(node)
   updateDeleteEnabled(node)
   node.setDirtyCanvas(true, true)
 }
@@ -3524,6 +3585,11 @@ function openCustomRatioBox(node, ratioWidget, event) {
   const previous = committedRatio(node)
   ratioWidget.value = previous // the command never stays as the value
   node.setDirtyCanvas(true, true)
+  // v0.101.0 scale mode: the ratio combo is disabled in both renderers, so
+  // `custom…` can only arrive programmatically here -- the widget is already
+  // put back above; open no box, write nothing (the ratio is ignored by the
+  // run and its value must survive the mode untouched).
+  if (currentScaleState(node).customRatio) return
   promptText(node, {
     title: 'Custom ratio',
     message: 'Ratio as width:height, like 21:9 or 2.39:1',
@@ -3938,6 +4004,408 @@ function wireMultipleOfLock(node) {
   }
 }
 
+// ------------------------------------------- v0.101.0: scale multiplier
+//
+// Owner spec 2026-10-29 (FORMAT.md §6.5 `scale_multiplier`): a FLOAT widget
+// (0 = off, 0.0..4.0, step 0.1), appended LAST by the backend (§8 tail
+// law -- nodes_resolution.py's own comment). Its two meanings -- "a wired
+// image at its OWN size times the multiplier" vs "the typed size times the
+// multiplier, no image" -- are the backend's contract (`_resolve_one`/
+// `_resolve_run`); this section is only (a) the GREYING and (b) the
+// READOUT.
+//
+// (a) With the multiplier > 0 AND an image wired to `image` or any
+// `image_N`, the backend ignores the typed width/height, `multiple_of`,
+// `ratio`, `resize_method` and every ticked preset -- so those five widgets,
+// the preset combo + Save + Delete, `copy from image` and the pad are
+// DISABLED here, values KEPT: nothing is written, only `.disabled` flips,
+// so setting the multiplier back to 0 restores everything and the greying
+// itself can never un-select a preset, re-conform a ratio or re-snap a
+// multiple (no widget callback runs). `interpolation` and the multiplier
+// stay live. `copy from image` is ALSO disabled whenever no image input is
+// wired at all, whatever the multiplier (it used to be clickable and
+// toast "Wire an image into this node first"); its wired-but-not-loaded and
+// mixed-sizes toasts are unchanged. On this line (the 2026-10-05 round)
+// `rotate` and the `custom…` ratio box are greyed too: rotate swaps
+// width/height, the box rewrites `ratio` -- both numbers the run ignores and
+// must keep -- so the row's rotate `<button>` is disabled and `rotateSize`/
+// `openCustomRatioBox` refuse even a programmatic call. The row buttons are
+// HTML `<button>`s (button_row.js), so their `.disabled` greys natively in
+// both renderers. `scaleMultiplierDisabledState` is the
+// pure decision; `applyScaleMultiplierState` is the one writer; it runs on
+// the multiplier's own callback, every connect/disconnect (synchronously
+// AND via the deferred converge), `onConfigure` (reload, paste, and the
+// tab switch that rebuilds every node), a Universal/State Controller
+// apply, and once at attach.
+//
+// ---- `widget.disabled` in BOTH renderers (verified against the rig's
+// installed comfyui_frontend_package 1.52.7, extracted from its sourcemaps
+// via research/nodes-2.0/tools/extract.py -- not guessed) ----
+//
+// CLASSIC canvas: `LGraphNode.updateComputedDisabled()` (LGraphNode.ts,
+// first thing in `drawWidgets`) sets `widget.computedDisabled =
+// widget.disabled || <its input is linked>` on EVERY draw;
+// `getWidgetOnPos()` (~L2356) skips a `computedDisabled` widget outright,
+// so no click or drag ever reaches it; `BaseSteppedWidget.drawWidget`
+// skips the arrows, `drawWidgetShape` skips the outline, and
+// `NumberWidget`/`ComboWidget._displayValue` return '' -- a disabled
+// number/combo draws as its label on an outline-less pill with the value
+// text BLANKED, the exact look core gives a widget whose input is linked.
+// The VALUE is untouched (only the paint changes), which is what "values
+// kept" needs. `ButtonWidget` likewise loses its outline and its click --
+// the existing Delete button relies on precisely this.
+//
+// VUE nodes (Nodes 2.0): `BaseWidget`'s `disabled` SETTER writes
+// `this._state.disabled`, and once the node is in a graph `_state` IS the
+// reactive Pinia `widgetValueStore` entry (`setNodeId` -> `registerWidget`
+// hands back the store's own proxy, LGraph.add registers every widget).
+// `useProcessedWidgets.ts` (~L333) reads `widgetState?.disabled` inside its
+// computed and folds it into `options.disabled`; `WidgetInputNumberInput.
+// vue` passes that to `ScrubableNumberInput` (`:disabled` -> the <input>,
+// both step buttons and the scrub), `WidgetSelectDefault.vue` dims to
+// `opacity-50` and disables its trigger, and `WidgetButton.vue` v-binds the
+// options straight onto `Button.vue`, whose `disabled` prop lands on the
+// <button>. So ONE write -- `widget.disabled = x` -- is the shared path.
+// NOT a getter-defined `disabled` (the research contract's "not observed"
+// row) and NOT a raw `widget.options.disabled` mutation (the raw options
+// object is not the reactive one the store hands Vue). The one renderer
+// gap: `WidgetDOM.vue` ignores `disabled` for DOM widgets, and the classic
+// overlay's own `computedDisabled` dimming (`DomWidget.vue`) only
+// re-composes on a store change -- so the pad (an addDOMWidget <canvas>)
+// is greyed by THIS FILE's own `GRID_INERT_CLASS` (opacity + pointer-events)
+// plus a pointerdown guard, identical in both renderers.
+//
+// Tab switch / reload: both renderers rebuild the node (`nodeCreated` ->
+// `attach()`, then `configure()` AFTER `graph.add` has registered the
+// widgets), and 1.52.7's store can hand a REUSED entry back for the same
+// graph+node+widget id (`registerWidget` returns `existing`), so the flag
+// is re-derived in the chained `onConfigure` rather than trusted from the
+// attach-time write alone. A Universal State apply writes the multiplier
+// through its real `.callback` (wrapped below) and also fans out through
+// `subscribeWidgetsChangedExternally`; both land on the same idempotent
+// `applyScaleMultiplierState`.
+//
+// (b) The READOUT's line 1 says what will actually come out (owner spec):
+// with an image, `out 3840 x 2160 (2x)` -- or `out mixed sizes (2x each)`
+// when the incoming-size walk finds several differing sources through a
+// switcher (never a guess, same rule as the `in` line); with no image,
+// `2048 x 2048 (2x of 1024 x 1024)` (multiple_of applied to the result,
+// as the backend does). `getScaleReadoutLine` is pure; the `in` line is
+// unchanged.
+
+//: eps_image/nodes_resolution.py INPUT_TYPES' `scale_multiplier` widget.
+const SCALE_MULTIPLIER_WIDGET_NAME = 'scale_multiplier'
+//: The backend widgets the scale mode ignores (nodes_resolution.py
+//: `_resolve_one`) -- disabled with their values kept. `interpolation` is
+//: deliberately absent: it still drives the resample. Disabling `ratio` also
+//: takes its `custom…` entry out of reach (the combo cannot be opened);
+//: `openCustomRatioBox` refuses the box on top of that, and `rotateSize`
+//: refuses the swap -- the two controls this line added in its 2026-10-05
+//: round, both greyed through `applyScaleMultiplierState` below.
+const SCALE_DISABLED_WIDGET_NAMES = ['width', 'height', 'multiple_of', 'ratio', 'resize_method']
+//: The pad's inert-state CSS hook (GRID_CSS_TEXT) and its replacement title.
+const GRID_INERT_CLASS = 'eps-res-grid-inert'
+const GRID_INERT_TITLE =
+  'Inactive while scale_multiplier is above 0 and an image is wired: the ' +
+  "output is the image's own size times the multiplier. Set the multiplier " +
+  'back to 0 to use the pad again.'
+
+/** The `scale_multiplier` widget value as a usable factor, or 0 ("off")
+ * for anything not a finite positive number -- mirrors nodes_resolution.py's
+ * `coerce_scale_multiplier` exactly (own implementation, same rule, tests
+ * on both). Pure; exported for tests.
+ * @param {unknown} raw @returns {number} */
+export function parseScaleMultiplier(raw) {
+  const value = Number(raw)
+  return Number.isFinite(value) && value > 0 ? value : 0
+}
+
+/** Whether any image input -- `image` or an `image_N` extra -- carries a
+ * link, over a LIVE litegraph `node.inputs` array (`{name, link}` entries).
+ * The same "any image wired" condition the backend's `resolve()` uses to
+ * decide the scale mode (`image is not None or extra_images`), so the
+ * greying and the run can never disagree. Pure; exported for tests.
+ * @param {Array<{name?:string, link?:unknown}>|undefined} inputs
+ * @returns {boolean} */
+export function anyImageInputWired(inputs) {
+  if (!Array.isArray(inputs)) return false
+  return inputs.some(
+    (input) =>
+      !!input &&
+      input.link != null &&
+      (input.name === 'image' || EXTRA_IMAGE_RE.test(input.name || ''))
+  )
+}
+
+/**
+ * THE decision (owner spec, "put the decision in a pure exported helper"):
+ * which controls the scale mode disables for a given multiplier and
+ * image-wired state.
+ *   - `scaleActive`: multiplier > 0 AND an image is wired -- the backend's
+ *     own-size-times-multiplier mode.
+ *   - `sizeControls`: width/height/multiple_of/ratio/resize_method, the
+ *     preset combo + Save + Delete, and the pad -- disabled exactly when
+ *     `scaleActive`.
+ *   - `copyFromImage`: disabled when NO image is wired at all (whatever the
+ *     multiplier) OR when `scaleActive` -- i.e. the only time it is live is
+ *     "an image is wired and the multiplier is 0", the only time its click
+ *     could do anything useful.
+ *   - `rotate` (this line's 2026-10-05 button -- it swaps width/height,
+ *     numbers the run ignores in scale mode): disabled exactly when
+ *     `scaleActive`; with nothing wired it stays live, the typed size still
+ *     drives the run then.
+ *   - `customRatio` (the `custom…` typing box the ratio combo opens): the
+ *     combo itself is in `sizeControls`, and this names the FLOW -- a
+ *     programmatic `custom…` pick in scale mode must open no box either.
+ * Pure; exported for tests.
+ * @param {unknown} multiplier @param {boolean} imageWired
+ * @returns {{scaleActive:boolean, sizeControls:boolean, copyFromImage:boolean,
+ *   rotate:boolean, customRatio:boolean}}
+ */
+export function scaleMultiplierDisabledState(multiplier, imageWired) {
+  const wired = !!imageWired
+  const scaleActive = parseScaleMultiplier(multiplier) > 0 && wired
+  return {
+    scaleActive,
+    sizeControls: scaleActive,
+    copyFromImage: !wired || scaleActive,
+    rotate: scaleActive,
+    customRatio: scaleActive
+  }
+}
+
+/** Nearest whole number, an exact .5 rounding UP -- mirrors
+ * nodes_resolution.py's `round_half_up` (round to six decimals first so
+ * binary float noise can't flip a tie: 0.3 * 1005 is 301.49999999999994,
+ * the user typed 0.3 and expects 302). Pure; exported for tests. */
+export function roundHalfUp(value) {
+  return Math.floor(Math.round(value * 1e6) / 1e6 + 0.5)
+}
+
+/** One axis times the multiplier, floored at 1 px; a non-positive size
+ * (the no-image 0 "derive" sentinel) stays as-is -- mirrors
+ * nodes_resolution.py's `scale_side`. Pure; exported for tests. */
+export function scaleSide(size, multiplier) {
+  const s = Number(size) || 0
+  if (s <= 0) return s
+  return Math.max(1, roundHalfUp(s * multiplier))
+}
+
+/** `2x` / `1.5x` / `0.25x` -- the factor as the user typed it, trailing
+ * zeros dropped (the widget rounds to 0.01, so two decimals is exact).
+ * Pure; exported for tests. */
+export function formatScaleMultiplier(multiplier) {
+  const m = parseScaleMultiplier(multiplier)
+  return `${Number(m.toFixed(2))}x`
+}
+
+/**
+ * Line 1 of the readout in scale mode, or `null` when the multiplier is 0
+ * (the caller then draws the ordinary target line, untouched). Same
+ * field shape as `getReadoutLines` plus a muted `tag` that takes the
+ * aspect's slot:
+ *   - image wired, one unambiguous source: `out 3840 x 2160` + `(2x)` +
+ *     the OUTPUT's aspect and megapixels;
+ *   - image wired, several differing sources through a switcher: `out
+ *     mixed sizes` + `(2x each)` -- says so rather than guessing, the `in`
+ *     line's own rule;
+ *   - image wired but nothing decoded yet: `out ?` + `(2x of input)` (the
+ *     source probe repaints the moment the size lands);
+ *   - no image: the scaled typed size, `multiple_of`-rounded like the
+ *     backend's own `_round_to_multiple`, + `(2x of 1024 x 1024)`; a 0 axis
+ *     reads `auto` on both sides, as the plain line already does.
+ * Pure over plain values; exported for tests.
+ * @param {{multiplier:unknown, imageWired:boolean,
+ *   summary:{kind:string, width?:number, height?:number}|null,
+ *   rawW:unknown, rawH:unknown, multipleOf:unknown}} args
+ * @returns {null|{dims:string, tag:string, aspect:string|null, mp:string|null}}
+ */
+export function getScaleReadoutLine({ multiplier, imageWired, summary, rawW, rawH, multipleOf }) {
+  const m = parseScaleMultiplier(multiplier)
+  if (!(m > 0)) return null
+  const factor = formatScaleMultiplier(m)
+  if (imageWired) {
+    if (summary?.kind === 'single') {
+      const w = scaleSide(summary.width, m)
+      const h = scaleSide(summary.height, m)
+      return {
+        dims: `out ${w} x ${h}`,
+        tag: `(${factor})`,
+        aspect: formatAspect(w, h),
+        mp: formatMegapixels(w, h)
+      }
+    }
+    if (summary?.kind === 'mixed') {
+      return { dims: 'out mixed sizes', tag: `(${factor} each)`, aspect: null, mp: null }
+    }
+    return { dims: 'out ?', tag: `(${factor} of input)`, aspect: null, mp: null }
+  }
+  const w0 = Math.round(Number(rawW) || 0)
+  const h0 = Math.round(Number(rawH) || 0)
+  const unit = Number(multipleOf) || 0
+  const w = roundToMultipleOf(scaleSide(w0, m), unit)
+  const h = roundToMultipleOf(scaleSide(h0, m), unit)
+  const label = (value) => (value > 0 ? String(value) : 'auto')
+  return {
+    dims: `${label(w)} x ${label(h)}`,
+    tag: `(${factor} of ${label(w0)} x ${label(h0)})`,
+    aspect: null,
+    mp: w > 0 && h > 0 ? formatMegapixels(w, h) : null
+  }
+}
+
+/** The live multiplier, via the same fail-soft parse the backend uses. */
+function currentScaleMultiplierValue(node) {
+  return parseScaleMultiplier(widgetByName(node, SCALE_MULTIPLIER_WIDGET_NAME)?.value)
+}
+
+/** `scaleMultiplierDisabledState` over the LIVE node -- the one read every
+ * writer below shares. */
+function currentScaleState(node) {
+  return scaleMultiplierDisabledState(currentScaleMultiplierValue(node), anyImageInputWired(node?.inputs))
+}
+
+/** Whether the node is in scale mode right now (an image wired AND the
+ * multiplier > 0) -- the gate `updateDeleteEnabled`/`endPresetAction`
+ * compose with their own. */
+function isScaleModeActive(node) {
+  return currentScaleState(node).scaleActive
+}
+
+/** `getScaleReadoutLine` over the live node: the same `resolveIncomingImageSummary`
+ * walk the `in` line and `copy from image` use, so the three can never
+ * disagree about what is wired. */
+function currentScaleReadoutLine(node) {
+  return getScaleReadoutLine({
+    multiplier: currentScaleMultiplierValue(node),
+    imageWired: anyImageInputWired(node.inputs),
+    summary: resolveIncomingImageSummary(node),
+    rawW: widgetByName(node, 'width')?.value,
+    rawH: widgetByName(node, 'height')?.value,
+    multipleOf: currentMultipleOfValue(node)
+  })
+}
+
+/** `widget.disabled = x`, change-guarded (FORMAT.md §7.9) -- the ONE write
+ * both renderers observe (section header). Never touches `.value` or
+ * `.options`, never calls the callback: greying has no side effects. */
+function setWidgetDisabled(widget, disabled) {
+  if (!widget) return
+  if (!!widget.disabled === disabled) return
+  widget.disabled = disabled
+}
+
+/**
+ * THE one writer: re-derives the scale-mode state from the live node and
+ * pushes it onto every affected control. Idempotent and side-effect-free
+ * beyond `.disabled`/the pad's class, so every trigger (section header)
+ * may call it freely and in any order. Save/Delete are left alone while a
+ * request is in flight (`beginPresetAction` owns them until
+ * `endPresetAction`, which re-derives through `isScaleModeActive` itself).
+ */
+function applyScaleMultiplierState(node) {
+  const state = currentScaleState(node)
+  for (const name of SCALE_DISABLED_WIDGET_NAMES) {
+    setWidgetDisabled(widgetByName(node, name), state.sizeControls)
+  }
+  const presets = presetsState(node)
+  if (presets) {
+    setWidgetDisabled(presets.combo, state.sizeControls)
+    if (!presets.presetActionPending) {
+      setWidgetDisabled(presets.saveBtn, state.sizeControls)
+      updateDeleteEnabled(node)
+    }
+  }
+  // This line's `copy from image | rotate` are HTML buttons in ONE row widget
+  // (`attachCopyRotateRow`, 2026-10-05 round): a native `<button>.disabled`,
+  // greyed by button_row.js's own `:disabled` rule in BOTH renderers, and the
+  // row's click handler refuses a disabled button outright (`rotateSize`
+  // carries its own guard as well). The two have DIFFERENT gates: copy is
+  // out whenever nothing is wired, rotate only in scale mode.
+  const copyRow = node._epsCopyRow
+  if (copyRow?.buttons) {
+    setWidgetDisabled(copyRow.buttons.copy, state.copyFromImage)
+    setWidgetDisabled(copyRow.buttons.rotate, state.rotate)
+  }
+  const grid = node._epsGrid
+  if (grid?.canvas) {
+    grid.scaleInert = state.sizeControls
+    grid.canvas.classList.toggle(GRID_INERT_CLASS, state.sizeControls)
+    const title = state.sizeControls ? GRID_INERT_TITLE : GRID_TITLE
+    if (grid.canvas.title !== title) grid.canvas.title = title
+  }
+  node.setDirtyCanvas?.(true, true)
+  renderGrid(node)
+}
+
+/**
+ * Installs the scale mode's live wiring on *node* (called LAST in
+ * `attach()`, once every widget it reaches exists):
+ *
+ * - the `scale_multiplier` widget's OWN callback (chained on top of
+ *   useFloatWidget's rounding callback -- the file's wrap idiom; this is
+ *   the one write path both renderers share, and also what a Universal
+ *   State apply calls);
+ * - `onConnectionsChange` (chained, never replaced): the synchronous
+ *   paint on any connect/disconnect -- `scheduleImageConverge` re-applies
+ *   once more after its deferred converge;
+ * - `onConfigure` (chained): reload, paste, and the tab switch that
+ *   rebuilds every node -- see the section header for why the attach-time
+ *   write alone is not trusted;
+ * - one initial apply, which on a fresh node disables only `copy from
+ *   image` (nothing wired yet).
+ */
+function wireScaleMultiplier(node) {
+  node._epsScale = true
+  const widget = widgetByName(node, SCALE_MULTIPLIER_WIDGET_NAME)
+  if (widget) {
+    const originalCallback = widget.callback
+    widget.callback = function (...args) {
+      let result
+      try {
+        result = originalCallback?.apply(this, args)
+      } finally {
+        applyScaleMultiplierState(node)
+      }
+      return result
+    }
+  } else {
+    console.warn(PREFIX, 'EPSResolution node is missing its `scale_multiplier` widget; scale-mode greying not wired')
+  }
+
+  const originalOnConnectionsChange = node.onConnectionsChange
+  node.onConnectionsChange = function scaleOnConnectionsChange(...args) {
+    let result
+    try {
+      result = originalOnConnectionsChange?.apply(this, args)
+    } finally {
+      try {
+        applyScaleMultiplierState(this)
+      } catch (error) {
+        console.warn(PREFIX, 'scale-mode connection refresh failed', error)
+      }
+    }
+    return result
+  }
+
+  const originalOnConfigure = node.onConfigure
+  node.onConfigure = function scaleMultiplierOnConfigure(info) {
+    let result
+    try {
+      result = originalOnConfigure?.call(this, info)
+    } finally {
+      try {
+        applyScaleMultiplierState(this)
+      } catch (error) {
+        console.warn(PREFIX, 'scale-mode post-configure refresh failed', error)
+      }
+    }
+    return result
+  }
+
+  applyScaleMultiplierState(node)
+}
+
 // --------------------------------------------------------------- lifecycle
 
 /** Frontend-only one-time setup: inject the grid's stylesheet once. */
@@ -4022,6 +4490,12 @@ function scheduleImageConverge(node) {
     try {
       convergeExtraImageInputs(node)
       revealExtraOutputs(node)
+      // v0.101.0: the deferred, coalesced re-check of the scale-mode
+      // greying -- runs after every connect/disconnect, configure and
+      // fresh attach, once the inputs array has settled (the synchronous
+      // onConnectionsChange apply is the instant paint; this is the one
+      // that can never see a half-updated link).
+      applyScaleMultiplierState(node)
     } catch (error) {
       console.warn(PREFIX, 'image-input converge failed', error)
     }
@@ -4151,6 +4625,11 @@ function copyFromImage(node) {
  * doing nothing silently (§6.3: failure is never silent).
  */
 function rotateSize(node) {
+  // v0.101.0 scale mode: the row's `rotate` button is disabled (and the
+  // row's own click handler refuses a disabled button); this is the guard
+  // for any other caller -- the swap would touch numbers the run ignores
+  // and must keep, so it is refused outright, no toast, nothing written.
+  if (currentScaleState(node).rotate) return
   const widthWidget = widgetByName(node, 'width')
   const heightWidget = widgetByName(node, 'height')
   if (!widthWidget || !heightWidget) return
@@ -4300,6 +4779,11 @@ export function attach(node) {
   wireRatioLock(node)
   // Last, so the unshift lands above widgets that are all already present.
   attachCopyRotateRow(node)
+  // v0.101.0: after EVERY widget this file adds exists (the preset cluster,
+  // the pad, the copy | rotate row), since the scale-mode greying reaches
+  // all of them; its initial apply also disables `copy from image` on a
+  // fresh node, which has nothing wired yet.
+  wireScaleMultiplier(node)
 
   // v0.61.0 (FORMAT.md §6.5): height-first layout stamp + old-save value
   // migration, multi-image converge/reveal. The stamp is set on EVERY node

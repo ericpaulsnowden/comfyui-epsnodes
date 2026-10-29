@@ -50,6 +50,28 @@ export function installEnvironment() {
   FakeEl.prototype.click ??= function () {
     fire(this, 'click')
   }
+  // `classList.toggle` / `.remove` (the v0.101.0 pad's inert class) -- the
+  // shared fake's per-element classList has only add/contains; widened here
+  // on every element `document.createElement` hands out, same reason as above.
+  const createElement = globalThis.document.createElement
+  globalThis.document.createElement = (tag) => {
+    const el = createElement(tag)
+    const list = el.classList
+    if (list && !list.remove) {
+      list.remove = (name) => {
+        el.className = el.className.split(/\s+/).filter((c) => c && c !== name).join(' ')
+      }
+    }
+    if (list && !list.toggle) {
+      list.toggle = (name, force) => {
+        const on = force === undefined ? !list.contains(name) : !!force
+        if (on) list.add(name)
+        else list.remove(name)
+        return on
+      }
+    }
+    return el
+  }
   // The grid's pointer drag registers window listeners only on pointerdown;
   // the fake `window` has none, so give it inert ones.
   globalThis.window.addEventListener = () => {}
@@ -101,8 +123,17 @@ export function makeBackendWidgets() {
     }),
     number('multiple_of', 0, { max: 1024 }),
     new FakeWidget('text', 'presets', '[]', { hidden: true }),
-    new FakeWidget('combo', 'ratio', 'none', { values: BACKEND_RATIO_OPTIONS.slice() })
+    new FakeWidget('combo', 'ratio', 'none', { values: BACKEND_RATIO_OPTIONS.slice() }),
+    // v0.101.0 port: the FLOAT `scale_multiplier`, appended LAST (§8) --
+    // useFloatWidget's shape (step x10 legacy field, step2 real, precision
+    // derived from the step, round from the spec).
+    number('scale_multiplier', 0, { max: 4, step: 1, step2: 0.1, precision: 1, round: 0.01 })
   ]
+}
+
+/** v1.5.0's backend widgets: the seven that predate `scale_multiplier`. */
+export function makeV150BackendWidgets() {
+  return makeBackendWidgets().filter((w) => w.name !== 'scale_multiplier')
 }
 
 /**

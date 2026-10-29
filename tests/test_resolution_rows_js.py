@@ -59,6 +59,7 @@ BACKEND_NAMES = [
     "multiple_of",
     "presets",
     "ratio",
+    "scale_multiplier",  # v0.101.0 port: appended LAST (§8)
 ]
 FRONTEND_ONLY = [
     "eps_resolution_copy_row",
@@ -100,6 +101,7 @@ class TestLayoutAndFlags:
             "multiple_of",
             "presets",
             "ratio",
+            "scale_multiplier",
             "preset",
             "eps_resolution_preset_row",
             "eps_resolution_grid",
@@ -181,7 +183,9 @@ class TestLayoutAndFlags:
     def test_copy_row_buttons_are_copy_on_the_left_rotate_on_the_right(self, run: dict) -> None:
         buttons = run["layout"]["rows"]["eps_resolution_copy_row"]["buttons"]
         assert [b["label"] for b in buttons] == ["copy from image", "rotate"]
-        assert all(b["disabled"] is False for b in buttons)
+        # v0.101.0 port: a FRESH node has nothing wired, so `copy from image`
+        # starts disabled (there is nothing to copy from); rotate is live.
+        assert [b["disabled"] for b in buttons] == [True, False]
 
     def test_preset_row_buttons_are_save_then_delete_with_delete_disabled(
         self, run: dict
@@ -209,39 +213,55 @@ class TestLayoutAndFlags:
 # =================== B. widgets_values: byte-identical to v1.5.0, both directions
 
 
-#: What each golden workflow array becomes once loaded and saved again. A
-#: workflow saved before `ratio` / `presets` existed is padded with the
-#: defaults when saved again -- the same thing v1.5.0 did.
+#: `scale_multiplier`'s default -- the ONE trailing value the v0.101.0 port
+#: appended after v1.5.0's seven (§8 tail law). A workflow that never set it
+#: saves this; v1.5.0 never wrote (or reads) an eighth value at all.
+TAIL_DEFAULT = 0
+
+#: What each golden workflow array becomes once loaded and saved again, as
+#: `(what v1.5.0 saves, what THIS build saves)`. A workflow saved before
+#: `ratio` / `presets` existed is padded with the defaults when saved again --
+#: the same thing v1.5.0 did -- and this build appends the multiplier it holds.
 GOLDEN = {
     "freshDefaults": (
         [1024, 1024, "stretch", "bilinear", 0, "[]", "none"],
-        '[1024,1024,"stretch","bilinear",0,"[]","none"]',
+        [1024, 1024, "stretch", "bilinear", 0, "[]", "none", TAIL_DEFAULT],
     ),
     "plainEdited": (
         [333, 777, "crop to fill", "lanczos", 0, '["Portrait"]', "none"],
-        '[333,777,"crop to fill","lanczos",0,"[\\"Portrait\\"]","none"]',
+        [333, 777, "crop to fill", "lanczos", 0, '["Portrait"]', "none", TAIL_DEFAULT],
     ),
     "lockedAndSnapped": (
         [576, 1024, "pad", "area", 64, "[]", "16:9"],
-        '[576,1024,"pad","area",64,"[]","16:9"]',
+        [576, 1024, "pad", "area", 64, "[]", "16:9", TAIL_DEFAULT],
     ),
     "portraitPreset": (
         [1280, 960, "stretch", "bilinear", 0, "[]", "3:4"],
-        '[1280,960,"stretch","bilinear",0,"[]","3:4"]',
+        [1280, 960, "stretch", "bilinear", 0, "[]", "3:4", TAIL_DEFAULT],
     ),
     "typedRatio": (
         [418, 1000, "stretch", "bilinear", 0, "[]", "2.39:1"],
-        '[418,1000,"stretch","bilinear",0,"[]","2.39:1"]',
+        [418, 1000, "stretch", "bilinear", 0, "[]", "2.39:1", TAIL_DEFAULT],
     ),
     "beforeRatio": (
         [512, 768, "stretch", "bilinear", 0, "[]", "none"],
-        '[512,768,"stretch","bilinear",0,"[]","none"]',
+        [512, 768, "stretch", "bilinear", 0, "[]", "none", TAIL_DEFAULT],
     ),
     "beforePresets": (
         [512, 768, "stretch", "bilinear", 0, "[]", "none"],
-        '[512,768,"stretch","bilinear",0,"[]","none"]',
+        [512, 768, "stretch", "bilinear", 0, "[]", "none", TAIL_DEFAULT],
+    ),
+    # saved by THIS build with the multiplier set: v1.5.0 reads the seven it
+    # knows and never sees the eighth; this build round-trips all eight.
+    "withMultiplier": (
+        [1024, 1024, "stretch", "bilinear", 0, "[]", "none"],
+        [1024, 1024, "stretch", "bilinear", 0, "[]", "none", 1.5],
     ),
 }
+
+
+def _compact_json(values: list) -> str:
+    return json.dumps(values, separators=(",", ":"))
 
 
 class TestSavedWorkflowsAreByteIdentical:
@@ -255,39 +275,55 @@ class TestSavedWorkflowsAreByteIdentical:
     `onSerialize` -- run through the same serialize/configure algorithm. Swapping
     its four button widgets for two row widgets changes how many frontend-only
     widgets exist, and so how many holes the RAW array has, but not one byte
-    that survives compaction. These tests compare the bytes."""
+    that survives compaction. Since the v0.101.0 port the saved array carries
+    exactly ONE more trailing value (`scale_multiplier`, §8 tail law): the
+    seven v1.5.0 bytes are unchanged at the front, and both directions still
+    load. These tests compare the bytes."""
 
     @pytest.mark.parametrize("case", sorted(GOLDEN))
-    def test_the_saved_array_is_the_same_bytes_as_v150(self, run: dict, case: str) -> None:
+    def test_the_saved_array_is_v150s_bytes_plus_the_one_tail_value(
+        self, run: dict, case: str
+    ) -> None:
         data = run["compat"][case]
-        expected_values, expected_json = GOLDEN[case]
-        assert data["savedNew"] == expected_values
-        assert data["saved150"] == expected_values
-        assert data["savedNewJson"] == expected_json
-        assert data["saved150Json"] == expected_json
-        assert data["savedNewJson"] == data["saved150Json"]
+        expected_150, expected_new = GOLDEN[case]
+        assert data["saved150"] == expected_150
+        assert data["savedNew"] == expected_new
+        assert data["saved150Json"] == _compact_json(expected_150)
+        assert data["savedNewJson"] == _compact_json(expected_new)
+        # the v1.5.0 prefix is byte-identical; only the tail is new
+        assert data["savedNew"][: len(expected_150)] == data["saved150"]
+        assert len(data["savedNew"]) == len(data["saved150"]) + 1
 
     @pytest.mark.parametrize("case", sorted(GOLDEN))
     def test_an_older_build_workflow_loads_here_exactly_as_it_loads_there(
         self, run: dict, case: str
     ) -> None:
         data = run["compat"][case]
-        assert data["loadedNew"] == data["loaded150"]
+        loaded_new = dict(data["loadedNew"])
+        loaded_150 = dict(data["loaded150"])
+        # every widget v1.5.0 knows lands on the same value here...
+        assert {k: v for k, v in loaded_new.items() if k != "scale_multiplier"} == loaded_150
+        # ...and the eighth is the file's own value, or the default when absent
+        tail = data["input"][7] if len(data["input"]) > 7 else TAIL_DEFAULT
+        assert loaded_new["scale_multiplier"] == tail
         # and the widgets land by NAME on the right values (positional restore intact)
-        loaded = dict(data["loadedNew"])
         for name, value in zip(BACKEND_NAMES, data["input"], strict=False):
-            assert loaded[name] == value, (case, name)
+            assert loaded_new[name] == value, (case, name)
 
     @pytest.mark.parametrize("case", sorted(GOLDEN))
     def test_a_workflow_saved_here_loads_on_the_older_build(self, run: dict, case: str) -> None:
+        """An eight-value array into v1.5.0's seven serialized widgets: the
+        restore loop stops when the widgets run out, the eighth is unread."""
         data = run["compat"][case]
         assert data["newSavedLoadedBy150"] == data["loaded150"]
 
     def test_a_full_length_array_round_trips_unchanged(self, run: dict) -> None:
-        for case, (values, _json) in GOLDEN.items():
+        for case, (_values_150, values_new) in GOLDEN.items():
             data = run["compat"][case]
             if len(data["input"]) == len(BACKEND_NAMES):
-                assert data["savedNew"] == data["input"] == values, case
+                assert data["savedNew"] == data["input"] == values_new, case
+        # the parametrisation really contains such a case
+        assert any(len(run["compat"][c]["input"]) == len(BACKEND_NAMES) for c in GOLDEN)
 
     def test_the_raw_array_never_carries_a_hole_or_a_null_for_a_button(self, run: dict) -> None:
         """The failure the compaction exists for (rig-proven 2026-08-14): a
@@ -312,7 +348,7 @@ class TestSavedWorkflowsAreByteIdentical:
         self, run: dict
     ) -> None:
         saved = run["layout"]["savedValues"]
-        assert saved == [1024, 1024, "stretch", "bilinear", 0, "[]", "none"]
+        assert saved == [1024, 1024, "stretch", "bilinear", 0, "[]", "none", TAIL_DEFAULT]
         assert len(saved) == len(BACKEND_NAMES)
 
 
@@ -640,8 +676,14 @@ class TestTheLockDoesNotWalkAwayFromWhatWasTyped:
 
 
 class TestCopyFromImage:
-    def test_unwired_says_so(self, run: dict) -> None:
-        assert run["copy"]["unwired"] == ["warn: Wire an image into this node first."]
+    def test_unwired_is_disabled_rather_than_toasting(self, run: dict) -> None:
+        """v0.101.0 port: with nothing wired the button is greyed, so the old
+        "Wire an image into this node first" click-toast is no longer
+        reachable; wiring an image (litegraph's `onConnectionsChange`) brings
+        it back."""
+        assert run["copy"]["unwiredDisabled"] is True
+        assert run["copy"]["unwired"] == []
+        assert run["copy"]["wiredDisabled"] is False
 
     def test_copies_the_wired_size_as_one_undo_step(self, run: dict) -> None:
         assert run["copy"]["copied"] == [800, 600]
@@ -753,7 +795,94 @@ class TestNoDomWidgetFrontend:
         assert "eps_resolution_copy_row" not in data["names"]
         assert "eps_resolution_preset_row" not in data["names"]
         assert data["names"][: len(BACKEND_NAMES)] == BACKEND_NAMES
-        assert data["savedValues"] == [1024, 1024, "stretch", "bilinear", 0, "[]", "none"]
+        assert data["savedValues"] == [
+            1024, 1024, "stretch", "bilinear", 0, "[]", "none", TAIL_DEFAULT
+        ]
+
+
+# ======================================================= K. scale mode (v0.101.0 port)
+
+
+class TestScaleMode:
+    """The v0.101.0 greying, run through the REAL `attach()` on this line's
+    node shape (button rows, typed ratio): the multiplier > 0 with an image
+    wired disables the size controls -- here including `rotate` and the
+    `custom…` box -- with NO side effects, and 0 restores everything. The
+    rig verification of this port happened on main (classic + Nodes 2.0);
+    the v1-only pieces (rotate, custom…) are covered here, by tests only."""
+
+    _SIZE_WIDGETS = ("height", "width", "resize_method", "multiple_of", "ratio")
+
+    def test_a_fresh_node_greys_only_copy_from_image(self, run: dict) -> None:
+        snap = run["scaleMode"]["freshUnwired"]
+        assert snap["copy"] is True  # nothing wired -> nothing to copy from
+        assert snap["rotate"] is False
+        assert not any(snap["widgets"][n] for n in self._SIZE_WIDGETS)
+        assert snap["padInert"] is False
+
+    def test_wiring_an_image_with_the_multiplier_off_enables_everything(
+        self, run: dict
+    ) -> None:
+        snap = run["scaleMode"]["wiredOff"]
+        assert snap["copy"] is False and snap["rotate"] is False
+        assert snap["save"] is False and snap["delete"] is True  # no preset picked
+        assert not any(snap["widgets"].values())
+        assert snap["padInert"] is False
+
+    def test_the_mode_greys_the_size_controls_rotate_and_the_preset_cluster(
+        self, run: dict
+    ) -> None:
+        snap = run["scaleMode"]["on"]
+        for name in self._SIZE_WIDGETS:
+            assert snap["widgets"][name] is True, name
+        assert snap["widgets"]["preset"] is True
+        assert snap["widgets"]["interpolation"] is False  # still drives the resample
+        assert snap["widgets"]["scale_multiplier"] is False  # the way back out
+        assert snap["copy"] is True and snap["rotate"] is True
+        assert snap["save"] is True and snap["delete"] is True
+        assert snap["padInert"] is True
+        assert "eps-res-grid-inert" in snap["padClass"]
+
+    def test_greying_has_no_side_effects_on_the_values(self, run: dict) -> None:
+        data = run["scaleMode"]
+        assert data["before"] == {"width": 1024, "height": 576, "ratio": "16:9", "presets": "[]"}
+        assert data["on"]["values"] == data["before"]
+
+    def test_rotate_is_refused_by_the_row_and_by_its_own_guard(self, run: dict) -> None:
+        data = run["scaleMode"]
+        assert data["afterRotateClick"] == {"values": data["before"], "toasts": []}
+        # even with the <button> forced live, rotateSize() itself refuses
+        assert data["afterForcedRotate"] == {"values": data["before"], "toasts": []}
+
+    def test_the_custom_ratio_box_never_opens_in_scale_mode(self, run: dict) -> None:
+        after = run["scaleMode"]["afterCustomPick"]
+        assert (after["dialogCalls"], after["canvasPrompts"], after["windowPrompts"]) == (0, 0, 0)
+        assert after["ratio"] == "16:9"  # the command never stays as the value
+
+    def test_copy_from_image_is_refused_in_scale_mode(self, run: dict) -> None:
+        data = run["scaleMode"]
+        assert data["afterCopyClick"] == {"values": data["before"], "toasts": []}
+
+    def test_zero_restores_everything_with_the_values_kept(self, run: dict) -> None:
+        data = run["scaleMode"]
+        off = data["off"]
+        assert not any(off["widgets"].values())
+        assert off["copy"] is False and off["rotate"] is False
+        assert off["save"] is False and off["delete"] is True
+        assert off["padInert"] is False
+        assert "eps-res-grid-inert" not in off["padClass"]
+        assert off["values"] == data["before"]
+        # control: the same rotate click now swaps and flips the lock
+        assert data["rotatedAfterOff"] == {"width": 576, "height": 1024, "ratio": "9:16"}
+
+    def test_multiplier_on_with_nothing_wired_keeps_the_typed_size_live(
+        self, run: dict
+    ) -> None:
+        snap = run["scaleMode"]["unwiredOn"]
+        assert not any(snap["widgets"][n] for n in self._SIZE_WIDGETS)
+        assert snap["rotate"] is False
+        assert snap["copy"] is True  # still nothing to copy from
+        assert snap["padInert"] is False
 
 
 # ================================================================ output is JSON
@@ -775,4 +904,5 @@ def test_the_probe_output_is_one_json_object(run: dict) -> None:
         "presetsProperty",
         "noDomWidgets",
         "lockStability",
+        "scaleMode",
     }

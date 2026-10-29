@@ -212,22 +212,33 @@ def _image_grid_emit(count: int) -> dict:
             "imageGridCount": count}
 
 
-def _resolution(inputs: dict, presets: str = "[]") -> dict:
+def _resolution(inputs: dict, presets: str = "[]", scale_multiplier: float = 0.0) -> dict:
     """§6.5 EPS Resolution (v0.67.1 in the estimator): mapped over its
-    longest list input x max(1, selected presets)."""
+    longest list input x max(1, selected presets) -- or x 1 in the v0.101.0
+    scale mode (`scale_multiplier` > 0 with an image wired)."""
     return {
         "classType": "EPSResolution",
-        "widgets": {"width": 1024, "height": 1024, "presets": presets},
+        "widgets": {
+            "width": 1024,
+            "height": 1024,
+            "presets": presets,
+            "scale_multiplier": scale_multiplier,
+        },
         "inputs": inputs,
     }
 
 
-def _resolution_chain(resolution_inputs: dict, extra_nodes: dict, presets: str = "[]") -> dict:
+def _resolution_chain(
+    resolution_inputs: dict,
+    extra_nodes: dict,
+    presets: str = "[]",
+    scale_multiplier: float = 0.0,
+) -> dict:
     """Text source + a Resolution (slot 1 = resized_image) feeding a pair-
     multiply multiplier's image input -- the owner's exact report shape."""
     nodes = {
         "3": _text_source(),
-        "res": _resolution(resolution_inputs, presets),
+        "res": _resolution(resolution_inputs, presets, scale_multiplier),
         "5": {
             "classType": "EPSCrossSweep",
             "widgets": {"base_folder": "", "pair_mode": "multiply", "sweep_mode": "multiply"},
@@ -1378,6 +1389,29 @@ ESTIMATE_CASES = [
         {"total": 0, "atLeast": False, "error": None,
          "breakdown": "nothing to run (image input is empty/blocked)"},
     ),
+    # ------------------------------------ v0.101.0 EPS Resolution scale mode
+    (
+        # Same two ticked presets as above, but scale_multiplier 2 with the
+        # image wired: the backend ignores the presets and runs ONCE
+        # (nodes_resolution.py resolve()) -- so does the estimate.
+        "resolution_scale_mode_ignores_ticked_presets",
+        _resolution_chain(
+            {"image": _link("91")}, {"91": _LOAD_IMAGES["91"]}, '["A", "B"]', 2.0
+        ),
+        "5",
+        {"total": 1, "atLeast": False, "pairs": 1, "unknowns": [], "error": None},
+    ),
+    (
+        # Scale mode still maps over a fanned input: a 3-image Emit grid
+        # through a scaling Resolution is 3 runs, not 3 x presets.
+        "resolution_scale_mode_still_maps_over_the_grid",
+        _resolution_chain(
+            {"image": _link("grid")}, {"grid": _image_grid_emit(3)}, '["A", "B"]', 1.5
+        ),
+        "5",
+        {"total": 3, "atLeast": True, "pairs": 3, "pairsAtLeast": True,
+         "unknowns": ["image"], "error": None},
+    ),
     # ------------------------------ v0.68.0 generic list flags (any node)
     (
         # Owner ask: 3 models through a third-party enhancer "only shows 1".
@@ -1616,6 +1650,26 @@ RESOLUTION_PRESET_CASES = [
     ("malformed_is_none", "not json", 0),
 ]
 
+#: (case name, scale_multiplier widget value, snapshot `inputs` map,
+#: expected resolutionScaleModeActive) -- v0.101.0: true iff the multiplier
+#: is a finite number > 0 AND `image` or any `image_N` carries a link; the
+#: SAME condition nodes_resolution.py's resolve() uses to drop the presets.
+_LINKED = {"originId": "91", "originSlot": 0}
+RESOLUTION_SCALE_MODE_CASES = [
+    ("off_with_image", 0, {"image": _LINKED}, False),
+    ("on_with_image", 2, {"image": _LINKED}, True),
+    ("on_with_fraction", 0.5, {"image": _LINKED}, True),
+    ("on_with_only_an_extra_image", 2, {"image": None, "image_3": _LINKED}, True),
+    ("on_with_image_8", 2, {"image_8": _LINKED}, True),
+    ("on_but_nothing_wired", 2, {"image": None}, False),
+    ("on_but_no_inputs_at_all", 2, {}, False),
+    ("on_with_a_non_image_input_only", 2, {"mask": _LINKED}, False),
+    ("string_multiplier_from_a_hand_edited_file", "1.5", {"image": _LINKED}, True),
+    ("garbage_multiplier_is_off", "x", {"image": _LINKED}, False),
+    ("negative_is_off", -1, {"image": _LINKED}, False),
+    ("inputs_undefined_is_off", 2, None, False),
+]
+
 #: (case name, raw `pinned` widget value, expected notebookPinnedCount) --
 #: mirrors notebook.js `parsePinned`'s acceptance rule: a JSON object whose
 #: `entries` holds >= 1 `{name: string}` item counts those items; anything
@@ -1657,7 +1711,8 @@ const out = {
     hasNotebookPinnedCount: typeof m.notebookPinnedCount === 'function',
     hasPickerEnabledRowCount: typeof m.pickerEnabledRowCount === 'function',
     hasIteratorValueCount: typeof m.iteratorValueCount === 'function',
-    hasResolutionPresetCount: typeof m.resolutionPresetCount === 'function'
+    hasResolutionPresetCount: typeof m.resolutionPresetCount === 'function',
+    hasResolutionScaleModeActive: typeof m.resolutionScaleModeActive === 'function'
   },
   constants: {
     classId: m.CLASS_ID,
@@ -1678,6 +1733,9 @@ const out = {
   ],
   pickerCounts: %(picker_inputs)s.map((raw) => m.pickerEnabledRowCount(raw)),
   resolutionPresetCounts: %(resolution_preset_inputs)s.map((raw) => m.resolutionPresetCount(raw)),
+  resolutionScaleModes: %(resolution_scale_inputs)s.map(
+    ([mult, inputs]) => m.resolutionScaleModeActive(mult, inputs === null ? undefined : inputs)
+  ),
   notebookPinnedCounts: %(notebook_pinned_inputs)s.map((raw) => m.notebookPinnedCount(raw))
 }
 
@@ -1711,6 +1769,9 @@ def cross_sweep_api(tmp_path_factory: pytest.TempPathFactory) -> dict:
             "picker_inputs": json.dumps([raw for _, raw, _ in PICKER_CASES]),
             "resolution_preset_inputs": json.dumps(
                 [raw for _, raw, _ in RESOLUTION_PRESET_CASES]
+            ),
+            "resolution_scale_inputs": json.dumps(
+                [[mult, inputs] for _, mult, inputs, _ in RESOLUTION_SCALE_MODE_CASES]
             ),
             "notebook_pinned_inputs": json.dumps([raw for _, raw, _ in NOTEBOOK_PINNED_CASES]),
         },
@@ -1773,6 +1834,7 @@ def test_module_exports_the_hooks_and_pure_helpers(cross_sweep_api: dict) -> Non
         "hasPickerEnabledRowCount": True,
         "hasIteratorValueCount": True,
         "hasResolutionPresetCount": True,
+        "hasResolutionScaleModeActive": True,
     }
 
 
@@ -1867,6 +1929,16 @@ def test_resolution_preset_count_mirrors_parse_preset_names(cross_sweep_api: dic
         assert got == expected, f"{name}: got {got!r}, wanted {expected!r}"
 
 
+def test_resolution_scale_mode_active_mirrors_resolve(cross_sweep_api: dict) -> None:
+    """v0.101.0: the K factor is 1 exactly when nodes_resolution.py's
+    resolve() drops the presets -- multiplier > 0 AND an image wired to
+    `image` or any `image_N`."""
+    for (name, _mult, _inputs, expected), got in zip(
+        RESOLUTION_SCALE_MODE_CASES, cross_sweep_api["resolutionScaleModes"], strict=True
+    ):
+        assert got == expected, f"{name}: got {got!r}, wanted {expected!r}"
+
+
 def test_notebook_pinned_count_mirrors_parse_pinned(cross_sweep_api: dict) -> None:
     """Provenance M3: `notebookPinnedCount(raw)` -> the pin's named-entry
     count, or null for anything that is not a valid pin (so the Notebook
@@ -1902,6 +1974,12 @@ def test_resolution_branch_is_mapped_not_flattened(source: str) -> None:
     branch = branch.split("if (CORE_SINGLE_CLASSES.has(type))", 1)[0]
     assert "mapLen = Math.max(mapLen, inner.count)" in branch
     assert "Math.max(1, resolutionPresetCount(node.widgets?.presets))" in branch
+    # v0.101.0: the scale mode short-circuits the preset factor to 1.
+    assert (
+        "const scaleMode = resolutionScaleModeActive(node.widgets?.scale_multiplier, node.inputs)"
+        in branch
+    )
+    assert "const presets = scaleMode ? 1 : Math.max(1, resolutionPresetCount(" in branch
     assert "slot <= 1 ? 'image' : slot >= 6 ? `image_${slot - 4}` : null" in branch
     assert "return { count: 0, atLeast: false, srcId: id }" in branch
 

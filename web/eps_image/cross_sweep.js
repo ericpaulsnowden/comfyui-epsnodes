@@ -365,6 +365,31 @@ export function resolutionPresetCount(raw) {
 }
 
 /**
+ * v0.101.0 (§6.5 `scale_multiplier`): whether a Resolution node is in its
+ * "scale the wired image from its own size" mode -- the multiplier is a
+ * finite number > 0 AND an image is wired to `image` or any `image_N`. In
+ * that mode nodes_resolution.py's `resolve()` ignores every ticked preset
+ * and runs ONCE, so the caller's K factor is 1, never the preset count.
+ * With no image wired the presets still fan out (each run scales its own
+ * preset's typed size), so this is false there. *inputs* is the snapshot's
+ * own name-keyed map (`{name: {originId, originSlot} | null}`, see
+ * `snapshotFromGraph`) -- a link present is "wired", the same rule the
+ * backend applies to its kwargs. Mirrors resolution.js's
+ * `parseScaleMultiplier` + `anyImageInputWired` by hand (that file reads
+ * the LIVE `node.inputs` array; this one reads the serialized map).
+ * @param {unknown} scaleMultiplier @param {Record<string, unknown>|undefined} inputs
+ * @returns {boolean}
+ */
+export function resolutionScaleModeActive(scaleMultiplier, inputs) {
+  const multiplier = Number(scaleMultiplier)
+  if (!(Number.isFinite(multiplier) && multiplier > 0)) return false
+  for (const [name, link] of Object.entries(inputs || {})) {
+    if (link && (name === 'image' || /^image_[2-8]$/.test(name))) return true
+  }
+  return false
+}
+
+/**
  * Notebook fan-out length: non-empty lines of the `entry` widget
  * (nodes_notebook.py `_selected_names` -- one selected name per line,
  * blank/whitespace-only lines skipped; zero lines is a queue-time error
@@ -948,7 +973,10 @@ function sourceCount(snapshot, link, path) {
       mapLen = Math.max(mapLen, inner.count)
       atLeast = atLeast || inner.atLeast
     }
-    const presets = Math.max(1, resolutionPresetCount(node.widgets?.presets))
+    // v0.101.0: in scale mode (multiplier > 0 + an image wired) the
+    // backend ignores the ticked presets and runs ONCE per mapped element.
+    const scaleMode = resolutionScaleModeActive(node.widgets?.scale_multiplier, node.inputs)
+    const presets = scaleMode ? 1 : Math.max(1, resolutionPresetCount(node.widgets?.presets))
     return { count: mapLen * presets, atLeast, srcId: id }
   }
   // v0.68.0: ANY class whose list flags the adapter injected (from

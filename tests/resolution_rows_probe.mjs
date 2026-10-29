@@ -14,6 +14,7 @@ import {
   installEnvironment,
   makeNode,
   makeBackendWidgets,
+  makeV150BackendWidgets,
   classicPick,
   vuePick,
   widgetNamed,
@@ -164,7 +165,11 @@ const out = {}
 // "The v1.5.0 build" is modelled by its widget list: ONE leading button widget
 // (copy from image) + the seven backend widgets + preset combo + Save + Delete +
 // the pad, every frontend widget `serialize:false`, and the same compaction
-// hook. The new build must write the same bytes and read the same bytes.
+// hook. The new build must write the same bytes and read the same bytes --
+// plus, since the v0.101.0 port, exactly ONE more trailing value, the
+// `scale_multiplier` the backend appended LAST (§8): v1.5.0's seven survive
+// unchanged at the front, an older save loads here with the multiplier at 0,
+// and a save from here loads there with the eighth value simply unread.
 {
   const V150_COMPACT = function (info) {
     const values = info?.widgets_values
@@ -178,7 +183,7 @@ const out = {}
   const v150Node = () => {
     const widgets = [
       frontendStub('copy from image', 'button'),
-      ...makeBackendWidgets(),
+      ...makeV150BackendWidgets(), // v1.5.0 predates `scale_multiplier`
       frontendStub('preset', 'combo'),
       frontendStub('Save', 'button'),
       frontendStub('Delete', 'button'),
@@ -200,7 +205,9 @@ const out = {}
     typedRatio: [418, 1000, 'stretch', 'bilinear', 0, '[]', '2.39:1'],
     // saved before `ratio` existed (6 values) and before `presets` (5 values)
     beforeRatio: [512, 768, 'stretch', 'bilinear', 0, '[]'],
-    beforePresets: [512, 768, 'stretch', 'bilinear', 0]
+    beforePresets: [512, 768, 'stretch', 'bilinear', 0],
+    // saved by THIS build with the multiplier set (8 values, v0.101.0 port)
+    withMultiplier: [1024, 1024, 'stretch', 'bilinear', 0, '[]', 'none', 1.5]
   }
   const readAll = (node) => node.widgets.filter((w) => w.serialize !== false).map((w) => [w.name, w.value])
   out.compat = {}
@@ -549,13 +556,22 @@ out.rotate.snapWrapperRestored = await (async () => {
   resetRecords()
   const node = await fresh()
   const row = widgetNamed(node, 'eps_resolution_copy_row')
-  click(rowButton(row, 'copy from image'))
+  const copyBtn = rowButton(row, 'copy from image')
+  // v0.101.0 port: with nothing wired the button is DISABLED (it used to be
+  // clickable and toast "Wire an image into this node first").
+  const unwiredDisabled = copyBtn.disabled
+  click(copyBtn)
   const unwired = detail()
   resetRecords()
   node.inputs[0].link = 5
   const wall = { id: 3, type: 'LoadImage', comfyClass: 'LoadImage', imgs: [{ naturalWidth: 800, naturalHeight: 600 }] }
   node.getInputNode = (slot) => (slot === 0 ? wall : null)
-  click(rowButton(row, 'copy from image'))
+  // litegraph fires onConnectionsChange once the link has landed; that is what
+  // re-derives the button's enabled state (the real frontend always fires it).
+  node.onConnectionsChange?.(1, 0, true, { id: 5 }, node.inputs[0])
+  await settle()
+  const wiredDisabled = copyBtn.disabled
+  click(copyBtn)
   const copied = dims(node)
   const copyUndo = undo.captures
   vuePick(node, 'ratio', '4:3') // 800x600 is already 4:3
@@ -563,7 +579,80 @@ out.rotate.snapWrapperRestored = await (async () => {
   wall.imgs = [{ naturalWidth: 1000, naturalHeight: 300 }]
   vuePick(node, 'multiple_of', 64)
   click(rowButton(row, 'copy from image'))
-  out.copy = { unwired, copied, copyUndo, withLock: dims(node), toastsWithLock: detail() }
+  out.copy = { unwiredDisabled, unwired, wiredDisabled, copied, copyUndo, withLock: dims(node), toastsWithLock: detail() }
+}
+
+// ============================================ K. scale mode (v0.101.0 port)
+// The multiplier > 0 with an image wired greys the size controls -- on this
+// line that includes the row's `rotate` button and the `custom…` box -- with
+// NO side effects (values kept, no preset un-select, no box, nothing written),
+// and the multiplier back to 0 restores everything.
+{
+  const snap = (node) => {
+    const copyRow = widgetNamed(node, 'eps_resolution_copy_row')
+    const presetRow = widgetNamed(node, 'eps_resolution_preset_row')
+    return {
+      widgets: Object.fromEntries(
+        ['height', 'width', 'resize_method', 'interpolation', 'multiple_of', 'ratio', 'scale_multiplier', 'preset']
+          .map((n) => [n, !!widgetNamed(node, n).disabled])
+      ),
+      copy: rowButton(copyRow, 'copy from image').disabled,
+      rotate: rowButton(copyRow, 'rotate').disabled,
+      save: rowButton(presetRow, 'Save').disabled,
+      delete: rowButton(presetRow, 'Delete').disabled,
+      padInert: !!node._epsGrid?.scaleInert,
+      padClass: node._epsGrid?.canvas?.className ?? null,
+      values: { width: val(node, 'width'), height: val(node, 'height'), ratio: val(node, 'ratio'), presets: val(node, 'presets') }
+    }
+  }
+  const wire = (node) => {
+    node.inputs[0].link = 9
+    node.getInputNode = (slot) =>
+      slot === 0 ? { id: 3, type: 'LoadImage', comfyClass: 'LoadImage', imgs: [{ naturalWidth: 800, naturalHeight: 600 }] } : null
+    node.onConnectionsChange?.(1, 0, true, { id: 9 }, node.inputs[0])
+  }
+  resetRecords()
+  const node = await fresh()
+  const freshUnwired = snap(node)
+  wire(node)
+  await settle()
+  const wiredOff = snap(node)
+  vuePick(node, 'ratio', '16:9')
+  vuePick(node, 'width', 1024) // 1024 x 576 at 16:9
+  const before = snap(node).values
+  resetRecords()
+  vuePick(node, 'scale_multiplier', 2)
+  await settle()
+  const on = snap(node)
+  const copyRow = widgetNamed(node, 'eps_resolution_copy_row')
+  const rotateBtn = rowButton(copyRow, 'rotate')
+  // a click on the disabled button is refused by the row itself...
+  click(rotateBtn)
+  const afterRotateClick = { values: snap(node).values, toasts: detail() }
+  // ...and `rotateSize`'s OWN guard refuses even when the button is forced live
+  rotateBtn.disabled = false
+  click(rotateBtn)
+  const afterForcedRotate = { values: snap(node).values, toasts: detail() }
+  rotateBtn.disabled = true
+  // the `custom…` command arriving programmatically opens no box
+  vuePick(node, 'ratio', 'custom…')
+  await settle()
+  const afterCustomPick = { dialogCalls: dialogCalls.length, canvasPrompts: canvasPrompts.length, windowPrompts: windowPrompts.length, ratio: val(node, 'ratio') }
+  click(rowButton(copyRow, 'copy from image'))
+  const afterCopyClick = { values: snap(node).values, toasts: detail() }
+  vuePick(node, 'scale_multiplier', 0)
+  await settle()
+  const off = snap(node)
+  // control: with the mode off the same rotate click swaps and flips
+  click(rotateBtn)
+  const rotatedAfterOff = { width: val(node, 'width'), height: val(node, 'height'), ratio: val(node, 'ratio') }
+  // multiplier on with NOTHING wired: the typed size still drives, so only
+  // copy is out (nothing to copy from); rotate and the fields stay live
+  const node2 = await fresh()
+  vuePick(node2, 'scale_multiplier', 2)
+  await settle()
+  const unwiredOn = snap(node2)
+  out.scaleMode = { freshUnwired, wiredOff, before, on, afterRotateClick, afterForcedRotate, afterCustomPick, afterCopyClick, off, rotatedAfterOff, unwiredOn }
 }
 
 // ================================================= J. the Save | Delete row
@@ -716,6 +805,10 @@ out.rotate.snapWrapperRestored = await (async () => {
   const wall = { id: 3, type: 'LoadImage', comfyClass: 'LoadImage', imgs: [{ naturalWidth: 1000, naturalHeight: 1000 }] }
   node.inputs[0].link = 5
   node.getInputNode = (slot) => (slot === 0 ? wall : null)
+  // v0.101.0 port: the copy button is disabled until litegraph's own
+  // connect notification re-derives it (the real frontend always fires it)
+  node.onConnectionsChange?.(1, 0, true, { id: 5 }, node.inputs[0])
+  await settle()
   vuePick(node, 'ratio', '2.39:1')
   click(rowButton(widgetNamed(node, 'eps_resolution_copy_row'), 'copy from image'))
   out.lockStability.copyAt239 = dims(node)
