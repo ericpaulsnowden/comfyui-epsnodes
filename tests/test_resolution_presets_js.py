@@ -587,7 +587,9 @@ def test_end_preset_action_rederives_delete_disabled_rather_than_flat_enabling(
 ) -> None:
     body = _function_body(source, "endPresetAction(node, state, activeBtn, originalLabel)")
     assert "state.presetActionPending = false" in body
-    assert "state.saveBtn.disabled = false" in body
+    # v0.101.0: Save's only gate is the scale mode's, re-derived here (was a
+    # flat `= false` before the scale multiplier existed).
+    assert "state.saveBtn.disabled = isScaleModeActive(node)" in body
     assert "updateDeleteEnabled(node)" in body
     # Delete's own disabled flag must never be flipped directly here --
     # only through the selection-based helper above, so a selection change

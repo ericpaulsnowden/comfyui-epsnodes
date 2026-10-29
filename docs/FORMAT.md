@@ -1670,6 +1670,96 @@ only the prefix and IO type substituted:
 
 ## §6.5 `EPSResolution` (display: "EPS Resolution") — M1 core
 
+**`scale_multiplier` (v0.101.0, owner spec 2026-10-29).** A FLOAT widget,
+default `0.0` (= off), `0.0..4.0`, `step 0.1`, `round 0.01` (core's own
+`KSampler.cfg` pairing: the frontend derives a one-decimal display
+precision from `step`, so arrows step 0.1 → 0.2 → 0.3 and never show
+`0.30000000000000004` — `useFloatWidget.ts`'s `onFloatValueChange`
+re-rounds every commit — while the finer `round` lets a user who raised
+`Comfy.FloatRoundingPrecision` keep `1.25`). Appended LAST in `INPUT_TYPES`
+after `ratio` (§8 tail law). **Tail-shift check:** every widget
+`resolution.js` adds itself (preset combo, Save, Delete, `copy from image`,
+the pad) is `serialize:false` on BOTH flags and so never occupies a
+`widgets_values` slot — the §6.2 `pinned_state` hazard (a backend tail
+shifting a frontend-appended SERIALIZED widget) does not apply; no
+migration. An old save is one entry short and the widget stays `0.0`,
+which is also `resolve()`'s default for a `/prompt` that omits the field.
+Declared in `EPS_STATE_WIDGETS` as `{"kind": "float", "min": 0.0, "max":
+4.0}`. Two meanings, by whether an image is wired:
+
+- **Image wired to `image` or any `image_N`, multiplier > 0** — each wired
+  image comes out at ITS OWN size × multiplier, each side
+  `round_half_up`, floored at 1 px (the product is rounded to six decimals
+  first so a binary-noise tie like `0.3 × 1005 = 301.49999999999994` still
+  reads as the `301.5 → 302` the user typed), a plain stretch resize with
+  the node's `interpolation` (aspect is preserved by construction).
+  `width`/`height`/`multiple_of`/`ratio`/`resize_method`/`presets` are
+  IGNORED — ticked presets do NOT fan out (one run; `resolve()` drops the
+  names before the store is consulted, so a preset missing elsewhere
+  cannot fail a run that ignores presets), and the §6.10 estimator
+  (`cross_sweep.js` `resolutionScaleModeActive`) counts 1 for exactly this
+  condition. Single mode: `resized_image` = the scaled image,
+  `width`/`height` = the scaled size, `original_*` = the image's size,
+  `image` passthrough as today. Multi mode: each `resized_N` scales from
+  its own size (different-sized inputs STAY different sizes — the owner's
+  explicit choice), `width`/`height` = the FIRST wired image's scaled size,
+  passthrough + originals block as today. Any scaled side past
+  `WIDTH_MAX`/`HEIGHT_MAX` (16384) fails the run with a `ValueError` naming
+  the source size, the multiplier and the result — never a silent clamp.
+- **No image wired, any multiplier** — a BEHAVIOUR CHANGE:
+  `original_width`/`original_height` now report the node's OWN size as set
+  — after the ratio lock, NOT `multiple_of`-rounded, a `0` axis staying
+  `0` (they were a literal `0` before v0.101.0); with presets ticked, each
+  preset's own width/height are that run's originals. Multiplier 0:
+  `width`/`height` exactly as before (typed size, `multiple_of`-rounded).
+  Multiplier > 0: `round_half_up(original × multiplier)` THEN
+  `multiple_of` — `1000 × 1000` at `1.5` with `multiple_of` 64 is `1472 ×
+  1472`, originals `1000 × 1000`. Presets still fan out here, each run
+  scaling its own preset's size. The same 16384 guard applies (a pure
+  size source emitting 40000 silently is the same hazard). All fields
+  stay editable.
+
+**Frontend greying (`resolution.js`, section "v0.101.0: scale
+multiplier").** `scaleMultiplierDisabledState(multiplier, imageWired)` is
+the pure, exported decision: `scaleActive` = multiplier > 0 AND an image
+wired (`anyImageInputWired` over `image`/`image_2..8`, the backend's own
+condition); `sizeControls` (= `scaleActive`) disables `width`, `height`,
+`multiple_of`, `ratio`, `resize_method`, the preset combo + Save + Delete,
+and the pad; `copyFromImage` is disabled when NO image is wired at all
+(whatever the multiplier — it used to be clickable with a toast) OR when
+`scaleActive`; the wired-but-not-loaded and mixed-sizes toasts are
+unchanged. `interpolation` and the multiplier stay live. ONLY
+`widget.disabled` flips — never a value, never a callback — so greying can
+never un-select a preset, re-conform a ratio or re-snap a multiple, and
+setting the multiplier back to 0 restores everything. Re-applied on the
+multiplier's own callback, every connect/disconnect (synchronously, plus
+the deferred image-input converge), `onConfigure` (load, paste, the tab
+switch that rebuilds every node), a Universal/State Controller apply
+(`subscribeWidgetsChangedExternally`) and once at attach. Save/Delete's
+in-flight gate is respected and their own selection gate is composed with
+the scale gate in the one place each is derived. **Renderers (verified
+against the rig's 1.52.7 sourcemaps):** classic canvas —
+`LGraphNode.updateComputedDisabled()` folds `widget.disabled` into
+`computedDisabled` on every draw, `getWidgetOnPos()` skips such widgets
+(unclickable), arrows/outline are skipped and the value text is blanked
+(core's own linked-input look); Vue nodes — the `disabled` setter writes
+the reactive `widgetValueStore` entry, `useProcessedWidgets` folds it into
+`options.disabled`, which `ScrubableNumberInput`/`WidgetSelectDefault`/
+`Button` honour. The pad is a DOM widget that `WidgetDOM.vue` never greys,
+so it carries its own `eps-res-grid-inert` class (opacity + `pointer-events:
+none`) plus a pointerdown guard — identical in both renderers.
+
+**Readout.** Line 1 in scale mode says what will come out: `out 3840 x
+2160 (2x)` + the output's aspect/MP with an image; `out mixed sizes (2x
+each)` when the §6.5 incoming-size walk finds several differing sources
+(never a guess); `out ? (2x of input)` while the wired image is still
+decoding; `2048 x 2048 (2x of 1024 x 1024)` with no image (`multiple_of`
+applied like the backend). The megapixels are dropped rather than drawn
+over a long tag. The `in` line is unchanged. `getScaleReadoutLine` is pure
+and tested; `roundHalfUp`/`scaleSide` mirror the backend's helpers by
+hand with one shared case table (`tests/test_resolution.py` ↔
+`tests/test_resolution_scale_multiplier_js.py`).
+
 **M4 — ratio lock (v0.87.0, owner ask 2026-08-28).** A VISIBLE `ratio`
 combo — `none` (default), `1:1`, `5:4`, `4:5`, `9:16`, `16:9` — appended
 LAST in `INPUT_TYPES` (after the hidden `presets`; §8's tail law, so every

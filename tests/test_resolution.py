@@ -280,7 +280,10 @@ def test_multiple_of_rounds_the_pure_size_source_with_no_image() -> None:
     # 100/64 = 1.5625 -> round 2 -> 128.
     assert (width, height) == (128, 128)
     assert resized is None
-    assert (orig_w, orig_h) == (0, 0)
+    # v0.101.0 (owner spec): with no image the originals are the node's OWN
+    # size BEFORE multiple_of -- 100, not the rounded 128, and not the
+    # literal 0 they were before.
+    assert (orig_w, orig_h) == (100, 100)
 
 
 def test_multiple_of_off_by_default_leaves_target_untouched() -> None:
@@ -350,7 +353,8 @@ def test_no_image_returns_target_wh_and_safe_empty_resized() -> None:
     assert out_image is None
     assert resized is None
     assert (width, height) == (640, 480)
-    assert (orig_w, orig_h) == (0, 0)
+    # v0.101.0: no image -> originals report the node's own typed size.
+    assert (orig_w, orig_h) == (640, 480)
 
 
 def test_no_image_with_zero_axis_cannot_derive_and_stays_zero() -> None:
@@ -360,7 +364,8 @@ def test_no_image_with_zero_axis_cannot_derive_and_stays_zero() -> None:
     )
     assert resized is None
     assert (width, height) == (0, 512)
-    assert (orig_w, orig_h) == (0, 0)
+    # v0.101.0: the 0 axis stays 0 in the originals too.
+    assert (orig_w, orig_h) == (0, 512)
 
 
 def test_no_image_both_axes_zero_stays_zero() -> None:
@@ -658,8 +663,10 @@ class TestPresetsSelected:
         # golden computation above; "Exact" has multiple_of=0 (off).
         assert width == [128, 1000]
         assert height == [128, 500]
-        assert orig_w == [0, 0]
-        assert orig_h == [0, 0]
+        # v0.101.0: each preset's own (pre-multiple_of) size is that run's
+        # original -- "Rounded" reports 100, not its rounded 128.
+        assert orig_w == [100, 1000]
+        assert orig_h == [100, 500]
 
     def test_missing_preset_name_raises_naming_it_and_the_file(
         self, context: LibraryContext
@@ -735,10 +742,10 @@ class TestMultiImage:
         assert "image_9" not in optional
         assert "image_" not in optional
         # static entries untouched, and iteration still shows only them
-        # ("ratio" appended LAST -- §8, owner ask 2026-08-28: see
-        # TestRatioLock's own tail-position test below for the ordering
-        # itself, not just set membership).
-        assert set(optional) == {"image", "presets", "ratio"}
+        # ("ratio" then "scale_multiplier" appended LAST -- §8: see
+        # TestRatioLockTailPosition / TestScaleMultiplierTailPosition below
+        # for the ordering itself, not just set membership).
+        assert set(optional) == {"image", "presets", "ratio", "scale_multiplier"}
 
     def test_two_images_same_target_both_resized(
         self, fake_execution_blocker: type
@@ -959,9 +966,14 @@ class TestRatioLockTailPosition:
     litegraph restores `widgets_values` POSITIONALLY, so anything else
     shifts every already-saved workflow's values."""
 
-    def test_ratio_is_the_last_key_in_optional(self) -> None:
+    def test_ratio_sits_right_after_presets(self) -> None:
+        # Was "the last key" until v0.101.0 appended `scale_multiplier`
+        # behind it (TestScaleMultiplierTailPosition pins the new tail);
+        # ratio's own slot -- immediately after `presets` -- is unchanged,
+        # which is what keeps every saved `widgets_values` straight.
         optional = nodes_resolution.EPSResolution.INPUT_TYPES()["optional"]
-        assert list(optional.keys())[-1] == "ratio"
+        keys = list(optional.keys())
+        assert keys.index("ratio") == keys.index("presets") + 1
 
     def test_full_widget_order_required_then_optional(self) -> None:
         # The exact order litegraph builds real (non-socket) widgets in:
@@ -981,7 +993,7 @@ class TestRatioLockTailPosition:
             "interpolation",
             "multiple_of",
         ]
-        assert optional_widget_names == ["presets", "ratio"]
+        assert optional_widget_names == ["presets", "ratio", "scale_multiplier"]
 
     def test_ratio_default_is_none(self) -> None:
         optional = nodes_resolution.EPSResolution.INPUT_TYPES()["optional"]
@@ -1116,3 +1128,350 @@ class TestRatioLockMultiImage:
         assert result[2][0] == 1000 and result[3][0] == 800
         assert tuple(result[1][0].shape) == (1, 800, 1000, 3)
         assert tuple(result[6][0].shape) == (1, 800, 1000, 3)
+
+
+# ------------------------------------------------ scale multiplier (v0.101.0)
+
+
+class TestScaleMultiplierPureHelpers:
+    """The three pure helpers behind FORMAT.md §6.5's `scale_multiplier`
+    (owner spec 2026-10-29), mirrored by hand in resolution.js
+    (`parseScaleMultiplier` / `roundHalfUp` / `scaleSide` -- same cases in
+    tests/test_resolution_scale_multiplier_js.py)."""
+
+    @pytest.mark.parametrize(
+        ("raw", "expected"),
+        [
+            (0, 0.0),
+            (0.0, 0.0),
+            (2, 2.0),
+            (1.5, 1.5),
+            ("1.5", 1.5),  # a hand-edited workflow's string still works
+            (-1, 0.0),  # non-positive is "off"
+            (None, 0.0),
+            ("bogus", 0.0),
+            (float("nan"), 0.0),
+            (float("inf"), 0.0),
+        ],
+    )
+    def test_coerce_scale_multiplier(self, raw: object, expected: float) -> None:
+        assert nodes_resolution.coerce_scale_multiplier(raw) == expected
+
+    @pytest.mark.parametrize(
+        ("value", "expected"),
+        [
+            (2.5, 3),  # exact tie rounds UP, never banker's (round(2.5) == 2)
+            (3.5, 4),
+            (2.4999, 2),
+            (301.49999999999994, 302),  # 0.3 * 1005 in binary -- the user typed 0.3
+            (0.4, 0),
+            (1501.5, 1502),
+        ],
+    )
+    def test_round_half_up(self, value: float, expected: int) -> None:
+        assert nodes_resolution.round_half_up(value) == expected
+
+    @pytest.mark.parametrize(
+        ("size", "multiplier", "expected"),
+        [
+            (1920, 2.0, 3840),
+            (1001, 1.5, 1502),  # 1501.5 -> half up
+            (1001, 0.5, 501),  # 500.5 -> half up
+            (3, 0.1, 1),  # floored at 1 px
+            (1005, 0.3, 302),  # binary-noise tie, see round_half_up
+            (0, 2.0, 0),  # the no-image 0 axis stays 0
+            (-1, 2.0, -1),
+        ],
+    )
+    def test_scale_side(self, size: int, multiplier: float, expected: int) -> None:
+        assert nodes_resolution.scale_side(size, multiplier) == expected
+
+    def test_scale_dimensions_refuses_past_the_widget_maximum(self) -> None:
+        with pytest.raises(ValueError) as excinfo:
+            nodes_resolution.scale_dimensions(8192, 4096, 2.5, "the wired image")
+        message = str(excinfo.value)
+        # names the source size, the multiplier and the result -- no clamp
+        assert "8192 x 4096" in message
+        assert "2.5" in message
+        assert "20480 x 10240" in message
+        assert "16384" in message
+
+    def test_scale_dimensions_at_exactly_the_maximum_is_allowed(self) -> None:
+        assert nodes_resolution.scale_dimensions(8192, 4096, 2.0, "x") == (16384, 8192)
+
+
+class TestScaleMultiplierTailPosition:
+    """§8 LAW: `scale_multiplier` is the NEW last real widget, after
+    `ratio` -- declared in `optional`, FLOAT, 0.0 default (off), 0.0..4.0,
+    step 0.1 -- and declared in the §6.16 registry as a float."""
+
+    def test_scale_multiplier_is_the_last_key_in_optional(self) -> None:
+        optional = nodes_resolution.EPSResolution.INPUT_TYPES()["optional"]
+        assert list(optional.keys())[-1] == "scale_multiplier"
+
+    def test_declaration(self) -> None:
+        optional = nodes_resolution.EPSResolution.INPUT_TYPES()["optional"]
+        kind, options = optional["scale_multiplier"]
+        assert kind == "FLOAT"
+        assert options["default"] == 0.0
+        assert options["min"] == 0.0
+        assert options["max"] == 4.0
+        assert options["step"] == 0.1
+        # core KSampler.cfg's own step/round pairing (nodes.py)
+        assert options["round"] == 0.01
+        assert "tooltip" in options and "0 = off" in options["tooltip"]
+
+    def test_registry_declares_it_as_a_bounded_float(self) -> None:
+        spec = nodes_resolution.EPSResolution.EPS_STATE_WIDGETS["widgets"]["scale_multiplier"]
+        assert spec == {"kind": "float", "min": 0.0, "max": 4.0}
+
+
+class TestScaleMultiplierWithImage:
+    """Owner spec item 2: an image wired + multiplier > 0 -> each wired
+    image at ITS OWN size x multiplier (round half up, min 1), plain
+    stretch resize with the node's `interpolation`; width/height/
+    multiple_of/ratio/presets/resize_method all ignored."""
+
+    def test_single_image_times_two(self) -> None:
+        image = _make_image(height=1080, width=1920)
+        node = _node()
+        out_image, resized, width, height, orig_w, orig_h = _resolve_scalar(
+            node,
+            # all of these must be ignored:
+            width=333,
+            height=777,
+            resize_method="pad",
+            multiple_of=64,
+            ratio="1:1",
+            image=image,
+            scale_multiplier=2.0,
+        )
+        assert out_image is image  # passthrough untouched, as today
+        assert tuple(resized.shape) == (1, 2160, 3840, 3)
+        assert (width, height) == (3840, 2160)
+        assert (orig_w, orig_h) == (1920, 1080)
+
+    def test_single_image_times_one_and_a_half_with_odd_sizes(self) -> None:
+        image = _make_image(height=333, width=1001)  # 1501.5 / 499.5 -> half up
+        node = _node()
+        _, resized, width, height, orig_w, orig_h = _resolve_scalar(
+            node, width=1, height=1, image=image, scale_multiplier=1.5
+        )
+        assert (width, height) == (1502, 500)
+        assert tuple(resized.shape) == (1, 500, 1502, 3)
+        assert (orig_w, orig_h) == (1001, 333)
+
+    def test_downscale_keeps_at_least_one_pixel(self) -> None:
+        image = _make_image(height=3, width=40)
+        node = _node()
+        _, resized, width, height, _, _ = _resolve_scalar(
+            node, width=1, height=1, image=image, scale_multiplier=0.1
+        )
+        assert (width, height) == (4, 1)
+        assert tuple(resized.shape) == (1, 1, 4, 3)
+
+    def test_multiple_of_and_resize_method_are_ignored(self) -> None:
+        image = _make_image(height=100, width=200)
+        node = _node()
+        _, resized, width, height, _, _ = _resolve_scalar(
+            node,
+            width=0,
+            height=0,
+            resize_method="keep aspect (fit)",
+            multiple_of=64,
+            image=image,
+            scale_multiplier=1.5,
+        )
+        # 300 x 150, NOT snapped to 64 and NOT fitted into a box
+        assert (width, height) == (300, 150)
+        assert tuple(resized.shape) == (1, 150, 300, 3)
+
+    def test_multi_image_scales_each_from_its_own_size(
+        self, fake_execution_blocker: type
+    ) -> None:
+        a = _make_image(height=100, width=200)
+        b = _make_image(height=50, width=50)
+        c = _make_image(height=33, width=99)
+        node = _node()
+        result = node.resolve(
+            width=1024, height=1024, image=a, image_2=b, image_3=c, scale_multiplier=2.0
+        )
+        assert tuple(result[1][0].shape) == (1, 200, 400, 3)  # resized_image <- image
+        assert tuple(result[6][0].shape) == (1, 100, 100, 3)  # resized_2 <- image_2
+        assert tuple(result[7][0].shape) == (1, 66, 198, 3)  # resized_3 <- image_3
+        # width/height = the FIRST wired image's scaled size
+        assert (result[2][0], result[3][0]) == (400, 200)
+        # passthrough + originals block in multi mode, as today
+        assert isinstance(result[0][0], fake_execution_blocker)
+        assert isinstance(result[4][0], fake_execution_blocker)
+        assert isinstance(result[5][0], fake_execution_blocker)
+        # unwired slots still block their own output
+        for idx in range(8, 13):
+            assert isinstance(result[idx][0], fake_execution_blocker)
+
+    def test_multi_image_first_wired_is_the_lowest_slot_when_image_is_unwired(
+        self, fake_execution_blocker: type
+    ) -> None:
+        b = _make_image(height=50, width=100)
+        c = _make_image(height=10, width=10)
+        node = _node()
+        result = node.resolve(width=1, height=1, image_2=b, image_3=c, scale_multiplier=3.0)
+        assert isinstance(result[1][0], fake_execution_blocker)  # resized_image: image unwired
+        assert (result[2][0], result[3][0]) == (300, 150)  # image_2 is "first"
+        assert tuple(result[6][0].shape) == (1, 150, 300, 3)
+        assert tuple(result[7][0].shape) == (1, 30, 30, 3)
+
+    def test_ticked_presets_do_not_fan_out_and_are_not_consulted(
+        self, context: LibraryContext
+    ) -> None:
+        presets_store.save_preset(context, "P1", _other_values(width=40, height=20))
+        image = _make_image(height=64, width=128)
+        node = _node()
+        # "Ghost" does not exist -- it must NOT fail the run: presets are
+        # ignored outright in this mode (one run, from the image's size).
+        result = node.resolve(
+            width=1,
+            height=1,
+            image=image,
+            presets=json.dumps(["P1", "Ghost"]),
+            scale_multiplier=2.0,
+        )
+        assert len(result[2]) == 1
+        assert (result[2][0], result[3][0]) == (256, 128)
+        assert tuple(result[1][0].shape) == (1, 128, 256, 3)
+
+    def test_past_16384_fails_loudly_naming_image_multiplier_and_result(self) -> None:
+        image = _make_image(height=4096, width=8192)
+        node = _node()
+        with pytest.raises(ValueError) as excinfo:
+            node.resolve(width=1, height=1, image=image, scale_multiplier=2.5)
+        message = str(excinfo.value)
+        assert "8192 x 4096" in message
+        assert "2.5" in message
+        assert "20480 x 10240" in message
+
+    def test_past_16384_on_an_extra_image_also_fails(self) -> None:
+        a = _make_image(height=10, width=10)
+        b = _make_image(height=4096, width=8192)
+        node = _node()
+        with pytest.raises(ValueError, match="20480 x 10240"):
+            node.resolve(width=1, height=1, image=a, image_2=b, scale_multiplier=2.5)
+
+    def test_interpolation_is_still_honoured(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        seen: list[str] = []
+        original = nodes_resolution._resize_tensor
+
+        def spy(image, width, height, interpolation, crop):
+            seen.append((interpolation, crop))
+            return original(image, width, height, interpolation, crop)
+
+        monkeypatch.setattr(nodes_resolution, "_resize_tensor", spy)
+        node = _node()
+        node.resolve(
+            width=1, height=1, image=_make_image(height=8, width=8),
+            interpolation="nearest", scale_multiplier=2.0,
+        )
+        assert seen == [("nearest", "disabled")]  # plain stretch, aspect preserved
+
+
+class TestScaleMultiplierNoImage:
+    """Owner spec item 3: no image wired -> the originals are the node's
+    own size (after the ratio lock, before multiple_of; 0 stays 0);
+    multiplier 0 leaves width/height exactly as before; multiplier > 0
+    scales the typed size, then multiple_of rounds."""
+
+    def test_multiplier_zero_originals_are_the_node_values_outputs_unchanged(self) -> None:
+        node = _node()
+        _, resized, width, height, orig_w, orig_h = _resolve_scalar(
+            node, width=1000, height=1000, multiple_of=64, scale_multiplier=0.0
+        )
+        assert resized is None
+        assert (width, height) == (1024, 1024)  # exactly as before
+        assert (orig_w, orig_h) == (1000, 1000)  # NOT multiple_of-rounded
+
+    def test_multiplier_two_without_multiple_of(self) -> None:
+        node = _node()
+        _, _, width, height, orig_w, orig_h = _resolve_scalar(
+            node, width=1000, height=500, scale_multiplier=2.0
+        )
+        assert (width, height) == (2000, 1000)
+        assert (orig_w, orig_h) == (1000, 500)
+
+    def test_multiplier_one_and_a_half_with_multiple_of_64_is_the_owners_1472_example(
+        self,
+    ) -> None:
+        node = _node()
+        _, _, width, height, orig_w, orig_h = _resolve_scalar(
+            node, width=1000, height=1000, multiple_of=64, scale_multiplier=1.5
+        )
+        assert (width, height) == (1472, 1472)  # 1500 -> nearest 64
+        assert (orig_w, orig_h) == (1000, 1000)
+
+    def test_multiplier_two_with_multiple_of(self) -> None:
+        node = _node()
+        _, _, width, height, orig_w, orig_h = _resolve_scalar(
+            node, width=1001, height=777, multiple_of=8, scale_multiplier=2.0
+        )
+        assert (width, height) == (2000, 1552)  # 2002 -> 2000, 1554 -> 1552
+        assert (orig_w, orig_h) == (1001, 777)
+
+    def test_zero_axis_stays_zero_in_both_outputs(self) -> None:
+        node = _node()
+        _, _, width, height, orig_w, orig_h = _resolve_scalar(
+            node, width=0, height=512, scale_multiplier=2.0
+        )
+        assert (width, height) == (0, 1024)
+        assert (orig_w, orig_h) == (0, 512)
+
+    def test_originals_are_after_the_ratio_lock(self) -> None:
+        node = _node()
+        _, _, width, height, orig_w, orig_h = _resolve_scalar(
+            node, width=1000, height=1, ratio="1:1", scale_multiplier=2.0
+        )
+        assert (orig_w, orig_h) == (1000, 1000)
+        assert (width, height) == (2000, 2000)
+
+    def test_presets_with_no_image_fan_out_and_scale_each(
+        self, context: LibraryContext
+    ) -> None:
+        presets_store.save_preset(
+            context, "A", _other_values(width=1000, height=1000, multiple_of=64)
+        )
+        presets_store.save_preset(context, "B", _other_values(width=200, height=100))
+        node = _node()
+        result = node.resolve(
+            width=1, height=1, image=None, presets=json.dumps(["A", "B"]), scale_multiplier=1.5
+        )
+        assert result[2] == [1472, 300]
+        assert result[3] == [1472, 150]
+        assert result[4] == [1000, 200]
+        assert result[5] == [1000, 100]
+
+    def test_past_16384_fails_for_the_pure_size_source_too(self) -> None:
+        node = _node()
+        with pytest.raises(ValueError, match="the node's own size"):
+            node.resolve(width=10000, height=10, scale_multiplier=2.0)
+
+
+class TestScaleMultiplierOmittedIsSafeDefault:
+    """A workflow saved before v0.101.0 (one `widgets_values` entry short,
+    §8) and a hand-built /prompt without the field both reach `resolve()`
+    with the 0.0 default: identical resize behaviour to before."""
+
+    def test_omitting_the_field_matches_explicit_zero_with_an_image(self) -> None:
+        image = _make_image(height=64, width=128)
+        node = _node()
+        kwargs = dict(width=100, height=0, resize_method="keep aspect (fit)", multiple_of=16)
+        without = _resolve_scalar(node, image=image, **kwargs)
+        explicit = _resolve_scalar(node, image=image, scale_multiplier=0.0, **kwargs)
+        assert without[2:] == explicit[2:]
+        assert tuple(without[1].shape) == tuple(explicit[1].shape) == (1, 48, 96, 3)
+
+    def test_garbled_field_degrades_to_off(self) -> None:
+        image = _make_image(height=64, width=128)
+        node = _node()
+        _, resized, width, height, _, _ = _resolve_scalar(
+            node, width=32, height=32, image=image, scale_multiplier="not a number"
+        )
+        assert (width, height) == (32, 32)
+        assert tuple(resized.shape) == (1, 32, 32, 3)

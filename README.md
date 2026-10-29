@@ -47,7 +47,7 @@ section further down; this is the map.
 | [**EPS Node Audit**](#eps-node-audit-shipped) | A plain-language look at what your other installed node packs can reach: their web routes, where they've called out to, and a scan of their code for a few patterns worth knowing about — green/yellow/red per pack, with a verbose toggle for the technical detail. | Nothing — reads whatever else is installed. |
 | [**EPS Number Controller**](#eps-number-controller-shipped) | Every number a workflow uses, kept in one place: named rows, each a plain number box. Wire one into a socket and it quietly becomes the right kind of number for it — whole or decimal. Untick a row and whatever it was plugged into goes back to its own value. The Universal State Controller can save and recall the whole set, including which rows are switched on. | Nothing — drag-and-drop with core nodes. |
 | [**EPS Checkpoint Switcher**](#eps-checkpoint-switcher-shipped) | Tick several checkpoint files in a list; one queue runs the workflow once per ticked checkpoint, with each run's model, CLIP, and VAE kept together and a label for save paths. | Your checkpoint files — drag-and-drop with core nodes. |
-| [**EPS Resolution**](#eps-resolution-shipped) | Image-first resize + size in one node: target size (with a drag pad), four resize modes, and the original image + both sets of dimensions passed through. Named size presets are shared across your machines — tick several and one Run resizes once per preset. Wire in extra images and they all come out at the same target size in one Run. | Nothing — drag-and-drop with core nodes. |
+| [**EPS Resolution**](#eps-resolution-shipped) | Image-first resize + size in one node: target size (with a drag pad), four resize modes, and the original image + both sets of dimensions passed through. Named size presets are shared across your machines — tick several and one Run resizes once per preset. Wire in extra images and they all come out at the same target size in one Run — or set `scale_multiplier` and each comes out at its own size × that factor. | Nothing — drag-and-drop with core nodes. |
 | [**EPS Image Grid**](#eps-image-grid-shipped) | Collects images across separate Runs into a buffer that survives restarts, shows them as a thumbnail grid, and fans the whole set out on demand. Add whole batches at once — a multiselect picker, a folder importer, or one big drag. | Nothing — drag-and-drop with core nodes. |
 | [**EPS Run Multiplier**](#eps-run-multiplier-shipped) | Multiplies whatever you wire in: a sweep group (LoRA Iterator, or Checkpoint Switcher with its VAEs) × images × texts, in one node — or just images × texts with no sweep at all — with per-run save paths so big runs land in tidy folders. | Any of: EPS LoRA Iterator / EPS Checkpoint Switcher / EPS Model + VAE Switchers (`models`→`model`, `models_low`→`model_low`, `vaes`→`vae`) on the sweep side; an Image Grid or Image Switcher plus a multi-select Prompt Notebook on the pair side. |
 | [**EPS Save Image**](#eps-save-image-shipped) | Save Image with provenance baked in: wire the Run Multiplier's `run_info` and every saved file carries a workflow already soloed to the run that made it — drop the image onto the canvas to recreate just that one. Without `run_info` it is exactly Save Image. | Nothing — a drop-in for the core Save Image node; `run_info` from EPS Run Multiplier unlocks the recreate-one-image drop. |
@@ -1076,6 +1076,36 @@ wire into save paths so results land in folders named by model.
 
 ## EPS Resolution (shipped)
 
+- **Scale an image by a factor instead of to a size (v0.101.0).** A new
+  `scale_multiplier` box, `0` = off. Set it to `2` and the wired image comes
+  out at twice its own size, `0.5` halves it, `1.5` is one and a half — each
+  side rounded to whole pixels, resampled with whatever `interpolation` you
+  picked. Wire several images and **every one scales from its own size**, so
+  a 1000×500 and a 300×300 stay different sizes (`width`/`height` report the
+  first one's result). While the multiplier is on and an image is wired, the
+  typed width/height, `multiple_of`, `ratio`, `resize_method`, the preset
+  dropdown with Save/Delete, *copy from image* and the drag pad are all
+  **greyed out** — they don't apply, and ticked presets no longer fan out
+  (one Run, and the Run Multiplier's count says so). Your numbers are kept:
+  set the multiplier back to `0` and everything comes back exactly as it
+  was. The readout under the pad shows what will actually come out —
+  `out 3840 x 2160 (2x)` — or says `out mixed sizes` when a switcher
+  upstream feeds differently-sized images, instead of guessing. If a result
+  would pass 16384 on either side the Run fails with a message naming the
+  image size, the multiplier and the result, rather than clamping quietly.
+  - **With no image wired** the multiplier scales the size you typed instead
+    (then `multiple_of` rounds it): `1000 × 1000` at `1.5` with
+    `multiple_of` 64 gives `1472 × 1472`, and the readout shows
+    `1472 x 1472 (1.5x of 1000 x 1000)`. The fields stay editable here.
+  - **`original_width`/`original_height` with no image wired** now report
+    the size you typed (after the ratio lock, before `multiple_of`
+    rounding) instead of `0` — so a pure size-source node tells you both
+    what you asked for and what it will emit. A `0` axis still reports `0`.
+  - *copy from image* is now greyed out whenever nothing is wired in, rather
+    than clickable with a "wire an image first" message; its other two
+    messages (image not loaded yet, mixed sizes) are unchanged.
+  - Works in both the classic canvas and the new Nodes 2.0 look. Old
+    workflows load with the multiplier at `0` and run exactly as before.
 - **`multiple_of` now drives the width and height boxes as well.** Set it to
   8 and the little arrows step by 8; type any number and it snaps to the
   nearest multiple as soon as you commit it — while you're still typing, it
