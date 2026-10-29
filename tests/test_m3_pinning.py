@@ -185,11 +185,15 @@ class TestWidgetIndex:
     def test_sockets_and_force_inputs_are_skipped_and_missing_raises(self) -> None:
         # images = socket, run_info = forceInput -> only filename_prefix, the
         # v1.1.0 tail toggle preview_only and the 2026-10-04 format tail
-        # (format, bit_depth, input_color_space, avif_crf) serialize
+        # (format, bit_depth, input_color_space, avif_crf) serialize, then the
+        # 2026-10-29 image_output tail
         assert m.widget_index(m.EPSSaveImage, "filename_prefix") == 0
         assert m.widget_index(m.EPSSaveImage, "preview_only") == 1
         assert m.widget_index(m.EPSSaveImage, "format") == 2
-        assert m.widget_defaults(m.EPSSaveImage) == ["EPS", False, "png", "auto", "sRGB", 18]
+        assert m.widget_index(m.EPSSaveImage, "image_output") == 6
+        assert m.widget_defaults(m.EPSSaveImage) == [
+            "EPS", False, "png", "auto", "sRGB", 18, True
+        ]
         with pytest.raises(RuntimeError, match="nope"):
             m.widget_index(LoraLibraryNotebook, "nope")
 

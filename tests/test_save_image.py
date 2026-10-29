@@ -2,10 +2,14 @@
 M2): run_info parsing, the derived solo_run widget index, path-id lookup
 through subgraph definitions, the baking itself, and a real save round
 trip against a fake ``folder_paths`` -- the PNG is read back and its
-``workflow``/``prompt``/``eps_run`` chunks checked."""
+``workflow``/``prompt``/``eps_run`` chunks checked. Plus the ``image_output``
+toggle: off still saves and still reports ``ui.images``, but the result is
+the silent blocker (faked in ``sys.modules`` the way tests/test_bypass.py
+does), imported lazily and never at module scope."""
 
 from __future__ import annotations
 
+import inspect
 import json
 import re
 import sys
@@ -56,6 +60,26 @@ def fake_folder_paths(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     module.get_save_image_path = get_save_image_path
     monkeypatch.setitem(sys.modules, "folder_paths", module)
     return out
+
+
+@pytest.fixture
+def fake_execution_blocker(monkeypatch: pytest.MonkeyPatch):
+    """A fake `comfy_execution.graph.ExecutionBlocker` in `sys.modules`
+    (tests/test_bypass.py's fixture of the same name) -- the off path
+    imports it lazily from exactly this module path. Returns the fake class
+    so tests can `isinstance()` the returned blocker."""
+
+    class FakeExecutionBlocker:
+        def __init__(self, message: object) -> None:
+            self.message = message
+
+    fake_graph = types.ModuleType("comfy_execution.graph")
+    fake_graph.ExecutionBlocker = FakeExecutionBlocker
+    fake_pkg = types.ModuleType("comfy_execution")
+    fake_pkg.graph = fake_graph
+    monkeypatch.setitem(sys.modules, "comfy_execution", fake_pkg)
+    monkeypatch.setitem(sys.modules, "comfy_execution.graph", fake_graph)
+    return FakeExecutionBlocker
 
 
 class TestParseRunInfo:
@@ -234,6 +258,7 @@ class TestSaveRoundTrip:
             "bit_depth",
             "input_color_space",
             "avif_crf",
+            "image_output",  # 2026-10-29, appended after the format tail
         ]
         assert spec["optional"]["run_info"][1]["forceInput"] is True
         assert spec["hidden"] == {"prompt": "PROMPT", "extra_pnginfo": "EXTRA_PNGINFO"}
@@ -539,10 +564,13 @@ class TestPreviewOnlyWidgetShape:
             "bit_depth",
             "input_color_space",
             "avif_crf",
+            "image_output",  # 2026-10-29, appended after the format tail
         ]
         assert m.widget_index(m.EPSSaveImage, "filename_prefix") == 0
         assert m.widget_index(m.EPSSaveImage, "preview_only") == 1
-        assert m.widget_defaults(m.EPSSaveImage) == ["EPS", False, "png", "auto", "sRGB", 18]
+        assert m.widget_defaults(m.EPSSaveImage) == [
+            "EPS", False, "png", "auto", "sRGB", 18, True
+        ]
 
     @staticmethod
     def _restore(widget_names: list[str], defaults: list, saved: list) -> dict:
@@ -562,6 +590,7 @@ class TestPreviewOnlyWidgetShape:
             "bit_depth": "auto",
             "input_color_space": "sRGB",
             "avif_crf": 18,
+            "image_output": True,
         }
 
     def test_a_new_workflow_loads_on_an_older_build(self) -> None:
@@ -595,3 +624,89 @@ class TestPreviewOnlyWidgetShape:
         widgets = m.EPSSaveImage.EPS_STATE_WIDGETS["widgets"]
         assert widgets["preview_only"] == {"kind": "boolean"}
         assert widgets["filename_prefix"]["kind"] == "string"
+
+
+class TestParseImageOutput:
+    def test_only_an_explicit_false_is_off(self) -> None:
+        assert m.parse_image_output(False) is False
+        assert m.parse_image_output("false") is False
+        assert m.parse_image_output(" FALSE ") is False
+        # 1-element-list-wrapped, the way a list-taking consumer hands it over
+        assert m.parse_image_output([False]) is False
+        assert m.parse_image_output(["false"]) is False
+
+    def test_anything_else_is_on(self) -> None:
+        for raw in (True, None, "", "true", "no", 0, [True], [None]):
+            assert m.parse_image_output(raw) is True, raw
+
+
+class TestImageOutput:
+    """The off path (module docstring "image_output"): the files and
+    `ui.images` are unchanged, only the result becomes the silent blocker
+    that makes core skip the consumers."""
+
+    def test_default_is_on_and_passes_the_images_through(self, fake_folder_paths: Path) -> None:
+        images = [_image()]
+        result = m.EPSSaveImage().save(images, filename_prefix="on")
+        assert result["result"] == (images,)
+        assert result["result"][0] is images
+
+    def test_off_still_saves_and_returns_a_silent_blocker(
+        self, fake_folder_paths: Path, fake_execution_blocker
+    ) -> None:
+        on = m.EPSSaveImage().save([_image()], filename_prefix="toggle")
+        off = m.EPSSaveImage().save([_image()], filename_prefix="toggle", image_output=False)
+        # same ui.images -- the on-node preview does not change
+        assert off["ui"] == on["ui"] == {
+            "images": [{"filename": "toggle_00001_.png", "subfolder": "", "type": "output"}]
+        }
+        assert Image.open(fake_folder_paths / "toggle_00001_.png").size == (4, 3)
+        assert isinstance(off["result"], tuple) and len(off["result"]) == 1
+        blocker = off["result"][0]
+        assert isinstance(blocker, fake_execution_blocker)
+        assert blocker.message is None  # silent: a string would surface as an error
+
+    @pytest.mark.parametrize("raw", [False, "false", "FALSE", [False], ["false"]])
+    def test_false_string_and_list_wrapped_false_mean_off(
+        self, raw, fake_folder_paths: Path, fake_execution_blocker
+    ) -> None:
+        result = m.EPSSaveImage().save([_image()], filename_prefix="t", image_output=raw)
+        assert isinstance(result["result"][0], fake_execution_blocker)
+
+    def test_none_means_on(self, fake_folder_paths: Path) -> None:
+        images = [_image()]
+        result = m.EPSSaveImage().save(images, filename_prefix="t", image_output=None)
+        assert result["result"][0] is images
+
+    def test_is_the_last_serialized_widget(self) -> None:
+        # [filename_prefix, preview_only, format, bit_depth,
+        # input_color_space, avif_crf, image_output] -- run_info is
+        # forceInput, no slot; a tail widget can only ever be appended (§8).
+        names = [name for name, _kind, _options in m._iter_widgets(m.EPSSaveImage)]
+        assert names[-1] == m.IMAGE_OUTPUT_WIDGET
+        assert m.widget_index(m.EPSSaveImage, m.IMAGE_OUTPUT_WIDGET) == 6
+        assert m.widget_defaults(m.EPSSaveImage)[-1] is True
+
+    def test_widget_is_an_unlabelled_optional_boolean_default_on(self) -> None:
+        kind, options = m.EPSSaveImage.INPUT_TYPES()["optional"][m.IMAGE_OUTPUT_WIDGET]
+        assert kind == "BOOLEAN" and options["default"] is True
+        # No label_on/label_off: a labelled BOOLEAN truncates under Nodes 2.0.
+        assert "label_on" not in options and "label_off" not in options
+        assert "skipped" in options["tooltip"]
+
+    def test_state_registry_declares_it_as_boolean(self) -> None:
+        widgets = m.EPSSaveImage.EPS_STATE_WIDGETS["widgets"]
+        assert widgets[m.IMAGE_OUTPUT_WIDGET] == {"kind": "boolean"}
+
+    def test_description_and_output_tooltip_say_so(self) -> None:
+        assert "image_output" in m.EPSSaveImage.DESCRIPTION
+        assert "skipped" in m.EPSSaveImage.OUTPUT_TOOLTIPS[0]
+
+    def test_no_module_scope_comfy_execution_import(self) -> None:
+        assert "comfy_execution" not in m.__dict__
+        assert "ExecutionBlocker" not in m.__dict__
+        source = inspect.getsource(m)
+        # The one comfy import is lazy: inside save()'s off branch, never at
+        # column 0 (tests/test_bypass.py's pin, same shape).
+        assert "\nfrom comfy_execution" not in source
+        assert "\n                from comfy_execution.graph import ExecutionBlocker" in source

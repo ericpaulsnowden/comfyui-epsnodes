@@ -295,8 +295,10 @@ class TestSaveImagePreviewOnly:
             "bit_depth",
             "input_color_space",
             "avif_crf",
+            "image_output",
         }
         assert widgets["preview_only"] == {"kind": "boolean"}
+        assert widgets["image_output"] == {"kind": "boolean"}
 
     def test_format_widgets_are_choices_and_a_bounded_int(self) -> None:
         widgets = EPSSaveImage.EPS_STATE_WIDGETS["widgets"]

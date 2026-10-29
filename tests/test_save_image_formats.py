@@ -630,6 +630,7 @@ class TestPositionalCompatibility:
         "bit_depth",
         "input_color_space",
         "avif_crf",
+        "image_output",  # 2026-10-29, appended after the format tail
     ]
     V1_4: ClassVar[list[str]] = ["filename_prefix", "preview_only"]
     V0: ClassVar[list[str]] = ["filename_prefix"]

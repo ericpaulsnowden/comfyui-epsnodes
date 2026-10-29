@@ -974,7 +974,10 @@ def _build_grid_layout(root: Path) -> Path:
     copies ``lora_library/api.js`` + ``version.js`` and the shared
     ``nested_graph.mjs`` fake) replaces the old single-file byte copy."""
     return build_layout(
-        root, eps_image=("image_grid.js",), api_stub=API_STUB, app_stub=APP_STUB
+        root,
+        eps_image=("image_grid.js", "owned_link_colour.js"),
+        api_stub=API_STUB,
+        app_stub=APP_STUB,
     )
 
 

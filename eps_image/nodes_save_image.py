@@ -81,6 +81,23 @@ workflow, pins and ``eps_run`` record reach every format -- PNG tEXt chunks,
 EXR header attributes, the AVIF Exif item -- through core's own metadata
 helpers, and the bake-undo ``finally`` still restores the shared objects.
 
+**image_output (owner ask 2026-10-29: "a toggle to disable the image
+output ... it shouldn't cause everything after that to fail and break the
+workflow, just not to run").** A BOOLEAN tail widget, default on. Off, the
+node STILL saves the files and still reports ``ui.images`` (the on-node
+preview is unchanged); only the ``images`` output changes, to the silent
+``ExecutionBlocker(None)`` -- core's ``process_inputs`` then skips every
+consumer of that output, and their consumers in turn, with no error and the
+queue finishing normally (the mechanism nodes_image_grid.py's "Collect
+only" and nodes_bypass.py's off path already rely on; a sweep maps ``save``
+once per run and each call blocks its own slice). It is the LAST serialized
+widget (after ``avif_crf``; ``run_info`` is forceInput and holds no slot)
+and lives in ``optional`` so an old hand-built /prompt still validates.
+``ExecutionBlocker`` is imported lazily inside ``save``. The frontend half
+(``web/eps_image/save_image.js``) greys the outgoing wires while it is off,
+and turns ``preview_only`` back off when a main-branch save (two values,
+``[filename_prefix, image_output]``) would otherwise land in it.
+
 Signature and on-disk behavior otherwise mirror core ``SaveImage``
 (``images`` + ``filename_prefix``, counter naming via
 ``folder_paths.get_save_image_path``, ``OUTPUT_NODE``, ``ui.images``), so
@@ -121,6 +138,10 @@ APPLY_SET_CLASS = "LoraLibraryApplySet"
 APPLY_SET_PIN_WIDGET = "pinned_state"
 MULTIPLIER_CLASS = "EPSCrossSweep"
 SOLO_WIDGET = "solo_run"
+
+#: This node's own tail widget (module docstring): off = the files are
+#: still saved, the ``images`` output is a silent blocker.
+IMAGE_OUTPUT_WIDGET = "image_output"
 
 _WIDGET_KINDS = ("STRING", "INT", "FLOAT", "BOOLEAN")
 
@@ -547,6 +568,18 @@ def _write_delegated(
             with contextlib.suppress(OSError):
                 os.unlink(path)
         raise RuntimeError(f"EPS Save Image: couldn't save {plan.label}: {exc}") from exc
+
+
+def parse_image_output(raw: Any) -> bool:
+    """The ``image_output`` widget as a plain bool. Only an explicit
+    ``False`` (or the string ``"false"``, any case -- a hand-built prompt)
+    is off; anything else, an absent ``None`` included, is on: a real
+    BOOLEAN widget always has a value, so a missing one can only be an API
+    caller that predates the widget (nodes_bypass.py's rule)."""
+    raw = _unwrap(raw)
+    if raw is False:
+        return False
+    return not (isinstance(raw, str) and raw.strip().lower() == "false")
 
 
 # ------------------------------------------------------------ widget index
@@ -1005,7 +1038,8 @@ class EPSSaveImage:
     RETURN_NAMES = ("images",)
     OUTPUT_TOOLTIPS = (
         "The images, passed through unchanged (like Save Image) -- whether "
-        "they were saved or only previewed.",
+        "they were saved or only previewed. With image_output off: nothing "
+        "-- the nodes after this one are skipped.",
     )
     DESCRIPTION = (
         "Save Image with provenance baked in. Wire images and filename_prefix "
@@ -1025,7 +1059,10 @@ class EPSSaveImage:
         "inputs) fine-tune it. Every format keeps the workflow inside the "
         "file. exr and avif need a ComfyUI that has those encoders; if yours "
         "doesn't, the node says so before it runs. preview_only always "
-        "shows a plain png, whatever format says."
+        "shows a plain png, whatever format says. "
+        "Switch image_output off and the images are still saved (or "
+        "previewed) and shown here, but the nodes after this one are skipped instead of run (not "
+        "an error)."
     )
 
     #: §6.16 state registry (v0.83.0): the widgets a Universal State
@@ -1041,6 +1078,7 @@ class EPSSaveImage:
     #: "draft" state can preview while a "final" state saves a 16-bit png or
     #: an exr. (``format`` here is a WIDGET name under ``widgets``; the
     #: descriptor's own top-level ``"format": 1`` is its schema version.)
+    #: ``image_output`` is a ``boolean`` too.
     EPS_STATE_WIDGETS: ClassVar[dict[str, Any]] = {
         "format": 1,
         "widgets": {
@@ -1050,6 +1088,7 @@ class EPSSaveImage:
             BIT_DEPTH_WIDGET: {"kind": "choice"},
             COLOR_SPACE_WIDGET: {"kind": "choice"},
             AVIF_CRF_WIDGET: {"kind": "int", "min": AVIF_CRF_MIN, "max": AVIF_CRF_MAX},
+            IMAGE_OUTPUT_WIDGET: {"kind": "boolean"},
         },
     }
 
@@ -1205,6 +1244,30 @@ class EPSSaveImage:
                         ),
                     },
                 ),
+                # TAIL widget (FORMAT.md §8: widgets_values restores
+                # POSITIONALLY, so a widget is only ever appended -- here
+                # after avif_crf, the last of the format widgets;
+                # run_info is a forceInput socket and holds no slot). In
+                # `optional`, like every tail widget this pack has added
+                # (solo_run, pair_mode, ...): a hand-built API /prompt that
+                # predates it still validates, and save() reads an absent
+                # value as on. NO `label_on`/`label_off` (rig lesson, Nodes
+                # 2.0 on frontend 1.52.7): with labels the Vue node draws a
+                # two-segment control whose halves truncate the text at the
+                # default node width; a plain switch next to the name reads
+                # right in both renderers.
+                IMAGE_OUTPUT_WIDGET: (
+                    "BOOLEAN",
+                    {
+                        "default": True,
+                        "tooltip": (
+                            "On: the images go out to the next node as usual. "
+                            "Off: they are still saved (or previewed) and shown "
+                            "here, but the nodes after this one are skipped (not "
+                            "an error); the wire turns grey while it's off."
+                        ),
+                    },
+                ),
             },
             "hidden": {"prompt": "PROMPT", "extra_pnginfo": "EXTRA_PNGINFO"},
         }
@@ -1269,6 +1332,7 @@ class EPSSaveImage:
         bit_depth: Any = DEFAULT_BIT_DEPTH,
         input_color_space: Any = DEFAULT_COLOR_SPACE,
         avif_crf: Any = DEFAULT_AVIF_CRF,
+        image_output: Any = True,
     ) -> dict[str, Any]:
         import folder_paths  # ComfyUI's own module; only importable inside ComfyUI
         import numpy as np
@@ -1407,6 +1471,18 @@ class EPSSaveImage:
                 )
                 results.append({"filename": file, "subfolder": subfolder, "type": result_type})
                 counter += 1
+            if not parse_image_output(image_output):
+                # Off: the files are on disk and `ui.images` is reported as
+                # usual (the on-node preview is unchanged); only the output
+                # is withheld. A silent blocker makes core's process_inputs
+                # skip every consumer (and theirs) with no error and the
+                # queue finishing normally -- nodes_image_grid.py's "Collect
+                # only" and nodes_bypass.py's off path use the same. Lazy
+                # import (module docstring's no-comfy-at-import promise;
+                # tests/test_save_image.py pins it).
+                from comfy_execution.graph import ExecutionBlocker
+
+                return {"ui": {"images": results}, "result": (ExecutionBlocker(None),)}
             return {"ui": {"images": results}, "result": (images,)}
         finally:
             undo_bakes(bake_undo)
