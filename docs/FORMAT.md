@@ -2226,6 +2226,23 @@ links are always drawn by the classic canvas renderer
 awareness at all); only a node's BODY/widgets render through the separate
 Vue overlay (`LGraphNode.vue`, which contains no link-drawing code of its
 own).
+  **Correction (v0.102.0, rig 2026-10-29): the dim was never visible on
+frontend 1.52.7.** Its `_renderAllLinkSegments` calls `renderLink(...,
+color = null, ...)` for a plain link, and `litegraphLinkAdapter.ts` then
+colours a null by `link.type` alone, so `link.color` is read only for a
+REROUTE (`reroute._colour`). The checks above read `link.color` back, not
+pixels. `web/eps_image/owned_link_colour.js` now wraps
+`LGraphCanvas.prototype.renderLink` ONCE (idempotent, feature-detected,
+never throws): when core passes no colour for a link carrying
+`__epsLinkColorOwner` with a `link.color` set, that colour is passed
+instead. Explicit colours (the white event flash) and every unclaimed
+link go through untouched. One shared module rather than a by-hand copy,
+because two copies would double-wrap; it has no imports, so the tests'
+served layouts copy just that file. Installed lazily by
+`reconcileLinkDimming` (here and in save_image.js, §6.14) before its first
+dim. The `v1` branch's broadcast_draw.js wraps the same method; the two
+compose in either order. Pixel-checked on the rig in both renderers.
+Pins: `tests/test_owned_link_colour_js.py`.
   A grid feeding `EPSDistributor`'s `image` input (§6.11) shares that exact
 same `LLink` object with distributor.js's own adopted-type colouring
 (mechanism 4 there) — resolved by a small, explicit, mirrored convention:
@@ -4170,11 +4187,69 @@ onto comfyui and recreate just that image"). Shipped v0.70.0.
   and `inputs[<widget>]` in the prompt chunk, alongside the solo bake; the
   `eps_run` chunk adds `"pinned": ["5", "7:2"]`. Deep copies as before.
   Pins: `tests/test_m3_pinning.py`.
+- **`image_output` (v0.102.0; BOOLEAN, optional, default `true`; owner ask
+  2026-10-29: "a toggle to disable the image output ... it shouldn't cause
+  everything after that to fail and break the workflow, just not to
+  run").** The node's own TAIL widget: `widgets_values` is
+  `[filename_prefix, image_output]` (`run_info` is forceInput and holds no
+  slot; §8 positional restore, so it could only ever be appended). In
+  `optional` so a hand-built /prompt that predates it still validates;
+  `parse_image_output` reads an absent value as on — only an explicit
+  `False`, or the string `"false"` in any case, 1-element-list-wrapped or
+  not, is off. No `label_on`/`label_off`: under Nodes 2.0 on frontend
+  1.52.7 a labelled BOOLEAN draws as a truncated two-segment control, and a
+  plain switch next to the name reads right in both renderers. **Off:** the
+  files are STILL written and `ui.images` is STILL returned (the on-node
+  preview is unchanged); only the result becomes `(ExecutionBlocker(None),)`,
+  imported lazily inside `save` (test-pinned, no module-scope comfy import).
+  Verified against core (`execution.py`, rig ComfyUI v0.36.0):
+  `get_output_from_returns` collects a dict return's `ui` independently of
+  its `result`, and `execute` sends the `executed` message whenever
+  `output_ui` is non-empty, so the preview still lands; `process_inputs`
+  skips any node handed a blocker on ANY input, `execution_block_cb` stays
+  silent for a `None` message, and the skipped node's own result becomes a
+  blocker tuple, so the skip propagates downstream with no
+  `execution_error` and the queue ends in `execution_success`; a sweep
+  maps `save` once per run and `merge_result_data` keeps one entry per
+  call, so each run blocks only its own slice. The same mechanism as §6.6
+  Collect only and §6.18's off-path fallback. State registry:
+  `image_output: {"kind": "boolean"}`.
+- **Frontend half (`save_image.js` `attach`, registered in `eps_image.js`'s
+  `nodeCreated`).** (1) While off, every link on the `images` output is
+  dimmed to §6.6's grey: `reconcileLinkDimming` is a BY-HAND copy of
+  image_grid.js's (owner tag `EPSSaveImage:image-output-off` under the
+  `__epsLinkColorOwner` key that image_grid.js, distributor.js and
+  bypass.js all honour; the target's `__epsResyncLinkColors` called once on
+  release; a WeakMap stash of the exact prior colour; a per-node tracked
+  Set; state always DERIVED, never stored — `link.color` is not
+  serialized). Re-derived from the widget callback (chained), an
+  `onConfigure` wrap, an `onConnectionsChange` wrap, and `onRemoved`
+  (force undim); change-gated repaint; a link another owner has claimed is
+  left alone. NOT dimmed while the widget's own input socket is wired (a
+  Number Controller BOOLEAN row): the value is only known at run time.
+  The grey is DRAWN through §6.6's shared `owned_link_colour.js`
+  `renderLink` hook (frontend 1.52.7 ignores `link.color` on a plain link).
+  (2) **Cross-branch restore guard**, in the same `onConfigure` wrap AFTER
+  `LGraphNode.configure` has assigned `widgets_values` positionally: the
+  unmerged `v1` branch's layout is `[filename_prefix, preview_only, format,
+  bit_depth, input_color_space, avif_crf]` (+ `image_output` at index 6
+  once ported there), so a v1 save opened on main would land
+  `preview_only`'s `false` in `image_output` and silently switch the output
+  off. `imageOutputFromSavedValues(values)`: not an array, or fewer than 3
+  values → `null` (a main layout, leave it); otherwise a v1 layout →
+  `values[6] !== false` when there are 7+ values, else `true`; written via
+  value + callback when it differs from what positional restore left.
 - **Pins**: `tests/test_save_image.py` (parse, derived index, path-id
   lookup through definitions, baking both chunks, a real PNG round trip
   reading the chunks back, plain-save parity, missing multiplier →
-  `baked: false`), `tests/test_save_image_js.py` (token grammar, verdicts,
-  the chained `handleFile` wrap).
+  `baked: false`; `image_output` default on, off = files + `ui.images`
+  unchanged + a 1-tuple silent blocker, the `"false"`/`[False]`/`None`
+  parse rule, last serialized widget, registry kind, no module-scope
+  `comfy_execution` import), `tests/test_save_image_js.py` (token grammar,
+  verdicts, the chained `handleFile` wrap; the guard's verdicts, the
+  dimming reconcile against a fake node/graph incl. the other-owner and
+  wired-input cases, `attach` end to end: click → configure guard →
+  connect → remove, hook chaining and per-instance guards).
 
 ## §6.15 `EPSPromptBuilder` (display: "EPS Prompt Builder") — compose from the Notebook
 

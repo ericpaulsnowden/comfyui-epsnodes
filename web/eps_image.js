@@ -135,6 +135,7 @@ app.registerExtension({
     safely('distributor.attach', () => distributor.attach?.(node))
     safely('checkpointSwitcher.attach', () => checkpointSwitcher.attach?.(node))
     safely('crossSweep.attach', () => crossSweep.attach?.(node))
+    safely('saveImage.attach', () => saveImage.attach?.(node)) // §6.14: image_output wire dimming
     safely('numberController.attach', () => numberController.attach?.(node))
     safely('bypass.attach', () => bypass.attach?.(node))
   },

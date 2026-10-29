@@ -183,9 +183,10 @@ class TestWidgetIndex:
         assert m._multiplier_widget_defaults() == m.widget_defaults(EPSCrossSweep)
 
     def test_sockets_and_force_inputs_are_skipped_and_missing_raises(self) -> None:
-        # images = socket, run_info = forceInput -> only filename_prefix serializes
+        # images = socket, run_info = forceInput -> filename_prefix serializes
+        # first, then the image_output tail widget (appended, so index 0 held)
         assert m.widget_index(m.EPSSaveImage, "filename_prefix") == 0
-        assert m.widget_defaults(m.EPSSaveImage) == ["EPS"]
+        assert m.widget_defaults(m.EPSSaveImage) == ["EPS", True]
         with pytest.raises(RuntimeError, match="nope"):
             m.widget_index(LoraLibraryNotebook, "nope")
 

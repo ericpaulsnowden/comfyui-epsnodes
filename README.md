@@ -1477,6 +1477,12 @@ puts you back on the live library.
 - **Caveat:** the file must keep its PNG metadata (re-encoding, stripping
   or converting to JPEG loses it), and the filename fallback needs the name
   intact. The image also carries the Prompt Notebook text and Apply LoRA Set rows as they were (M3 pinning, v0.72.0) — the nodes show them pinned with a drift badge and an Unpin button.
+- **Turn the image output off (`image_output`, v0.102.0):** switch it off and the
+  node still saves and shows the images, but whatever is wired to its
+  `images` output — and everything after that — is skipped instead of run,
+  with no error; the wire goes grey while it's off. Handy for saving a
+  batch without re-running an upscale or a video pass downstream. Switch
+  it back on and the wire comes back to life.
 
 ## EPS Frame Saver (shipped)
 

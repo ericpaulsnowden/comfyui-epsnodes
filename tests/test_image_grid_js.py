@@ -957,6 +957,10 @@ def grid_api(tmp_path_factory: pytest.TempPathFactory) -> dict:
     module_dir = layout / "extensions" / "comfyui-epsnodes" / "eps_image"
     module_dir.mkdir(parents=True)
     shutil.copyfile(IMAGE_GRID_JS, module_dir / "image_grid.js")
+    # its one sibling import (the renderLink colour hook, no imports of its own)
+    shutil.copyfile(
+        IMAGE_GRID_JS.parent / "owned_link_colour.js", module_dir / "owned_link_colour.js"
+    )
 
     # image_grid.js's two imports, stubbed at the served depth
     # (`../../../scripts/{app,api}.js`) -- the same fixture shape

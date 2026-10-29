@@ -814,6 +814,7 @@
 
 import { api } from '../../../scripts/api.js'
 import { app, ComfyApp } from '../../../scripts/app.js'
+import { ensureOwnedLinkColourHook } from './owned_link_colour.js'
 
 const CLASS_ID = 'EPSImageGrid'
 const PREFIX = '[eps_image:image_grid]'
@@ -2407,6 +2408,10 @@ export function reconcileLinkDimming(node, { forceUndim = false } = {}) {
     }
     tracked.delete(id)
   }
+
+  // Frontend 1.52.7 ignores `link.color` on a plain link; this hook makes
+  // it draw a link we've claimed in our colour (owned_link_colour.js).
+  if (desired.size) ensureOwnedLinkColourHook()
 
   // Dim anything newly desired that this file doesn't already own.
   for (const id of desired) {

@@ -38,6 +38,22 @@ pinning never fails the queue. The ``eps_run`` chunk lists the pinned node
 ids. The lora_library modules are imported lazily inside ``save`` (never at
 module scope, never torch).
 
+**image_output (owner ask 2026-10-29: "a toggle to disable the image
+output ... it shouldn't cause everything after that to fail and break the
+workflow, just not to run").** A BOOLEAN tail widget, default on. Off, the
+node STILL saves the files and still reports ``ui.images`` (the on-node
+preview is unchanged); only the ``images`` output changes, to the silent
+``ExecutionBlocker(None)`` -- core's ``process_inputs`` then skips every
+consumer of that output, and their consumers in turn, with no error and the
+queue finishing normally (the mechanism nodes_image_grid.py's "Collect
+only" and nodes_bypass.py's off path already rely on; a sweep maps ``save``
+once per run and each call blocks its own slice). It is the LAST serialized
+widget (after ``filename_prefix``; ``run_info`` is forceInput and holds no
+slot) and lives in ``optional`` so an old hand-built /prompt still
+validates. ``ExecutionBlocker`` is imported lazily inside ``save``. The
+frontend half (``web/eps_image/save_image.js``) greys the outgoing wires
+while it is off.
+
 Signature and on-disk behavior otherwise mirror core ``SaveImage``
 (``images`` + ``filename_prefix``, counter naming via
 ``folder_paths.get_save_image_path``, ``OUTPUT_NODE``, ``ui.images``), so
@@ -74,6 +90,10 @@ APPLY_SET_CLASS = "LoraLibraryApplySet"
 APPLY_SET_PIN_WIDGET = "pinned_state"
 MULTIPLIER_CLASS = "EPSCrossSweep"
 SOLO_WIDGET = "solo_run"
+
+#: This node's own tail widget (module docstring): off = the files are
+#: still saved, the ``images`` output is a silent blocker.
+IMAGE_OUTPUT_WIDGET = "image_output"
 
 _WIDGET_KINDS = ("STRING", "INT", "FLOAT", "BOOLEAN")
 
@@ -112,6 +132,18 @@ def parse_run_info(raw: Any) -> dict[str, Any] | None:
     if not isinstance(data, dict) or not isinstance(data.get("token"), str):
         return None
     return data
+
+
+def parse_image_output(raw: Any) -> bool:
+    """The ``image_output`` widget as a plain bool. Only an explicit
+    ``False`` (or the string ``"false"``, any case -- a hand-built prompt)
+    is off; anything else, an absent ``None`` included, is on: a real
+    BOOLEAN widget always has a value, so a missing one can only be an API
+    caller that predates the widget (nodes_bypass.py's rule)."""
+    raw = _unwrap(raw)
+    if raw is False:
+        return False
+    return not (isinstance(raw, str) and raw.strip().lower() == "false")
 
 
 # ------------------------------------------------------------ widget index
@@ -568,7 +600,10 @@ class EPSSaveImage:
     OUTPUT_NODE = True
     RETURN_TYPES = ("IMAGE",)
     RETURN_NAMES = ("images",)
-    OUTPUT_TOOLTIPS = ("The saved images, passed through unchanged (like Save Image).",)
+    OUTPUT_TOOLTIPS = (
+        "The saved images, passed through unchanged (like Save Image). With "
+        "image_output off: nothing -- the nodes after this one are skipped.",
+    )
     DESCRIPTION = (
         "Save Image with provenance baked in. Wire images and filename_prefix "
         "exactly like the core Save Image node -- and wire EPS Run Multiplier's "
@@ -577,17 +612,22 @@ class EPSSaveImage:
         "Notebook text and Apply LoRA Set rows pinned to the values used: "
         "drop the image onto the canvas and the whole workflow loads ready to "
         "recreate just that one image, exactly, even after the library was "
-        "edited. With run_info unwired it behaves exactly like Save Image."
+        "edited. With run_info unwired it behaves exactly like Save Image. "
+        "Switch image_output off and the images are still saved and shown "
+        "here, but the nodes after this one are skipped instead of run (not "
+        "an error)."
     )
 
     #: §6.16 state registry (v0.83.0): the widgets a Universal State
     #: Controller may capture/apply, declared next to the parser that owns
     #: their shape. ``images`` is a socket and ``run_info`` is wire-only
-    #: (forceInput); neither appears here.
+    #: (forceInput); neither appears here. ``image_output`` is the
+    #: ``boolean`` kind EPS Bypass's ``enabled`` introduced (v0.99.0).
     EPS_STATE_WIDGETS: ClassVar[dict[str, Any]] = {
         "format": 1,
         "widgets": {
             "filename_prefix": {"kind": "string", "max_len": 10000},
+            IMAGE_OUTPUT_WIDGET: {"kind": "boolean"},
         },
     }
 
@@ -624,6 +664,30 @@ class EPSSaveImage:
                         ),
                     },
                 ),
+                # TAIL widget (FORMAT.md §8: widgets_values restores
+                # POSITIONALLY, so a widget is only ever appended -- here
+                # after filename_prefix, the node's only other widget;
+                # run_info is a forceInput socket and holds no slot). In
+                # `optional`, like every tail widget this pack has added
+                # (solo_run, pair_mode, ...): a hand-built API /prompt that
+                # predates it still validates, and save() reads an absent
+                # value as on. NO `label_on`/`label_off` (rig lesson, Nodes
+                # 2.0 on frontend 1.52.7): with labels the Vue node draws a
+                # two-segment control whose halves truncate the text at the
+                # default node width; a plain switch next to the name reads
+                # right in both renderers.
+                IMAGE_OUTPUT_WIDGET: (
+                    "BOOLEAN",
+                    {
+                        "default": True,
+                        "tooltip": (
+                            "On: the images go out to the next node as usual. "
+                            "Off: they are still saved and shown here, but the "
+                            "nodes after this one are skipped (not an error); "
+                            "the wire turns grey while it's off."
+                        ),
+                    },
+                ),
             },
             "hidden": {"prompt": "PROMPT", "extra_pnginfo": "EXTRA_PNGINFO"},
         }
@@ -633,6 +697,7 @@ class EPSSaveImage:
         images: Any,
         filename_prefix: str = "EPS",
         run_info: Any = None,
+        image_output: Any = True,
         prompt: Any = None,
         extra_pnginfo: Any = None,
     ) -> dict[str, Any]:
@@ -710,6 +775,18 @@ class EPSSaveImage:
                 img.save(os.path.join(full_output_folder, file), pnginfo=metadata, compress_level=4)
                 results.append({"filename": file, "subfolder": subfolder, "type": "output"})
                 counter += 1
+            if not parse_image_output(image_output):
+                # Off: the files are on disk and `ui.images` is reported as
+                # usual (the on-node preview is unchanged); only the output
+                # is withheld. A silent blocker makes core's process_inputs
+                # skip every consumer (and theirs) with no error and the
+                # queue finishing normally -- nodes_image_grid.py's "Collect
+                # only" and nodes_bypass.py's off path use the same. Lazy
+                # import (module docstring's no-comfy-at-import promise;
+                # tests/test_save_image.py pins it).
+                from comfy_execution.graph import ExecutionBlocker
+
+                return {"ui": {"images": results}, "result": (ExecutionBlocker(None),)}
             return {"ui": {"images": results}, "result": (images,)}
         finally:
             undo_bakes(bake_undo)
