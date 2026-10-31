@@ -1691,6 +1691,162 @@ NOTEBOOK_PINNED_CASES = [
 ]
 
 
+def _image_switcher_with_masks(pass_masks, wired: int = 3, off=("image_2",)) -> dict:
+    """§6.4 masks: an Image Switcher with *wired* rows, the rows in *off*
+    toggled off, and the `pass_masks` widget at *pass_masks* (`None` =
+    absent, as an old save's widgets would read). Its slot 0 (`images`)
+    and slot 1 (`masks`) are index-aligned while the gate is on."""
+    widgets = {"toggles": json.dumps(dict.fromkeys(off, False))}
+    if pass_masks is not None:
+        widgets["pass_masks"] = pass_masks
+    return {
+        "classType": "EPSSwitcher",
+        "widgets": widgets,
+        "inputs": {f"image_{i}": _link(str(90 + i)) for i in range(1, wired + 1)},
+    }
+
+
+def _mask_shape(switcher: dict, multiplier_inputs: dict, extra: dict | None = None) -> dict:
+    """A Notebook with two texts, *switcher* at "sw", LoadImages behind it,
+    and a pair-multiply multiplier whose inputs are *multiplier_inputs*."""
+    nodes = {
+        "30": _notebook("First\nSecond\n\n"),
+        "sw": switcher,
+        "5": {
+            "classType": "EPSCrossSweep",
+            "widgets": {"base_folder": "", "pair_mode": "multiply", "sweep_mode": "multiply"},
+            "inputs": {"text": _link("30", 0), **multiplier_inputs},
+        },
+        **_LOAD_IMAGES,
+    }
+    nodes.update(extra or {})
+    return {"nodes": nodes}
+
+
+# §6.4 masks: `mask` is a consumed member welded to `image` -- it propagates
+# zero/blocked/atLeast/error like `name`, never enters the pair math, and
+# paints run()'s two mask checks early when the counts are exact.
+ESTIMATE_CASES += [
+    (
+        "image_switcher_masks_on_images_and_masks_count_the_same",
+        _mask_shape(
+            _image_switcher_with_masks(True),
+            {"image": _link("sw", 0), "mask": _link("sw", 1)},
+        ),
+        "5",
+        {"total": 4, "atLeast": False, "steps": 1, "pairs": 4, "unknowns": [], "error": None},
+    ),
+    (
+        "masks_slot_with_pass_masks_off_is_known_blocked",
+        _mask_shape(
+            _image_switcher_with_masks(False),
+            {"image": _link("sw", 0), "mask": _link("sw", 1)},
+        ),
+        "5",
+        {"total": 0, "atLeast": False, "error": None,
+         "breakdown": "nothing to run (mask input is empty/blocked)"},
+    ),
+    (
+        "masks_slot_with_pass_masks_absent_is_known_blocked",
+        _mask_shape(
+            _image_switcher_with_masks(None),
+            {"image": _link("sw", 0), "mask": _link("sw", 1)},
+        ),
+        "5",
+        {"total": 0, "atLeast": False, "error": None,
+         "breakdown": "nothing to run (mask input is empty/blocked)"},
+    ),
+    (
+        "images_slot_is_unaffected_by_the_gate",
+        _mask_shape(_image_switcher_with_masks(False), {"image": _link("sw", 0)}),
+        "5",
+        {"total": 4, "atLeast": False, "pairs": 4, "error": None},
+    ),
+    (
+        "mask_count_disagreeing_with_image_is_the_queue_error_early",
+        _mask_shape(
+            _image_switcher_with_masks(True),
+            {"image": _link("sw", 0), "mask": _link("sw2", 1)},
+            {"sw2": _image_switcher_with_masks(True, wired=3, off=())},
+        ),
+        "5",
+        {"error_contains": ["mask and image disagree", "image=2", "mask=3", "queue will fail"]},
+    ),
+    (
+        "single_mask_source_broadcasts_without_error",
+        _mask_shape(
+            _image_switcher_with_masks(True),
+            {"image": _link("sw", 0), "mask": _link("91", 1)},
+        ),
+        "5",
+        {"total": 4, "atLeast": False, "unknowns": [], "error": None},
+    ),
+    (
+        "mask_wired_with_image_unwired_is_the_queue_error_early",
+        _mask_shape(_image_switcher_with_masks(True), {"mask": _link("91", 1)}),
+        "5",
+        {"error_contains": ["mask is wired but image is not", "queue will fail"]},
+    ),
+    (
+        "unknown_mask_source_floors_the_total_and_names_mask",
+        _mask_shape(
+            _image_switcher_with_masks(True),
+            {"image": _link("sw", 0), "mask": _link("en", 0)},
+            {"en": _third_party({})},
+        ),
+        "5",
+        {"total": 4, "atLeast": True, "unknowns": ["mask"], "error": None},
+    ),
+    (
+        "mask_known_blocked_outranks_the_pairing_error",
+        _mask_shape(
+            _image_switcher_with_masks(True),
+            {"image": _link("sw", 0), "mask": _link("sw2", 1)},
+            {"sw2": _image_switcher_with_masks(False, wired=3, off=())},
+        ),
+        "5",
+        {"total": 0, "atLeast": False, "error": None,
+         "breakdown": "nothing to run (mask input is empty/blocked)"},
+    ),
+    (
+        "chained_multiplier_mask_output_consumed_with_mask_unwired_is_the_dead_output_error",
+        _mask_shape(
+            _image_switcher_with_masks(True),
+            {"image": _link("sw", 0)},
+            {
+                "6": {
+                    "classType": "EPSCrossSweep",
+                    "widgets": {"pair_mode": "multiply", "sweep_mode": "multiply"},
+                    "inputs": {
+                        "image": _link("5", 2), "mask": _link("5", 9), "text": _link("30", 0),
+                    },
+                }
+            },
+        ),
+        "6",
+        {"error_contains": ["chained", "mask output is consumed", "mask input is not wired"]},
+    ),
+    (
+        "chained_multiplier_mask_output_counts_through_when_wired",
+        _mask_shape(
+            _image_switcher_with_masks(True),
+            {"image": _link("sw", 0), "mask": _link("sw", 1)},
+            {
+                "6": {
+                    "classType": "EPSCrossSweep",
+                    "widgets": {"pair_mode": "multiply", "sweep_mode": "multiply"},
+                    "inputs": {
+                        "image": _link("5", 2), "mask": _link("5", 9), "text": _link("30", 0),
+                    },
+                }
+            },
+        ),
+        "6",
+        {"total": 8, "atLeast": False, "pairs": 8, "unknowns": [], "error": None},
+    ),
+]
+
+
 PROBE_JS = """
 import * as m from './extensions/comfyui-epsnodes/eps_image/cross_sweep.js'
 
@@ -2297,6 +2453,35 @@ def test_run_count_refreshes_on_graph_changes_not_only_draws(source: str) -> Non
     assert recompute.index("installGraphNodeWatch(graph)") < recompute.index(
         "estimateRuns(snapshotFromGraph(graph)"
     )
+
+
+def test_mask_is_a_consumed_member_welded_to_image_in_the_estimator(source: str) -> None:
+    """§6.4 masks: `mask` is counted like `name` -- a consumed input that
+    propagates zero/blocked/atLeast/error into the node and floors the
+    total -- but it never enters the sweep-member loop or the pair math
+    (it is never an axis); the chained dead-output guard covers slot 9;
+    and the Image Switcher's slot 1 reads as known-blocked while
+    `pass_masks` is off, mirroring the backend's one-blocker output."""
+    assert "9: 'mask'" in source
+    assert "const maskSrc = sourceCount(snapshot, inputs.mask ?? null, path)" in source
+    assert "if (maskSrc?.atLeast) unknowns.add('mask')" in source
+    assert "mask: maskSrc" in source
+    assert "Boolean(maskSrc?.atLeast)" in source
+    # never a sweep member, never in the pair math
+    assert "for (const name of ['model', 'model_low', 'clip', 'label', 'vae'])" in source
+    assert "pairs = imageSrc.count * textSrc.count" in source
+    assert "maskSrc.count *" not in source
+    # the two early paints, inside the zero-collapse-first block
+    body = _function_body(source, "estimateInner(snapshot, nodeId, path)")
+    zero_block = body.index("if (zeroNames.length === 0) {")
+    assert zero_block < body.index("'mask is wired but image is not — the queue will fail'")
+    assert zero_block < body.index("maskSrc.count !== imageSrc.count")
+    pairing_paint = body.index("maskSrc.count !== imageSrc.count")
+    assert pairing_paint < body.index("// Steps -- run()'s exact ladder")
+    # the switcher branch's gate read mirrors nodes_switcher.py `_flag_is_on`
+    assert "function passMasksOn(raw)" in source
+    count = _function_body(source, "sourceCount(snapshot, link, path)")
+    assert "(resolved.slot ?? 0) === 1 && !passMasksOn(node.widgets?.pass_masks)" in count
 
 
 def test_model_low_is_a_welded_axis_member_in_the_estimator(source: str) -> None:

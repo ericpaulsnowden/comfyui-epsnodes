@@ -571,13 +571,32 @@ function switcherIsStaticallyAllOff(snapshot, node) {
 
 /** Chained-multiplier OUTPUT slot -> the INPUT that must be wired for that
  * output to carry values, positionally off nodes_cross_sweep.py's
- * RETURN_NAMES ('model','clip','image','text','save_prefix','label','vae','model_low')
- * -- text (3) and save_prefix (4) are always live. Consuming any of THESE
- * outputs while the matching input is unwired trips run()'s v0.51.0
- * dead-output ValueError (`_consumed_output_slots` + the dead_outputs
- * block): every run on that wire would be a silent blocker, so the
- * backend fails the queue naming both ends. */
-const DEAD_OUTPUT_INPUTS = { 0: 'model', 1: 'clip', 2: 'image', 5: 'label', 6: 'vae', 7: 'model_low' }
+ * RETURN_NAMES ('model','clip','image','text','save_prefix','label','vae',
+ * 'model_low','run_info','mask') -- text (3), save_prefix (4) and run_info
+ * (8) are always live. Consuming any of THESE outputs while the matching
+ * input is unwired trips run()'s v0.51.0 dead-output ValueError
+ * (`_consumed_output_slots` + the dead_outputs block): every run on that
+ * wire would be a silent blocker, so the backend fails the queue naming
+ * both ends. */
+const DEAD_OUTPUT_INPUTS = {
+  0: 'model',
+  1: 'clip',
+  2: 'image',
+  5: 'label',
+  6: 'vae',
+  7: 'model_low',
+  9: 'mask'
+}
+
+/**
+ * nodes_switcher.py `_flag_is_on` mirrored: the Image Switcher's
+ * `pass_masks` widget is ON only as a real `true` (or the string "true" a
+ * hand-built prompt might carry) -- never any other truthy value.
+ * @param {unknown} raw @returns {boolean}
+ */
+function passMasksOn(raw) {
+  return raw === true || (typeof raw === 'string' && raw.trim().toLowerCase() === 'true')
+}
 
 /**
  * How many list elements the node behind *link* emits -- the per-source
@@ -630,6 +649,18 @@ function sourceCount(snapshot, link, path) {
     // element in any consumed input list blocks the whole consumer
     // (execution.py process_inputs): this entire switcher collapses to
     // {count: 0, atLeast: false}.
+    //
+    // §6.4 masks: the Image Switcher's slot 1 (`masks`) is index-aligned
+    // with slot 0 BY CONSTRUCTION while `pass_masks` is on (an unwired
+    // mask row contributes a zero mask, never a gap), so it counts exactly
+    // like `images` below. With the gate OFF the backend emits one
+    // ExecutionBlocker on that output -- the known-blocked family. The
+    // frontend removes the output in that state, so this is only ever a
+    // hand-edited/API prompt or a stale link, but the count must still
+    // tell the truth about it.
+    if (type === 'EPSSwitcher' && (resolved.slot ?? 0) === 1 && !passMasksOn(node.widgets?.pass_masks)) {
+      return { count: 0, atLeast: false, srcId: id }
+    }
     if (path.has(id)) return { count: 1, atLeast: true, srcId: id }
     const sub = new Set([...path, id])
     let count = 0
@@ -1030,12 +1061,14 @@ function estimateInner(snapshot, nodeId, path) {
   const unknowns = new Set()
 
   // --- Every consumed input's source count FIRST: the sweep members
-  // (run()'s v0.49.1/v0.57.0 rules), the pair side, AND `name`. run()
-  // only ever reads names for save_prefix, so `name` never enters the
-  // pair MATH below -- but it IS a consumed input list, and one
+  // (run()'s v0.49.1/v0.57.0 rules), the pair side, `name` AND `mask`.
+  // run() only ever reads names for save_prefix, so `name` never enters
+  // the pair MATH below -- but it IS a consumed input list, and one
   // ExecutionBlocker element in ANY consumed list blocks this whole node
   // (header: BLOCKED/EMPTY PROPAGATION), so its zero/blocked state and
-  // its atLeast floor must propagate like every other member's.
+  // its atLeast floor must propagate like every other member's. `mask`
+  // (§6.4 masks) is the same shape: welded to `image`, never an axis, its
+  // own pairing check painted below.
   const members = {}
   // v0.66.0: model_low is a WELDED member of the model axis (backend
   // wired_sweep parity) -- it participates in zero-collapse, the aligned
@@ -1048,10 +1081,12 @@ function estimateInner(snapshot, nodeId, path) {
   const textSrc = sourceCount(snapshot, inputs.text ?? null, path)
   const imageSrc = sourceCount(snapshot, inputs.image ?? null, path)
   const nameSrc = sourceCount(snapshot, inputs.name ?? null, path)
+  const maskSrc = sourceCount(snapshot, inputs.mask ?? null, path)
   if (textSrc?.atLeast) unknowns.add('text')
   if (imageSrc?.atLeast) unknowns.add('image')
   if (nameSrc?.atLeast) unknowns.add('name')
-  const sources = { ...members, text: textSrc, image: imageSrc, name: nameSrc }
+  if (maskSrc?.atLeast) unknowns.add('mask')
+  const sources = { ...members, text: textSrc, image: imageSrc, name: nameSrc, mask: maskSrc }
 
   // A chained multiplier's dead-output consumption (sourceCount's
   // CLASS_ID branch) is a queue-time ValueError raised the moment the
@@ -1109,6 +1144,29 @@ function estimateInner(snapshot, nodeId, path) {
           return result
         }
       }
+    }
+
+    // run()'s §6.4 mask checks, same scope: a mask wired with no image is
+    // a miswire whatever the counts (a mask only travels with its image),
+    // and when BOTH counts are exactly known a mask count that is neither
+    // 1 (broadcast) nor the image count is the queue-time length error.
+    // An atLeast floor on either side skips the paint rather than risk a
+    // lying failure -- run() stays the referee.
+    if (maskSrc && !imageSrc) {
+      result.error = 'mask is wired but image is not — the queue will fail'
+      return result
+    }
+    if (
+      maskSrc &&
+      imageSrc &&
+      !maskSrc.atLeast &&
+      !imageSrc.atLeast &&
+      maskSrc.count !== 1 &&
+      maskSrc.count !== imageSrc.count
+    ) {
+      result.error =
+        `mask and image disagree: image=${imageSrc.count} vs mask=${maskSrc.count} — the queue will fail`
+      return result
     }
   }
 
@@ -1168,10 +1226,14 @@ function estimateInner(snapshot, nodeId, path) {
     return result
   }
   result.total = steps * pairs
-  // `name` never enters the steps/pairs math, but an unknowable name
-  // source still floors the TOTAL (it could yet turn out blocked), so its
-  // atLeast propagates like either group's.
-  result.atLeast = result.stepsAtLeast || result.pairsAtLeast || Boolean(nameSrc?.atLeast)
+  // `name` and `mask` never enter the steps/pairs math, but an unknowable
+  // source of either still floors the TOTAL (it could yet turn out
+  // blocked), so their atLeast propagates like either group's.
+  result.atLeast =
+    result.stepsAtLeast ||
+    result.pairsAtLeast ||
+    Boolean(nameSrc?.atLeast) ||
+    Boolean(maskSrc?.atLeast)
   result.breakdown = `${plural(steps, 'sweep step')} × ${plural(pairs, 'pair')}`
 
   // --- v0.67.0 provenance M1: `solo_run`. A non-empty token means run()

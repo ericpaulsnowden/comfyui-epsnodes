@@ -27,6 +27,29 @@ def _toggles(**overrides: bool) -> str:
     return json.dumps(overrides)
 
 
+@pytest.fixture(autouse=True)
+def _fake_execution_blocker_everywhere(monkeypatch: pytest.MonkeyPatch):
+    """Autouse since the pass_masks round: with `pass_masks` off (every
+    legacy call in this file), execute() emits ONE ExecutionBlocker on the
+    `masks` output, so the lazy `comfy_execution.graph` import now fires on
+    the happy path too, not just the all-off one -- the same move
+    tests/test_switcher_types.py made for v0.66.0's models_low. The named
+    `fake_execution_blocker` fixture below is kept for the tests that
+    isinstance() the blocker; it installs the same shape."""
+
+    class FakeExecutionBlocker:
+        def __init__(self, message: object) -> None:
+            self.message = message
+
+    graph_module = types.ModuleType("comfy_execution.graph")
+    graph_module.ExecutionBlocker = FakeExecutionBlocker
+    package = types.ModuleType("comfy_execution")
+    package.graph = graph_module
+    monkeypatch.setitem(sys.modules, "comfy_execution", package)
+    monkeypatch.setitem(sys.modules, "comfy_execution.graph", graph_module)
+    return FakeExecutionBlocker
+
+
 @pytest.fixture
 def fake_execution_blocker(monkeypatch: pytest.MonkeyPatch):
     """Installs a fake ``comfy_execution.graph`` module exposing
@@ -149,14 +172,14 @@ class TestExecuteCollectsEnabledInAscendingOrder:
     def test_single_connected_and_enabled_image_passes_through(self) -> None:
         node = EPSSwitcher()
         result = node.execute(toggles=_toggles(), image_1="img1")
-        assert result == (["img1"],)
+        assert result[0] == ["img1"]
 
     def test_default_toggles_enables_every_connected_slot(self) -> None:
         # No `toggles` value at all (a plain API caller who never loaded
         # switcher.js) -- module docstring's default-enabled rationale.
         node = EPSSwitcher()
         result = node.execute(image_1="img1", image_2="img2")
-        assert result == (["img1", "img2"],)
+        assert result[0] == ["img1", "img2"]
 
     def test_collects_in_ascending_n_regardless_of_kwarg_order(self) -> None:
         node = EPSSwitcher()
@@ -166,7 +189,7 @@ class TestExecuteCollectsEnabledInAscendingOrder:
             image_1="img1",
             image_2="img2",
         )
-        assert result == (["img1", "img2", "img3"],)
+        assert result[0] == ["img1", "img2", "img3"]
 
     def test_disabled_slot_is_omitted(self) -> None:
         node = EPSSwitcher()
@@ -176,7 +199,7 @@ class TestExecuteCollectsEnabledInAscendingOrder:
             image_2="img2",
             image_3="img3",
         )
-        assert result == (["img1", "img3"],)
+        assert result[0] == ["img1", "img3"]
 
     @pytest.mark.parametrize("falsy", [None, 0, "", [], {}])
     def test_non_bool_falsy_toggle_value_keeps_slot_enabled(self, falsy: object) -> None:
@@ -189,14 +212,14 @@ class TestExecuteCollectsEnabledInAscendingOrder:
         node = EPSSwitcher()
         toggles = json.dumps({"image_2": falsy})
         result = node.execute(toggles=toggles, image_1="img1", image_2="img2", image_3="img3")
-        assert result == (["img1", "img2", "img3"],)
+        assert result[0] == ["img1", "img2", "img3"]
 
     def test_explicit_boolean_false_is_the_only_disabler(self) -> None:
         node = EPSSwitcher()
         result = node.execute(
             toggles=json.dumps({"image_2": False}), image_1="img1", image_2="img2"
         )
-        assert result == (["img1"],)
+        assert result[0] == ["img1"]
 
     def test_disconnected_slot_none_is_skipped_even_if_marked_enabled(self) -> None:
         # A gap slot (per FORMAT.md §6.4 growth invariant, a disconnected
@@ -209,7 +232,7 @@ class TestExecuteCollectsEnabledInAscendingOrder:
             image_2=None,
             image_3="img3",
         )
-        assert result == (["img1", "img3"],)
+        assert result[0] == ["img1", "img3"]
 
     def test_multiple_disabled_slots_all_omitted(self) -> None:
         node = EPSSwitcher()
@@ -220,17 +243,17 @@ class TestExecuteCollectsEnabledInAscendingOrder:
             image_3="img3",
             image_4="img4",
         )
-        assert result == (["img2", "img4"],)
+        assert result[0] == ["img2", "img4"]
 
     def test_malformed_toggles_json_falls_back_to_all_enabled(self) -> None:
         node = EPSSwitcher()
         result = node.execute(toggles="not json{{", image_1="img1", image_2="img2")
-        assert result == (["img1", "img2"],)
+        assert result[0] == ["img1", "img2"]
 
     def test_toggles_that_is_not_a_json_object_falls_back_to_all_enabled(self) -> None:
         node = EPSSwitcher()
         result = node.execute(toggles="[1, 2, 3]", image_1="img1")
-        assert result == (["img1"],)
+        assert result[0] == ["img1"]
 
 
 class TestExecuteInputIsListContract:
@@ -248,19 +271,19 @@ class TestExecuteInputIsListContract:
     def test_list_wrapped_toggles_is_unwrapped(self) -> None:
         node = EPSSwitcher()
         result = node.execute(toggles=[_toggles()], image_1=["img1"])
-        assert result == (["img1"],)
+        assert result[0] == ["img1"]
 
     def test_empty_list_toggles_falls_back_to_default(self) -> None:
         # `_unwrap_toggles`'s edge case: a list-wrapped input that's
         # somehow empty rather than holding the one expected string.
         node = EPSSwitcher()
         result = node.execute(toggles=[], image_1=["img1"])
-        assert result == (["img1"],)
+        assert result[0] == ["img1"]
 
     def test_list_wrapped_malformed_toggles_falls_back_to_all_enabled(self) -> None:
         node = EPSSwitcher()
         result = node.execute(toggles=["not json{{"], image_1=["a"], image_2=["b"])
-        assert result == (["a", "b"],)
+        assert result[0] == ["a", "b"]
 
     def test_grid_shaped_upstream_list_merges_element_wise(self) -> None:
         # The bug scenario itself, scaled down: a list-producing upstream
@@ -274,7 +297,7 @@ class TestExecuteInputIsListContract:
             image_1=["tile0", "tile1", "tile2"],
             image_2=["loaded"],
         )
-        assert result == (["tile0", "tile1", "tile2", "loaded"],)
+        assert result[0] == ["tile0", "tile1", "tile2", "loaded"]
 
     def test_disabled_grid_shaped_slot_contributes_nothing(self) -> None:
         # The owner-reported bug's fix, scaled down: grid disabled + a
@@ -286,7 +309,7 @@ class TestExecuteInputIsListContract:
             image_1=["tile0", "tile1", "tile2"],
             image_2=["loaded"],
         )
-        assert result == (["loaded"],)
+        assert result[0] == ["loaded"]
 
     def test_flatten_preserves_slot_order_and_intra_slot_order(self) -> None:
         # Slot order ascending (image_1, image_2, image_3) regardless of
@@ -299,7 +322,7 @@ class TestExecuteInputIsListContract:
             image_1=["a0", "a1", "a2"],
             image_2=["b0"],
         )
-        assert result == (["a0", "a1", "a2", "b0", "c0", "c1"],)
+        assert result[0] == ["a0", "a1", "a2", "b0", "c0", "c1"]
 
     def test_single_element_list_batch_stays_one_output_element(self) -> None:
         # An ordinary (non-list-producing) upstream's batch tensor arrives
@@ -311,7 +334,7 @@ class TestExecuteInputIsListContract:
         node = EPSSwitcher()
         batch_stand_in = object()
         result = node.execute(toggles=[_toggles()], image_1=[batch_stand_in])
-        assert result == ([batch_stand_in],)
+        assert result[0] == [batch_stand_in]
 
     def test_none_elements_within_a_resolved_list_are_skipped(self) -> None:
         # Defensive tolerance for a partial/misbehaving upstream list (or a
@@ -319,7 +342,7 @@ class TestExecuteInputIsListContract:
         # elements are dropped, real ones kept, order preserved.
         node = EPSSwitcher()
         result = node.execute(toggles=[_toggles()], image_1=["tile0", None, "tile2"])
-        assert result == (["tile0", "tile2"],)
+        assert result[0] == ["tile0", "tile2"]
 
     def test_bare_non_list_image_value_is_tolerated_as_one_element(self) -> None:
         # Real ComfyUI always sends a list here (module docstring); this
@@ -328,7 +351,7 @@ class TestExecuteInputIsListContract:
         # on exactly this tolerance.
         node = EPSSwitcher()
         result = node.execute(toggles=_toggles(), image_1="plain_tensor_stand_in")
-        assert result == (["plain_tensor_stand_in"],)
+        assert result[0] == ["plain_tensor_stand_in"]
 
     def test_all_off_returns_blocker_with_list_shaped_inputs(
         self, fake_execution_blocker: type
@@ -362,7 +385,7 @@ class TestAllOffOrNoneConnectedReturnsAnExecutionBlocker:
         node = EPSSwitcher()
         result = node.execute(toggles=_toggles())
         assert isinstance(result, tuple)
-        assert len(result) == 1
+        assert len(result) == 2  # images + the pass_masks round's masks tail
         assert isinstance(result[0], list)
         assert len(result[0]) == 1
         blocker = result[0][0]
@@ -372,6 +395,8 @@ class TestAllOffOrNoneConnectedReturnsAnExecutionBlocker:
         # `.message is not None` -- a message here would turn our graceful
         # skip back into a reported error.
         assert blocker.message is None
+        # ...and the masks output is blocked the same way, whatever pass_masks.
+        assert len(result[1]) == 1 and isinstance(result[1][0], fake_execution_blocker)
 
     def test_nothing_connected_logs_at_info_not_warning_or_error(
         self, fake_execution_blocker: type, caplog: pytest.LogCaptureFixture
@@ -427,18 +452,24 @@ class TestAllOffOrNoneConnectedReturnsAnExecutionBlocker:
         node = EPSSwitcher()
         node.execute(toggles=_toggles(image_1=False), image_1="img1")
 
-    def test_missing_fake_execution_blocker_module_surfaces_as_import_error(self) -> None:
-        # Sanity check on the test fixture's own premise (no
-        # `fake_execution_blocker` requested here): without a real or faked
-        # `comfy_execution.graph` on the path, the lazy import inside the
-        # all-off branch fails loudly rather than silently -- confirms the
-        # other tests above are genuinely exercising that import, not
+    def test_missing_fake_execution_blocker_module_surfaces_as_import_error(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Sanity check on the test fixture's own premise: without a real or
+        # faked `comfy_execution.graph` on the path, the lazy import inside
+        # the all-off branch fails loudly rather than silently -- confirms
+        # the other tests above are genuinely exercising that import, not
         # accidentally passing because ExecutionBlocker was already
-        # importable some other way.
+        # importable some other way. The autouse fake is REMOVED here (it
+        # is what the rest of this file now relies on); a real ComfyUI on
+        # the path would still satisfy the import, so that case skips.
+        import importlib.util
         import sys as _sys
 
-        if "comfy_execution" in _sys.modules or "comfy_execution.graph" in _sys.modules:
-            pytest.skip("comfy_execution is already importable in this environment")
+        monkeypatch.delitem(_sys.modules, "comfy_execution.graph", raising=False)
+        monkeypatch.delitem(_sys.modules, "comfy_execution", raising=False)
+        if importlib.util.find_spec("comfy_execution") is not None:
+            pytest.skip("comfy_execution is genuinely importable in this environment")
         node = EPSSwitcher()
         with pytest.raises(ModuleNotFoundError):
             node.execute(toggles=_toggles())
@@ -533,12 +564,16 @@ class TestClassShapeMatchesFormatMdSection6_4:
     def test_category(self) -> None:
         assert EPSSwitcher.CATEGORY == "EPSNodes/Switchers"
 
-    def test_return_types_is_a_single_image_output(self) -> None:
-        assert EPSSwitcher.RETURN_TYPES == ("IMAGE",)
-        assert EPSSwitcher.RETURN_NAMES == ("images",)
+    def test_return_types_is_images_plus_the_masks_tail(self) -> None:
+        # §8 tail append (pass_masks round): `images` is still slot 0, so
+        # every saved wire stays put; `masks` rides behind it.
+        assert EPSSwitcher.RETURN_TYPES == ("IMAGE", "MASK")
+        assert EPSSwitcher.RETURN_NAMES == ("images", "masks")
+        assert len(EPSSwitcher.OUTPUT_TOOLTIPS) == 2
+        assert all(isinstance(tip, str) and tip for tip in EPSSwitcher.OUTPUT_TOOLTIPS)
 
     def test_output_is_list_flagged_true(self) -> None:
-        assert EPSSwitcher.OUTPUT_IS_LIST == (True,)
+        assert EPSSwitcher.OUTPUT_IS_LIST == (True, True)
 
     def test_input_is_list_flagged_true(self) -> None:
         # The Part A fix itself: without this, a list-producing upstream
@@ -556,11 +591,12 @@ class TestClassShapeMatchesFormatMdSection6_4:
         assert EPSSwitcher.FUNCTION == "execute"
         assert callable(getattr(EPSSwitcher(), EPSSwitcher.FUNCTION))
 
-    def test_execute_return_shape_is_a_one_tuple_of_a_list(self) -> None:
+    def test_execute_return_shape_is_a_two_tuple_of_lists(self) -> None:
         result = EPSSwitcher().execute(toggles=_toggles(), image_1="img1")
         assert isinstance(result, tuple)
-        assert len(result) == 1
+        assert len(result) == 2
         assert isinstance(result[0], list)
+        assert isinstance(result[1], list)
 
 
 # --------------------------------------------------------------- no ComfyUI import
@@ -659,7 +695,7 @@ class TestUpstreamEmptySwitcherIsNotRequested:
         # neither crash nor contribute, and the other slot must still flow.
         assert EPSSwitcher().execute(
             toggles=["{}"], image_1=(None,), image_2=["live"]
-        ) == (["live"],)
+        )[0] == ["live"]
 
     def test_all_off_still_returns_a_blocker_unconditionally(
         self, fake_execution_blocker: type
@@ -670,7 +706,7 @@ class TestUpstreamEmptySwitcherIsNotRequested:
             "4": {"class_type": "EPSSwitcher", "inputs": {"toggles": '{"image_1": false}'}},
             "5": {"class_type": "EPSSwitcher", "inputs": {"image_1": ["4", 0]}},
         }
-        (images,) = EPSSwitcher().execute(
+        images, _masks = EPSSwitcher().execute(
             toggles=['{"image_1": false}'], prompt=[prompt], unique_id=["4"], image_1=["img"]
         )
         assert len(images) == 1 and isinstance(images[0], fake_execution_blocker)
@@ -821,3 +857,304 @@ class TestModelHighLowPairsV0660:
         highs, lows = node.execute(toggles=['{"model_1": false}'], model_1=["high-A"])
         assert isinstance(highs[0], ExecutionBlocker)
         assert isinstance(lows[0], ExecutionBlocker)
+
+
+# ------------------------------------------------------------ pass_masks
+
+
+class _FakeImage:
+    """A stand-in for an IMAGE tensor ([B, H, W, C]) carrying just what
+    `_zeros_like_mask` touches: `.shape` and `.new_zeros(shape)`. Counts
+    the `new_zeros` calls so a test can prove the OFF path allocates
+    nothing (a long video batch must never pay for masks nobody asked for)."""
+
+    allocations = 0
+
+    def __init__(self, *shape: int) -> None:
+        self.shape = shape
+
+    def new_zeros(self, shape: tuple[int, ...]) -> _FakeMask:
+        _FakeImage.allocations += 1
+        return _FakeMask(shape)
+
+
+class _FakeMask:
+    def __init__(self, shape: tuple[int, ...]) -> None:
+        self.shape = tuple(shape)
+
+
+class TestPassMasks:
+    """§6.4 masks (owner ask 2026-10-31: "an option that is off by default to
+    also pass along the mask with every image. the mask and image should
+    always be passed together"). The EPSSwitcher row partner: `mask_N`
+    under every `image_N`, gated by the visible `pass_masks` BOOLEAN
+    widget, with the `masks` tail output index-aligned with `images` BY
+    CONSTRUCTION."""
+
+    @pytest.fixture(autouse=True)
+    def _reset_allocation_counter(self):
+        _FakeImage.allocations = 0
+
+    # ------------------------------------------------------ INPUT_TYPES
+
+    def test_pass_masks_is_a_visible_boolean_widget_off_by_default(self) -> None:
+        optional = EPSSwitcher.INPUT_TYPES()["optional"]
+        widget_type, options = optional["pass_masks"]
+        assert widget_type == "BOOLEAN"
+        assert options["default"] is False
+        assert isinstance(options["tooltip"], str) and options["tooltip"]
+        # A visible widget, NOT a Properties entry, and no on/off labels
+        # (they truncate in Nodes 2.0 on frontend 1.52.7).
+        assert "hidden" not in options
+        assert "label_on" not in options and "label_off" not in options
+        # Eager, like toggles: check_lazy_status reads it before anything resolves.
+        assert "lazy" not in options
+        # ...and in `optional`, so a hand-built /prompt may omit it.
+        assert "pass_masks" not in EPSSwitcher.INPUT_TYPES()["required"]
+
+    def test_pass_masks_is_appended_after_toggles(self) -> None:
+        # widgets_values restores positionally: an old save's `["{}"]` must
+        # land on `toggles`, leaving pass_masks at its False default.
+        assert list(EPSSwitcher.INPUT_TYPES()["optional"].keys()) == [
+            "image_1", "toggles", "pass_masks",
+        ]
+
+    def test_mask_slots_are_accepted_lazy_mask_typed(self) -> None:
+        optional = EPSSwitcher.INPUT_TYPES()["optional"]
+        assert "mask_1" in optional and "mask_37" in optional
+        io_type, options = optional["mask_5"]
+        assert io_type == "MASK"
+        assert options["lazy"] is True
+        assert "mask" in options["tooltip"].lower()
+        # never stored as a real key -- the frontend grows every mask socket
+        assert "mask_1" not in list(optional.keys())
+        # ...and the image pattern never swallows a mask name (or vice versa)
+        assert _FlexibleOptionalImageInputs({})["mask_2"][0] == "MASK"
+        assert _FlexibleOptionalImageInputs({})["image_2"][0] == "IMAGE"
+        assert "mask_" not in optional and "mask_1x" not in optional
+
+    def test_state_registry_declares_pass_masks_as_boolean(self) -> None:
+        widgets = EPSSwitcher.EPS_STATE_WIDGETS["widgets"]
+        assert widgets["pass_masks"] == {"kind": "boolean"}
+        assert widgets["toggles"] == {"kind": "json_object", "key_pattern": r"^image_\d+$"}
+
+    # ------------------------------------------------------------- off
+
+    def test_off_by_default_images_unchanged_masks_blocked_no_zeros(
+        self, fake_execution_blocker: type
+    ) -> None:
+        img = _FakeImage(1, 64, 64, 3)
+        images, masks = EPSSwitcher().execute(toggles=["{}"], image_1=[img], image_2=["b"])
+        assert images == [img, "b"]
+        assert len(masks) == 1 and isinstance(masks[0], fake_execution_blocker)
+        assert masks[0].message is None
+        assert _FakeImage.allocations == 0
+
+    @pytest.mark.parametrize(
+        "off_value", [[False], False, [], [None], [0], [1], ["yes"], ["truthy"], "false", None]
+    )
+    def test_only_a_real_true_turns_masks_on(
+        self, off_value: object, fake_execution_blocker: type
+    ) -> None:
+        # The old-API prompt shape (`pass_masks` absent) and every non-true
+        # value stay OFF; a wired mask is simply ignored in that state.
+        node = EPSSwitcher()
+        kwargs = {} if off_value is None else {"pass_masks": off_value}
+        images, masks = node.execute(toggles=["{}"], image_1=["a"], mask_1=["m"], **kwargs)
+        assert images == ["a"]
+        assert len(masks) == 1 and isinstance(masks[0], fake_execution_blocker)
+
+    @pytest.mark.parametrize("on_value", [[True], True, ["true"], [" TRUE "]])
+    def test_true_and_the_string_true_turn_masks_on(self, on_value: object) -> None:
+        images, masks = EPSSwitcher().execute(
+            toggles=["{}"], pass_masks=on_value, image_1=["a"], mask_1=["m"]
+        )
+        assert images == ["a"]
+        assert masks == ["m"]
+
+    def test_off_never_requests_a_mask_upstream(self) -> None:
+        wanted = EPSSwitcher().check_lazy_status(
+            toggles=["{}"], pass_masks=[False], image_1=(None,), mask_1=(None,)
+        )
+        assert wanted == ["image_1"]
+
+    # -------------------------------------------------------------- on
+
+    def test_equal_lengths_pair_by_index_in_slot_order(self) -> None:
+        images, masks = EPSSwitcher().execute(
+            toggles=["{}"],
+            pass_masks=[True],
+            image_2=["b"],
+            mask_2=["mb"],
+            image_1=["a"],
+            mask_1=["ma"],
+        )
+        assert images == ["a", "b"]
+        assert masks == ["ma", "mb"]
+
+    def test_a_wired_mask_is_passed_through_untouched(self) -> None:
+        mask = _FakeMask((1, 8, 8))
+        _images, masks = EPSSwitcher().execute(
+            toggles=["{}"], pass_masks=[True], image_1=[_FakeImage(1, 64, 64, 3)], mask_1=[mask]
+        )
+        assert masks[0] is mask  # never resized, never copied
+        assert _FakeImage.allocations == 0
+
+    def test_list_producing_image_pairs_element_wise_with_a_list_mask(self) -> None:
+        # EPS Image Grid (OUTPUT_IS_LIST) into image_1, three masks beside it.
+        images, masks = EPSSwitcher().execute(
+            toggles=["{}"],
+            pass_masks=[True],
+            image_1=["t0", "t1", "t2"],
+            mask_1=["m0", "m1", "m2"],
+            image_2=["loaded"],
+            mask_2=["mloaded"],
+        )
+        assert images == ["t0", "t1", "t2", "loaded"]
+        assert masks == ["m0", "m1", "m2", "mloaded"]
+
+    def test_single_mask_broadcasts_across_a_list_producing_image(self) -> None:
+        images, masks = EPSSwitcher().execute(
+            toggles=["{}"], pass_masks=[True], image_1=["t0", "t1", "t2"], mask_1=["m"]
+        )
+        assert images == ["t0", "t1", "t2"]
+        assert masks == ["m", "m", "m"]
+
+    def test_length_disagreement_fails_loudly_naming_the_row_and_socket(self) -> None:
+        with pytest.raises(ValueError, match=r"row 2 .*3 image\(s\) with 2 mask\(s\).*mask_2"):
+            EPSSwitcher().execute(
+                toggles=["{}"],
+                pass_masks=[True],
+                image_1=["a"],
+                mask_1=["ma"],
+                image_2=["t0", "t1", "t2"],
+                mask_2=["m0", "m1"],
+            )
+
+    def test_unwired_mask_on_an_enabled_row_is_an_all_zero_mask_shaped_like_the_image(
+        self,
+    ) -> None:
+        img = _FakeImage(2, 64, 48, 3)  # [B, H, W, C]
+        images, masks = EPSSwitcher().execute(
+            toggles=["{}"], pass_masks=[True], image_1=[img], image_2=["b"], mask_2=["mb"]
+        )
+        assert images == [img, "b"]
+        assert isinstance(masks[0], _FakeMask)
+        assert masks[0].shape == (2, 64, 48)  # [B, H, W] -- the channel dim dropped
+        assert masks[1] == "mb"
+        assert _FakeImage.allocations == 1  # one zero mask, for the one unwired row
+
+    def test_wired_but_empty_mask_is_treated_like_an_unwired_one(self) -> None:
+        img = _FakeImage(1, 4, 4, 3)
+        _images, masks = EPSSwitcher().execute(
+            toggles=["{}"], pass_masks=[True], image_1=[img], mask_1=[None]
+        )
+        assert isinstance(masks[0], _FakeMask) and masks[0].shape == (1, 4, 4)
+
+    def test_masks_stay_index_aligned_with_images_by_construction(self) -> None:
+        # Mixed rows -- wired masks, an unwired one, a list-producing image
+        # with a broadcast mask, a disabled row in the middle -- and the two
+        # outputs still line up one for one.
+        img_a = _FakeImage(1, 2, 2, 3)
+        images, masks = EPSSwitcher().execute(
+            toggles=['{"image_2": false}'],
+            pass_masks=[True],
+            image_1=[img_a],
+            image_2=["skipped"],
+            mask_2=["mskipped"],
+            image_3=["c0", "c1"],
+            mask_3=["mc"],
+            image_4=["d"],
+            mask_4=["md"],
+        )
+        assert images == [img_a, "c0", "c1", "d"]
+        assert len(masks) == len(images)
+        assert masks[0].shape == (1, 2, 2)
+        assert masks[1:] == ["mc", "mc", "md"]
+
+    def test_toggled_off_row_runs_neither_image_nor_mask_upstream(self) -> None:
+        wanted = EPSSwitcher().check_lazy_status(
+            toggles=['{"image_1": false}'],
+            pass_masks=[True],
+            image_1=(None,),
+            mask_1=(None,),
+            image_2=(None,),
+            mask_2=(None,),
+        )
+        assert wanted == ["image_2", "mask_2"]
+
+    def test_mask_is_requested_only_when_its_image_is_wanted(self) -> None:
+        node = EPSSwitcher()
+        # a mask alone (no image on its row) is never requested...
+        assert node.check_lazy_status(toggles=["{}"], pass_masks=[True], mask_1=(None,)) == []
+        # ...nor is a mask whose image is fed by a statically-all-off sibling
+        prompt = {
+            "2": {"class_type": "EPSSwitcher", "inputs": {"toggles": '{"image_1": false}',
+                                                          "image_1": ["1", 0]}},
+            "4": {"class_type": "EPSSwitcher", "inputs": {"image_1": ["2", 0],
+                                                          "mask_1": ["2", 1],
+                                                          "image_2": ["3", 0]}},
+        }
+        wanted = node.check_lazy_status(
+            toggles=["{}"], pass_masks=[True], prompt=[prompt], unique_id=["4"],
+            image_1=(None,), mask_1=(None,), image_2=(None,),
+        )
+        assert wanted == ["image_2"]
+
+    def test_mask_with_no_image_on_its_row_is_dropped_with_a_warning(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        with caplog.at_level(logging.WARNING, logger="eps_image"):
+            images, masks = EPSSwitcher().execute(
+                toggles=["{}"], pass_masks=[True], image_1=["a"], mask_1=["ma"], mask_3=["orphan"]
+            )
+        assert images == ["a"]
+        assert masks == ["ma"]  # the orphan never travels alone
+        warnings = [r.message for r in caplog.records if r.levelno == logging.WARNING]
+        assert len(warnings) == 1  # once per execution
+        assert "mask_3" in warnings[0] and "never travels alone" in warnings[0]
+
+    def test_mask_on_a_toggled_off_row_is_neither_emitted_nor_an_orphan(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        with caplog.at_level(logging.WARNING, logger="eps_image"):
+            images, masks = EPSSwitcher().execute(
+                toggles=['{"image_2": false}'],
+                pass_masks=[True],
+                image_1=["a"], mask_1=["ma"], image_2=["b"], mask_2=["mb"],
+            )
+        assert images == ["a"] and masks == ["ma"]
+        assert not [r for r in caplog.records if r.levelno == logging.WARNING]
+
+    def test_skipped_image_with_a_wired_mask_is_skipped_not_an_error(self) -> None:
+        # The lazy "not resolved" placeholder on the image (fed by an
+        # all-off sibling) pairs nothing -- never a "0 image(s) with 1
+        # mask(s)" error (the lows' audit-2026-08-21 rule, kept for masks).
+        images, masks = EPSSwitcher().execute(
+            toggles=["{}"], pass_masks=[True],
+            image_1=(None,), mask_1=["m"], image_2=["b"], mask_2=["mb"],
+        )
+        assert images == ["b"]
+        assert masks == ["mb"]
+
+    def test_all_off_blocks_both_outputs(self, fake_execution_blocker: type) -> None:
+        images, masks = EPSSwitcher().execute(
+            toggles=['{"image_1": false}'], pass_masks=[True], image_1=["a"], mask_1=["m"]
+        )
+        assert len(images) == 1 and isinstance(images[0], fake_execution_blocker)
+        assert len(masks) == 1 and isinstance(masks[0], fake_execution_blocker)
+
+    def test_none_connected_blocks_both_outputs(self, fake_execution_blocker: type) -> None:
+        images, masks = EPSSwitcher().execute(toggles=["{}"], pass_masks=[True])
+        assert isinstance(images[0], fake_execution_blocker)
+        assert isinstance(masks[0], fake_execution_blocker)
+
+    def test_statically_all_off_detection_ignores_mask_keys(self) -> None:
+        # A sibling-emptiness scan reads `image_N` wires only: a wired mask
+        # on an otherwise all-off switcher does not make it "live".
+        node = {
+            "class_type": "EPSSwitcher",
+            "inputs": {"toggles": '{"image_1": false}', "image_1": ["1", 0],
+                       "mask_1": ["1", 1], "pass_masks": True},
+        }
+        assert nodes_switcher._switcher_is_statically_all_off(node) is True

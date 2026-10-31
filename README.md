@@ -767,6 +767,18 @@ off means three runs.
   first row wired. Now every wire, every on/off state and every renamed
   row comes along, high/low pairs included. Plain Ctrl+V still gives a
   clean, unwired copy with the same on/off states.
+- **Pass the masks along too** (`pass_masks`, off by default, v0.103.0). Turn the
+  toggle on and every image row gets a `mask_N` socket right under it, and
+  a `masks` output appears next to `images` — one mask per enabled image,
+  in the same order — so a node that takes an image and its mask runs once
+  per image with the right pair. A row with no mask wired sends an empty,
+  all-black mask the size of its image (what Load Image gives you for a
+  picture with no alpha), so the two lists always line up. The row's one
+  checkbox switches image and mask off together. A wired mask socket, or a
+  wired `masks` output, refuses the toggle until you unwire it. Off,
+  nothing changes: images only, no mask memory spent, and a mask wired
+  into a row is simply ignored. Feeding a Run Multiplier? Wire `masks`
+  into its `mask` input rather than around it — see that section.
 
 ## EPS Model / CLIP / VAE Switcher (shipped)
 
@@ -1422,6 +1434,17 @@ always a mistake; the same rule covers `model`/`clip`/`image`/`label`).
   run counts (and the readout) don't change. In `sweep_mode: multiply`
   each VAE runs the same high+low pair. Mismatched lengths fail the queue
   naming `model_low`, never a silent wrong pairing.
+- **Masks ride with their images** (`mask` input, `mask` output, v0.103.0). Wire the
+  Image Switcher's `masks` into `mask` next to `images` → `image`, and
+  every run's `mask` output is the mask of that run's image — across
+  texts, sweep steps and `solo_run` alike. It never adds runs. Don't run
+  the `masks` wire *around* this node: its `image` output is longer than
+  the switcher's list (images × texts × steps), and ComfyUI would pair the
+  leftover runs with the last mask. Lengths must agree, or be a single mask
+  used for every image; `mask` wired without `image`, or the `mask` output
+  consumed with nothing wired into `mask`, fails the queue with a message
+  that says so. The run-count readout checks the same things before you
+  queue.
 - **Why you need it:** ComfyUI's own list pairing ZIPS index-by-index —
   two fanned lists into one sampler give you max(11, 8) = 11 runs, not
   11 × 8. This node is the pack's one true multiplier: sweep group ×

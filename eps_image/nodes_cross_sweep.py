@@ -237,13 +237,20 @@ class EPSCrossSweep:
     # every other output, for EPS Save Image to bake a pre-soloed workflow.
     # v0.71.0 (provenance M3): the same JSON also carries name/text/label
     # (null when unwired) -- no new output, the field set just grew.
+    # `mask` (§6.4 masks round) is TAIL-APPENDED after run_info, slot 9:
+    # WELDED to `image` the way model_low is welded to model, never an
+    # axis. It exists because this node's image output is LONGER than the
+    # Switcher's list (images x texts x steps), so a `masks` wire run
+    # AROUND it would be zipped by core's repeat-last rule against the
+    # wrong images -- the mask has to ride through here with its image.
     RETURN_TYPES = (
-        "MODEL", "CLIP", "IMAGE", "STRING", "STRING", "STRING", "VAE", "MODEL", "STRING",
+        "MODEL", "CLIP", "IMAGE", "STRING", "STRING", "STRING", "VAE", "MODEL", "STRING", "MASK",
     )
     RETURN_NAMES = (
         "model", "clip", "image", "text", "save_prefix", "label", "vae", "model_low", "run_info",
+        "mask",
     )
-    OUTPUT_IS_LIST = (True,) * 9
+    OUTPUT_IS_LIST = (True,) * 10
     INPUT_IS_LIST = True
     OUTPUT_TOOLTIPS = (
         "This run's model -- only when the optional model input is wired; "
@@ -273,6 +280,9 @@ class EPSCrossSweep:
         "Save Image's run_info input and "
         "every saved file carries a workflow already soloed to the run that "
         "made it -- drop the image to recreate just that one.",
+        "This run's mask -- the mask of this run's image, only when the "
+        "optional mask input is wired (EPS Image Switcher's masks, with "
+        "pass_masks on); unwired, this output blocks whatever consumes it.",
     )
     FUNCTION = "run"
     DESCRIPTION = (
@@ -302,7 +312,11 @@ class EPSCrossSweep:
         "re-run exactly that one image out of the whole set -- clear it "
         "to run everything again. Wire run_info into EPS Save Image and "
         "every saved file carries its own pre-soloed workflow: drop the "
-        "image onto the canvas to recreate just that one."
+        "image onto the canvas to recreate just that one. To carry masks, "
+        "wire EPS Image Switcher's masks (pass_masks on) into the mask "
+        "input: each run's mask output is the mask of that run's image, "
+        "whatever the sweep or text crossing -- it never adds runs, and a "
+        "masks wire run around this node would pair the wrong masks."
     )
 
     #: §6.16 state registry (v0.83.0): the widgets a Universal State
@@ -420,6 +434,26 @@ class EPSCrossSweep:
                             "(txt2img) iteration; pairs are then just the "
                             "texts, and this node's image output blocks "
                             "whatever consumes it."
+                        ),
+                    },
+                ),
+                # §6.4 masks: WELDED to `image` (model_low's exact posture
+                # on the sweep side) -- same length or a single mask to
+                # broadcast, never an axis, so run counts never change.
+                # A socket, not a widget: no widgets_values slot, so its
+                # position here is free (inputs resolve by name).
+                "mask": (
+                    "MASK",
+                    {
+                        "tooltip": (
+                            "Each image's mask -- wire EPS Image Switcher's "
+                            "masks output (with pass_masks on) alongside its "
+                            "images. Travels welded to the image input: same "
+                            "length (or a single mask to broadcast), never a "
+                            "new axis, so run counts don't change; every run's "
+                            "mask output is the mask of that run's image. "
+                            "Unwired, the mask output blocks whatever consumes "
+                            "it. Needs image wired."
                         ),
                     },
                 ),
@@ -558,6 +592,7 @@ class EPSCrossSweep:
         clip: Any = None,
         label: Any = None,
         image: Any = None,
+        mask: Any = None,
         text: Any = None,
         name: Any = None,
         base_folder: Any = "",
@@ -573,6 +608,7 @@ class EPSCrossSweep:
         clips = _as_clean_list(clip)
         labels = _as_clean_list(label)
         images = _as_clean_list(image)
+        masks = _as_clean_list(mask)
         texts = _as_clean_list(text)
         names = _as_clean_list(name)
         vaes = _as_clean_list(vae)
@@ -598,6 +634,7 @@ class EPSCrossSweep:
         # the "" the save_prefix fallback uses (EPS Save Image tells the two
         # apart when matching a Notebook's entry to THIS run).
         name_wired = name is not None
+        mask_wired = mask is not None
         text_only = image is None
         sweep_wired = model_wired or model_low_wired or clip_wired or label_wired or vae_wired
 
@@ -628,12 +665,44 @@ class EPSCrossSweep:
             dead_outputs.append(
                 "model_low (wire EPS Model Switcher's models_low into the model_low input)"
             )
+        if 9 in consumed and not mask_wired:
+            # Slot 8 (run_info) has no backing input and is never dead;
+            # slot 9 (mask) is welded to the mask input exactly like 7.
+            dead_outputs.append(
+                "mask (wire EPS Image Switcher's masks -- with pass_masks on -- "
+                "into the mask input)"
+            )
         if dead_outputs:
             raise ValueError(
                 "EPS Run Multiplier: these outputs are wired downstream but their "
                 "matching inputs are not wired, so every run on those wires would "
                 "be silently skipped and the workflow would finish without "
                 "generating anything: " + "; ".join(dead_outputs)
+            )
+
+        # §6.4 masks: `mask` is WELDED to `image` -- a mask only ever
+        # travels with its image, so it is checked against the image list
+        # and nothing else. Wired with no image (text-only) is a miswire,
+        # not a silent per-run skip; equal lengths pair by index, a single
+        # mask broadcasts (one mask for a whole batch of images), and any
+        # other disagreement fails the queue naming BOTH counts -- the
+        # v0.49.1 posture: a silent clamp here is exactly the wrong
+        # image+mask pairing the owner asked this node to make impossible.
+        # Only an image list with something in it is checked: a
+        # wired-but-EMPTY image already collapses the node to the blocker
+        # path below, and the masks are moot for a run that never happens.
+        if mask_wired and text_only:
+            raise ValueError(
+                "EPS Run Multiplier: mask is wired but image is not -- a mask only "
+                "travels with its image. Wire the images into the image input "
+                "(EPS Image Switcher's images next to its masks), or unwire mask."
+            )
+        if mask_wired and images and len(masks) not in (1, len(images)):
+            raise ValueError(
+                "EPS Run Multiplier: image and mask disagree about how many there "
+                f"are (image={len(images)}, mask={len(masks)}). Wire both from the "
+                "same EPS Image Switcher (images and masks, with pass_masks on), "
+                "or wire a single mask to use it for every image."
             )
 
         wired_sweep = {
@@ -772,15 +841,18 @@ class EPSCrossSweep:
         # v0.67.0 provenance M1: every pair row carries its own pure-index
         # token fragment (owner's pinned naming choice) -- i/t for a
         # multiplied pair, t alone for text-only, p for an aligned pair.
-        pair_rows: list[tuple[Any, Any, str, str]]  # (image-or-None, text, name, ptoken)
+        # The fifth member is the row's IMAGE INDEX (None for text-only):
+        # the mask output picks this run's mask by it, so a mask follows its
+        # image through either pair mode and through the solo filter.
+        pair_rows: list[tuple[Any, Any, str, str, int | None]]
         if text_only:
             pair_rows = [
-                (None, texts[p], names[p] if p < len(names) else "", f"t{p + 1}")
+                (None, texts[p], names[p] if p < len(names) else "", f"t{p + 1}", None)
                 for p in range(len(texts))
             ]
         elif multiply:
             pair_rows = [
-                (img, texts[t], names[t] if t < len(names) else "", f"i{i + 1}_t{t + 1}")
+                (img, texts[t], names[t] if t < len(names) else "", f"i{i + 1}_t{t + 1}", i)
                 for i, img in enumerate(images)
                 for t in range(len(texts))
             ]
@@ -795,7 +867,7 @@ class EPSCrossSweep:
                     len(images), len(texts), pairs,
                 )
             pair_rows = [
-                (images[p], texts[p], names[p] if p < len(names) else "", f"p{p + 1}")
+                (images[p], texts[p], names[p] if p < len(names) else "", f"p{p + 1}", p)
                 for p in range(pairs)
             ]
 
@@ -825,8 +897,15 @@ class EPSCrossSweep:
         # sweep inputs all wired and only model_low unwired, no blocker was
         # built and the model_low output emitted bare None per run -- the
         # exact crash-a-consumer shape this block exists to prevent.
+        # mask_wired joined for the same reason: every optional output that
+        # can be unwired must be in this condition, or its column is None.
         if text_only or not (
-            model_wired and model_low_wired and clip_wired and label_wired and vae_wired
+            model_wired
+            and model_low_wired
+            and clip_wired
+            and label_wired
+            and vae_wired
+            and mask_wired
         ):
             from comfy_execution.graph import ExecutionBlocker
 
@@ -945,7 +1024,7 @@ class EPSCrossSweep:
         # in that order above); v0.57.0's model-major multiply decomposition
         # and the v0.67.0 solo filter both already applied.
         for _s, a1_idx, v_idx, p, row, token in emission:
-            pair_image, pair_text, pair_name, _ptoken = row
+            pair_image, pair_text, pair_name, _ptoken, image_idx = row
             label_component = (
                 (_safe_component(labels[_sweep_index(len(labels), a1_idx)]) if label_wired else "")
                 or f"step_{a1_idx + 1:02d}"
@@ -1009,5 +1088,17 @@ class EPSCrossSweep:
             )
             out["vae"].append(
                 vaes[_sweep_index(len(vaes), v_idx)] if vae_wired else run_blocker
+            )
+            # §6.4 masks: this run's mask is the mask of THIS run's image --
+            # by the row's image index (a single mask broadcasts, the
+            # length check above already ruled out anything else), so the
+            # pairing survives multiply, paired, every sweep crossing and
+            # the solo filter alike. Text-only never gets here with a mask
+            # (refused above), so `image_idx` is a real index whenever
+            # `mask_wired`.
+            out["mask"].append(
+                masks[image_idx if len(masks) > 1 else 0]
+                if mask_wired and image_idx is not None
+                else run_blocker
             )
         return tuple(out[k] for k in self.RETURN_NAMES)
