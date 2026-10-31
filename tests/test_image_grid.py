@@ -121,7 +121,7 @@ class TestInputTypes:
         # workflows.
         input_types = EPSImageGrid.INPUT_TYPES()
         mode_type, mode_spec = input_types["required"]["mode"]
-        assert mode_type == ["Collect", "Collect only", "Emit"]
+        assert mode_type == ["Collect", "Collect only", "Emit", "Emit All"]
         assert mode_spec["default"] == "Collect"
 
     def test_image_is_optional(self) -> None:
@@ -174,7 +174,7 @@ class TestModesConstant:
     (restored by VALUE, not by index) meaning exactly what it always did."""
 
     def test_order_and_default(self) -> None:
-        assert nodes_image_grid.MODES == ["Collect", "Collect only", "Emit"]
+        assert nodes_image_grid.MODES == ["Collect", "Collect only", "Emit", "Emit All"]
         assert nodes_image_grid.MODE_COLLECT == "Collect"
         assert nodes_image_grid.MODE_COLLECT_ONLY == "Collect only"
         assert nodes_image_grid.MODE_EMIT == "Emit"
@@ -201,7 +201,7 @@ class TestIsChanged:
     def test_collect_only_is_also_the_always_changed_sentinel(self) -> None:
         # v0.98.0: Collect only appends exactly like Collect -- the same
         # side-effect-must-never-be-cached-away rationale applies, and
-        # `mode != MODE_EMIT` already covers it without a dedicated branch.
+        # `mode not in _EMIT_MODES` already covers it without a dedicated branch.
         assert math.isnan(EPSImageGrid.IS_CHANGED(mode="Collect only"))
         assert EPSImageGrid.IS_CHANGED(mode="Collect only") != EPSImageGrid.IS_CHANGED(
             mode="Collect only"
@@ -1071,3 +1071,106 @@ class TestCloneRoute:
     async def test_non_object_body_is_400(self, client) -> None:
         response = await client.post("/eps_image_grid/clone", json=["not", "an", "object"])
         assert response.status == 400
+
+
+class TestEmitAllMode:
+    """v0.104.0: the same images as an unfocused Emit, as ONE batch."""
+
+    @pytest.fixture
+    def fake_common_upscale(self, monkeypatch: pytest.MonkeyPatch) -> list:
+        """`comfy.utils` only exists inside ComfyUI. Records each call and
+        does a plain resize, so the sizes and arguments can be checked."""
+        calls: list = []
+
+        def common_upscale(samples, width, height, method, crop):
+            calls.append((tuple(samples.shape), width, height, method, crop))
+            return torch.nn.functional.interpolate(samples, size=(height, width), mode="bilinear")
+
+        utils = types.ModuleType("comfy.utils")
+        utils.common_upscale = common_upscale
+        comfy = types.ModuleType("comfy")
+        comfy.utils = utils
+        monkeypatch.setitem(sys.modules, "comfy", comfy)
+        monkeypatch.setitem(sys.modules, "comfy.utils", utils)
+        return calls
+
+    def test_buffer_comes_out_as_one_batch_in_order(self, fake_folder_paths: Path) -> None:
+        batch = _make_batch(3)
+        store.append_batch(VALID_UUID, batch)
+        result = _node().run(mode="Emit All", grid_uuid=VALID_UUID)
+        images, widths, heights = result["result"]
+        assert len(images) == 1
+        assert images[0].shape == (3, 4, 6, 3)
+        assert widths == [6]
+        assert heights == [4]
+        assert torch.allclose(images[0], batch, atol=1 / 255)
+
+    def test_wired_image_lands_at_the_end_of_the_batch(self, fake_folder_paths: Path) -> None:
+        store.append_batch(VALID_UUID, _make_batch(2))
+        live = torch.ones((1, 4, 6, 3))
+        result = _node().run(mode="Emit All", image=live, grid_uuid=VALID_UUID)
+        images = result["result"][0]
+        assert len(images) == 1
+        assert images[0].shape[0] == 3
+        assert torch.equal(images[0][2:3], live)
+
+    def test_never_appends_and_never_reports_ui(self, fake_folder_paths: Path) -> None:
+        store.append_batch(VALID_UUID, _make_batch(2))
+        result = _node().run(mode="Emit All", image=_make_batch(1), grid_uuid=VALID_UUID)
+        assert len(store.list_refs(VALID_UUID)) == 2
+        assert "ui" not in result
+
+    def test_focus_is_ignored(self, fake_folder_paths: Path) -> None:
+        refs = store.append_batch(VALID_UUID, _make_batch(3))
+        result = _node().run(
+            mode="Emit All", grid_uuid=VALID_UUID, focus=refs[1]["filename"]
+        )
+        assert result["result"][0][0].shape[0] == 3
+
+    def test_empty_buffer_nothing_wired_blocks_silently(
+        self, fake_folder_paths: Path, fake_execution_blocker: type
+    ) -> None:
+        result = _node().run(mode="Emit All", grid_uuid=VALID_UUID)
+        for lst in result["result"]:
+            assert len(lst) == 1
+            assert isinstance(lst[0], fake_execution_blocker)
+
+    def test_mixed_sizes_fit_the_first_frame_and_warn(
+        self,
+        fake_folder_paths: Path,
+        fake_common_upscale: list,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        store.append_batch(VALID_UUID, _make_batch(2, height=4, width=6))
+        store.append_batch(VALID_UUID, _make_batch(1, height=8, width=8))
+        with caplog.at_level("WARNING", logger="eps_image"):
+            result = _node().run(mode="Emit All", grid_uuid=VALID_UUID)
+        images, widths, heights = result["result"]
+        assert images[0].shape == (3, 4, 6, 3)
+        assert (widths, heights) == ([6], [4])
+        assert fake_common_upscale == [((1, 3, 8, 8), 6, 4, "bilinear", "center")]
+        assert "1 of 3 images" in caplog.text
+        assert "6x4" in caplog.text
+
+    def test_same_size_never_touches_comfy_or_warns(
+        self, fake_folder_paths: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        # No fake_common_upscale here: `import comfy.utils` would raise.
+        store.append_batch(VALID_UUID, _make_batch(2))
+        with caplog.at_level("WARNING", logger="eps_image"):
+            _node().run(mode="Emit All", grid_uuid=VALID_UUID)
+        assert "different size" not in caplog.text
+
+    def test_missing_alpha_pads_to_the_widest_frame(self, fake_folder_paths: Path) -> None:
+        store.append_batch(VALID_UUID, _make_batch(1))
+        live = torch.zeros((1, 4, 6, 4))
+        images = _node().run(mode="Emit All", image=live, grid_uuid=VALID_UUID)["result"][0]
+        assert images[0].shape == (2, 4, 6, 4)
+        assert torch.equal(images[0][0, :, :, 3], torch.ones((4, 6)))
+
+    def test_is_changed_is_the_buffer_token(self, fake_folder_paths: Path) -> None:
+        first = EPSImageGrid.IS_CHANGED(mode="Emit All", grid_uuid=VALID_UUID)
+        assert isinstance(first, str)
+        assert first == EPSImageGrid.IS_CHANGED(mode="Emit All", grid_uuid=VALID_UUID)
+        store.append_batch(VALID_UUID, _make_batch(1))
+        assert first != EPSImageGrid.IS_CHANGED(mode="Emit All", grid_uuid=VALID_UUID)

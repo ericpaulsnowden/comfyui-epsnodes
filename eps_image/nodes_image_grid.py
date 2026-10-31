@@ -6,7 +6,9 @@ restart; `Emit` mode fans the whole buffer back out, with whatever's
 currently wired appended at the end. `Collect only` (v0.98.0, owner ask:
 "let me collect without running the rest of the workflow every time")
 records exactly like `Collect` but never passes anything downstream --
-every node past this one is skipped for that Run, silently.
+every node past this one is skipped for that Run, silently. `Emit All`
+(v0.104.0, owner ask: "sends out all of the images at once vs one at a
+time") sends what `Emit` would, stacked into ONE batch -- one downstream run.
 
 M1 (`research/roadmap-eps-image-grid.md`): Collect/Emit toggle, the buffer
 itself, the free thumbnail grid, Clear, and per-node identity/dedup (the
@@ -120,7 +122,11 @@ CATEGORY_NAME = "EPSNodes/Images"
 MODE_COLLECT = "Collect"
 MODE_COLLECT_ONLY = "Collect only"
 MODE_EMIT = "Emit"
-MODES = [MODE_COLLECT, MODE_COLLECT_ONLY, MODE_EMIT]
+#: v0.104.0 -- appended last, the same pure addition as `MODE_COLLECT_ONLY`.
+MODE_EMIT_ALL = "Emit All"
+MODES = [MODE_COLLECT, MODE_COLLECT_ONLY, MODE_EMIT, MODE_EMIT_ALL]
+#: The two modes that never append, so both can use the buffer-state cache.
+_EMIT_MODES = (MODE_EMIT, MODE_EMIT_ALL)
 
 #: `optional` (not `required`) default for the hidden identity bridge —
 #: mirrors `nodes_switcher.py`'s `toggles` rationale: a hand-built `/prompt`
@@ -196,6 +202,12 @@ class EPSImageGrid:
       behavior above, with a logged warning — never a hard error. `Collect`
       and `Collect only` both ignore `focus` entirely; it only ever affects
       Emit.
+    - `Emit All` (v0.104.0): records nothing. Downstream gets the same
+      images as an unfocused `Emit` -- the whole buffer, then whatever's
+      wired -- stacked into ONE batch, so the rest of the workflow runs
+      once. Frames of another size are fitted to the first frame's size
+      with a warning toast (`store.stack_frames`). `focus` is ignored: this mode
+      means all of them, and `Emit` is the way to send one.
 
     Re-reads the on-disk buffer on every execution — there is no in-memory
     state to go stale between Runs (a second EPSImageGrid instance pointed
@@ -214,9 +226,12 @@ class EPSImageGrid:
         "still recording to the buffer. In Emit mode, the whole buffer "
         "plus whatever's currently wired, oldest first -- one run "
         "downstream per image. Double-click a frame in the grid to focus "
-        "it, and Emit sends ONLY that one frame instead.",
-        "Each output image's width, index-aligned with image.",
-        "Each output image's height, index-aligned with image.",
+        "it, and Emit sends ONLY that one frame instead. In Emit All mode, "
+        "all of those images together as ONE batch -- one run downstream.",
+        "Each output image's width, index-aligned with image. Emit All "
+        "has one value, the batch's width.",
+        "Each output image's height, index-aligned with image. Emit All "
+        "has one value, the batch's height.",
     )
     FUNCTION = "run"
     DESCRIPTION = (
@@ -234,7 +249,10 @@ class EPSImageGrid:
         "buffer from the node any time; there's no size cap, so keep an "
         "eye on disk use. Double-click a frame to focus it -- while "
         "focused, Emit sends ONLY that one frame; unfocus (double-click "
-        "again) to go back to the whole buffer."
+        "again) to go back to the whole buffer. Emit All sends every "
+        "image at once as one batch, so the rest of the workflow runs "
+        "once; images of another size are fitted to the first image's "
+        "size, with a warning."
     )
 
     #: §6.16 state registry (v0.83.0): the widgets a Universal State
@@ -267,8 +285,9 @@ class EPSImageGrid:
                             "this node is skipped, silently, so you can "
                             "gather a batch without re-running the rest of "
                             "the workflow every time. Emit sends the whole "
-                            "buffer downstream instead, without adding to "
-                            "it."
+                            "buffer downstream instead, one run per image, "
+                            "without adding to it. Emit All sends them all "
+                            "at once as one batch, for one run."
                         ),
                     },
                 ),
@@ -354,7 +373,9 @@ class EPSImageGrid:
         #    the token and re-runs. `image`/`focus` are ordinary tracked
         #    inputs already in the cache key; hidden prompt/unique_id land
         #    in **_kwargs.
-        if mode != MODE_EMIT:
+        #  - Emit All (v0.104.0) is just as side-effect-free. `mode` itself
+        #    is in the cache key, so sharing the token never crosses the two.
+        if mode not in _EMIT_MODES:
             return float("nan")
         return f"emit:{store.buffer_token(str(grid_uuid or ''))}"
 
@@ -417,6 +438,14 @@ class EPSImageGrid:
             # frames just appended above ARE `live` -- do not also fan out
             # the rest of the buffer here (that's what Emit is for).
             result_frames = live
+        elif mode == MODE_EMIT_ALL:  # never appends, never reports `ui` (point 1)
+            result_frames = store.read_all_as_tensors(grid_uuid) + live
+            if result_frames:
+                total = sum(int(frame.shape[0]) for frame in result_frames)
+                batch, resized = store.stack_frames(result_frames)
+                if resized:
+                    self._warn_resized(resized, total, batch, unique_id)
+                result_frames = [batch]
         else:  # MODE_EMIT -- never appends; never reports `ui` (point 1).
             # Owner ask 2026-08-23 ("if you have a single image in focus ...
             # the widget should only output that one image"): a resolved
@@ -509,3 +538,25 @@ class EPSImageGrid:
         if new_refs:
             out["ui"] = {"images": new_refs}
         return out
+
+    @staticmethod
+    def _warn_resized(resized: int, total: int, batch: Any, unique_id: Any) -> None:
+        """Emit All changed some pixels to make the batch: say so, loudly."""
+        was, it_was = ("was", "it was") if resized == 1 else ("were", "they were")
+        detail = (
+            f"{resized} of {total} images {was} a different size, so {it_was} "
+            f"resized and center-cropped to {int(batch.shape[2])}x{int(batch.shape[1])} "
+            "(the first image's size) to fit one batch."
+        )
+        logger.warning("EPSNodes: EPS Image Grid: %s", detail)
+        try:
+            from server import PromptServer  # ComfyUI-only; absent in tests
+
+            PromptServer.instance.send_sync(
+                "eps-image-grid-batch-resized",
+                {"node": str(_unwrap_hidden(unique_id)), "detail": detail},
+            )
+        except Exception:
+            # No live server (tests/direct callers) -- the log line above
+            # already carries the warning.
+            pass
