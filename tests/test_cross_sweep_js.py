@@ -473,6 +473,66 @@ ESTIMATE_CASES = [
         },
     ),
     (
+        # v0.104.0: Emit All is one batch whatever the buffer holds, and a
+        # focus doesn't change that -- exact, no floor.
+        "emit_all_grid_counts_one_exactly",
+        {
+            "nodes": {
+                "30": _notebook("First\nSecond"),
+                "31": {
+                    "classType": "EPSImageGrid",
+                    "widgets": {"mode": "Emit All", "focus": "0002.png"},
+                    "inputs": {},
+                    "imageGridCount": 7,
+                },
+                "5": {
+                    "classType": "EPSCrossSweep",
+                    "widgets": {"pair_mode": "multiply", "sweep_mode": "aligned"},
+                    "inputs": {"image": _link("31"), "text": _link("30", 0)},
+                },
+            }
+        },
+        "5",
+        {
+            "total": 2,
+            "atLeast": False,
+            "steps": 1,
+            "pairs": 2,
+            "error": None,
+            "breakdown": "1 sweep step × 2 pairs",
+        },
+    ),
+    (
+        # ...but an empty buffer with nothing wired has nothing to send. Its
+        # count is a client echo, so it reads as a floor (pairsAtLeast), like Emit.
+        "emit_all_empty_grid_is_a_floor_of_zero",
+        {
+            "nodes": {
+                "30": _notebook("First\nSecond"),
+                "31": {
+                    "classType": "EPSImageGrid",
+                    "widgets": {"mode": "Emit All"},
+                    "inputs": {},
+                    "imageGridCount": 0,
+                },
+                "5": {
+                    "classType": "EPSCrossSweep",
+                    "widgets": {"pair_mode": "multiply", "sweep_mode": "aligned"},
+                    "inputs": {"image": _link("31"), "text": _link("30", 0)},
+                },
+            }
+        },
+        "5",
+        {
+            "total": 0,
+            "atLeast": False,
+            "steps": 1,
+            "pairs": 0,
+            "error": None,
+            "breakdown": "nothing to run",
+        },
+    ),
+    (
         # v0.98.0: Collect only is a TRUE known-blocked branch (unlike plain
         # Collect, which is merely a §6.10 policy floor -- see the
         # estimator's own comment) -- same zero-collapse shape either way.

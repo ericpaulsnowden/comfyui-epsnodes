@@ -2221,7 +2221,8 @@ function writeFocusWidget(node, value) {
  * only both ignore `focus` entirely") ignores `focus` entirely, so hinting
  * "narrowed" there would be misleading. The `=== MODE_EMIT_VALUE` check
  * below already excludes Collect only for free -- no separate clause
- * needed. Idempotent; safe to call every draw.
+ * needed, and Emit All too (v0.104.0: it ignores `focus`, it means all of
+ * them). Idempotent; safe to call every draw.
  */
 function updateFocusHint(node, focusValue) {
   const modeWidget = findWidget(node, MODE_WIDGET_NAME)
@@ -4281,6 +4282,16 @@ export function init() {
     app.extensionManager?.toast?.add?.({
       severity: 'warn',
       summary: `${NODE_TITLE}: Collect mode has nothing to pass through`,
+      detail: typeof detail === 'string' && detail ? detail : undefined,
+      life: 12000
+    })
+  })
+  // v0.104.0: Emit All had to change some pixels to fit one batch.
+  api.addEventListener('eps-image-grid-batch-resized', (event) => {
+    const detail = event?.detail?.detail
+    app.extensionManager?.toast?.add?.({
+      severity: 'warn',
+      summary: `${NODE_TITLE}: Emit All resized some images`,
       detail: typeof detail === 'string' && detail ? detail : undefined,
       life: 12000
     })

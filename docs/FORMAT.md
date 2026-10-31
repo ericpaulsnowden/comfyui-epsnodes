@@ -2232,6 +2232,31 @@ is the functional core WITHOUT the grid.
 
 ## §6.6 `EPSImageGrid` (display: "EPS Image Grid") — accumulate + fan out
 
+**"Emit All" — a fourth `mode` value (v0.104.0, owner ask: "sends out all
+of the images at once vs one at a time").** Appended last in `MODES`, the
+same pure addition as Collect only below. `run()` reads what an unfocused
+Emit would send (the buffer, then the wired frames) and stacks it with
+`store.stack_frames` into ONE `[B,H,W,C]` tensor: every output is a length-1 list,
+so core maps the rest of the workflow once. This is the one place the buffer
+IS stacked; `read_all_as_tensors` still returns separate frames.
+  - **Mixed sizes** follow core Batch Images (`batch_images`,
+    `comfy_extras/nodes_post_processing.py`): the first frame sets the size,
+    others go through `comfy.utils.common_upscale(..., "bilinear", "center")`,
+    and alpha pads to the widest channel count. Because that changes pixels,
+    a resize logs a warning and sends the `eps-image-grid-batch-resized`
+    websocket event, which `image_grid.js` shows as a warn toast naming the
+    count and the size.
+  - **`focus` is ignored**, and the "emitting only it" hint stays off. All
+    means all; Emit remains the way to send one frame.
+  - **Empty buffer, nothing wired:** the silent `ExecutionBlocker` triple,
+    the same as Emit.
+  - **Caching:** side-effect-free, so it shares Emit's `buffer_token`
+    `IS_CHANGED`; `mode` is in the cache key, so the two never collide.
+  - **§6.10 estimator:** exactly 1 with no floor, whatever the buffer holds.
+    The exception is a client echo of an empty buffer with no `image` wired,
+    which is `{count: 0, atLeast: true}` like Emit's. A Run Multiplier counts
+    the batch as one image, so 1 batch × N texts = N runs.
+
 **"Collect only" — a third `mode` value (v0.98.0, owner ask: "let me
 collect without running the rest of the workflow every time").** `MODES`
 gains `"Collect only"` BETWEEN `"Collect"` and `"Emit"`

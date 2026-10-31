@@ -796,7 +796,8 @@ def thumbnail_path(
 def read_all_as_tensors(grid_uuid: str) -> list:
     """Every buffered frame, decoded fresh from disk, as its own
     ``[1,H,W,C]`` float tensor (FORMAT.md §6.6: "NEVER stacked — buffered
-    images may differ in size"). Nothing is cached between calls — this IS
+    images may differ in size"; Emit All does its own fitting and stacking,
+    :func:`stack_frames`). Nothing is cached between calls — this IS
     the lazy decode the docs ask for.
 
     ``[]`` for an invalid uuid or an empty buffer. A frame file that's
@@ -831,6 +832,42 @@ def read_all_as_tensors(grid_uuid: str) -> list:
             continue
         tensors.append(torch.from_numpy(array)[None, ...])
     return tensors
+
+
+def stack_frames(frames: list) -> tuple[Any, int]:
+    """Stack `[B,H,W,C]` tensors into one batch at the FIRST frame's size.
+
+    Returns `(batch, resized)`, where *resized* counts the frames that had
+    to change size. Mirrors core Batch Images (`batch_images`,
+    comfy_extras/nodes_post_processing.py) so a mixed-size grid gives the
+    pixels a user would get from that node: alpha pads to the widest channel
+    count, then a different size is bilinear-resized with a center crop.
+    Not imported from there because that module is core's own node file --
+    importing it again would re-execute it. `comfy.utils` is imported only
+    when a frame actually needs resizing.
+    """
+    import torch
+
+    channels = max(int(frame.shape[-1]) for frame in frames)
+    padded = [
+        torch.nn.functional.pad(frame, (0, channels - int(frame.shape[-1])), value=1.0)
+        if int(frame.shape[-1]) < channels
+        else frame
+        for frame in frames
+    ]
+    height, width = int(padded[0].shape[1]), int(padded[0].shape[2])
+    resized = 0
+    fitted = []
+    for frame in padded:
+        if int(frame.shape[1]) != height or int(frame.shape[2]) != width:
+            import comfy.utils
+
+            resized += int(frame.shape[0])
+            frame = comfy.utils.common_upscale(
+                frame.movedim(-1, 1), width, height, "bilinear", "center"
+            ).movedim(1, -1)
+        fitted.append(frame)
+    return torch.cat(fitted, dim=0), resized
 
 
 def read_frame_as_tensor(grid_uuid: str, filename: str) -> Any | None:

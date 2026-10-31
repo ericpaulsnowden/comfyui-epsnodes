@@ -58,7 +58,7 @@
  * (Emit ⇒ buffer count as a FLOOR -- the injected `imageGridCount` is a
  * client-side echo of SERVER state; Collect ⇒ 0; v0.98.0 Collect only ⇒ 0
  * too, but as a true known-blocked branch -- see that branch's own
- * comment), §6.8 LoRA Iterator (its
+ * comment; v0.104.0 Emit All ⇒ 1, the one batch), §6.8 LoRA Iterator (its
  * own widget step math x the max of its mapped model/clip input counts --
  * nodes_sweep.py has no INPUT_IS_LIST, so core maps it; per-lora mode
  * follows the `lora_stack` wire -- a §6.13 Picker's enabled rows are
@@ -772,6 +772,16 @@ function sourceCount(snapshot, link, path) {
     // output is provably empty this run".
     if (node.widgets?.mode === 'Collect' || node.widgets?.mode === 'Collect only') {
       return { count: 0, atLeast: false, srcId: id }
+    }
+    if (node.widgets?.mode === 'Emit All') {
+      // v0.104.0: one batch whatever the buffer holds, and it ignores
+      // `focus` -- so exactly 1, no floor. The one exception is the same
+      // client-side echo as below: an empty buffer with nothing wired
+      // blocks, and it stays a floor because the echo can lag.
+      if (node.imageGridCount === 0 && !node.inputs?.image) {
+        return { count: 0, atLeast: true, srcId: id }
+      }
+      return { count: 1, atLeast: false, srcId: id }
     }
     if (typeof node.widgets?.focus === 'string' && node.widgets.focus.trim() !== '') {
       // §6.6 focus (owner ask 2026-08-23): a double-click-focused frame

@@ -1251,6 +1251,14 @@ times to gather images, then send the whole set through a workflow at once.
   without actually unplugging anything (an image input can't fall back to
   a typed-in value the way a number can). Switch back to Collect or Emit
   and the wires return to normal and downstream runs again.
+- **Emit All (v0.104.0):** sends the same images as Emit, but **all at once
+  as one batch**, so the rest of the workflow runs once instead of once per
+  image. Use it for a node that wants the whole set together, like a video
+  combine or a batch edit. `width` and `height` give the batch's size. A
+  batch needs one size, so images of another size are resized and
+  center-cropped to the first image's size, the same as core's Batch Images,
+  and a warning toast says how many changed. A focused frame doesn't narrow
+  it: Emit All always means all of them. Use Emit to send just one.
 - **Navigable grid:** the collected images show as a clickable thumbnail grid
   right on the node (ComfyUI's own image viewer — click to enlarge, arrow
   through them). **Adding an image keeps you on the full grid** — a new
