@@ -113,7 +113,7 @@ app.registerExtension({
   aboutPageBadges: [{ label: 'EPSNodes (image)', url: REPO_URL, icon: 'pi pi-github' }],
 
   /** Settings > EPSNodes: the Run Multiplier's broadcast switch for
-   * text/image/label (FORMAT.md §6.10 "Broadcast (v1)"; id naming follows
+   * text/image/mask/label (FORMAT.md §6.10 "Broadcast (v1)"; id naming follows
    * lora_library/settings.js's `EPSNodes.HealModelPaths`). */
   settings: broadcast.SETTINGS,
 

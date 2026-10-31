@@ -824,7 +824,7 @@ def test_the_one_setting(probe: dict) -> None:
     assert s["id"] == s["constId"] == "EPSNodes.BroadcastSameNameInputs"
     assert s["type"] == "boolean" and s["defaultValue"] is False  # OFF by default
     assert s["category"][0] == "EPSNodes"
-    assert "text, image and label" in s["name"] and "same name" in s["name"]
+    assert "text, image, mask and label" in s["name"] and "same name" in s["name"]
     assert s["hasTooltip"] and s["onChange"] == "function"
     assert s["readOff"] == {"exactNames": False}
     assert s["readOn"] == {"exactNames": True}
@@ -1036,7 +1036,7 @@ def test_popover_has_the_wires_and_reach_choices(probe: dict) -> None:
     assert f["scopes"] == [["graph", "Whole workflow (default)"], ["group", "Only my group"]]
     assert f["look"] == "tucked" and f["scope"] == "graph"  # both start at the stored default
     assert all(f["aria"])
-    assert f["checks"] == 10  # the nine output checkboxes + Keep wired: untouched by the new fields
+    assert f["checks"] == 11  # the ten output checkboxes + Keep wired: untouched by the new fields
 
 
 def test_choosing_a_look_is_stored_and_reaches_the_renderers_cached_owner(probe: dict) -> None:

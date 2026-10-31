@@ -198,6 +198,31 @@
  * it -- not a rewire, not a reload -- and only keys that cannot name a row
  * at all are ever pruned, so the map stays bounded by the row count.
  *
+ * **Row partners -- WAN lows (v0.66.0) and masks.** A pairable class
+ * carries a second socket directly under every `<prefix>_N` row and a TAIL
+ * output index-aligned with the main one: `EPSModelSwitcher`'s
+ * `model_N_low` + `models_low`, gated by the `High/low pairs` node
+ * PROPERTY, and `EPSSwitcher`'s `mask_N` + `masks`, gated by the backend's
+ * visible `pass_masks` WIDGET (owner ask 2026-10-31: "an option that is
+ * off by default to also pass along the mask with every image. the mask
+ * and image should always be passed together"; a widget rather than a
+ * property because Properties are unreachable in Nodes 2.0). One `pair`
+ * spec per class (`SWITCHER_CLASSES[...].pair`) drives both: the
+ * converge/re-seat, the tail output's add/remove, the wired-refusal toast,
+ * and the gate hook -- `onPropertyChanged` for the property, the widget's
+ * own chained `callback` for the widget (a click, and a Universal State
+ * Apply's `widget.callback?.(v, canvas, node)`, both land there). The one
+ * asymmetry that matters: litegraph's `configure()` fires
+ * `onPropertyChanged` for a restored property but NO callback for a
+ * restored `widgets_values` entry, so the widget-gated partner is re-seated
+ * synchronously in the configure wrap's `finally` -- paste-with-links
+ * (`_deserializeItems`) connects wires by slot INDEX right after
+ * `configure()` returns, and the def-first slot merge would otherwise
+ * leave `mask_1` behind `toggles`/`pass_masks` where the wire lands on
+ * the wrong socket. Partners never match `inputRe`: no checkbox, no
+ * rename, no column entry of their own -- the row's one toggle governs
+ * the pair, backend and frontend alike.
+ *
  * **0.28.1 caveat**: this file was built and live-verified against the dev
  * rig's ComfyUI 0.28.0 / `comfyui-frontend-package` 1.45.21. Every litegraph
  * API used above is checked against that fork's TS source directly (see
@@ -228,9 +253,11 @@ const PREFIX = '[eps_image:switcher]'
  * for its own pure constants.
  */
 export const SWITCHER_CLASSES = {
-  EPSSwitcher: { prefix: 'image', type: 'IMAGE' },
-  // §6.4 WAN pairing (v0.66.0): the MODEL switcher alone supports per-row
-  // high/low pairs, enabled by the node's 'High/low pairs' property.
+  // §6.4 masks: the IMAGE switcher's row partner is a MASK socket behind
+  // the visible `pass_masks` widget -- its `pair` spec is set below.
+  EPSSwitcher: { prefix: 'image', type: 'IMAGE', pairable: true },
+  // §6.4 WAN pairing (v0.66.0): the MODEL switcher's row partner is the
+  // high/low pair, enabled by the node's 'High/low pairs' property.
   EPSModelSwitcher: { prefix: 'model', type: 'MODEL', pairable: true },
   // `noun` overrides the header label's naive `<prefix>s` pluralization
   // where the prefix is an initialism -- "no CLIPs connected" reads right,
@@ -243,9 +270,6 @@ export const SWITCHER_CLASSES = {
 }
 for (const spec of Object.values(SWITCHER_CLASSES)) {
   spec.inputRe = new RegExp(`^${spec.prefix}_(\\d+)$`)
-  // Lows deliberately do NOT match inputRe: no checkbox of their own (the
-  // row's one toggle governs the pair), no rename target, no column math.
-  if (spec.pairable) spec.lowInputRe = new RegExp(`^${spec.prefix}_(\\d+)_low$`)
 }
 
 //: v0.66.0 pairing property + names (owner spec: "call them high and low
@@ -253,6 +277,45 @@ for (const spec of Object.values(SWITCHER_CLASSES)) {
 //: in that node").
 const PROP_HIGH_LOW = 'High/low pairs'
 const LOW_OUTPUT_NAME = 'models_low'
+//: §6.4 masks: the gate is the backend's visible BOOLEAN widget
+//: (nodes_switcher.py PASS_MASKS_WIDGET_NAME) and the tail output is
+//: `masks` -- names shared with the backend, frozen once shipped (§8).
+const PASS_MASKS_WIDGET_NAME = 'pass_masks'
+const MASKS_OUTPUT_NAME = 'masks'
+
+/**
+ * Row-partner specs (file header "Row partners"), one per pairable class.
+ * `inputRe` is the partner socket's own name shape -- deliberately NOT
+ * `inputRe` above, so a partner never gets a checkbox of its own (the
+ * row's one toggle governs the pair), never becomes a rename target and
+ * never enters the column math; `nameOf(n)` builds row n's partner name;
+ * `type`/`outputName` are the socket type and the tail output; exactly
+ * one of `gateProperty`/`gateWidget` names what turns the partner on;
+ * `title` is the toast summary when the node has no title of its own;
+ * `refuseInputs`/`refuseOutput` are the wired-refusal toasts. Assigned
+ * onto the registry entries (not inlined) so the registry's own
+ * prefix/type shape, which tests/test_switcher_js.py pins, stays flat.
+ */
+SWITCHER_CLASSES.EPSModelSwitcher.pair = {
+  inputRe: /^model_(\d+)_low$/,
+  nameOf: (n) => `model_${n}_low`,
+  type: 'MODEL',
+  outputName: LOW_OUTPUT_NAME,
+  gateProperty: PROP_HIGH_LOW,
+  title: 'EPS Model Switcher',
+  refuseInputs: 'Unwire the low-model sockets before turning High/low pairs off.',
+  refuseOutput: 'Unwire the models_low output before turning High/low pairs off.'
+}
+SWITCHER_CLASSES.EPSSwitcher.pair = {
+  inputRe: /^mask_(\d+)$/,
+  nameOf: (n) => `mask_${n}`,
+  type: 'MASK',
+  outputName: MASKS_OUTPUT_NAME,
+  gateWidget: PASS_MASKS_WIDGET_NAME,
+  title: 'EPS Image Switcher',
+  refuseInputs: 'Unwire the mask sockets before turning pass_masks off.',
+  refuseOutput: 'Unwire the masks output before turning pass_masks off.'
+}
 
 const TOGGLES_WIDGET_NAME = 'toggles'
 const HEADER_WIDGET_NAME = '__eps_switcher_toggle_all'
@@ -537,12 +600,85 @@ function addImageInput(node, n, template) {
   return node.addInput(name, type, extraInfo)
 }
 
-//: v0.66.0 WAN pairing helpers -----------------------------------------
+//: v0.66.0 WAN pairing helpers (generalized to every row partner) ------
 
-/** Whether this node's high/low pairing is ON (pairable classes only). */
+/** *node*'s row-partner spec (`SWITCHER_CLASSES[...].pair`), or null for
+ * a class without one. */
+function pairSpecOf(node) {
+  return switcherSpecOf(node)?.pair || null
+}
+
+/**
+ * The partner gate's RAW value -- the Model switcher's property or the
+ * Image switcher's `pass_masks` widget value -- or `undefined` when the
+ * class has no partner or the gate does not exist yet (a property before
+ * addProperty, a widget the backend did not declare). Callers that refuse
+ * a flip compare against a literal `false`: only an explicit OFF is ever
+ * reverted, never an absent gate.
+ * @param {object} node
+ */
+function pairGateValue(node) {
+  const pair = pairSpecOf(node)
+  if (!pair) return undefined
+  if (pair.gateWidget) return findWidget(node, pair.gateWidget)?.value
+  return node.properties?.[pair.gateProperty]
+}
+
+/** Whether this node's row partners are ON (pairable classes only). */
 function pairingOn(node) {
-  const spec = switcherSpecOf(node)
-  return !!(spec?.pairable && node.properties?.[PROP_HIGH_LOW] === true)
+  return pairGateValue(node) === true
+}
+
+/** Write the gate DIRECTLY -- the property or the widget value, never
+ * through its hook/callback, so a refusal cannot re-enter the converge. */
+function setPairGate(node, on) {
+  const pair = pairSpecOf(node)
+  if (!pair) return
+  if (pair.gateWidget) {
+    const widget = findWidget(node, pair.gateWidget)
+    if (widget) widget.value = on
+    return
+  }
+  node.properties[pair.gateProperty] = on
+}
+
+/** Any partner socket or the partner output still carrying a wire. */
+function pairWiresPresent(node) {
+  const pair = pairSpecOf(node)
+  if (!pair) return false
+  const inputWired = (node.inputs || []).some(
+    (input) => input && pair.inputRe.test(input.name) && input.link != null
+  )
+  const output = (node.outputs || []).find((output) => output?.name === pair.outputName)
+  return inputWired || outputIsWired(output)
+}
+
+function outputIsWired(output) {
+  if (!output) return false
+  return (
+    (Array.isArray(output.links) && output.links.length > 0) ||
+    (typeof output._floatingLinks?.size === 'number' && output._floatingLinks.size > 0)
+  )
+}
+
+/**
+ * Refuse a gate-off: snap the gate back ON and say what to unwire
+ * (resolution.js's hide-refusal posture -- never silently orphan a user's
+ * wire). For the WIDGET gate the refusal is asserted a second time on the
+ * next tick (bypass.js's `refuseOff`): the Vue renderer writes its own
+ * model around the widget callback, and this makes the refusal win in
+ * either order. A later real flip is never overridden -- the re-assert
+ * only fires while a partner wire is still present.
+ */
+function refusePairOff(node, message) {
+  setPairGate(node, true)
+  toastSwitcher(node, message)
+  if (!pairSpecOf(node)?.gateWidget) return
+  setTimeout(() => {
+    if (!node.graph || pairingOn(node) || !pairWiresPresent(node)) return
+    setPairGate(node, true)
+    node.graph.setDirtyCanvas(true, true)
+  }, 0)
 }
 
 /** Re-seat an existing input, fixing every affected link-slot index. */
@@ -580,88 +716,88 @@ function insertInputAt(node, name, type, at) {
 }
 
 /**
- * Converge the `model_N_low` sockets to the pairing property (owner spec
- * 2026-08-14: high/low, per-node, all rows). ON: every `model_N` row --
- * the trailing spare included -- gets its `_low` partner directly BELOW
- * it, so pairs read as pairs. OFF: unwired lows are removed; a WIRED low
- * refuses the flip (property reverts + toast -- resolution.js's
- * hide-refusal posture: never silently orphan a user's wire).
+ * Converge the partner sockets (`model_N_low` / `mask_N`) to the gate
+ * (owner spec 2026-08-14 for lows: high/low, per-node, all rows; the
+ * same shape for masks). ON: every `<prefix>_N` row -- the trailing spare
+ * included -- gets its partner directly BELOW it, so pairs read as pairs.
+ * OFF: unwired partners are removed; a WIRED partner refuses the flip
+ * (gate reverts + toast -- resolution.js's hide-refusal posture: never
+ * silently orphan a user's wire).
  */
 function convergePairInputs(node) {
-  const spec = switcherSpecOf(node)
-  if (!spec?.pairable || !node.inputs) return
+  const pair = pairSpecOf(node)
+  if (!pair || !node.inputs) return
   const on = pairingOn(node)
-  const lowNameOf = (n) => `${spec.prefix}_${n}_low`
 
   if (!on) {
-    const wiredLows = node.inputs.filter(
-      (input) => input && spec.lowInputRe.test(input.name) && input.link != null
-    )
-    if (wiredLows.length && node.properties[PROP_HIGH_LOW] === false) {
-      node.properties[PROP_HIGH_LOW] = true
-      toastSwitcher(node, 'Unwire the low-model sockets before turning High/low pairs off.')
+    // A wired partner SOCKET or a wired partner OUTPUT refuses the flip
+    // here, BEFORE anything is removed. Checking the output here too (and
+    // not only in convergePairOutput, which runs after this) keeps the
+    // unwired partner sockets in place through the refusal -- otherwise
+    // they were dropped, the gate reverted, and the rows sat partner-less
+    // until the next converge (the mask probe caught it with only the
+    // `masks` output wired).
+    if (pairGateValue(node) === false && pairWiresPresent(node)) {
+      const socketWired = node.inputs.some(
+        (input) => input && pair.inputRe.test(input.name) && input.link != null
+      )
+      refusePairOff(node, socketWired ? pair.refuseInputs : pair.refuseOutput)
       return
     }
     for (let i = node.inputs.length - 1; i >= 0; i--) {
       const input = node.inputs[i]
-      if (input && spec.lowInputRe.test(input.name) && input.link == null) {
+      if (input && pair.inputRe.test(input.name) && input.link == null) {
         node.removeInput(i)
       }
     }
     return
   }
 
-  // ON: highs first (their converge already ran), then place lows --
-  // creating missing ones AND re-seating existing ones directly under
-  // their high (a workflow reload restores inputs in file order, which
-  // can interleave `toggles` between a pair; wires are name-bound so a
-  // seat move only needs the link-slot fixup insertInputAt already does).
-  const highs = imageInputEntries(node)
-  for (const entry of highs) {
-    const lowName = lowNameOf(entry.n)
-    const highIdx = node.inputs.findIndex((input) => input?.name === entry.name)
-    const at = node.inputs.findIndex((input) => input?.name === lowName)
+  // ON: primaries first (their converge already ran), then place
+  // partners -- creating missing ones AND re-seating existing ones
+  // directly under their primary (a workflow reload restores inputs in
+  // file order, which can interleave `toggles` between a pair; wires are
+  // name-bound so a seat move only needs the link-slot fixup
+  // insertInputAt already does).
+  const primaries = imageInputEntries(node)
+  for (const entry of primaries) {
+    const partnerName = pair.nameOf(entry.n)
+    const primaryIdx = node.inputs.findIndex((input) => input?.name === entry.name)
+    const at = node.inputs.findIndex((input) => input?.name === partnerName)
     if (at === -1) {
-      insertInputAt(node, lowName, spec.type, highIdx + 1)
-    } else if (at !== highIdx + 1) {
-      moveInput(node, at, at < highIdx ? highIdx : highIdx + 1)
+      insertInputAt(node, partnerName, pair.type, primaryIdx + 1)
+    } else if (at !== primaryIdx + 1) {
+      moveInput(node, at, at < primaryIdx ? primaryIdx : primaryIdx + 1)
     }
   }
-  // Drop lows whose high is gone (a collapsed trailing spare).
-  const liveHighNs = new Set(highs.map((entry) => entry.n))
+  // Drop partners whose primary is gone (a collapsed trailing spare).
+  const liveNs = new Set(primaries.map((entry) => entry.n))
   for (let i = node.inputs.length - 1; i >= 0; i--) {
     const input = node.inputs[i]
-    const match = input && spec.lowInputRe.exec(input.name)
-    if (match && !liveHighNs.has(Number(match[1])) && input.link == null) {
+    const match = input && pair.inputRe.exec(input.name)
+    if (match && !liveNs.has(Number(match[1])) && input.link == null) {
       node.removeInput(i)
     }
   }
 }
 
 /**
- * Show/hide the paired `models_low` output with the property. It is the
- * TAIL output (§8: tail add/remove is the one safe true removal), so OFF
- * removes it outright when unwired -- and refuses (revert + toast) when
- * wired -- and ON re-appends it at its canonical last slot.
+ * Show/hide the partner output (`models_low` / `masks`) with the gate. It
+ * is the TAIL output (§8: tail add/remove is the one safe true removal),
+ * so OFF removes it outright when unwired -- and refuses (revert + toast)
+ * when wired -- and ON re-appends it at its canonical last slot.
  */
 function convergePairOutput(node) {
-  const spec = switcherSpecOf(node)
-  if (!spec?.pairable) return
-  const idx = (node.outputs || []).findIndex((output) => output?.name === LOW_OUTPUT_NAME)
+  const pair = pairSpecOf(node)
+  if (!pair) return
+  const idx = (node.outputs || []).findIndex((output) => output?.name === pair.outputName)
   if (pairingOn(node)) {
-    if (idx === -1) node.addOutput(LOW_OUTPUT_NAME, spec.type)
+    if (idx === -1) node.addOutput(pair.outputName, pair.type)
     return
   }
   if (idx === -1) return
-  const output = node.outputs[idx]
-  const wired =
-    (Array.isArray(output.links) && output.links.length > 0) ||
-    (typeof output._floatingLinks?.size === 'number' && output._floatingLinks.size > 0)
-  if (wired) {
-    if (node.properties[PROP_HIGH_LOW] === false) {
-      node.properties[PROP_HIGH_LOW] = true
-      toastSwitcher(node, 'Unwire the models_low output before turning High/low pairs off.')
-    }
+  if (outputIsWired(node.outputs[idx])) {
+    if (pairGateValue(node) === false) refusePairOff(node, pair.refuseOutput)
     return
   }
   node.removeOutput(idx)
@@ -671,7 +807,7 @@ function toastSwitcher(node, detail) {
   try {
     app.extensionManager?.toast?.add?.({
       severity: 'warn',
-      summary: node.title || 'EPS Model Switcher',
+      summary: node.title || pairSpecOf(node)?.title || 'EPS Switcher',
       detail,
       life: 4000
     })
@@ -680,29 +816,60 @@ function toastSwitcher(node, detail) {
   }
 }
 
-/** The property + its live hook -- pairable classes only. */
-function wirePairingProperty(node) {
-  const spec = switcherSpecOf(node)
-  if (!spec?.pairable) return
-  node.addProperty(PROP_HIGH_LOW, false, 'boolean')
-  const original = node.onPropertyChanged
-  node.onPropertyChanged = function (name, value, prevValue) {
-    const result = original?.call(this, name, value, prevValue)
-    if (name === PROP_HIGH_LOW) {
-      try {
-        convergePairInputs(this)
-        convergePairOutput(this)
-        this.setSize?.([this.size[0], Math.max(this.size[1], this.computeSize()[1])])
-        this.graph?.setDirtyCanvas(true, true)
-      } catch (error) {
-        console.warn(PREFIX, 'pair visibility failed', error)
+/**
+ * The gate + its live hook -- pairable classes only. The Model switcher's
+ * gate is a node PROPERTY (v0.66.0, owner spec: "an option that gets
+ * turned on in properties"); the Image switcher's is the backend's visible
+ * `pass_masks` WIDGET (Properties are unreachable in Nodes 2.0, and a
+ * widget shows on the node in both renderers). Either hook is CHAINED,
+ * never replaced -- `onPropertyChanged` for the property, the widget's own
+ * `callback` for the widget (bypass.js's `wireToggle`: a click and a
+ * Universal State Apply's `widget.callback?.(v, canvas, node)` both land
+ * there) -- and both run the same reconverge: sockets, tail output, a
+ * height that fits the new rows, a repaint.
+ */
+function wirePairingGate(node) {
+  const pair = pairSpecOf(node)
+  if (!pair) return
+  const reconverge = (target) => {
+    try {
+      convergePairInputs(target)
+      convergePairOutput(target)
+      target.setSize?.([target.size[0], Math.max(target.size[1], target.computeSize()[1])])
+      target.graph?.setDirtyCanvas(true, true)
+    } catch (error) {
+      console.warn(PREFIX, 'pair visibility failed', error)
+    }
+  }
+  if (pair.gateWidget) {
+    const widget = findWidget(node, pair.gateWidget)
+    if (!widget) {
+      console.warn(
+        PREFIX,
+        `${nodeClassOf(node)} node is missing its \`${pair.gateWidget}\` widget; ` +
+          'partner sockets will not follow it'
+      )
+    } else {
+      const original = widget.callback
+      widget.callback = function (...args) {
+        const result = typeof original === 'function' ? original.apply(this, args) : undefined
+        reconverge(node)
+        return result
       }
     }
-    return result
+  } else {
+    node.addProperty(pair.gateProperty, false, 'boolean')
+    const original = node.onPropertyChanged
+    node.onPropertyChanged = function (name, value, prevValue) {
+      const result = original?.call(this, name, value, prevValue)
+      if (name === pair.gateProperty) reconverge(this)
+      return result
+    }
   }
-  // Fresh node: property is false -> the backend-declared models_low tail
-  // comes off until the property turns it on (resolution.js's apply-once
-  // rationale: addProperty alone never fires onPropertyChanged).
+  // Fresh node: the gate is off -> the backend-declared tail output comes
+  // off until the gate turns it on (resolution.js's apply-once rationale:
+  // addProperty alone never fires onPropertyChanged, and a widget's
+  // construction default fires no callback).
   convergePairOutput(node)
 }
 
@@ -826,6 +993,27 @@ function wireImageInputGrowth(node) {
       // longer existed, so only model_1 came back. By the time this fires
       // the paste's own connect() calls have landed and the pass sees the
       // real wiring; the runner skips a clone that never joins a graph.
+      //
+      // The WIDGET-gated partner (masks) is re-seated synchronously here,
+      // and only here, BEFORE that deferral: litegraph's configure() fires
+      // `onPropertyChanged` for a restored property -- which is how the
+      // Model switcher's lows are already back under their highs by the
+      // time configure() returns -- but sets a restored widgets_values
+      // entry with NO callback. Without this, the def-first slot merge
+      // leaves `mask_1` behind `toggles`/`pass_masks`, and the paste's
+      // index-based connect() lands the mask wire on the wrong socket.
+      // Safe for the clone() snapshot too: ON only inserts/moves (the
+      // snapshot copied every slot), and OFF has nothing to remove --
+      // a wired partner keeps the gate on, so no mask ever exists while
+      // the gate is off. Idempotent with the deferred pass that follows.
+      if (spec?.pair?.gateWidget) {
+        try {
+          convergePairInputs(this)
+          convergePairOutput(this)
+        } catch (error) {
+          console.warn(PREFIX, 'pair re-seat after configure failed', error)
+        }
+      }
       scheduleConverge(this)
     }
   }
@@ -1441,7 +1629,7 @@ export function attach(node) {
 
     hideTogglesWidget(node)
     ensureMinNodeWidth(node)
-    wirePairingProperty(node)
+    wirePairingGate(node)
     wireImageInputGrowth(node)
     wireRowToggleDrawing(node)
     wireRowToggleClicks(node)

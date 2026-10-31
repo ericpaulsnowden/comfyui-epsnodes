@@ -396,7 +396,7 @@ export function openPopover(options) {
   const pop = el('div', { class: 'eps-bc-pop', role: 'dialog', 'aria-label': 'Broadcast options', tabindex: '-1', 'data-capture-wheel': 'true' }, [
     el('h3', { text: 'Broadcast these outputs' }),
     ...checks,
-    el('div', { class: 'eps-bc-hint', text: 'text, image and label only connect to inputs with exactly the same name, and only when the ComfyUI setting is on (Settings › EPSNodes).' }),
+    el('div', { class: 'eps-bc-hint', text: 'text, image, mask and label only connect to inputs with exactly the same name, and only when the ComfyUI setting is on (Settings › EPSNodes).' }),
     el('div', { class: 'eps-bc-sep' }),
     el('label', { class: 'eps-bc-check' }, [keepBox, 'Keep wired']),
     el('div', { class: 'eps-bc-hint', text: 'New and pasted nodes get wired as you add them. A wire you unplug stays unplugged.' }),

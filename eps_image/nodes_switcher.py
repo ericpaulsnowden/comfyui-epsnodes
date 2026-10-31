@@ -89,6 +89,26 @@ sibling-emptiness check (``_slots_fed_by_an_empty_switcher`` /
 the four classes via a small ``class_id -> that class's own slot pattern``
 registry (``_SWITCHER_SLOT_PATTERNS``), populated as each class is built --
 not just a single hardcoded class id.
+
+**Row partners: WAN lows (v0.66.0) and masks.** A class may carry a second
+socket under every ``<prefix>_N`` whose value travels WITH that row's
+primary -- ``EPSModelSwitcher``'s ``model_N_low`` and ``EPSSwitcher``'s
+``mask_N`` -- plus a TAIL output (``models_low`` / ``masks``) that stays
+index-aligned with the primary output BY CONSTRUCTION, so a consumer taking
+both runs once per row element and can never pair the wrong two. One
+``_RowPartner`` spec (below) describes either; the factory's
+``check_lazy_status``/``execute`` read it instead of hardcoding the low.
+The two differ in exactly three knobs: the mask partner is gated by the
+visible ``pass_masks`` BOOLEAN widget (off by default -- owner ask
+2026-10-31: "an option that is off by default to also pass along the mask
+with every image. the mask and image should always be passed together"),
+an unwired mask on an enabled row contributes an all-zero mask shaped like
+its image (ComfyUI's own "no mask", what LoadImage emits without an alpha)
+where an unwired low contributes per-element ``ExecutionBlocker``s, and a
+mask wired with no image on its row is logged and dropped (a mask never
+travels alone). With ``pass_masks`` off the ``masks`` output is one
+``ExecutionBlocker`` and no zero mask is ever allocated -- a long video
+batch would otherwise waste gigabytes on masks nobody consumes.
 """
 
 from __future__ import annotations
@@ -96,7 +116,7 @@ from __future__ import annotations
 import json
 import logging
 import re
-from typing import Any
+from typing import Any, NamedTuple
 
 logger = logging.getLogger("eps_image")
 
@@ -130,6 +150,27 @@ _MODEL_LOW_INPUT_TOOLTIP = (
     "The LOW-noise partner of this row's model (WAN-style two-stage "
     "pairs). Appears when the node's 'High/low pairs' property is on; "
     "the row's one toggle governs both models together."
+)
+#: §6.4 masks (owner ask 2026-10-31: "an option that is off by default to
+#: also pass along the mask with every image. the mask and image should
+#: always be passed together"). A `mask_N` slot pairs with `image_N`; the
+#: row's one toggle governs both, and the visible `pass_masks` widget gates
+#: the whole mechanism -- a WIDGET, not a Properties entry, because
+#: Properties are unreachable in Nodes 2.0.
+_MASK_INPUT_PATTERN = re.compile(r"mask_(\d+)")
+_MASK_INPUT_TOOLTIP = (
+    "The mask that belongs with this row's image (shown while pass_masks "
+    "is on). Leave it unwired to send an empty, all-black mask the size of "
+    "the image; the row's one toggle switches image and mask off together."
+)
+PASS_MASKS_WIDGET_NAME = "pass_masks"
+_PASS_MASKS_TOOLTIP = (
+    "Off: images only, exactly as before. On: every image row gets a mask "
+    "socket under it, and the masks output carries one mask per enabled "
+    "image in the same order, so a node that takes both runs once per "
+    "image. A row with no mask wired sends an empty, all-black mask the "
+    "size of its image. A row's one toggle switches image and mask off "
+    "together."
 )
 
 _MODEL_INPUT_TOOLTIP = (
@@ -178,6 +219,20 @@ def _unwrap_hidden(value: Any) -> Any:
     if isinstance(value, (list, tuple)):
         return value[0] if value else None
     return value
+
+
+def _flag_is_on(value: Any) -> bool:
+    """A BOOLEAN widget value (``pass_masks``), unwrapped like any other
+    ``INPUT_IS_LIST`` input (:func:`_unwrap_hidden`'s exact shape), read
+    STRICTLY: only a real ``True`` -- or the string ``"true"`` a hand-built
+    ``/prompt`` might send -- is on. A missing key, an empty wrapper, ``1``,
+    ``"yes"`` and every other truthy value stay OFF, so the default (images
+    only, no mask allocation) can never be switched on by accident.
+    """
+    value = _unwrap_hidden(value)
+    if value is True:
+        return True
+    return isinstance(value, str) and value.strip().lower() == "true"
 
 
 def _unwrap_toggles(toggles: Any) -> Any:
@@ -441,9 +496,70 @@ def _make_flexible_optional_inputs_class(
 # and constructs instances of it itself. Built via the shared factory just
 # like the three siblings below, so EPSSwitcher's own INPUT_TYPES() uses this
 # exact class (see its `flexible_cls=` argument at the bottom of this module).
+# The MASK extra spec is what lets a workflow wire `mask_N` at all (§6.4
+# masks): ComfyUI's validation asks this dict `input_name in optional`, and
+# `mask_1` is never a real key -- the frontend grows every mask socket, the
+# same way `model_N_low` rides on the model switcher's own flexible dict.
 _FlexibleOptionalImageInputs = _make_flexible_optional_inputs_class(
-    _IMAGE_INPUT_PATTERN, "IMAGE", _IMAGE_INPUT_TOOLTIP
+    _IMAGE_INPUT_PATTERN,
+    "IMAGE",
+    _IMAGE_INPUT_TOOLTIP,
+    extra_specs=[(_MASK_INPUT_PATTERN, "MASK", _MASK_INPUT_TOOLTIP)],
 )
+
+
+class _RowPartner(NamedTuple):
+    """One switcher class's per-row PARTNER socket (FORMAT.md §6.4, module
+    docstring "Row partners"): a second slot under every ``<prefix>_N``
+    whose value travels WITH that row's primary, plus the tail output that
+    carries the partners index-aligned with the primary output. Two
+    instantiations -- the model switcher's WAN ``model_N_low`` (v0.66.0:
+    always on, blockers for unwired rows, silent about orphans, byte-for-
+    byte the behaviour it shipped with) and the image switcher's ``mask_N``
+    (gated by ``pass_masks``, zero masks for unwired rows, orphans logged).
+    """
+
+    #: The partner slot's own name shape (``model_(\d+)_low`` / ``mask_(\d+)``);
+    #: group 1 is the row number, same as the primary pattern's.
+    pattern: re.Pattern[str]
+    #: ``str.format`` template for row *n*'s partner key, with ``prefix`` and
+    #: ``n`` available: ``"{prefix}_{n}_low"`` / ``"mask_{n}"``.
+    name_format: str
+    io_type: str
+    input_tooltip: str
+    output_name: str
+    output_tooltip: str
+    #: ``str.format`` template for the length-disagreement ValueError, with
+    #: ``index``/``primaries``/``partners``/``partner_key`` available. A
+    #: silent clamp is exactly the wrong pairing neither WAN nor a
+    #: mask-taking node must ever get, so the message is per-class prose.
+    pair_error: str
+    #: The one-word partner noun for the orphan warning ("mask").
+    short_noun: str = ""
+    #: Name of the BOOLEAN widget that turns the partner on; ``None`` means
+    #: always on (the model switcher's property lives frontend-side only --
+    #: its backend always declares both outputs and pairs whatever is wired).
+    gate_widget: str | None = None
+    gate_tooltip: str = ""
+    #: What an UNWIRED partner on an enabled row contributes per primary
+    #: element: ``True`` = zeros shaped like the primary (masks -- ComfyUI's
+    #: own "no mask"), ``False`` = an ``ExecutionBlocker`` each (lows --
+    #: only ``models_low``'s consumers skip that row, §6.5's precedent).
+    fill_zeros: bool = False
+    #: Log (once per execution) every partner slot wired with no primary on
+    #: its row, then drop it. Off for lows (their v0.66.0 silence is kept).
+    warn_orphans: bool = False
+
+
+def _zeros_like_mask(image: Any) -> Any:
+    """An all-zero MASK for *image*: IMAGE is ``[B, H, W, C]`` and MASK is
+    ``[B, H, W]``, so the first three dims are the mask's shape. Built off
+    the tensor itself (``new_zeros`` keeps dtype/device) so this module never
+    imports torch -- the module-scope no-comfy/no-torch promise holds. This
+    is ComfyUI's own meaning of "no mask": core's LoadImage emits exactly
+    such a zero tensor for an image with no alpha channel.
+    """
+    return image.new_zeros(tuple(image.shape[:3]))
 
 
 def _make_switcher_ns(
@@ -460,10 +576,7 @@ def _make_switcher_ns(
     description: str,
     class_doc: str,
     flexible_cls: type[dict] | None = None,
-    low_pattern: re.Pattern[str] | None = None,
-    low_tooltip: str = "",
-    low_output_name: str = "",
-    low_output_tooltip: str = "",
+    partner: _RowPartner | None = None,
 ) -> type:
     """Build one switcher class (FORMAT.md §6.4 and its MODEL/CLIP/VAE
     generalization). ``EPSSwitcher`` (IMAGE) and its three siblings
@@ -488,60 +601,96 @@ def _make_switcher_ns(
     one -- solely so ``EPSSwitcher`` can keep using the pre-existing,
     externally-imported ``_FlexibleOptionalImageInputs`` object identity;
     every other class lets this factory build its own private one.
+
+    *partner*, when given, is this class's per-row partner socket + tail
+    output (:class:`_RowPartner`, module docstring "Row partners"): the
+    model switcher's WAN lows, the image switcher's masks.
     """
     if flexible_cls is None:
-        extra = [(low_pattern, io_type, low_tooltip)] if low_pattern is not None else None
+        extra = (
+            [(partner.pattern, partner.io_type, partner.input_tooltip)]
+            if partner is not None
+            else None
+        )
         flexible_cls = _make_flexible_optional_inputs_class(
             pattern, io_type, input_tooltip, extra_specs=extra
         )
     _SWITCHER_SLOT_PATTERNS[class_id] = pattern
 
+    def partner_key_of(index: int) -> str:
+        """Row *index*'s partner slot name (``model_3_low`` / ``mask_3``)."""
+        assert partner is not None
+        return partner.name_format.format(prefix=prefix, n=index)
+
+    def partner_on(kwargs: dict[str, Any]) -> bool:
+        """Whether this execution pairs partners at all: no partner spec =
+        never; an ungated partner (lows) = always; a gated one (masks) =
+        only when its widget arrived as a real true."""
+        if partner is None:
+            return False
+        if partner.gate_widget is None:
+            return True
+        return _flag_is_on(kwargs.get(partner.gate_widget))
+
     def INPUT_TYPES(cls) -> dict[str, Any]:
+        declared: dict[str, Any] = {
+            # `lazy: True` -- module docstring "Disabled slots are
+            # also genuinely lazy now"; __getitem__ above synthesizes
+            # the SAME options dict (including the same tooltip) for
+            # every dynamically grown slot (slot 2 and up) so they're
+            # all equally lazy and read identically on hover.
+            f"{prefix}_1": (io_type, {"lazy": True, "tooltip": input_tooltip}),
+            # Serialized bridge to the frontend's per-row/header
+            # toggle UI (module docstring "Enabled-set mechanism");
+            # the frontend hides this widget's on-canvas row but
+            # keeps writing its value, so it still serializes with
+            # the workflow and still reaches execute() untouched for
+            # a plain API caller who never loads our JS.
+            #
+            # In `optional`, NOT `required`: ComfyUI's
+            # validate_inputs rejects a /prompt whose inputs omit any
+            # REQUIRED key BEFORE the node runs (there is no backend
+            # default-fill), which would make the documented "API
+            # caller who never heard of this widget" path (module
+            # docstring) unreachable. execute()'s own
+            # `toggles=DEFAULT_TOGGLES` default covers the omitted
+            # case; the frontend still serializes it.
+            #
+            # Deliberately NOT lazy (module docstring "Enabled-set
+            # mechanism"): `check_lazy_status` needs it immediately
+            # to decide which slots are even worth asking for.
+            #
+            # "hidden": True is the VUE-nodes ("New node design")
+            # hide flag (2026-07-29): that renderer decides widget
+            # visibility from the input spec's options
+            # (`options.hidden`, useProcessedWidgets.ts) and IGNORES
+            # the litegraph `widget.hidden` the frontend sets --
+            # without this, this internal widget leaks into Vue nodes
+            # as a raw editable field. The classic canvas renderer
+            # ignores this key right back, so it changes nothing
+            # there.
+            "toggles": (
+                "STRING",
+                {"default": DEFAULT_TOGGLES, "multiline": False, "hidden": True},
+            ),
+        }
+        if partner is not None and partner.gate_widget is not None:
+            # §6.4 masks: the VISIBLE on/off for the partner mechanism --
+            # a plain BOOLEAN widget in `optional` (a hand-built /prompt
+            # may omit it; `partner_on` reads an absent key as off), NOT
+            # lazy (check_lazy_status needs it before anything resolves,
+            # the same reason `toggles` is eager), and APPENDED after
+            # `toggles` on purpose: widgets_values restores positionally,
+            # so an old save's `["{}"]` lands on `toggles` and this one
+            # keeps its False default. No label_on/label_off -- they
+            # truncate in Nodes 2.0 on frontend 1.52.7.
+            declared[partner.gate_widget] = (
+                "BOOLEAN",
+                {"default": False, "tooltip": partner.gate_tooltip},
+            )
         return {
             "required": {},
-            "optional": flexible_cls(
-                {
-                    # `lazy: True` -- module docstring "Disabled slots are
-                    # also genuinely lazy now"; __getitem__ above synthesizes
-                    # the SAME options dict (including the same tooltip) for
-                    # every dynamically grown slot (slot 2 and up) so they're
-                    # all equally lazy and read identically on hover.
-                    f"{prefix}_1": (io_type, {"lazy": True, "tooltip": input_tooltip}),
-                    # Serialized bridge to the frontend's per-row/header
-                    # toggle UI (module docstring "Enabled-set mechanism");
-                    # the frontend hides this widget's on-canvas row but
-                    # keeps writing its value, so it still serializes with
-                    # the workflow and still reaches execute() untouched for
-                    # a plain API caller who never loads our JS.
-                    #
-                    # In `optional`, NOT `required`: ComfyUI's
-                    # validate_inputs rejects a /prompt whose inputs omit any
-                    # REQUIRED key BEFORE the node runs (there is no backend
-                    # default-fill), which would make the documented "API
-                    # caller who never heard of this widget" path (module
-                    # docstring) unreachable. execute()'s own
-                    # `toggles=DEFAULT_TOGGLES` default covers the omitted
-                    # case; the frontend still serializes it.
-                    #
-                    # Deliberately NOT lazy (module docstring "Enabled-set
-                    # mechanism"): `check_lazy_status` needs it immediately
-                    # to decide which slots are even worth asking for.
-                    #
-                    # "hidden": True is the VUE-nodes ("New node design")
-                    # hide flag (2026-07-29): that renderer decides widget
-                    # visibility from the input spec's options
-                    # (`options.hidden`, useProcessedWidgets.ts) and IGNORES
-                    # the litegraph `widget.hidden` the frontend sets --
-                    # without this, this internal widget leaks into Vue nodes
-                    # as a raw editable field. The classic canvas renderer
-                    # ignores this key right back, so it changes nothing
-                    # there.
-                    "toggles": (
-                        "STRING",
-                        {"default": DEFAULT_TOGGLES, "multiline": False, "hidden": True},
-                    ),
-                }
-            ),
+            "optional": flexible_cls(declared),
             # Server-supplied, never user-facing: lets check_lazy_status
             # inspect the prompt for a provably-empty sibling switcher before
             # requesting a slot fed by one. Hidden inputs can't be omitted by
@@ -596,20 +745,24 @@ def _make_switcher_ns(
             for index in _connected_slot_indices(kwargs, pattern)
             if (name := f"{prefix}_{index}") not in skip and toggle_map.get(name, True) is not False
         ]
-        if low_pattern is not None:
-            # §6.4 pairing (v0.66.0): a row's LOW slot follows its row's one
-            # toggle (keyed by the HIGH name) -- a disabled row skips both
-            # upstreams, so a toggled-off WAN pair loads neither model.
-            # ...and only when the HIGH itself is wanted (audit 2026-08-21):
-            # a high fed by a statically-all-off sibling switcher is in
-            # `skip` and never arrives, so requesting its low alone ran the
-            # low's upstream for nothing and then failed the 0-high/1-low
-            # pairing check in execute().
-            wanted_highs = set(wanted)
+        if partner is not None and partner_on(kwargs):
+            # §6.4 pairing (v0.66.0 lows; masks follow the same rule): a
+            # row's PARTNER slot follows its row's one toggle (keyed by the
+            # primary name) -- a disabled row skips both upstreams, so a
+            # toggled-off WAN pair loads neither model and a toggled-off
+            # image row decodes neither its image nor its mask.
+            # ...and only when the PRIMARY itself is wanted (audit
+            # 2026-08-21): a high fed by a statically-all-off sibling
+            # switcher is in `skip` and never arrives, so requesting its
+            # low alone ran the low's upstream for nothing and then failed
+            # the 0-high/1-low pairing check in execute(). With the mask
+            # gate OFF nothing below runs, so no mask upstream is ever
+            # asked for -- a wired mask_N is simply ignored.
+            wanted_primaries = set(wanted)
             wanted.extend(
-                f"{prefix}_{index}_low"
-                for index in _connected_slot_indices(kwargs, low_pattern)
-                if f"{prefix}_{index}" in wanted_highs
+                partner_key_of(index)
+                for index in _connected_slot_indices(kwargs, partner.pattern)
+                if f"{prefix}_{index}" in wanted_primaries
             )
         return wanted
 
@@ -647,55 +800,91 @@ def _make_switcher_ns(
         # the lazy "not resolved" placeholder for a slot that -- because it's
         # disabled -- was never actually requested and so never resolved).
         enabled_values: list[Any] = []
-        low_values: list[Any] = []
+        partner_values: list[Any] = []
+        pairing = partner_on(kwargs)
 
         def _flatten(raw: Any) -> list[Any]:
             if isinstance(raw, (list, tuple)):
                 return [element for element in raw if element is not None]
             return [raw]
 
+        if pairing and partner.warn_orphans:
+            # §6.4 masks: a mask wired on a row with no image never travels
+            # alone -- it has nothing to pair with, so it contributes
+            # nothing. Said ONCE per execution, naming every such socket,
+            # because a silently dropped wire is the kind of thing that
+            # costs an afternoon.
+            primaries = set(connected)
+            orphans = [
+                partner_key_of(index)
+                for index in _connected_slot_indices(kwargs, partner.pattern)
+                if index not in primaries
+            ]
+            if orphans:
+                logger.warning(
+                    "%s: %s wired with no %s on the same row -- a %s never "
+                    "travels alone; ignoring it",
+                    log_prefix,
+                    ", ".join(orphans),
+                    noun,
+                    partner.short_noun,
+                )
+
         for index in connected:
             key = f"{prefix}_{index}"
             if toggle_map.get(key, True) is False:
                 continue
-            highs = _flatten(kwargs[key])
-            if not highs:
-                # A skipped/blocked high (lazy skip set, None upstream) has
-                # nothing to pair or emit -- never a 0-vs-N pairing error
-                # (audit 2026-08-21).
+            primaries = _flatten(kwargs[key])
+            if not primaries:
+                # A skipped/blocked primary (lazy skip set, None upstream)
+                # has nothing to pair or emit -- never a 0-vs-N pairing
+                # error (audit 2026-08-21).
                 continue
-            enabled_values.extend(highs)
-            if low_pattern is None:
+            enabled_values.extend(primaries)
+            if not pairing:
                 continue
-            # §6.4 WAN pairing (v0.66.0): the low output stays index-aligned
-            # with the high output BY CONSTRUCTION. Per enabled slot: a
-            # wired low pairs 1:1 with that slot's highs, a SINGLE low
-            # broadcasts across them (a list-producing high with one low
-            # partner), any other length disagreement is a MISWIRE and
-            # fails loudly -- a silent clamp here is exactly the wrong
-            # high+low pairing WAN must never get. An unwired low
-            # contributes per-element ExecutionBlockers, so only consumers
-            # of the LOW output are skipped for that row (Resolution's §6.5
-            # per-slot blocker precedent).
-            low_key = f"{key}_low"
-            if low_key in kwargs and kwargs[low_key] is not None:
-                lows = _flatten(kwargs[low_key])
-                if len(lows) == len(highs):
-                    low_values.extend(lows)
-                elif len(lows) == 1 and highs:
-                    low_values.extend(lows * len(highs))
+            # §6.4 pairing (v0.66.0 WAN lows; masks since the pass_masks
+            # round): the partner output stays index-aligned with the
+            # primary output BY CONSTRUCTION. Per enabled slot: a wired
+            # partner pairs 1:1 with that slot's primaries, a SINGLE
+            # partner broadcasts across them (a list-producing image or
+            # high with one partner), any other length disagreement is a
+            # MISWIRE and fails loudly -- a silent clamp here is exactly
+            # the wrong high+low (or image+mask) pairing nobody must ever
+            # get. An unwired partner contributes per element either an
+            # all-zero mask shaped like its image (masks: ComfyUI's own
+            # "no mask", never resized, never altered when wired) or an
+            # ExecutionBlocker (lows: only consumers of the LOW output are
+            # skipped for that row, Resolution's §6.5 per-slot precedent).
+            # A WIRED-but-empty low still goes through the length check
+            # (0 vs N fails, as it always has); a wired-but-empty mask is
+            # treated like an unwired one -- the brief's "unwired (or
+            # empty) mask" -- since there is nothing to pair and zeros are
+            # the honest fill.
+            partner_key = partner_key_of(index)
+            wired = partner_key in kwargs and kwargs[partner_key] is not None
+            partners = _flatten(kwargs[partner_key]) if wired else []
+            if wired and (partners or not partner.fill_zeros):
+                if len(partners) == len(primaries):
+                    partner_values.extend(partners)
+                elif len(partners) == 1 and primaries:
+                    partner_values.extend(partners * len(primaries))
                 else:
                     raise ValueError(
-                        f"{log_prefix}: row {index} pairs {len(highs)} high "
-                        f"model(s) with {len(lows)} low model(s) -- the two "
-                        "sides of a high/low pair must match (or wire a "
-                        "single low to broadcast). Fix the wiring on "
-                        f"{low_key}."
+                        f"{log_prefix}: "
+                        + partner.pair_error.format(
+                            index=index,
+                            primaries=len(primaries),
+                            partners=len(partners),
+                            partner_key=partner_key,
+                        )
                     )
+            elif partner.fill_zeros:
+                partner_values.extend(_zeros_like_mask(element) for element in primaries)
             else:
                 from comfy_execution.graph import ExecutionBlocker
 
-                low_values.extend(ExecutionBlocker(None) for _ in highs)
+                partner_values.extend(ExecutionBlocker(None) for _ in primaries)
 
         if not enabled_values:
             # FORMAT.md §6.4 "All-off / none-connected is a VALID state"
@@ -746,13 +935,23 @@ def _make_switcher_ns(
             from comfy_execution.graph import ExecutionBlocker
 
             blocked = [ExecutionBlocker(None)]
-            return (blocked, [ExecutionBlocker(None)]) if low_pattern is not None else (blocked,)
+            return (blocked, [ExecutionBlocker(None)]) if partner is not None else (blocked,)
 
-        if low_pattern is not None:
-            return (enabled_values, low_values)
-        return (enabled_values,)
+        if partner is None:
+            return (enabled_values,)
+        if not pairing:
+            # Gate off (masks): images exactly as before, and the partner
+            # output is ONE blocker -- the same whole-output skip the
+            # all-off path uses, so a consumer of `masks` is silently
+            # skipped and no zero mask is ever allocated for a row nobody
+            # asked a mask of (module docstring: a long video batch would
+            # waste gigabytes). Never reached for an ungated partner.
+            from comfy_execution.graph import ExecutionBlocker
 
-    paired = low_pattern is not None
+            return (enabled_values, [ExecutionBlocker(None)])
+        return (enabled_values, partner_values)
+
+    paired = partner is not None
     #: §6.16 state registry (v0.83.0): the widgets a Universal State
     #: Controller may capture/apply, declared next to the parser that owns
     #: their shape -- stamped per generated class since ``toggles``'s own
@@ -760,23 +959,30 @@ def _make_switcher_ns(
     #: ``clip_N``/``vae_N``). The unbounded ``<prefix>_N`` sockets
     #: themselves are IMAGE/MODEL/CLIP/VAE-typed, not widgets, and never
     #: appear here.
-    state_widgets = {
+    state_widgets: dict[str, Any] = {
         "format": 1,
         "widgets": {
             "toggles": {"kind": "json_object", "key_pattern": f"^{prefix}_\\d+$"},
         },
     }
+    if partner is not None and partner.gate_widget is not None:
+        # §6.4 masks: `pass_masks` is a real, visible widget, so a captured
+        # state carries it and an Apply flips it (the frontend converges the
+        # sockets off the widget callback the Apply fires).
+        state_widgets["widgets"][partner.gate_widget] = {"kind": "boolean"}
     namespace: dict[str, Any] = {
         "__module__": __name__,
         "__doc__": class_doc,
         "CATEGORY": "EPSNodes/Switchers",
         "EPS_STATE_WIDGETS": state_widgets,
-        # §8: the low output is a TAIL append -- existing wires never move.
-        "RETURN_TYPES": (io_type, io_type) if paired else (io_type,),
-        "RETURN_NAMES": (output_name, low_output_name) if paired else (output_name,),
+        # §8: the partner output is a TAIL append -- existing wires never move.
+        "RETURN_TYPES": (io_type, partner.io_type) if paired else (io_type,),
+        "RETURN_NAMES": (output_name, partner.output_name) if paired else (output_name,),
         "INPUT_IS_LIST": True,
         "OUTPUT_IS_LIST": (True, True) if paired else (True,),
-        "OUTPUT_TOOLTIPS": (output_tooltip, low_output_tooltip) if paired else (output_tooltip,),
+        "OUTPUT_TOOLTIPS": (
+            (output_tooltip, partner.output_tooltip) if paired else (output_tooltip,)
+        ),
         "FUNCTION": "execute",
         "DESCRIPTION": description,
         "INPUT_TYPES": classmethod(INPUT_TYPES),
@@ -824,6 +1030,16 @@ kwargs on every execution -- there is no other state to go stale, so
 unlike the Prompt Notebook this node needs no ``IS_CHANGED`` override:
 ``toggles`` and every ``image_N`` are ordinary tracked inputs already
 covered by ComfyUI's own input-hash caching.
+
+``pass_masks`` (BOOLEAN widget, off by default -- owner ask 2026-10-31)
+turns on the row-partner mechanism (module docstring "Row partners"):
+every ``image_N`` gains a lazy ``mask_N`` partner, the row's one toggle
+governs both, and the tail ``masks`` output carries one mask per enabled
+image in the same order -- a wired mask as-is (equal lengths pair, a
+single mask broadcasts across a list-producing image, anything else fails
+the queue naming the socket), an unwired one as an all-zero mask shaped
+like its image. Off, ``images`` is exactly what it always was, ``masks``
+is a single ``ExecutionBlocker`` and no zero mask is allocated.
 """
 
 EPSSwitcher = _make_switcher_ns(
@@ -849,10 +1065,38 @@ EPSSwitcher = _make_switcher_ns(
         "a valid state: the queue still succeeds and the downstream branch "
         "simply doesn't run. A value wired further downstream, like a seed, "
         "repeats identically across every run unless you give it an "
-        "explicit per-image list."
+        "explicit per-image list. Turn on pass_masks to send each image's "
+        "mask along with it: every row gets a mask socket, the masks output "
+        "lines up one-to-one with images, a row with no mask wired sends an "
+        "empty (all-black) mask the size of its image, and the row's one "
+        "toggle switches both off together."
     ),
     class_doc=_EPS_SWITCHER_CLASS_DOC,
     flexible_cls=_FlexibleOptionalImageInputs,
+    partner=_RowPartner(
+        pattern=_MASK_INPUT_PATTERN,
+        name_format="mask_{n}",
+        io_type="MASK",
+        input_tooltip=_MASK_INPUT_TOOLTIP,
+        output_name="masks",
+        output_tooltip=(
+            "One mask per enabled image, in the same order as images (only "
+            "while pass_masks is on; off, this output skips whatever "
+            "consumes it). A row with no mask wired sends an empty, "
+            "all-black mask the size of its image."
+        ),
+        pair_error=(
+            "row {index} pairs {primaries} image(s) with {partners} mask(s) "
+            "-- image and mask must match one for one (or wire a single "
+            "mask to broadcast across the row). Fix the wiring on "
+            "{partner_key}."
+        ),
+        short_noun="mask",
+        gate_widget=PASS_MASKS_WIDGET_NAME,
+        gate_tooltip=_PASS_MASKS_TOOLTIP,
+        fill_zeros=True,
+        warn_orphans=True,
+    ),
 )
 
 
@@ -891,14 +1135,25 @@ EPSModelSwitcher = _make_switcher_ns(
     output_name="models",
     log_prefix="EPS Model Switcher",
     noun="model",
-    low_pattern=_MODEL_LOW_INPUT_PATTERN,
-    low_tooltip=_MODEL_LOW_INPUT_TOOLTIP,
-    low_output_name="models_low",
-    low_output_tooltip=(
-        "Every enabled row's LOW-noise partner model, index-aligned with "
-        "the models output (WAN-style high/low pairs -- see the 'High/low "
-        "pairs' property). Rows without a low wired contribute a skip for "
-        "this output only."
+    partner=_RowPartner(
+        pattern=_MODEL_LOW_INPUT_PATTERN,
+        name_format="{prefix}_{n}_low",
+        io_type="MODEL",
+        input_tooltip=_MODEL_LOW_INPUT_TOOLTIP,
+        output_name="models_low",
+        output_tooltip=(
+            "Every enabled row's LOW-noise partner model, index-aligned with "
+            "the models output (WAN-style high/low pairs -- see the 'High/low "
+            "pairs' property). Rows without a low wired contribute a skip for "
+            "this output only."
+        ),
+        # v0.66.0's exact wording -- pinned by tests/test_switcher.py.
+        pair_error=(
+            "row {index} pairs {primaries} high model(s) with {partners} low "
+            "model(s) -- the two sides of a high/low pair must match (or wire "
+            "a single low to broadcast). Fix the wiring on {partner_key}."
+        ),
+        short_noun="low",
     ),
     input_tooltip=_MODEL_INPUT_TOOLTIP,
     output_tooltip=(

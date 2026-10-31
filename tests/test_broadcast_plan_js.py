@@ -114,6 +114,7 @@ M_OUTPUTS = [
     ("vae", "VAE"),
     ("model_low", "MODEL"),
     ("run_info", "STRING"),
+    ("mask", "MASK"),
 ]
 
 
@@ -134,6 +135,7 @@ def multiplier(
         "clip": "CLIP",
         "label": "STRING",
         "image": "IMAGE",
+        "mask": "MASK",
         "vae": "VAE",
     }
     inputs = [
@@ -407,6 +409,30 @@ EXACT_SNAP = snapshot(
             ],
         ),
     ]
+)
+#: v0.103.0: `mask` is welded to `image`, so it obeys image's exact rules.
+MASK_NODES = [
+    node(
+        60,
+        "ImageCompositeMasked",
+        "Composite",
+        [inp("image", "IMAGE"), inp("mask", "MASK"), inp("other_mask", "MASK")],
+    ),
+]
+MASK_ON = case(
+    "mask, setting on",
+    snapshot([multiplier(1, wired=("image", "mask")), *MASK_NODES]),
+    settings={"exactNames": True},
+)
+MASK_OFF = case(
+    "mask, setting off",
+    snapshot([multiplier(1, wired=("image", "mask")), *MASK_NODES]),
+    settings={"exactNames": False},
+)
+MASK_NOT_WIRED = case(
+    "mask input unwired, setting on",
+    snapshot([multiplier(1, wired=("image",)), *MASK_NODES]),
+    settings={"exactNames": True},
 )
 EXACT_OFF = case("exact names, setting off", EXACT_SNAP, settings={"exactNames": False})
 EXACT_ON = case("exact names, setting on", EXACT_SNAP, settings={"exactNames": True})
@@ -1580,7 +1606,7 @@ def test_plan_js_parses() -> None:
 
 
 def test_outputs_table_matches_the_backend_return_names(probe: dict) -> None:
-    """The nine outputs, positionally: the planner's names, types and INDEXES
+    """The ten outputs, positionally: the planner's names, types and INDEXES
     are the backend's RETURN_NAMES/RETURN_TYPES (a saved link records
     [origin_id, origin_slot] -- a drift here would wire the wrong output)."""
     from eps_image.nodes_cross_sweep import EPSCrossSweep
@@ -1722,15 +1748,26 @@ def test_dead_outputs_are_not_broadcast(probe: dict) -> None:
 
 def test_exact_name_outputs_are_gated_by_the_setting(probe: dict) -> None:
     off = probe["plans"][EXACT_OFF]
-    assert not {o for o, _, _ in _pairs(off)} & {"text", "image", "label"}
+    assert not {o for o, _, _ in _pairs(off)} & {"text", "image", "mask", "label"}
     gated = {s["output"] for s in _skips(off, "setting-off")}
-    assert gated == {"text", "image", "label"}
+    assert gated == {"text", "image", "mask", "label"}
     states = {o["output"]: o["state"] for o in off["outputs"]}
     assert states["text"] == states["image"] == states["label"] == "setting-off"
     # save_prefix / run_info are NOT behind the setting
     assert ("save_prefix", "46", "filename_prefix") in _pairs(off)
     assert ("save_prefix", "47", "filename_prefix") in _pairs(off)
     assert ("run_info", "47", "run_info") in _pairs(off)
+
+
+def test_mask_output_follows_image_exact_rules(probe: dict) -> None:
+    on = _pairs(probe["plans"][MASK_ON])
+    assert ("image", "60", "image") in on
+    assert ("mask", "60", "mask") in on
+    assert not any(i == "other_mask" for _, _, i in on)  # exact NAME only
+    assert not {o for o, _, _ in _pairs(probe["plans"][MASK_OFF])} & {"image", "mask"}
+    # A mask output with nothing wired into `mask` would fail the queue
+    # (the dead-output guard), so it is never connected.
+    assert not any(o == "mask" for o, _, _ in _pairs(probe["plans"][MASK_NOT_WIRED]))
 
 
 def test_exact_name_outputs_with_the_setting_on(probe: dict) -> None:

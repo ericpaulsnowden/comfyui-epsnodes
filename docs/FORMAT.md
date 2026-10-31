@@ -1566,6 +1566,54 @@ per-input toggle + toggle-all header + N-enabled→N-runs fan-out.
   true tail add/remove with the wired-refusal toast; property-off with a
   wired low reverts + toasts. CLIP/VAE stay single-output — the owner's
   spec is models only (WAN shares CLIP/VAE).
+- **Masks — `pass_masks` (v0.103.0; owner ask 2026-10-31: "an option that is off by
+  default to also pass along the mask with every image. the mask and
+  image should always be passed together").** The WAN lows' row-partner
+  mechanism, generalized: `nodes_switcher.py`'s `_RowPartner` spec is
+  what `_make_switcher_ns` reads for both (the model switcher's spec
+  reproduces v0.66.0 byte for byte), and `switcher.js`'s
+  `SWITCHER_CLASSES[...].pair` drives one converge/re-seat/refusal path
+  for both. Three things differ for masks. (1) The gate is a VISIBLE
+  BOOLEAN `pass_masks` widget in `optional` (default False, not lazy, no
+  `label_on`/`label_off` — they truncate in Nodes 2.0 on 1.52.7; appended
+  after `toggles`, so an old save's `["{}"]` restores to off; declared
+  `boolean` in `EPS_STATE_WIDGETS`) — a widget, not a Properties entry,
+  because Properties are unreachable in Nodes 2.0. (2) On, every
+  `image_N` row gets a lazy `mask_N` (MASK, accepted through
+  `_FlexibleOptionalImageInputs`'s extra spec, grown by the frontend
+  directly below its image, spare included) and the tail `masks` output
+  (`RETURN_TYPES ("IMAGE", "MASK")`, §8 tail append) carries one mask per
+  enabled image in slot order — index-aligned with `images` BY
+  CONSTRUCTION: equal lengths pair, a single mask broadcasts across a
+  list-producing image, any other disagreement fails the queue naming the
+  row and socket; an unwired (or empty) mask on an enabled row contributes
+  `image.new_zeros(image.shape[:3])` (BHW from BHWC — ComfyUI's own "no
+  mask", what LoadImage emits without an alpha; no torch import), so there
+  is never a gap, and a wired mask is never resized or altered.
+  `check_lazy_status` requests `mask_N` only when `pass_masks` is on AND
+  `image_N` is wanted, so a toggled-off row runs neither upstream. A
+  `mask_N` wired with no `image_N` contributes nothing and is logged once
+  per execution (a mask never travels alone). (3) Off, `images` is exactly
+  what it always was, `masks` is a single `ExecutionBlocker`, a wired
+  `mask_N` is ignored, and NO zero mask is allocated (a long video batch
+  would waste gigabytes on masks nobody consumes). All-off/none-wired
+  blocks both outputs. Frontend: the widget's `callback` is CHAINED (a
+  click, and a Universal State Apply's `widget.callback?.(v, canvas,
+  node)`, both land there) and runs the same reconverge as the property
+  hook; a wired mask socket or a wired `masks` output refuses the flip
+  (widget reverts + toast, re-asserted next tick for the Vue renderer) —
+  and the refusal now runs BEFORE any socket is removed, for both classes.
+  Because litegraph's `configure()` fires `onPropertyChanged` for a
+  restored property but no callback for a restored `widgets_values`
+  entry, the widget-gated partner is re-seated SYNCHRONOUSLY in the
+  configure wrap's `finally`: paste-with-links connects by slot INDEX right
+  after `configure()` returns, and the def-first slot merge would
+  otherwise park `mask_1` behind `toggles`/`pass_masks` where the wire
+  lands on the wrong socket. A `masks` wire must go THROUGH §6.10's Run
+  Multiplier (its `mask` input), never around it (its `image` output is
+  longer than this node's list). Pinned by
+  `tests/test_switcher.py::TestPassMasks`, `tests/test_switcher_js.py`'s
+  mask probe, and §6.10's mask tests in both layers.
 - **Output:** single `IMAGE` declared `OUTPUT_IS_LIST` — emits the ENABLED
   images in slot order; downstream runs once per enabled image (N enabled →
   N runs) via core list execution. A list-producing upstream (e.g. EPS
@@ -3354,6 +3402,34 @@ per-run blocker. The §6.10 run-count readout mirrors all of this —
 `model_low` participates in zero-collapse/agreement and never changes
 the number (rig-verified: 2 models + 2 lows reads "2 sweep steps").
 
+**`mask` (§6.4 masks round):** an optional `MASK` input WELDED to `image`
+(model_low's posture on the pair side) plus a TAIL-APPENDED `mask` output
+at slot 9, after `run_info` (`RETURN_TYPES` ends `"STRING", "MASK"`,
+`OUTPUT_IS_LIST` is ten `True`s). Why it exists: this node's `image`
+output is LONGER than the Switcher's list (images × texts × steps), so a
+`masks` wire run AROUND it would be zipped against the wrong images by
+core's repeat-last rule — the mask has to ride through here with its
+image. Never an axis, never a run-count change: each run's `mask` is the
+mask of that run's IMAGE, by the pair row's image index, in `pair_mode`
+multiply AND paired, through every sweep crossing and the `solo_run`
+filter. Lengths: equal to `image` pairs by index, length 1 broadcasts,
+anything else (a wired-but-empty mask included) raises a `ValueError`
+naming both counts; `mask` wired with `image` unwired (text-only) is the
+same loud error. The v0.51.0 consumed-but-unwired guard covers slot 9;
+slot 8 (`run_info`) has no backing input and is never dead. Unwired,
+`mask` emits the per-run blocker — `mask_wired` joined the `run_blocker`
+construction condition, the exact gap the model_low audit found. The
+whole-node blocker path is `RETURN_NAMES`-derived and needed no change.
+The §6.10 estimator counts `mask` like `name` (a consumed member:
+zero/blocked/atLeast/error propagate, it never enters the pair math),
+paints "mask and image disagree: image=N vs mask=M" when both counts are
+exact and M is neither 1 nor N, paints "mask is wired but image is not",
+reads an Image Switcher's slot 1 (`masks`) as known-blocked while its
+`pass_masks` is off (the backend's one-blocker output) and as slot 0's
+count otherwise, and covers slot 9 in the chained dead-output map.
+Pinned by `tests/test_cross_sweep.py::TestMaskWeldedToImage` and the
+mask cases in `tests/test_cross_sweep_js.py`.
+
 Display name renamed from "EPS Cross Sweep" in v0.48.4 (owner ask
 2026-08-02; his "EPS Node Multiplier" adjusted to "Run Multiplier" since
 it multiplies RUNS, not nodes). Display-only — same class-id/saved-title
@@ -3399,8 +3475,10 @@ label, so two chained Cross Products cannot express it.
   points at `sweep_mode: multiply` — a disagreement between fanned sweep
   lists is always a miswire, never something to clamp. Pair-side
   mismatches (paired mode) still warn and use the min. Either side empty
-  → the §6.4 `[ExecutionBlocker(None)]` pattern on all eight outputs
-  (model/clip/image/text/save_prefix/label/vae/model_low).
+  → the §6.4 `[ExecutionBlocker(None)]` pattern on every output
+  (`RETURN_NAMES`-derived: model/clip/image/text/save_prefix/label/vae/
+  model_low/run_info/mask). `mask` (optional, MASK) is welded to `image`
+  — see the `mask` paragraph at the head of this section.
 - **`sweep_mode` (v0.57.0, owner ask 2026-08-09 — "You actually want 4
   models × 2 VAEs (8 runs); each slot corresponding to the same slot is
   not what I'm looking for", straight from hitting the v0.49.1 error with
@@ -3487,14 +3565,15 @@ label, so two chained Cross Products cannot express it.
   input wired "completes immediately, nothing generated").** The node
   takes the `prompt`/`unique_id` hidden pair (§6.4's exact idiom) and
   scans the prompt for consumers of its own slots; any consumed output
-  whose backing input is unwired (model/clip/image/label/vae) raises ONE
-  error naming each such output with per-output guidance (image's names
-  the Empty-Latent txt2img path). Unwired AND unconsumed outputs keep the
-  silent per-run blockers — they poison nobody. Direct callers/tests that
-  pass no prompt get the pre-v0.51.0 behavior unchanged.
+  whose backing input is unwired (model/clip/image/label/vae/model_low/
+  mask) raises ONE error naming each such output with per-output guidance
+  (image's names the Empty-Latent txt2img path). Unwired AND unconsumed
+  outputs keep the silent per-run blockers — they poison nobody. Direct
+  callers/tests that pass no prompt get the pre-v0.51.0 behavior
+  unchanged.
 - **Outputs (all `OUTPUT_IS_LIST`, length steps×pairs):** `model`, `clip`,
   `image`, `text`, `save_prefix`, `label`, then the tail-appended `vae`
-  (v0.46.0) and `model_low` (v0.66.0) — **STRENGTH-MAJOR** (owner
+  (v0.46.0), `model_low` (v0.66.0), `run_info` (v0.70.0) and `mask` — **STRENGTH-MAJOR** (owner
   decision 2026-07-23b: outer loop = sweep step, so each strength's
   results land together; 11 steps × 8 pairs = 88, and the run count
   multiplies again per lora in the sweep's independent mode — surface the
@@ -3668,9 +3747,15 @@ workflow has broadcast wires or the switch is already on; frontends without
 wrapper instead (installed from `init()` / `setup()`, idempotent, gated on the
 same absence so a modern frontend never shows it twice).
 
+**`mask` (`v1` 1.11.0, port of v0.103.0).** The Run Multiplier's new `mask`
+output (slot 9) is in `BROADCAST_OUTPUTS` with `image`'s exact rules: exact
+name + type, behind the same setting, live only while the `mask` input is
+wired -- a mask is welded to its image here too, so it never broadcasts on
+different terms.
+
 **The setting.** `EPSNodes.BroadcastSameNameInputs` (boolean, default `false`),
 category `EPSNodes › Run Multiplier › Broadcast`, name *"Run Multiplier
-broadcast: also connect text, image and label to inputs with the same name"*,
+broadcast: also connect text, image, mask and label to inputs with the same name"*,
 registered through the extension's `settings` array (`web/eps_image.js`),
 id naming as `EPSNodes.HealModelPaths` (`path_heal.js`). Read fresh on every
 plan (`readSettings()`); a missing store reads `false`; only a real `true`

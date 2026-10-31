@@ -119,7 +119,7 @@ const NODE_TITLE = 'EPS Run Multiplier'
  * the cache -- plus the draw module's session switch. */
 export { broadcastLinkIndex, broadcastLinkOwner, bumpBroadcastEpoch, getShowAllWires, isBroadcastLink, setShowAllWires }
 
-/** The ONE ComfyUI setting (owner decision 2026-10-03): text, image and label
+/** The ONE ComfyUI setting (owner decision 2026-10-03): text, image, mask and label
  * connect only to inputs with exactly the same NAME and TYPE, and only when
  * this is on. Id naming follows `EPSNodes.HealModelPaths` (path_heal.js),
  * registered through the extension's `settings` array like
@@ -157,10 +157,10 @@ export const SETTINGS = [
   {
     id: BROADCAST_SETTING_ID,
     category: ['EPSNodes', 'Run Multiplier', 'Broadcast'],
-    name: 'Run Multiplier broadcast: also connect text, image and label to inputs with the same name',
+    name: 'Run Multiplier broadcast: also connect text, image, mask and label to inputs with the same name',
     tooltip:
       'The EPS Run Multiplier’s Broadcast always handles model, clip, vae, model_low, ' +
-      'save_prefix and run_info. With this ON it also connects its text, image and label outputs ' +
+      'save_prefix and run_info. With this ON it also connects its text, image, mask and label outputs ' +
       '— but ONLY to an input with exactly the same name and type (a CLIP Text Encode’s ' +
       '“text” box, an Image Scale’s “image”). It never feeds a text box ' +
       'whose encoder goes to a sampler’s negative input. Off by default; it only changes what ' +

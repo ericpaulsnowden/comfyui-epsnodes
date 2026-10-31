@@ -64,14 +64,14 @@
  *   3. Exact-name outputs go only to an input with exactly that NAME and TYPE
  *      -- save_prefix -> `filename_prefix`, run_info -> `run_info`, and
  *      (behind ONE ComfyUI setting, off by default, decided 2026-10-03)
- *      text -> `text`, image -> `image`, label -> `label` -- and MAY be
- *      widget-backed or optional.
+ *      text -> `text`, image -> `image`, mask -> `mask`, label -> `label` --
+ *      and MAY be widget-backed or optional.
  *   4. Never the multiplier itself or any ANCESTOR of it (a DFS over the
  *      flattened links, across subgraph boundaries both ways).
  *   5. Only LIVE outputs: an output whose backing input is unwired would, if
  *      consumed, fail the run (nodes_cross_sweep.py v0.51.0
  *      `_consumed_output_slots` guard). text/save_prefix/run_info are always
- *      live; model/clip/image/label/vae/model_low are live iff wired.
+ *      live; model/clip/image/label/vae/model_low/mask are live iff wired.
  *   6. Fail closed on ambiguity: another multiplier that could feed the same
  *      input means NEITHER does (conflict). Never touch another multiplier's
  *      inputs.
@@ -163,7 +163,7 @@ export const MAX_OTHER_MULTIPLIERS = 16
  * exactly `type` (widget-backed / optional allowed). `liveInput` = the
  * multiplier input that must be wired for the output to carry values (null =
  * always live). `gated` = governed by the one ComfyUI setting (decided
- * 2026-10-03: text, image and label are OFF by default). */
+ * 2026-10-03: text, image, mask and label are OFF by default). */
 export const BROADCAST_OUTPUTS = Object.freeze([
   { name: 'model', index: 0, type: 'MODEL', rule: 'type', liveInput: 'model', gated: false },
   { name: 'clip', index: 1, type: 'CLIP', rule: 'type', liveInput: 'clip', gated: false },
@@ -173,7 +173,10 @@ export const BROADCAST_OUTPUTS = Object.freeze([
   { name: 'label', index: 5, type: 'STRING', rule: 'exact', exactName: 'label', liveInput: 'label', gated: true },
   { name: 'vae', index: 6, type: 'VAE', rule: 'type', liveInput: 'vae', gated: false },
   { name: 'model_low', index: 7, type: 'MODEL', rule: 'type-low', liveInput: 'model_low', gated: false },
-  { name: 'run_info', index: 8, type: 'STRING', rule: 'exact', exactName: 'run_info', liveInput: null, gated: false }
+  { name: 'run_info', index: 8, type: 'STRING', rule: 'exact', exactName: 'run_info', liveInput: null, gated: false },
+  // v0.103.0: welded to `image`, so it follows image's exact rules -- same
+  // setting, exact name + type, live only when the mask input is wired.
+  { name: 'mask', index: 9, type: 'MASK', rule: 'exact', exactName: 'mask', liveInput: 'mask', gated: true }
 ])
 
 /** Output name -> spec, for lookups by record key. */
@@ -671,7 +674,7 @@ function collectRaw(snapshot, loc, cfgIn, settings) {
       status.state = 'setting-off'
       status.reason =
         `${spec.name} is only broadcast when Settings › EPSNodes › "Run Multiplier broadcast: also ` +
-        'connect text, image and label to inputs with the same name" is on'
+        'connect text, image, mask and label to inputs with the same name" is on'
       pushSkip(SKIP_CODES.SETTING_OFF, status.reason, { output: spec.name })
       continue
     }
@@ -1149,7 +1152,7 @@ function collectRaw(snapshot, loc, cfgIn, settings) {
  * @param {object} config - the multiplier's `properties.Broadcast` (raw or
  *   normalised); toggles, leave-alone list and recorded wires drive the plan
  * @param {{exactNames?: boolean}} settings - `exactNames` is the ONE ComfyUI
- *   setting that enables text/image/label (decided 2026-10-03, off by default)
+ *   setting that enables text/image/mask/label (decided 2026-10-03, off by default)
  * @returns {{
  *   multiplier: string,
  *   proposals: object[], skips: object[], conflicts: object[], outputs: object[],

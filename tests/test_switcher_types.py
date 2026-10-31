@@ -803,8 +803,23 @@ class TestEPSSwitcherIdentityViaFactory:
     """
 
     def test_return_types_and_names_are_still_image(self) -> None:
-        assert EPSSwitcher.RETURN_TYPES == ("IMAGE",)
-        assert EPSSwitcher.RETURN_NAMES == ("images",)
+        # Slot 0 is the identity claim; the `masks` tail (pass_masks
+        # round, §8 tail append) rides behind it without moving a wire.
+        assert EPSSwitcher.RETURN_TYPES == ("IMAGE", "MASK")
+        assert EPSSwitcher.RETURN_NAMES == ("images", "masks")
+
+    @pytest.mark.parametrize(
+        "cls", [EPSModelSwitcher, EPSClipSwitcher, EPSVaeSwitcher], ids=["model", "clip", "vae"]
+    )
+    def test_siblings_carry_no_mask_partner(self, cls) -> None:
+        """The mask partner is EPSSwitcher's alone: no `pass_masks` widget,
+        no `mask_N` slot, no `masks` output, no state-registry entry on
+        the three siblings -- the Model switcher's lows are untouched."""
+        optional = cls.INPUT_TYPES()["optional"]
+        assert "pass_masks" not in optional
+        assert "mask_1" not in optional
+        assert "masks" not in cls.RETURN_NAMES
+        assert "pass_masks" not in cls.EPS_STATE_WIDGETS["widgets"]
 
     def test_input_types_optional_still_uses_the_image_prefix(self) -> None:
         optional = EPSSwitcher.INPUT_TYPES()["optional"]

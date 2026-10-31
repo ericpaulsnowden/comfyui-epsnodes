@@ -506,11 +506,29 @@ def test_unwired_switcher_contributes_nothing_to_the_shared_column(
 
 def test_high_low_pairing_frontend_pins(switcher_source: str) -> None:
     """v0.66.0 (owner spec): pairing is a per-node property on the MODEL
-    switcher only; lows never match inputRe (no checkbox/rename/column of
-    their own -- the row's one toggle governs the pair)."""
+    switcher; lows never match inputRe (no checkbox/rename/column of
+    their own -- the row's one toggle governs the pair). Since the
+    pass_masks round the pair machinery is a per-class `pair` spec on the
+    registry entry: the Model switcher's lows behind the PROPERTY, the
+    Image switcher's masks behind the backend's visible `pass_masks`
+    WIDGET (Properties are unreachable in Nodes 2.0)."""
     assert "EPSModelSwitcher: { prefix: 'model', type: 'MODEL', pairable: true }" in switcher_source
+    assert "EPSSwitcher: { prefix: 'image', type: 'IMAGE', pairable: true }" in switcher_source
     assert "const PROP_HIGH_LOW = 'High/low pairs'" in switcher_source
-    assert "if (spec.pairable) spec.lowInputRe" in switcher_source
+    assert "const PASS_MASKS_WIDGET_NAME = 'pass_masks'" in switcher_source
+    assert "const MASKS_OUTPUT_NAME = 'masks'" in switcher_source
+    # partner regexes are the pair spec's own, never the row `inputRe`
+    assert "SWITCHER_CLASSES.EPSModelSwitcher.pair = {" in switcher_source
+    assert "inputRe: /^model_(\\d+)_low$/" in switcher_source
+    assert "gateProperty: PROP_HIGH_LOW" in switcher_source
+    assert "SWITCHER_CLASSES.EPSSwitcher.pair = {" in switcher_source
+    assert "inputRe: /^mask_(\\d+)$/" in switcher_source
+    assert "gateWidget: PASS_MASKS_WIDGET_NAME" in switcher_source
+    assert "type: 'MASK'" in switcher_source
+    # a `mask_N` must never satisfy the row regex (no checkbox of its own)
+    # -- pinned by the probe's regexResults for `image_N` shapes above;
+    # here the spec-level statement:
+    assert "spec.lowInputRe" not in switcher_source
     # every high converge drags the pair machinery with it -- one choke point
     body = _function_body(switcher_source, "convergeImageInputs(node)")
     assert "convergePairInputs(node)" in body
@@ -520,20 +538,71 @@ def test_high_low_pairing_frontend_pins(switcher_source: str) -> None:
 def test_pair_moves_fix_link_slots_and_off_refuses_wired_lows(switcher_source: str) -> None:
     """litegraph stores link targets by POSITION: any insert/move must fix
     target_slot for every later input (removeInput has its own fixup;
-    insertion/move have none built in). And the property can never
-    silently orphan a wire -- OFF with a wired low reverts + toasts
-    (resolution.js's hide-refusal posture)."""
+    insertion/move have none built in). And the gate can never silently
+    orphan a wire -- OFF with a wired partner reverts + toasts
+    (resolution.js's hide-refusal posture), the gate written DIRECTLY
+    (never through its hook, so no re-entry) with the v0.66.0 wording kept
+    byte-for-byte for the Model switcher."""
     for fn in ("insertInputAt(node, name, type, at)", "moveInput(node, from, to)"):
         body = _function_body(switcher_source, fn)
         assert "link.target_slot = i" in body
     pair_in = _function_body(switcher_source, "convergePairInputs(node)")
-    assert "node.properties[PROP_HIGH_LOW] = true" in pair_in
-    assert "Unwire the low-model sockets" in pair_in
+    # refuse BEFORE removing anything, for a wired socket OR a wired output
+    assert "if (pairGateValue(node) === false && pairWiresPresent(node))" in pair_in
+    assert "refusePairOff(node, socketWired ? pair.refuseInputs : pair.refuseOutput)" in pair_in
+    removal = pair_in.index("node.removeInput(i)")
+    assert pair_in.index("pairWiresPresent(node)") < removal
+    gate = _function_body(switcher_source, "setPairGate(node, on)")
+    assert "node.properties[pair.gateProperty] = on" in gate
+    assert "if (widget) widget.value = on" in gate
+    assert "refuseInputs: 'Unwire the low-model sockets before turning High/low pairs off.'" in (
+        switcher_source
+    )
+    assert "refuseOutput: 'Unwire the models_low output before turning High/low pairs off.'" in (
+        switcher_source
+    )
+    assert "refuseInputs: 'Unwire the mask sockets before turning pass_masks off.'" in (
+        switcher_source
+    )
+    assert "refuseOutput: 'Unwire the masks output before turning pass_masks off.'" in (
+        switcher_source
+    )
     pair_out = _function_body(switcher_source, "convergePairOutput(node)")
-    assert "Unwire the models_low output" in pair_out
+    assert "refusePairOff(node, pair.refuseOutput)" in pair_out
     # the tail output is a TRUE add/remove -- §8's one safe removal spot
-    assert "node.addOutput(LOW_OUTPUT_NAME, spec.type)" in pair_out
+    assert "node.addOutput(pair.outputName, pair.type)" in pair_out
     assert "node.removeOutput(idx)" in pair_out
+
+
+def test_widget_gate_is_chained_and_reseated_synchronously_after_configure(
+    switcher_source: str,
+) -> None:
+    """The mask gate is the backend's `pass_masks` WIDGET: its callback is
+    CHAINED (bypass.js's wireToggle -- a click and a Universal State
+    Apply's `widget.callback?.(v, canvas, node)` both land there), never
+    replaced. And because litegraph's configure() fires onPropertyChanged
+    for a restored property but NO callback for a restored widgets_values
+    entry, the widget-gated partner is re-seated SYNCHRONOUSLY in the
+    configure wrap's finally, before paste-with-links connects wires by
+    slot index -- the Model switcher's property path is untouched."""
+    gate = _function_body(switcher_source, "wirePairingGate(node)")
+    assert "const original = widget.callback" in gate
+    assert "widget.callback = function (...args)" in gate
+    assert "original.apply(this, args)" in gate
+    assert "node.addProperty(pair.gateProperty, false, 'boolean')" in gate
+    assert "node.onPropertyChanged = function (name, value, prevValue)" in gate
+    # the attach-time apply-once still runs for both gates
+    assert gate.rstrip().endswith("convergePairOutput(node)")
+    growth = _function_body(switcher_source, "wireImageInputGrowth(node)")
+    assert "if (spec?.pair?.gateWidget) {" in growth
+    finally_kw = growth.index("} finally {")
+    reseat = growth.index("convergePairInputs(this)")
+    deferred = growth.index("scheduleConverge(this)")
+    assert finally_kw < reseat < deferred
+    # the refusal re-asserts on the next tick for the WIDGET gate only
+    refuse = _function_body(switcher_source, "refusePairOff(node, message)")
+    assert "if (!pairSpecOf(node)?.gateWidget) return" in refuse
+    assert "setTimeout(" in refuse
 
 
 # ---------------------------------------- tab-switch restore-race audit
@@ -1366,3 +1435,635 @@ def test_set_property_does_not_throw_on_the_header_widget(switcher_attach_api: d
     assert result["headerSerialize"] is False
     assert result["headerOptionsSerialize"] is False
     assert result["widgetsValues"] == [json.dumps(OFF_2_TO_5, separators=(",", ":"))]
+
+
+# ------------------------------------------------------------ masks (§6.4)
+#
+# The pass_masks round: EPSSwitcher's row partner is a MASK socket under
+# every image row, gated by the backend's visible `pass_masks` BOOLEAN
+# widget, with a `masks` tail output. The probe below drives the REAL
+# attach() export against an EPSSwitcher stub shaped like frontend
+# 1.52.7's node (the def's image_1, the hidden `toggles` and the visible
+# `pass_masks` each owning a widget-input slot; outputs images + masks
+# from the backend def) through the gestures that matter: the gate flip
+# (a click, and a Universal State Apply's `widget.callback?.(v, canvas,
+# node)`), the wired refusals, reload, an old save, copy/paste/clone, spare
+# growth, and a lifted wire -- and reads what a queue would read.
+
+MASK_PROBE_JS = """
+import * as s from './extensions/comfyui-epsnodes/eps_image/switcher.js'
+
+const INPUT = 1
+const tick = () => new Promise((resolve) => setTimeout(resolve, 0))
+const settle = async () => { await tick(); await tick() }
+globalThis.__toasts = []
+const takeToasts = () => {
+  const t = globalThis.__toasts.map((x) => x.detail)
+  globalThis.__toasts = []
+  return t
+}
+
+let nextLinkId = 1
+
+function makeGraph() {
+  const graph = { links: new Map(), _nodes: [], setDirtyCanvas() {} }
+  graph.add = (node) => { graph._nodes.push(node); node.graph = graph }
+  graph.getNodeById = (id) => graph._nodes.find((n) => n.id === id) || null
+  return graph
+}
+
+// A LoadImage-shaped source: IMAGE at slot 0, MASK at slot 1.
+function makeLoader(id) {
+  return {
+    id, comfyClass: 'LoadImage', inputs: [], widgets: [],
+    outputs: [
+      { name: 'IMAGE', type: 'IMAGE', links: [] },
+      { name: 'MASK', type: 'MASK', links: [] }
+    ],
+    connect(slot, target, targetSlot) {
+      const idx = typeof targetSlot === 'string'
+        ? target.inputs.findIndex((i) => i.name === targetSlot)
+        : targetSlot
+      const input = target.inputs[idx]
+      if (!input) return null
+      if (input.link != null) target.disconnectInput(idx)
+      const link = {
+        id: nextLinkId++, origin_id: this.id, origin_slot: slot,
+        target_id: target.id, target_slot: idx, type: input.type
+      }
+      this.graph.links.set(link.id, link)
+      this.outputs[slot].links.push(link.id)
+      input.link = link.id
+      target.onConnectionsChange?.(INPUT, idx, true, link, input)
+      return link
+    }
+  }
+}
+
+function makeSwitcher(id) {
+  return {
+    id, comfyClass: 'EPSSwitcher', pos: [0, 0], size: [270, 100],
+    flags: {}, properties: {},
+    // The def's own slots (nodes_switcher.py INPUT_TYPES, in order):
+    // image_1, the hidden `toggles` STRING, the visible `pass_masks`
+    // BOOLEAN -- each widget ALSO owning a widget-input slot on 1.52.7.
+    inputs: [
+      { name: 'image_1', type: 'IMAGE', link: null },
+      { name: 'toggles', type: 'STRING', link: null, widget: { name: 'toggles' } },
+      { name: 'pass_masks', type: 'BOOLEAN', link: null, widget: { name: 'pass_masks' } }
+    ],
+    outputs: [
+      { name: 'images', type: 'IMAGE', links: null },
+      { name: 'masks', type: 'MASK', links: null }
+    ],
+    widgets: [
+      { name: 'toggles', type: 'text', value: '{}', options: {} },
+      { name: 'pass_masks', type: 'toggle', value: false, options: {} }
+    ],
+    addProperty(name, value) { this.properties[name] = value },
+    setSize(size) { this.size = size },
+    computeSize() { return [270, 100] },
+    setDirtyCanvas() {},
+    addInput(name, type, extra) {
+      const input = { name, type, link: null, ...(extra || {}) }
+      this.inputs.push(input)
+      return input
+    },
+    removeInput(slot) {
+      this.disconnectInput(slot)
+      this.inputs.splice(slot, 1)
+      for (let i = slot; i < this.inputs.length; i++) {
+        const link = this.graph?.links.get(this.inputs[i].link)
+        if (link) link.target_slot = i
+      }
+    },
+    disconnectInput(slot) {
+      const input = this.inputs[slot]
+      if (!input || input.link == null) return false
+      const link = this.graph?.links.get(input.link)
+      input.link = null
+      if (link) {
+        this.graph.links.delete(link.id)
+        const origin = this.graph.getNodeById(link.origin_id)
+        const out = origin?.outputs?.[link.origin_slot]
+        if (out?.links) out.links = out.links.filter((linkId) => linkId !== link.id)
+      }
+      this.onConnectionsChange?.(INPUT, slot, false, link, input)
+      return true
+    },
+    addOutput(name, type) { this.outputs.push({ name, type, links: null }) },
+    removeOutput(idx) { this.outputs.splice(idx, 1) },
+    addCustomWidget(widget) { this.widgets.push(widget); return widget },
+    getConnectionPos(isInput, slot) { return [0, 10 + slot * 20] },
+    // LGraphNode.configure (1.52.7): def-first slot merge, outputs,
+    // properties (hook fires), the hardcoded-true onConnectionsChange
+    // loop, then widgets_values -- set DIRECTLY, no widget callback.
+    configure(info) {
+      if (info.inputs) {
+        const saved = new Map(info.inputs.map((input) => [input.name, input]))
+        const defSlots = this.inputs.map((input) => ({ ...(saved.get(input.name) ?? input) }))
+        const extras = info.inputs
+          .filter((input) => !this.inputs.some((current) => current.name === input.name))
+          .map((input) => ({ ...input }))
+        this.inputs = [...defSlots, ...extras]
+      }
+      if (info.outputs) this.outputs = info.outputs.map((output) => ({ ...output }))
+      for (const [name, value] of Object.entries(info.properties || {})) {
+        this.properties[name] = value
+        this.onPropertyChanged?.(name, value)
+      }
+      for (const [i, input] of this.inputs.entries()) {
+        const link = input.link != null ? this.graph?.links.get(input.link) : null
+        this.onConnectionsChange?.(INPUT, i, true, link, input)
+      }
+      if (info.widgets_values) {
+        let n = 0
+        for (const widget of this.widgets) {
+          if (widget.serialize === false) continue
+          if (n >= info.widgets_values.length) break
+          widget.value = info.widgets_values[n++]
+        }
+      }
+    }
+  }
+}
+
+const widgetOf = (node, name) => node.widgets.find((w) => w.name === name)
+const togglesOf = (node) => JSON.parse(widgetOf(node, 'toggles').value)
+const gateOf = (node) => widgetOf(node, 'pass_masks').value
+const names = (node) => node.inputs.map((input) => input.name)
+const rowsOf = (node) => node.inputs
+  .filter((input) => /^(image|mask)_\\d+$/.test(input.name))
+  .map((input) => `${input.name}:${input.link == null ? '-' : 'wired'}`)
+const outputsOf = (node) => node.outputs.map((output) => output.name)
+const enabledWired = (node) => {
+  const toggles = togglesOf(node)
+  return node.inputs.filter(
+    (input) =>
+      /^image_\\d+$/.test(input.name) && input.link != null && toggles[input.name] !== false
+  ).length
+}
+// A real toggle gesture: litegraph writes the value then fires the
+// callback -- the same two steps universal_controller.js's _writeApplyPlan
+// takes (`widget.value = v; widget.callback?.(v, app.canvas, node)`).
+function flipGate(node, on) {
+  const widget = widgetOf(node, 'pass_masks')
+  widget.value = on
+  widget.callback?.(on, null, node)
+}
+const snapshot = (node) => ({
+  names: names(node), rows: rowsOf(node), outputs: outputsOf(node), gate: gateOf(node),
+  toggles: togglesOf(node), enabledWired: enabledWired(node)
+})
+function clickRow(node, name) {
+  const noop = () => {}
+  const ctx = { save: noop, restore: noop, beginPath: noop, roundRect: noop, rect: noop,
+    fill: noop, stroke: noop, moveTo: noop, lineTo: noop, fillText: noop }
+  node.onDrawForeground(ctx, null, null)
+  const rect = node.__epsSwitcherRowRects.find((r) => r.name === name)
+  if (!rect) throw new Error(`no toggle box drawn for ${name}`)
+  node.onMouseDown({}, [rect.x + 1, rect.y + 1], null)
+}
+
+function build() {
+  const graph = makeGraph()
+  const sw = makeSwitcher(1)
+  graph.add(sw)
+  const loaders = []
+  for (let i = 0; i < 5; i++) {
+    const loader = makeLoader(10 + i)
+    graph.add(loader)
+    loaders.push(loader)
+  }
+  s.attach(sw)
+  return { graph, sw, loaders }
+}
+
+async function wireThree() {
+  const rig = build()
+  for (let i = 0; i < 3; i++) {
+    rig.loaders[i].connect(0, rig.sw, `image_${i + 1}`)
+    await settle()
+  }
+  return rig
+}
+
+const out = {}
+
+// --- A: a fresh node -- the gate is off, the backend-declared masks tail
+// comes off at attach, no mask sockets.
+{
+  const { sw } = build()
+  out.fresh = snapshot(sw)
+}
+
+// --- B: three wired rows, gate ON via the widget -> every row (spare
+// included) gets its mask directly below it, the tail output appears.
+{
+  const { sw } = await wireThree()
+  flipGate(sw, true)
+  out.on = snapshot(sw)
+  // ...and OFF again with nothing wired removes them all.
+  flipGate(sw, false)
+  out.offUnwired = snapshot(sw)
+  out.offToasts = takeToasts()
+}
+
+// --- C: a WIRED mask socket refuses the flip (widget reverts + toast);
+// unwire it and the flip goes through.
+{
+  const { sw, loaders } = await wireThree()
+  flipGate(sw, true)
+  loaders[1].connect(1, sw, 'mask_2')
+  await settle()
+  const wired = snapshot(sw)
+  flipGate(sw, false)
+  await settle() // the next-tick re-assert
+  const refused = { ...snapshot(sw), toasts: takeToasts() }
+  sw.disconnectInput(sw.inputs.findIndex((input) => input.name === 'mask_2'))
+  await settle()
+  flipGate(sw, false)
+  out.refuseInput = { wired, refused, after: snapshot(sw) }
+}
+
+// --- D: a WIRED masks output refuses the flip the same way.
+{
+  const { sw } = await wireThree()
+  flipGate(sw, true)
+  sw.outputs.find((o) => o.name === 'masks').links = [99]
+  flipGate(sw, false)
+  await settle()
+  const refused = { ...snapshot(sw), toasts: takeToasts() }
+  sw.outputs.find((o) => o.name === 'masks').links = []
+  flipGate(sw, false)
+  out.refuseOutput = { refused, after: snapshot(sw) }
+}
+
+// --- E: a workflow saved with masks ON reloads in FILE order (toggles and
+// pass_masks sit between image_1 and mask_1 after the def-first merge):
+// every socket and wire restores, re-seated under its image -- and that
+// re-seat is SYNCHRONOUS (read before any tick), which is what paste-with-
+// links relies on.
+{
+  const { graph, sw, loaders } = build()
+  const wire = (loader, slot, originSlot) => {
+    const link = {
+      id: nextLinkId++, origin_id: loader.id, origin_slot: originSlot,
+      target_id: sw.id, target_slot: slot, type: originSlot === 0 ? 'IMAGE' : 'MASK'
+    }
+    graph.links.set(link.id, link)
+    loader.outputs[originSlot].links.push(link.id)
+    return link.id
+  }
+  sw.configure({
+    inputs: [
+      { name: 'image_1', type: 'IMAGE', link: wire(loaders[0], 0, 0) },
+      { name: 'mask_1', type: 'MASK', link: wire(loaders[0], 1, 1) },
+      { name: 'toggles', type: 'STRING', link: null, widget: { name: 'toggles' } },
+      { name: 'pass_masks', type: 'BOOLEAN', link: null, widget: { name: 'pass_masks' } },
+      { name: 'image_2', type: 'IMAGE', link: wire(loaders[1], 4, 0) },
+      { name: 'mask_2', type: 'MASK', link: null },
+      { name: 'image_3', type: 'IMAGE', link: null },
+      { name: 'mask_3', type: 'MASK', link: null }
+    ],
+    outputs: [
+      { name: 'images', type: 'IMAGE', links: [] },
+      { name: 'masks', type: 'MASK', links: [] }
+    ],
+    properties: {},
+    widgets_values: ['{"image_2":false}', true]
+  })
+  const synchronous = snapshot(sw)
+  await settle()
+  const linkSlots = [...graph.links.values()].map(
+    (link) => `${link.origin_id}:${link.origin_slot}->${link.target_slot}`
+  )
+  out.reloadOn = { synchronous, settled: snapshot(sw), linkSlots }
+}
+
+// --- F: an OLD save (no pass_masks in widgets_values, one output) loads
+// with the gate off and keeps exactly what it saved.
+{
+  const { graph, sw, loaders } = build()
+  const link = {
+    id: nextLinkId++, origin_id: loaders[0].id, origin_slot: 0,
+    target_id: sw.id, target_slot: 0, type: 'IMAGE'
+  }
+  graph.links.set(link.id, link)
+  loaders[0].outputs[0].links.push(link.id)
+  sw.configure({
+    inputs: [
+      { name: 'image_1', type: 'IMAGE', link: link.id },
+      { name: 'toggles', type: 'STRING', link: null, widget: { name: 'toggles' } },
+      { name: 'image_2', type: 'IMAGE', link: null }
+    ],
+    outputs: [{ name: 'images', type: 'IMAGE', links: [] }],
+    properties: {},
+    widgets_values: ['{}']
+  })
+  await settle()
+  out.oldSave = snapshot(sw)
+}
+
+// ------------------------------------------------------------------------
+// Copy / paste / clone (the v0.100.4 probe's exact litegraph order).
+// ------------------------------------------------------------------------
+function serializeLike(node) {
+  return {
+    inputs: node.inputs.map((input) => ({
+      name: input.name, type: input.type, link: input.link,
+      ...(input.widget ? { widget: { ...input.widget } } : {})
+    })),
+    outputs: node.outputs.map((output) => ({
+      name: output.name, type: output.type, links: output.links ? [...output.links] : null
+    })),
+    properties: { ...node.properties },
+    widgets_values: node.widgets.filter((w) => w.serialize !== false).map((w) => w.value)
+  }
+}
+function cloneLike(node) {
+  const data = serializeLike(node)
+  for (const input of data.inputs) input.link = null
+  for (const output of data.outputs) if (output.links) output.links.length = 0
+  const copy = makeSwitcher(node.id)
+  s.attach(copy)
+  copy.configure(data)
+  return copy
+}
+function copyLike(node, graph) {
+  const clip = { node: serializeLike(cloneLike(node)), links: [] }
+  for (const [idx, input] of node.inputs.entries()) {
+    if (input.link == null) continue
+    const link = graph.links.get(input.link)
+    clip.links.push({
+      origin_id: link.origin_id, origin_slot: link.origin_slot,
+      target_id: node.id, target_slot: idx
+    })
+  }
+  return clip
+}
+async function pasteLike(clip, graph, id, { connectInputs }) {
+  const pasted = makeSwitcher(id)
+  s.attach(pasted)
+  graph.add(pasted)
+  pasted.configure(clip.node)
+  if (connectInputs) {
+    for (const link of clip.links) {
+      graph.getNodeById(link.origin_id).connect(link.origin_slot, pasted, link.target_slot)
+    }
+  }
+  await settle()
+  return pasted
+}
+
+// --- G: Ctrl+C / Ctrl+Shift+V with masks on and two masks wired.
+{
+  const { graph, sw, loaders } = await wireThree()
+  flipGate(sw, true)
+  loaders[0].connect(1, sw, 'mask_1')
+  loaders[2].connect(1, sw, 'mask_3')
+  await settle()
+  const clip = copyLike(sw, graph)
+  const pasted = await pasteLike(clip, graph, 2, { connectInputs: true })
+  out.pasteWithLinks = {
+    clipboardNames: clip.node.inputs.map((input) => input.name),
+    clipboardGate: clip.node.widgets_values[1],
+    clipboardOutputs: clip.node.outputs.map((output) => output.name),
+    linkSlots: clip.links.map((link) => link.target_slot),
+    original: snapshot(sw),
+    pasted: snapshot(pasted)
+  }
+  // --- H: plain Ctrl+V of the same node (no links come along).
+  const plain = await pasteLike(copyLike(sw, graph), graph, 3, { connectInputs: false })
+  out.pastePlain = snapshot(plain)
+}
+
+// --- I: the trailing spare grows and collapses WITH its mask.
+{
+  const { sw, loaders } = await wireThree()
+  flipGate(sw, true)
+  loaders[3].connect(0, sw, 'image_4') // the spare
+  await settle()
+  const grown = snapshot(sw)
+  sw.disconnectInput(sw.inputs.findIndex((input) => input.name === 'image_4'))
+  await settle()
+  out.spare = { grown, collapsed: snapshot(sw) }
+}
+
+// --- J: lift a wired row's image wire and drop it back with its mask
+// wired and the row switched off -- the mask stays under its image, the
+// row stays off, a foreign `mask_2: false` toggles key is pruned.
+{
+  const { sw, loaders } = await wireThree()
+  flipGate(sw, true)
+  loaders[1].connect(1, sw, 'mask_2')
+  await settle()
+  clickRow(sw, 'image_2')
+  widgetOf(sw, 'toggles').value = JSON.stringify({ ...togglesOf(sw), mask_2: false })
+  sw.disconnectInput(sw.inputs.findIndex((input) => input.name === 'image_2'))
+  await settle()
+  const lifted = snapshot(sw)
+  loaders[1].connect(0, sw, 'image_2')
+  await settle()
+  out.liftAndDropBack = { lifted, dropped: snapshot(sw) }
+}
+
+process.stdout.write(JSON.stringify(out))
+"""
+
+
+@pytest.fixture(scope="module")
+def switcher_mask_api(tmp_path_factory: pytest.TempPathFactory) -> dict:
+    """Runs MASK_PROBE_JS against the REAL switcher.js in the served-layout
+    shape, with an `app` stub whose toast surface RECORDS what switcher.js
+    tells the user (the refusal probes read it back)."""
+    layout = tmp_path_factory.mktemp("web_root_masks")
+    module_dir = layout / "extensions" / "comfyui-epsnodes" / "eps_image"
+    module_dir.mkdir(parents=True)
+    shutil.copyfile(SWITCHER_JS, module_dir / "switcher.js")
+    scripts = layout / "scripts"
+    scripts.mkdir(parents=True, exist_ok=True)
+    (scripts / "app.js").write_text(
+        "export const app = { extensionManager: { toast: { add: (t) => "
+        "globalThis.__toasts.push(t) } } }\n",
+        encoding="utf-8",
+    )
+    probe = layout / "probe.mjs"
+    probe.write_text(MASK_PROBE_JS, encoding="utf-8")
+    result = subprocess.run(
+        [NODE, str(probe)], capture_output=True, text=True, timeout=60, cwd=layout
+    )
+    assert result.returncode == 0, f"mask probe failed:\n{result.stderr}"
+    return json.loads(result.stdout)
+
+
+THREE_WIRED_WITH_MASKS = [
+    "image_1:wired", "mask_1:-", "image_2:wired", "mask_2:-",
+    "image_3:wired", "mask_3:-", "image_4:-", "mask_4:-",
+]
+THREE_WIRED_NO_MASKS = ["image_1:wired", "image_2:wired", "image_3:wired", "image_4:-"]
+
+
+def test_fresh_image_switcher_has_the_gate_off_and_no_masks_tail(switcher_mask_api: dict) -> None:
+    """A fresh node: `pass_masks` is the backend's widget at its False
+    default, the backend-declared `masks` tail comes off at attach (the
+    apply-once rationale), and no mask socket exists."""
+    fresh = switcher_mask_api["fresh"]
+    assert fresh["gate"] is False
+    assert fresh["outputs"] == ["images"]
+    assert fresh["names"] == ["image_1", "toggles", "pass_masks"]
+    assert fresh["rows"] == ["image_1:-"]
+
+
+def test_gate_on_places_a_mask_under_every_row_and_adds_the_tail_output(
+    switcher_mask_api: dict,
+) -> None:
+    """ON: every image row -- the trailing spare included -- gets `mask_N`
+    DIRECTLY below it (the widget-input slots stay where the def put
+    them), and the `masks` output appears at the tail."""
+    on = switcher_mask_api["on"]
+    assert on["gate"] is True
+    assert on["rows"] == THREE_WIRED_WITH_MASKS
+    assert on["names"] == [
+        "image_1", "mask_1", "toggles", "pass_masks",
+        "image_2", "mask_2", "image_3", "mask_3", "image_4", "mask_4",
+    ]
+    assert on["outputs"] == ["images", "masks"]
+    assert on["enabledWired"] == 3
+
+
+def test_gate_off_with_nothing_wired_removes_masks_and_the_tail(switcher_mask_api: dict) -> None:
+    off = switcher_mask_api["offUnwired"]
+    assert off["gate"] is False
+    assert off["rows"] == THREE_WIRED_NO_MASKS
+    assert off["outputs"] == ["images"]
+    assert switcher_mask_api["offToasts"] == []
+
+
+def test_wired_mask_socket_refuses_the_flip_with_an_accurate_toast(
+    switcher_mask_api: dict,
+) -> None:
+    """OFF with a wired mask: the widget snaps back to true, nothing is
+    removed, and the toast says what to unwire -- naming the mask sockets
+    and `pass_masks`, never the Model switcher's wording. Unwiring it lets
+    the flip through."""
+    probe = switcher_mask_api["refuseInput"]
+    assert probe["wired"]["rows"][3] == "mask_2:wired"
+    refused = probe["refused"]
+    assert refused["gate"] is True
+    assert refused["rows"] == probe["wired"]["rows"]
+    assert refused["outputs"] == ["images", "masks"]
+    assert refused["toasts"] == ["Unwire the mask sockets before turning pass_masks off."]
+    after = probe["after"]
+    assert after["gate"] is False
+    assert after["rows"] == THREE_WIRED_NO_MASKS
+    assert after["outputs"] == ["images"]
+
+
+def test_wired_masks_output_refuses_the_flip(switcher_mask_api: dict) -> None:
+    probe = switcher_mask_api["refuseOutput"]
+    assert probe["refused"]["gate"] is True
+    assert probe["refused"]["outputs"] == ["images", "masks"]
+    assert probe["refused"]["rows"] == THREE_WIRED_WITH_MASKS
+    assert probe["refused"]["toasts"] == ["Unwire the masks output before turning pass_masks off."]
+    assert probe["after"]["gate"] is False
+    assert probe["after"]["outputs"] == ["images"]
+    assert probe["after"]["rows"] == THREE_WIRED_NO_MASKS
+
+
+def test_reload_with_masks_on_reseats_synchronously_and_keeps_every_wire(
+    switcher_mask_api: dict,
+) -> None:
+    """A save with masks on restores all sockets and wires, each mask
+    re-seated under its image -- SYNCHRONOUSLY inside configure() (a
+    restored widgets_values entry fires no callback, so the configure wrap
+    does the re-seat itself), and unchanged after the deferred converge.
+    `image_2: false` survives, the gate reads true, both outputs exist."""
+    probe = switcher_mask_api["reloadOn"]
+    expected_names = [
+        "image_1", "mask_1", "toggles", "pass_masks",
+        "image_2", "mask_2", "image_3", "mask_3",
+    ]
+    assert probe["synchronous"]["names"] == expected_names
+    assert probe["settled"]["names"] == expected_names
+    assert probe["settled"]["rows"] == [
+        "image_1:wired", "mask_1:wired", "image_2:wired", "mask_2:-", "image_3:-", "mask_3:-",
+    ]
+    assert probe["settled"]["gate"] is True
+    assert probe["settled"]["outputs"] == ["images", "masks"]
+    assert probe["settled"]["toggles"] == {"image_2": False}
+    assert probe["settled"]["enabledWired"] == 1
+    # link target_slot fixups followed every move
+    assert sorted(probe["linkSlots"]) == ["10:0->0", "10:1->1", "11:0->4"]
+
+
+def test_old_save_without_pass_masks_restores_off_with_its_one_output(
+    switcher_mask_api: dict,
+) -> None:
+    old = switcher_mask_api["oldSave"]
+    assert old["gate"] is False
+    assert old["outputs"] == ["images"]
+    assert old["rows"] == ["image_1:wired", "image_2:-"]
+    assert old["names"] == ["image_1", "toggles", "pass_masks", "image_2"]
+
+
+def test_paste_with_links_keeps_masks_wires_order_and_tail(switcher_mask_api: dict) -> None:
+    """Ctrl+C / Ctrl+Shift+V with masks on: the throwaway clone is
+    re-seated before it is serialized (so the clipboard carries the
+    original order and the gate), the paste re-seats before the
+    index-based connect() calls land, and every image AND mask wire comes
+    back on the right socket with the tail output."""
+    probe = switcher_mask_api["pasteWithLinks"]
+    expected_names = [
+        "image_1", "mask_1", "toggles", "pass_masks",
+        "image_2", "mask_2", "image_3", "mask_3", "image_4", "mask_4",
+    ]
+    assert probe["clipboardNames"] == expected_names
+    assert probe["clipboardGate"] is True
+    assert probe["clipboardOutputs"] == ["images", "masks"]
+    assert probe["linkSlots"] == [0, 1, 4, 6, 7]
+    expected_rows = [
+        "image_1:wired", "mask_1:wired", "image_2:wired", "mask_2:-",
+        "image_3:wired", "mask_3:wired", "image_4:-", "mask_4:-",
+    ]
+    assert probe["original"]["rows"] == expected_rows
+    assert probe["pasted"]["rows"] == expected_rows
+    assert probe["pasted"]["names"] == expected_names
+    assert probe["pasted"]["gate"] is True
+    assert probe["pasted"]["outputs"] == ["images", "masks"]
+
+
+def test_plain_paste_with_masks_on_is_a_tidy_one_spare_pair(switcher_mask_api: dict) -> None:
+    plain = switcher_mask_api["pastePlain"]
+    assert plain["rows"] == ["image_1:-", "mask_1:-"]
+    assert plain["gate"] is True
+    assert plain["outputs"] == ["images", "masks"]
+
+
+def test_spare_grows_and_collapses_with_its_mask(switcher_mask_api: dict) -> None:
+    probe = switcher_mask_api["spare"]
+    assert probe["grown"]["rows"] == [
+        "image_1:wired", "mask_1:-", "image_2:wired", "mask_2:-", "image_3:wired", "mask_3:-",
+        "image_4:wired", "mask_4:-", "image_5:-", "mask_5:-",
+    ]
+    assert probe["collapsed"]["rows"] == THREE_WIRED_WITH_MASKS
+
+
+def test_lifting_an_image_wire_keeps_its_mask_seated_and_the_row_off(
+    switcher_mask_api: dict,
+) -> None:
+    """Lift image_2's wire (its mask stays wired), drop it back: the mask
+    never leaves its row, the row's `false` is sticky (v0.100.3), and a
+    `mask_N` key -- not a row name -- is pruned from toggles."""
+    probe = switcher_mask_api["liftAndDropBack"]
+    assert probe["lifted"]["rows"] == [
+        "image_1:wired", "mask_1:-", "image_2:-", "mask_2:wired",
+        "image_3:wired", "mask_3:-", "image_4:-", "mask_4:-",
+    ]
+    assert probe["lifted"]["toggles"] == {"image_2": False}
+    assert probe["dropped"]["rows"] == [
+        "image_1:wired", "mask_1:-", "image_2:wired", "mask_2:wired",
+        "image_3:wired", "mask_3:-", "image_4:-", "mask_4:-",
+    ]
+    assert probe["dropped"]["toggles"] == {"image_2": False}
+    assert probe["dropped"]["enabledWired"] == 2
