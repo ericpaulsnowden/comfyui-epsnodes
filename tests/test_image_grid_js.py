@@ -534,7 +534,11 @@ out.basenames = [
   // change, no-ops (no re-fire) when the resolved value hasn't changed.
   {
     const { node, focusWidget, calls } = makeGridNode(102, { mode: 'Emit' })
-    node.images = [R3('a.png'), R3('b.png')]
+    // Settled by THIS file (a real buffer load), not a bare `node.images =`
+    // -- since 2026-11-02 only our own settle lets a clearing write through
+    // (core's own preview path also produces an array there; see
+    // `writeFocusWidget`).
+    grid.setNodeImagesFromRefs(node, [R3('a.png'), R3('b.png')])
     node.imageIndex = 1
     grid.syncFocusFromView(node)
     const afterFocus = { value: focusWidget.value, calls: calls.length }
@@ -650,6 +654,103 @@ out.basenames = [
       resolvedAfterSettle,
       clearsAfterRealUnfocus
     }
+  }
+
+  // 2026-11-02 (owner: "the image grid keeps forgetting its state" on undo
+  // and tab switch). Core's output store outlives the node object across
+  // both, and its `updatePreviews` would render from it on the first draw
+  // -- then its late `onLoaded` nulls `imageIndex`. `adoptPreservedOutputs`
+  // runs ahead of it: adopts the store entry as a `/list` result, restores
+  // the persisted focus, and leaves core's identity check equal.
+  {
+    const { node, focusWidget } = makeGridNode(110, { focusValue: 'b.png' })
+    app.nodeOutputs['110'] = { images: [R3('a.png'), R3('b.png'), R3('c.png')] }
+    const adopted = grid.adoptPreservedOutputs(node)
+    const afterAdopt = {
+      settled: !!node.__epsGridBufferSettled,
+      imageIndex: node.imageIndex,
+      thumbs: Array.isArray(node.imgs) && node.imgs.length === 3 && node.imgs.every((i) => !!i.__epsUrl),
+      identityEqual: node.images === app.nodeOutputs['110'].images,
+      coreWouldRerender: coreWouldRerender(node)
+    }
+    // The draw-time poll in the same draw (adopt runs first) sees the
+    // restored index -- nothing to write, the widget is intact.
+    grid.syncFocusFromView(node)
+    const widgetAfterDraw = focusWidget.value
+    // Already settled: a no-op, the view is the user's now.
+    node.imageIndex = 2
+    const second = grid.adoptPreservedOutputs(node)
+    const untouchedIndex = node.imageIndex
+
+    // Nothing preserved (a fresh page load) -> nothing to adopt, and no
+    // settle either -- the clearing guard keeps holding for `/list`.
+    const { node: bare, focusWidget: bareWidget } = makeGridNode(111, { focusValue: 'a.png' })
+    const noEntry = grid.adoptPreservedOutputs(bare)
+    app.nodeOutputs['111'] = { images: [] }
+    const emptyEntry = grid.adoptPreservedOutputs(bare)
+    grid.syncFocusFromView(bare)
+    const bareState = { settled: !!bare.__epsGridBufferSettled, widget: bareWidget.value }
+    delete app.nodeOutputs['111']
+
+    // A subgraph grid keeps core's rendering (same locator rule as
+    // syncCoreOutputStore -- the plain id would be some root node's key).
+    const { node: nested } = makeGridNode(112, { focusValue: 'a.png' })
+    nested.graph = { isSubgraph: true }
+    app.nodeOutputs['112'] = { images: [R3('a.png')] }
+    const nestedAdopted = grid.adoptPreservedOutputs(nested)
+    const nestedUntouched = nested.images === undefined && !nested.__epsGridBufferSettled
+    delete app.nodeOutputs['112']
+
+    out.adoptPreserved = {
+      adopted, afterAdopt, widgetAfterDraw, second, untouchedIndex,
+      noEntry, emptyEntry, bareState, nestedAdopted, nestedUntouched
+    }
+  }
+
+  // The guard itself, pinned on the exact shape core's path leaves behind:
+  // `node.images` IS an array (core assigned it) but THIS file never
+  // settled the node, and `imageIndex` is null (core's `onLoaded`). Until
+  // 2026-11-02 that passed as a settle and wiped the persisted focus.
+  {
+    const { node, focusWidget } = makeGridNode(113, { focusValue: 'b.png' })
+    node.images = [R3('a.png'), R3('b.png')]
+    node.imgs = [new Image(), new Image()]
+    node.imageIndex = null
+    grid.syncFocusFromView(node)
+    out.coreArrayIsNotASettle = focusWidget.value
+  }
+
+  // captureUndoStep: every view-driven write is its own undo step; a
+  // settled draw with nothing changed captures nothing.
+  {
+    const captures = []
+    app.extensionManager.workflow = {
+      activeWorkflow: { changeTracker: { captureCanvasState: () => captures.push('capture') } }
+    }
+    const { node } = makeGridNode(114)
+    grid.setNodeImagesFromRefs(node, [R3('a.png'), R3('b.png')])
+    grid.syncFocusFromView(node) // settled, unfocused, widget already '' -> no write
+    const afterNoChange = captures.length
+    node.imageIndex = 1
+    grid.syncFocusFromView(node)
+    const afterFocus = captures.length
+    grid.syncFocusFromView(node) // the next draw -- unchanged
+    const afterRepeat = captures.length
+    node.imageIndex = null
+    grid.syncFocusFromView(node)
+    const afterUnfocus = captures.length
+
+    // Older frontends: only the (now deprecated) checkState exists.
+    app.extensionManager.workflow = {
+      activeWorkflow: { changeTracker: { checkState: () => captures.push('check') } }
+    }
+    const legacy = grid.captureUndoStep()
+    // No tracker at all (Vue-less test shells, a very old build): false, no throw.
+    app.extensionManager.workflow = undefined
+    const none = grid.captureUndoStep()
+    delete app.extensionManager.workflow
+
+    out.undoStep = { afterNoChange, afterFocus, afterRepeat, afterUnfocus, calls: captures, legacy, none }
   }
 }
 
@@ -1793,6 +1894,90 @@ def test_clear_node_preview_marks_the_buffer_settled() -> None:
     guard that protects a not-yet-restored one."""
     body = _function_body("function clearNodePreview")
     assert "markBufferSettled(node)" in body
+
+
+# ---- Undo / tab switch kept un-focusing the grid (owner report 2026-11-02) ----
+
+
+def test_adopt_preserved_outputs_settles_restores_and_pre_empts_core(grid_api: dict) -> None:
+    """Core keeps `app.nodeOutputs` across an undo (`clean = false`) and a
+    tab switch (`ChangeTracker.store()/restore()`), and would render the
+    rebuilt node from it on the first draw -- then null `imageIndex` when
+    its full-res loads land. Adopting the entry first makes the store and
+    `node.images` one identity (core's check equal, its load never starts)
+    and restores the persisted focus against those very refs."""
+    adopt = grid_api["adoptPreserved"]
+    assert adopt["adopted"] is True
+    assert adopt["afterAdopt"] == {
+        "settled": True,
+        "imageIndex": 1,
+        "thumbs": True,
+        "identityEqual": True,
+        "coreWouldRerender": False,
+    }
+    assert adopt["widgetAfterDraw"] == "b.png"
+    assert adopt["second"] is False  # settled -> the view is the user's
+    assert adopt["untouchedIndex"] == 2
+
+
+def test_adopt_preserved_outputs_is_a_noop_without_an_entry(grid_api: dict) -> None:
+    """A fresh page load has nothing preserved: no adopt, and -- just as
+    important -- no settle, so the clearing guard keeps holding the
+    persisted focus for the `/list` that is still coming."""
+    adopt = grid_api["adoptPreserved"]
+    assert adopt["noEntry"] is False
+    assert adopt["emptyEntry"] is False
+    assert adopt["bareState"] == {"settled": False, "widget": "a.png"}
+
+
+def test_adopt_preserved_outputs_skips_subgraph_nodes(grid_api: dict) -> None:
+    """Same locator rule as `syncCoreOutputStore`: inside a subgraph the
+    plain id would be some unrelated root node's store key."""
+    adopt = grid_api["adoptPreserved"]
+    assert adopt["nestedAdopted"] is False
+    assert adopt["nestedUntouched"] is True
+
+
+def test_core_assigned_images_array_is_not_a_settle(grid_api: dict) -> None:
+    """The exact shape core's own preview path leaves behind -- an array in
+    `node.images`, a null `imageIndex` from its `onLoaded` -- must not let
+    the draw-time poll clear the persisted focus. Until 2026-11-02 it did."""
+    assert grid_api["coreArrayIsNotASettle"] == "b.png"
+
+
+def test_focus_write_is_its_own_undo_step(grid_api: dict) -> None:
+    """Core captures undo state at mouse-up, but a tile's focus is set by
+    core one draw later and written to the widget the draw after -- so
+    without a capture of our own the NEXT action's capture bundled the
+    focus in, and undoing that action un-focused the grid."""
+    step = grid_api["undoStep"]
+    assert step["afterNoChange"] == 0
+    assert step["afterFocus"] == 1
+    assert step["afterRepeat"] == 1  # an unchanged draw never re-captures
+    assert step["afterUnfocus"] == 2
+    assert step["calls"] == ["capture", "capture", "check"]
+    assert step["legacy"] is True
+    assert step["none"] is False
+
+
+def test_write_focus_widget_guard_reads_only_this_files_settle() -> None:
+    body = _function_body("function writeFocusWidget")
+    assert "if (!value && !node.__epsGridBufferSettled) return" in body
+    assert "Array.isArray(node.images)" not in body
+    # The undo step is captured AFTER the value and its callback land.
+    assert body.index("widget.callback(value") < body.index("captureUndoStep()")
+
+
+def test_adopt_runs_first_in_the_outermost_draw_wrap() -> None:
+    """Order is load-bearing twice over: ahead of `syncFocusFromView` in the
+    same draw (so the poll reads the restored index), and ahead of core's
+    prototype hook (so its identity check is already equal)."""
+    body = _function_body("function installFocusWidgetSync")
+    assert body.index("adoptPreservedOutputs(this)") < body.index("syncFocusFromView(this)")
+    attach_body = _function_body("export function attach")
+    swap = attach_body.index("installFocusedFullResSwap(node)")
+    sync = attach_body.index("installFocusWidgetSync(node)")
+    assert swap < sync  # installed last of the draw wraps -> outermost -> runs first
 
 
 # ---- Clipspace copy full-res parity (owner report 2026-09-09) ----
