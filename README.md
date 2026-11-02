@@ -1319,6 +1319,19 @@ times to gather images, then send the whole set through a workflow at once.
   frame, switch to another open workflow tab and back, and it's still that
   one frame — not the whole buffer — so Emit keeps sending just the image
   you focused instead of quietly reverting.
+- **…and across undo (v0.105.0).** Focusing a frame is now its own undo
+  step, like any other widget change: focus a frame, move a node, press
+  Ctrl+Z, and the node move is undone while the frame stays enlarged (one
+  more Ctrl+Z undoes the focus itself; Ctrl+Y brings it back). Before,
+  the focus was folded into whatever you did next, so undoing that one
+  thing also quietly dropped you back to the whole grid — and a run then
+  emitted every image instead of the one you had picked. The same fix
+  stops ComfyUI's own preview re-render from un-focusing the grid a moment
+  after an undo or a tab switch (it used to win the race on a LAN, where
+  its full-size image loads land after the grid has restored itself). The
+  grid also comes back instantly now instead of after a server round trip.
+  Classic node look only — the new node design never draws the canvas
+  hooks this runs on.
 
 ## EPS Run Multiplier (shipped)
 

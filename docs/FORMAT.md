@@ -2371,6 +2371,63 @@ lost; with it, preserved — the window this races in is sub-millisecond on
 loopback, which is why it was invisible until latency was added on purpose
 (§7.5's LAN-latency lesson, restated for this different race in §7.9).
 
+**Undo and tab switch still un-focused the grid (v0.105.0, owner report
+2026-11-02: "the image grid keeps forgetting its state … it sends 20 images
+instead of one").** Three independent causes, each reproduced on the rig
+before fixing, all in `image_grid.js`:
+
+1. **The focus was never its own undo step.** Core's change tracker captures
+   graph state at mouse-up (`changeTracker.ts`: `processMouseUp`, window
+   `mouseup`, a keydown rAF), but core sets `node.imageIndex` for a tile
+   click INSIDE the next draw, and the poll writes `focus` the draw after —
+   so no capture ever saw the focus by itself, and the NEXT canvas action's
+   capture bundled "focus + that action" into one step. Undo that action and
+   the grid un-focused with it. Rig: after a focus, `activeState` still held
+   `focus = ''`; the following move's undo entry carried `''`; Ctrl+Z
+   restored the move AND the empty focus. Fix: `writeFocusWidget` ends with
+   `captureUndoStep()` (`changeTracker.captureCanvasState()`, 1.52.7; falls
+   back to the deprecated `checkState()`; a no-op inside core's own
+   mid-load/mid-undo/transaction guards). Focus, un-focus and the ←/→ arrows
+   are each one step now, like any combo click — Ctrl+Z right after
+   focusing un-focuses, Ctrl+Y re-focuses, and undoing a LATER action leaves
+   the focus alone.
+2. **Core's preserved preview store re-rendered the node from underneath
+   the restore.** `ChangeTracker.store()/restore()` snapshot `nodeOutputs`
+   across a tab switch, and `undo()` loads with `clean = false`, so the
+   store entry this file wrote (`syncCoreOutputStore`) outlives the node
+   object. On the first draw of the rebuilt node core's `updatePreviews`
+   found `node.images !== store.images`, took `node.images` for itself and
+   started `showPreview()` — N full-res `/view` loads whose `onLoaded`
+   (`useNodeImage.ts`) does `node.imageIndex = null; node.imgs = elements`
+   unconditionally, whenever the slowest load lands. On a LAN that is AFTER
+   `/list` has settled and `restoreFocusedView` has re-applied the focus:
+   rig, 600 ms injected image latency — focused after `/list`, un-focused
+   and the widget cleared one draw after core's load landed.
+3. **The settle guard accepted core's array as a settle.** The guard above
+   read `Array.isArray(node.images)` as "settled", and core's path (2)
+   produces exactly that: with `/list` slow instead (800 ms injected), core's
+   images landed first, nulled `imageIndex`, and the next draw wrote `''`
+   through the guard before `/list` could restore — same loss, other order.
+
+Fix for (2) and (3): `adoptPreservedOutputs`, run first in the outermost
+`onDrawBackground` wrap (`installFocusWidgetSync`, installed last of the draw
+wraps in `attach()` for exactly that reason), before `syncFocusFromView` and
+before core's prototype hook. For a node this file has not settled yet whose
+root-graph store entry holds refs, it calls `setNodeImagesFromRefs` with
+those refs (so `node.images` and the store share one identity again and
+core's check is equal on every draw — its load never starts) and then
+`restoreFocusedView`. The grid, or the enlarged frame, is therefore on screen
+in the first frame after an undo or a switch (thumbnails from the browser
+cache), and the `/list` that follows stays authoritative (an undo past a
+Clear, a frame added elsewhere). The clearing-write guard now reads ONLY
+`__epsGridBufferSettled` — settled by this file — as the backstop. Vue nodes
+never call `onDrawBackground`, so none of this runs there (the Nodes 2.0
+roadmap already lists Image Grid). Rig after the fix, same injected
+latencies, both orders plus a real tab switch: `focus` kept, `imageIndex`
+restored on the first draw, `node.imgs` all this file's thumbs throughout
+(core never loaded anything), and `activeState` carried the focus the draw it
+was written.
+
 **Emit cross-prompt-caches now (v0.80.0).** `IS_CHANGED` split by mode:
 Collect keeps the NaN always-changed sentinel (its append is a side effect
 the cache must never skip), but Emit — side-effect-free by design — returns
@@ -5822,7 +5879,14 @@ trusting the comparison. Three shapes this took:
   before `restoreFocusedView` ever got to read it back. `markBufferSettled`/
   `__epsGridBufferSettled` is the fix (§6.6): a CLEARING write to `focus` is
   held back until the buffer has settled at least once; a non-empty write
-  (a real focus) is never held back.
+  (a real focus) is never held back. v0.105.0 closed the two holes that
+  remained (§6.6 "Undo and tab switch still un-focused the grid"): core's
+  own preview store outlives the node across undo/tab switch and its late
+  `onLoaded` nulls `imageIndex` after our restore — now pre-empted by
+  `adoptPreservedOutputs` — and the guard no longer mistakes core's
+  `node.images` array for a settle. Separately, a focus write is now its own
+  undo step (`captureUndoStep`), so undoing a later action never drags the
+  focus down with it.
 - **universal_controller.js, before this round.** `onRemoved()` used to FLUSH
   an open, unconfirmed group rename by calling `_commitCategoryRename()` — as
   if a tab switch were the user pressing Enter. This is the variant taken to

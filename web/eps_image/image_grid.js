@@ -2179,32 +2179,83 @@ function markBufferSettled(node) {
  * callback/dirty machinery for an unchanged view.
  *
  * A CLEARING write (*value* `''`) is additionally held back until *node*'s
- * buffer has settled at least once (`markBufferSettled`/`Array.isArray(
- * node.images)`) -- the second half of the tab-switch/undo/reload focus
- * bug (rig-caught): a freshly rebuilt node's `imageIndex` reads `null` for
- * TWO different reasons that this draw-time poll can't otherwise tell
- * apart -- a genuine unfocus (Clear, a bulk add, deleting a tile, all of
- * which only ever happen AFTER a settle) versus simply "not restored yet"
- * (the widget's `.value` already holds the persisted `focus` from
- * `configure()`, but `node.images`/`imageIndex` won't exist until the
- * async `refreshFromBuffer` -> `restoreFocusedView` finishes). A draw
- * landing in that window -- routine; `installFocusWidgetSync` polls every
- * frame while the refresh is a real network round trip -- would otherwise
- * write `''` here FIRST, wiping the persisted value out from under
+ * buffer has settled at least once (`markBufferSettled`) -- the second
+ * half of the tab-switch/undo/reload focus bug (rig-caught): a freshly
+ * rebuilt node's `imageIndex` reads `null` for TWO different reasons that
+ * this draw-time poll can't otherwise tell apart -- a genuine unfocus
+ * (Clear, a bulk add, deleting a tile, all of which only ever happen AFTER
+ * a settle) versus simply "not restored yet" (the widget's `.value`
+ * already holds the persisted `focus` from `configure()`, but
+ * `node.images`/`imageIndex` won't exist until the async
+ * `refreshFromBuffer` -> `restoreFocusedView` finishes). A draw landing in
+ * that window -- routine; `installFocusWidgetSync` polls every frame while
+ * the refresh is a real network round trip -- would otherwise write `''`
+ * here FIRST, wiping the persisted value out from under
  * `restoreFocusedView` before it ever runs; the very next save would then
  * serialize an empty `focus`, permanently losing "this frame is focused"
  * even though the user never touched anything. A non-empty write (the user
  * -- or a successful restore -- just focused a tile) is never held back;
  * that's always a real, intentional value.
+ *
+ * "Settled" means settled BY THIS FILE (`setNodeImagesFromRefs`,
+ * `clearNodePreview`) -- never "`node.images` is an array". Until
+ * 2026-11-02 an array there counted as a settle too, and that is exactly
+ * what core's own preview path produces on an undo or a tab switch: the
+ * output store survives both (`ChangeTracker.store()/restore()` snapshot
+ * `nodeOutputs`; undo loads with `clean = false`), so core's
+ * `updatePreviews` found `node.images !== store.images` on the first draw,
+ * set `node.images` itself and started `showPreview()` -- whose `onLoaded`
+ * callback nulls `imageIndex` (useNodeImage.ts, unconditional, after ALL
+ * its full-res loads land). The next draw then saw an array + a null index,
+ * passed this guard, and wiped the persisted focus before `/list` could
+ * restore it (reproduced on the rig, both orders: images faster than
+ * `/list` and `/list` faster than images). `adoptPreservedOutputs` now
+ * keeps core's path from ever starting; this guard is the backstop.
+ *
+ * Every write here is a change the user (or a run) made to persisted
+ * state, so it is also recorded as its own undo step (`captureUndoStep`)
+ * -- without that, the next canvas action's capture bundled it in, and
+ * undoing that action silently un-focused the grid (owner report
+ * 2026-11-02; the tracker only captures at mouse-up, while the focus
+ * itself is set by core one draw later and written here the draw after).
  */
 function writeFocusWidget(node, value) {
   const widget = getFocusWidget(node)
   if (!widget || widget.value === value) return
-  if (!value && !Array.isArray(node.images) && !node.__epsGridBufferSettled) return
+  if (!value && !node.__epsGridBufferSettled) return
   widget.value = value
   if (typeof widget.callback === 'function') {
     widget.callback(value, app.canvas, node)
   }
+  captureUndoStep()
+}
+
+/**
+ * Records the graph's current state as its own undo step, if the frontend
+ * exposes its change tracker (1.52.7: `captureCanvasState`; older builds:
+ * `checkState`, which 1.52.7 still accepts but deprecation-warns once). A
+ * no-op inside core's own guards -- mid-load, mid-undo/redo, inside a
+ * `before-change`/`after-change` transaction -- exactly as a mouse-up
+ * capture would be, so it can never corrupt the history it is keeping
+ * honest. Never throws. Returns whether a capture was requested; exported
+ * for tests.
+ */
+export function captureUndoStep() {
+  try {
+    const tracker = app.extensionManager?.workflow?.activeWorkflow?.changeTracker
+    if (!tracker) return false
+    if (typeof tracker.captureCanvasState === 'function') {
+      tracker.captureCanvasState()
+      return true
+    }
+    if (typeof tracker.checkState === 'function') {
+      tracker.checkState()
+      return true
+    }
+  } catch (error) {
+    console.warn(PREFIX, 'undo-step capture failed', error)
+  }
+  return false
 }
 
 /**
@@ -2246,12 +2297,69 @@ export function syncFocusFromView(node) {
 }
 
 /**
+ * Adopts core's PRESERVED output-store entry for a freshly rebuilt *node*
+ * -- the refs this file itself put there (`syncCoreOutputStore`) before an
+ * undo, a redo or a tab switch -- as if it were a `/list` result, BEFORE
+ * core's own `updatePreviews` can render it (2026-11-02, owner report "the
+ * image grid keeps forgetting its state" on undo and tab switch).
+ *
+ * Core keeps `app.nodeOutputs` across both: `ChangeTracker.store()`
+ * snapshots it at `deactivate()` and `restore()` puts it back, and
+ * `undo()` calls `loadGraphData(prevState, false, ...)` with `clean =
+ * false`, so the entry is simply still there. Every node object is new
+ * after either, though, so on the first draw `updatePreviews` finds
+ * `node.images !== store.images`, assigns `node.images` itself and starts
+ * `showPreview()`: N full-res `/view` loads, and then -- whenever the
+ * slowest one lands, long after this file's `/list` has already settled
+ * and restored the focused frame on a LAN -- `onLoaded` does
+ * `node.imageIndex = null; node.imgs = elements` unconditionally
+ * (useNodeImage.ts). That late null was then read by the draw-time poll as
+ * a real unfocus and written into the `focus` widget. Reproduced on the
+ * rig in both orders (see `writeFocusWidget`).
+ *
+ * Running ahead of core in the same `onDrawBackground` (this file's wrap
+ * is outermost; core's hook is the prototype's) closes it at the source:
+ * `setNodeImagesFromRefs` makes `node.images` and the store entry one
+ * identity again, so core's identity check is equal on every draw and its
+ * load never starts; `restoreFocusedView` then re-applies the persisted
+ * `focus` against the very same refs. The thumbnails come back from the
+ * browser cache (same `thumbUrlForRef` urls as before the switch), so the
+ * grid -- or the enlarged frame -- is on screen in the first frame instead
+ * of after a `/list` round trip. The `/list` that `onConfigure`/`attach`
+ * schedule still runs and stays authoritative: an undo past a Clear, or a
+ * frame added from another machine, is reconciled by it exactly as before
+ * (`setNodeImagesFromRefs`' content check). Same locator rule as
+ * `syncCoreOutputStore` -- root-graph nodes only; a subgraph grid keeps
+ * core's rendering. Only ever acts on a node this file has not settled
+ * yet, so it is a cheap flag read on every later draw. Returns whether it
+ * adopted anything; exported for tests.
+ */
+export function adoptPreservedOutputs(node) {
+  if (!node || node.__epsGridBufferSettled) return false
+  if (!node.graph || !app?.graph || node.graph !== app.graph) return false
+  const entry = app.nodeOutputs?.[String(node.id)]
+  const refs = entry && Array.isArray(entry.images) ? entry.images : null
+  if (!refs || !refs.length) return false
+  setNodeImagesFromRefs(node, refs)
+  restoreFocusedView(node)
+  return true
+}
+
+/**
  * Wraps (never replaces) *node*'s `onDrawBackground`, stacking onto
  * whatever `installFocusedFullResSwap` above already installed there --
  * both react to the same `imageIndex` property; each preserves and calls
  * its own captured `original`, the same chaining idiom
  * `installCopyImageMenuItem` uses for `getExtraMenuOptions`. Guarded per
  * instance, mirroring every other `install*` wrapper in this file.
+ *
+ * Installed LAST of the draw wraps in `attach()`, so it is the outermost
+ * and runs first on every draw -- load-bearing for
+ * `adoptPreservedOutputs`, which must beat core's `updatePreviews` (the
+ * innermost, prototype-level hook) to the store-identity check, and must
+ * precede `syncFocusFromView` in the same draw so the restored index is
+ * what the poll reads. Vue nodes (§7.5) never call `onDrawBackground`, so
+ * neither runs there.
  */
 function installFocusWidgetSync(node) {
   if (node.__epsGridFocusWidgetSyncInstalled) return
@@ -2259,6 +2367,7 @@ function installFocusWidgetSync(node) {
   const original = node.onDrawBackground
   node.onDrawBackground = function (...args) {
     try {
+      adoptPreservedOutputs(this)
       syncFocusFromView(this)
     } catch (error) {
       console.warn(PREFIX, 'focus widget sync failed', error)
