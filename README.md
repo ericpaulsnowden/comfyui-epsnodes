@@ -24,6 +24,7 @@ ComfyUI, and hard-refresh the browser tab — the version shown in
 **Settings → EPSNodes** must match on both halves (see
 [Versioning](#versioning)). The full steps, including pointing the library at
 a folder of your choice, are in [docs/INSTALL.md](docs/INSTALL.md).
+Developing or running the tests: [docs/DEVELOPING.md](docs/DEVELOPING.md).
 
 ## Quick start
 
@@ -46,6 +47,11 @@ a folder of your choice, are in [docs/INSTALL.md](docs/INSTALL.md).
    its own section further down. Your notebooks, saved lora sets and size
    presets live in one library folder — see
    [The library folder](#the-library-folder) if you want to move it.
+6. **Contributing?** Start with [docs/DEVELOPING.md](docs/DEVELOPING.md):
+   architecture map, one worked request, module ownership, storage
+   lifetimes, supported versions, the exact test commands, and where to
+   add a node, route or panel control. [docs/FORMAT.md](docs/FORMAT.md) is
+   the binding contract it cites by section.
 
 **Where to find them.** The six folders under **Add Node → EPSNodes**:
 
