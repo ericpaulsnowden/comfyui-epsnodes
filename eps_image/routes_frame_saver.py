@@ -202,6 +202,13 @@ def _validate_video_path(raw: str) -> tuple[Path | None, str | None]:
     trimmed = (raw or "").strip()
     if not trimmed:
         return None, "missing 'path' query parameter"
+    if "\x00" in trimmed:
+        # Explicit rather than left to `Path.resolve()` raising below: on
+        # Windows, newer Pythons (gh-106242) make a non-strict resolve()
+        # return a NUL-containing path as-is instead of raising, so that
+        # guard only ever held on POSIX (found while porting the suite to
+        # the Windows CI leg).
+        return None, "invalid path (embedded NUL byte)"
     if _is_foreign_absolute(trimmed):
         other = "POSIX (macOS/Linux)" if _IS_WINDOWS else "Windows"
         return None, (

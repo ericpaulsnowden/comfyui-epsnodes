@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import inspect
 import json
+import os
 import re
 import sys
 import types
@@ -201,7 +202,10 @@ class TestSaveRoundTrip:
         )
         saved = result["ui"]["images"][0]
         assert saved["filename"] == "Portrait_m2_i1_t3_00001_.png"
-        assert saved["subfolder"] == "shoot/lora_0.5"
+        # The subfolder is folder_paths.get_save_image_path's own value passed
+        # through untouched -- like core SaveImage, it uses the OS separator
+        # ("shoot\\lora_0.5" on Windows), which ComfyUI's /view resolves there.
+        assert saved["subfolder"] == os.path.join("shoot", "lora_0.5")
         png = Image.open(fake_folder_paths / saved["subfolder"] / saved["filename"])
         chunks = png.text
         assert json.loads(chunks["prompt"])["5"]["inputs"]["solo_run"] == "m2_i1_t3"

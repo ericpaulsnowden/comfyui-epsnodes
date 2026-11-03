@@ -72,7 +72,7 @@ def probe(tmp_path_factory: pytest.TempPathFactory) -> dict:
     script = work / "probe.mjs"
     script.write_text(PROBE_JS % {"module": json.dumps(MODULE_JS.as_uri())}, encoding="utf-8")
     result = subprocess.run(
-        [NODE, str(script)], capture_output=True, text=True, timeout=60, check=False
+        [NODE, str(script)], capture_output=True, encoding="utf-8", timeout=60, check=False
     )
     assert result.returncode == 0, result.stderr
     return json.loads(result.stdout)

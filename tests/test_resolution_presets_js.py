@@ -262,7 +262,7 @@ def presets_api(tmp_path_factory: pytest.TempPathFactory) -> dict:
     )
 
     result = subprocess.run(
-        [NODE, str(probe)], capture_output=True, text=True, timeout=60, cwd=layout
+        [NODE, str(probe)], capture_output=True, encoding="utf-8", timeout=60, cwd=layout
     )
     assert result.returncode == 0, f"probe failed:\n{result.stderr}"
     return json.loads(result.stdout)
@@ -303,7 +303,7 @@ def test_resolution_js_still_parses() -> None:
     after the M3 addition (test_resolution_grid_js.py pins the same thing;
     repeated here so this file stands alone)."""
     result = subprocess.run(
-        [NODE, "--check", str(RESOLUTION_JS)], capture_output=True, text=True, timeout=60
+        [NODE, "--check", str(RESOLUTION_JS)], capture_output=True, encoding="utf-8", timeout=60
     )
     assert result.returncode == 0, result.stderr
 

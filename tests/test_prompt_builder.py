@@ -475,9 +475,12 @@ class TestMissingBlocks:
 # 2026-08-28 owner report (mirrors nodes_notebook.py's identical fix): a
 # `file` value that's absolute for the OTHER platform (e.g.
 # `Z:\docs\short_prompts.md` read on POSIX) used to join WHOLE under
-# `library_dir` instead of resolving relative to it.
+# `library_dir` instead of resolving relative to it. Written from that POSIX
+# host's side; `posix_server` simulates it on a Windows CI runner, where
+# `Z:\...` is an ordinary local path.
 
 
+@pytest.mark.usefixtures("posix_server")
 class TestForeignAbsoluteFileHealing:
     def test_resolves_blocks_after_healing_to_an_existing_tail(
         self, library_dir: Path
@@ -498,8 +501,9 @@ class TestForeignAbsoluteFileHealing:
         message = str(exc_info.value)
         assert "tried as a Windows path from another machine:" in message
         tried = message.split("tried as a Windows path from another machine: ", 1)[1]
-        assert "\\" not in tried.split(")", 1)[0]
-        assert str(library_dir / "docs" / "short_prompts.md") in message
+        named = Path(tried.split(")", 1)[0])
+        assert named == library_dir / "docs" / "short_prompts.md"
+        assert named.relative_to(library_dir).parts == ("docs", "short_prompts.md")
 
     def test_ordinary_missing_block_still_uses_the_plain_resolved_wording(
         self, library_dir: Path

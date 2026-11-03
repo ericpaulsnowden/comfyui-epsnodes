@@ -45,6 +45,49 @@ def library_dir(context: LibraryContext) -> Path:
     return context.library_dir()
 
 
+# --- Cross-platform seams for the CI matrix (Linux + Windows) ----------------
+#
+# The suite was written on macOS. These helpers keep the platform-specific
+# tests honest on the other two CI hosts instead of letting them fail (or
+# pass by accident) for reasons unrelated to what they test.
+
+
+@pytest.fixture
+def posix_server(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Pin ``lora_library.context._IS_WINDOWS`` to False for a test written
+    from a POSIX host's point of view ("a Windows-shaped path arrives at a
+    macOS/Linux ComfyUI"). A no-op on macOS/Linux; on a Windows CI runner it
+    simulates the POSIX host through the same seam the ``*_on_simulated_
+    windows`` tests already use for the reverse direction, so both directions
+    run on every OS."""
+    from lora_library import context as context_module
+
+    monkeypatch.setattr(context_module, "_IS_WINDOWS", False)
+
+
+#: chmod-based "unreadable/unwritable directory" tests need POSIX permission
+#: bits to be enforced. Windows ignores them for directories (chmod only sets
+#: the read-only attribute), and root bypasses them everywhere.
+POSIX_PERMISSIONS_ENFORCED = sys.platform != "win32" and not (
+    hasattr(os, "geteuid") and os.geteuid() == 0
+)
+
+needs_posix_permissions = pytest.mark.skipif(
+    not POSIX_PERMISSIONS_ENFORCED,
+    reason="needs enforced POSIX permission bits (Windows ignores chmod on "
+    "directories; root bypasses them)",
+)
+
+
+def symlink_or_skip(link: Path, target: Path, *, target_is_directory: bool = False) -> None:
+    """Create *link* -> *target*, or skip the calling test where this user may
+    not create symlinks (Windows without Developer Mode or admin rights)."""
+    try:
+        link.symlink_to(target, target_is_directory=target_is_directory)
+    except (OSError, NotImplementedError) as exc:
+        pytest.skip(f"cannot create symlinks here: {exc}")
+
+
 # --- Session-start temp-dir hygiene -----------------------------------------
 #
 # test_routes_core.py's TestListableDirGuard/TestRootsOmitsUnlistableHome

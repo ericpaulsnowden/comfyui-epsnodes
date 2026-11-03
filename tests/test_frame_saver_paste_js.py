@@ -222,7 +222,7 @@ def paste_api(tmp_path_factory: pytest.TempPathFactory) -> dict:
     probe.write_text(PROBE_JS % {"cases": json.dumps(cases)}, encoding="utf-8")
 
     result = subprocess.run(
-        [NODE, str(probe)], capture_output=True, text=True, timeout=60, cwd=layout
+        [NODE, str(probe)], capture_output=True, encoding="utf-8", timeout=60, cwd=layout
     )
     assert result.returncode == 0, f"probe failed:\n{result.stderr}"
     return json.loads(result.stdout)
@@ -275,7 +275,7 @@ def _button_glyph(source: str, state_field: str) -> str:
 def test_frame_saver_js_parses() -> None:
     """`node --check` — the file must at minimum be valid ES module syntax."""
     result = subprocess.run(
-        [NODE, "--check", str(FRAME_SAVER_JS)], capture_output=True, text=True, timeout=60
+        [NODE, "--check", str(FRAME_SAVER_JS)], capture_output=True, encoding="utf-8", timeout=60
     )
     assert result.returncode == 0, result.stderr
 

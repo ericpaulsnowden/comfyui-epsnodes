@@ -636,15 +636,20 @@ def _splice_listing_cache(
     except OSError:
         _listing_cache.pop(states_dir_path, None)
         return
+    if states_dir_path not in _listing_cache:
+        return  # the folder vanished during that stat -- stay cold (sets_store twin)
     _listing_cache[states_dir_path] = (dir_key, time.monotonic(), spliced)
 
 
 def _states_dir_mtime_ns(context: LibraryContext, states_dir_path: Path) -> int:
     """The states directory's mtime_ns -- the LISTING layer's key. Mirrors
-    ``sets_store._sets_dir_mtime_ns``."""
+    ``sets_store._sets_dir_mtime_ns``, including forgetting the cached
+    listing when the folder vanished (a re-created folder can carry the SAME
+    mtime on a coarse-timestamp filesystem -- see that docstring)."""
     try:
         return states_dir_path.stat().st_mtime_ns
     except FileNotFoundError:
+        _forget_listing(states_dir_path)
         context.forget_ensured_dirs()
         return states_dir(context).stat().st_mtime_ns
 

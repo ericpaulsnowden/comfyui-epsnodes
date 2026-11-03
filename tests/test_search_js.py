@@ -37,7 +37,7 @@ def test_search_js_parses() -> None:
         [NODE, "--check", "--input-type=module"],
         input=SEARCH_JS.read_text(encoding="utf-8"),
         capture_output=True,
-        text=True,
+        encoding="utf-8",
         timeout=30,
     )
     assert result.returncode == 0, result.stderr
@@ -115,7 +115,7 @@ def search_api(tmp_path_factory: pytest.TempPathFactory) -> dict:
         encoding="utf-8",
     )
     result = subprocess.run(
-        [NODE, str(probe)], capture_output=True, text=True, timeout=30, cwd=layout
+        [NODE, str(probe)], capture_output=True, encoding="utf-8", timeout=30, cwd=layout
     )
     assert result.returncode == 0, f"probe failed:\n{result.stderr}"
     return json.loads(result.stdout)

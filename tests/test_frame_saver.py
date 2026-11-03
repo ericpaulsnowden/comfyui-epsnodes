@@ -110,7 +110,7 @@ class TestProbe:
     def test_unreadable_garbage_file_raises_value_error(self, tmp_path: Path) -> None:
         garbage = tmp_path / "not_a_video.mp4"
         garbage.write_bytes(b"this is not a real video container")
-        with pytest.raises(ValueError, match=str(garbage)):
+        with pytest.raises(ValueError, match=re.escape(str(garbage))):
             frame_saver_video.probe(str(garbage))
 
 
@@ -443,7 +443,7 @@ class TestUploadedInputRefExecution:
     def test_wrong_extension_ref_is_a_clean_value_error_at_run(
         self, monkeypatch, tmp_path: Path
     ) -> None:
-        (tmp_path / "notes.txt").write_text("nope")
+        (tmp_path / "notes.txt").write_text("nope", encoding="utf-8")
 
         class TxtFolderPaths:
             @staticmethod
@@ -474,6 +474,14 @@ class TestUploadedInputRefExecution:
 # ============================================================= routes_frame_saver
 
 
+@pytest.fixture
+def frame_saver_posix_server(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Pin ``routes_frame_saver._IS_WINDOWS`` (this module's own copy of
+    ``lora_library.context``'s seam) to False: conftest's ``posix_server``,
+    for the frame saver. A no-op on macOS/Linux."""
+    monkeypatch.setattr(routes_frame_saver, "_IS_WINDOWS", False)
+
+
 class TestValidateVideoPath:
     """Unit tests for the shared path-validation helper both routes use."""
 
@@ -487,8 +495,11 @@ class TestValidateVideoPath:
         assert resolved is None
         assert "absolute" in error
 
-    def test_disallowed_extension_is_rejected(self) -> None:
-        resolved, error = routes_frame_saver._validate_video_path("/tmp/notes.txt")
+    def test_disallowed_extension_is_rejected(self, tmp_path: Path) -> None:
+        # Built from tmp_path so it is locally absolute on every OS (a bare
+        # "/tmp/..." is a foreign POSIX path on a Windows server and would be
+        # rejected before the extension check this test is about).
+        resolved, error = routes_frame_saver._validate_video_path(str(tmp_path / "notes.txt"))
         assert resolved is None
         assert "extension" in error
 
@@ -511,14 +522,19 @@ class TestValidateVideoPath:
             assert error is None, f"{ext} should be accepted"
             assert resolved is not None
 
-    def test_embedded_nul_byte_is_a_clean_rejection_not_a_raw_exception(self) -> None:
+    def test_embedded_nul_byte_is_a_clean_rejection_not_a_raw_exception(
+        self, tmp_path: Path
+    ) -> None:
         # Regression: Path.resolve() raises a bare ValueError ("embedded null
         # character in path") for an absolute-looking string containing a
         # NUL byte -- confirmed live before this guard was added, and would
-        # otherwise propagate straight into an unhandled 500.
-        resolved, error = routes_frame_saver._validate_video_path("/tmp/\x00nul.mp4")
+        # otherwise propagate straight into an unhandled 500. Built from
+        # tmp_path so it is locally absolute on every OS: on Windows a bare
+        # "/tmp/..." was rejected as a foreign path first, hiding that newer
+        # Pythons' Windows resolve() no longer raises for a NUL at all.
+        resolved, error = routes_frame_saver._validate_video_path(str(tmp_path / "\x00nul.mp4"))
         assert resolved is None
-        assert error is not None
+        assert error is not None and "NUL" in error
 
     # ----------------------------------- 2026-08-28 cross-OS foreign-absolute
     #
@@ -528,18 +544,24 @@ class TestValidateVideoPath:
     # internals). No healing here (FORMAT.md §6.7: a video path is
     # arbitrary filesystem, never confined to one shared folder) -- just
     # detection and a clean, specific error instead of the generic one.
+    # The Windows-shaped cases are written from a POSIX host's side:
+    # `frame_saver_posix_server` simulates one on a Windows CI runner (where
+    # `Z:\...` is local), the `*_on_simulated_windows` cases do the reverse.
 
+    @pytest.mark.usefixtures("frame_saver_posix_server")
     def test_windows_drive_letter_path_is_rejected_with_a_specific_message(self) -> None:
         resolved, error = routes_frame_saver._validate_video_path(r"Z:\clips\video.mp4")
         assert resolved is None
         assert "Windows" in error
         assert "absolute path (got" not in error
 
+    @pytest.mark.usefixtures("frame_saver_posix_server")
     def test_windows_forward_slash_drive_path_is_rejected(self) -> None:
         resolved, error = routes_frame_saver._validate_video_path("Z:/clips/video.mp4")
         assert resolved is None
         assert "Windows" in error
 
+    @pytest.mark.usefixtures("frame_saver_posix_server")
     def test_unc_path_is_rejected_with_a_specific_message(self) -> None:
         resolved, error = routes_frame_saver._validate_video_path(r"\\server\share\video.mp4")
         assert resolved is None
@@ -678,14 +700,17 @@ class TestProbeRoute:
 
     async def test_disallowed_extension_is_400(self, client, tmp_path: Path) -> None:
         bad = tmp_path / "clip.txt"
-        bad.write_text("nope")
+        bad.write_text("nope", encoding="utf-8")
         response = await client.get("/eps_frame_saver/probe", params={"path": str(bad)})
         assert response.status == 400
 
-    async def test_nonexistent_file_with_good_extension_is_400_not_500(self, client) -> None:
-        response = await client.get(
-            "/eps_frame_saver/probe", params={"path": "/no/such/place/nope.mp4"}
-        )
+    async def test_nonexistent_file_with_good_extension_is_400_not_500(
+        self, client, tmp_path: Path
+    ) -> None:
+        # Locally absolute on every OS (a bare "/no/such/..." would be a
+        # foreign POSIX path on a Windows server, 400'd before the open).
+        missing = tmp_path / "no" / "such" / "place" / "nope.mp4"
+        response = await client.get("/eps_frame_saver/probe", params={"path": str(missing)})
         assert response.status == 400
         assert "error" in await response.json()
 
@@ -705,6 +730,7 @@ class TestProbeRoute:
         assert response.status == 403
         assert "error" in await response.json()
 
+    @pytest.mark.usefixtures("frame_saver_posix_server")
     async def test_foreign_absolute_path_is_a_clean_400(self, client) -> None:
         response = await client.get(
             "/eps_frame_saver/probe", params={"path": r"Z:\clips\video.mp4"}
@@ -751,7 +777,7 @@ class TestStreamRoute:
 
     async def test_disallowed_extension_is_400(self, client, tmp_path: Path) -> None:
         bad = tmp_path / "notes.txt"
-        bad.write_text("nope")
+        bad.write_text("nope", encoding="utf-8")
         response = await client.get("/eps_frame_saver/stream", params={"path": str(bad)})
         assert response.status == 400
 

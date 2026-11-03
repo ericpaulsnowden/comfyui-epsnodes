@@ -703,7 +703,7 @@ def controller_api(tmp_path_factory: pytest.TempPathFactory) -> dict:
     )
 
     result = subprocess.run(
-        [NODE, str(probe)], capture_output=True, text=True, timeout=60, cwd=layout
+        [NODE, str(probe)], capture_output=True, encoding="utf-8", timeout=60, cwd=layout
     )
     assert result.returncode == 0, f"probe failed:\n{result.stderr}"
     return json.loads(result.stdout)
@@ -761,7 +761,8 @@ def test_syntax_is_valid() -> None:
         [NODE, "--check", "--input-type=module"],
         input=CONTROLLER_JS.read_text(encoding="utf-8"),
         capture_output=True,
-        text=True,
+        encoding="utf-8",
+        timeout=60,
     )
     assert result.returncode == 0, result.stderr
 
@@ -2098,7 +2099,7 @@ def name_field_flush_probe(source: str, tmp_path_factory: pytest.TempPathFactory
     probe = layout / "probe.mjs"
     probe.write_text(script, encoding="utf-8")
     result = subprocess.run(
-        [NODE, str(probe)], capture_output=True, text=True, timeout=60, cwd=layout
+        [NODE, str(probe)], capture_output=True, encoding="utf-8", timeout=60, cwd=layout
     )
     assert result.returncode == 0, f"probe failed:\n{result.stderr}"
     return json.loads(result.stdout)
@@ -2567,7 +2568,7 @@ def new_group_prompt_probe(source: str, tmp_path_factory: pytest.TempPathFactory
     probe = layout / "probe.mjs"
     probe.write_text(script, encoding="utf-8")
     result = subprocess.run(
-        [NODE, str(probe)], capture_output=True, text=True, timeout=60, cwd=layout
+        [NODE, str(probe)], capture_output=True, encoding="utf-8", timeout=60, cwd=layout
     )
     assert result.returncode == 0, f"probe failed:\n{result.stderr}"
     return json.loads(result.stdout)
@@ -2728,7 +2729,7 @@ def search_match_api(source: str, tmp_path_factory: pytest.TempPathFactory) -> l
     probe = layout / "probe.mjs"
     probe.write_text(script, encoding="utf-8")
     result = subprocess.run(
-        [NODE, str(probe)], capture_output=True, text=True, timeout=30, cwd=layout
+        [NODE, str(probe)], capture_output=True, encoding="utf-8", timeout=30, cwd=layout
     )
     assert result.returncode == 0, f"probe failed:\n{result.stderr}"
     return json.loads(result.stdout)

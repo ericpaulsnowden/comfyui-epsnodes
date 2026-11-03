@@ -587,7 +587,7 @@ def m3_api(tmp_path_factory: pytest.TempPathFactory) -> dict:
         encoding="utf-8",
     )
     result = subprocess.run(
-        [NODE, str(probe)], capture_output=True, text=True, timeout=60, cwd=layout
+        [NODE, str(probe)], capture_output=True, encoding="utf-8", timeout=60, cwd=layout
     )
     assert result.returncode == 0, (
         f"probe failed (the modules must IMPORT under Node):\n{result.stderr}"
@@ -629,7 +629,7 @@ def test_modules_parse_as_es_modules(path: Path) -> None:
         [NODE, "--check", "--input-type=module"],
         input=path.read_text(encoding="utf-8"),
         capture_output=True,
-        text=True,
+        encoding="utf-8",
         timeout=60,
     )
     assert result.returncode == 0, result.stderr

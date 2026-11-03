@@ -235,13 +235,13 @@ class TestClassShape:
 def test_module_never_imports_comfy_or_torch() -> None:
     repo = Path(__file__).resolve().parents[1]
     code = (
-        "import sys; sys.path.insert(0, r'" + str(repo) + "'); "
+        f"import sys; sys.path.insert(0, {str(repo)!r}); "
         "import eps_image.nodes_cross_sweep; "
         "bad = [m for m in sys.modules if m == 'torch' or m.startswith('torch.') "
         "or m == 'comfy' or m.startswith('comfy.') or m.startswith('comfy_execution')]; "
         "assert not bad, bad"
     )
-    subprocess.run([sys.executable, "-c", code], check=True)
+    subprocess.run([sys.executable, "-c", code], check=True, timeout=120)
 
 
 class TestVaePassthrough:

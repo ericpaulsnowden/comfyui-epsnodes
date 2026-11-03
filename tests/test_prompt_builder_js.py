@@ -73,7 +73,7 @@ def test_prompt_builder_js_parses() -> None:
         [NODE, "--check", "--input-type=module"],
         input=PROMPT_BUILDER_JS.read_text(encoding="utf-8"),
         capture_output=True,
-        text=True,
+        encoding="utf-8",
         timeout=60,
     )
     assert result.returncode == 0, result.stderr
@@ -319,7 +319,7 @@ def probe_api(tmp_path_factory: pytest.TempPathFactory) -> dict:
     probe = layout / "probe.mjs"
     probe.write_text(PROBE_JS, encoding="utf-8")
     result = subprocess.run(
-        [NODE, str(probe)], capture_output=True, text=True, timeout=60, cwd=layout
+        [NODE, str(probe)], capture_output=True, encoding="utf-8", timeout=60, cwd=layout
     )
     assert result.returncode == 0, f"probe failed (module must IMPORT under Node):\n{result.stderr}"
     return json.loads(result.stdout)

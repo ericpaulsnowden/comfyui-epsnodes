@@ -44,7 +44,9 @@ def source() -> str:
 def test_syntax_is_valid(source: str) -> None:
     import subprocess
 
-    result = subprocess.run([NODE, "--check", str(SETS_JS)], capture_output=True, text=True)
+    result = subprocess.run(
+        [NODE, "--check", str(SETS_JS)], capture_output=True, encoding="utf-8", timeout=60
+    )
     assert result.returncode == 0, result.stderr
 
 

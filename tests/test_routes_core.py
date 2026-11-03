@@ -31,6 +31,7 @@ from typing import ClassVar
 
 import pytest
 from aiohttp import web
+from conftest import needs_posix_permissions
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -47,6 +48,28 @@ async def client(context: LibraryContext, aiohttp_client):
     app = web.Application()
     app.add_routes(build_routes(context))
     return await aiohttp_client(app)
+
+
+@pytest.fixture
+def macos_roots(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Route the ROOTS platform tail down the macOS (`/Volumes`) branch on any
+    host: both platform seams pinned, since a real Linux or Windows runner
+    would otherwise take its own branch first."""
+    monkeypatch.setattr(lora_routes, "_is_windows", lambda: False)
+    monkeypatch.setattr(lora_routes, "_is_linux", lambda: False)
+
+
+@pytest.fixture
+def linux_roots(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Route the ROOTS platform tail down the Linux branch on any host, with
+    the host's REAL mount table switched off: these tests feed a fake
+    `_linux_mount_root_candidates` set, and a real Linux runner's own mounts
+    (e.g. its `/boot`) would otherwise be listed ahead of it.
+    `_list_mounted_filesystems` has its own direct tests
+    (`TestMountedFilesystemDiscovery`)."""
+    monkeypatch.setattr(lora_routes, "_is_windows", lambda: False)
+    monkeypatch.setattr(lora_routes, "_is_linux", lambda: True)
+    monkeypatch.setattr(lora_routes, "_list_mounted_filesystems", lambda: [])
 
 
 async def test_config_reports_is_local_true_for_loopback(client) -> None:
@@ -213,6 +236,7 @@ async def test_fs_list_roots_sentinel_includes_default_dir_and_home_on_posix(
     assert by_name["Home"] == str(Path.home().resolve())
 
 
+@pytest.mark.usefixtures("macos_roots")
 async def test_fs_list_roots_sentinel_lists_macos_volumes_when_monkeypatched(
     client, monkeypatch
 ) -> None:
@@ -222,8 +246,10 @@ async def test_fs_list_roots_sentinel_lists_macos_volumes_when_monkeypatched(
     response = await client.get("/lora_library/fs/list", params={"dir": "ROOTS"})
     data = await response.json()
     by_name = {entry["name"]: entry["path"] for entry in data["dirs"]}
-    assert by_name["Macintosh HD"] == "/Volumes/Macintosh HD"
-    assert by_name["Backup"] == "/Volumes/Backup"
+    # Entries carry str(Path(volume)) -- the volume path itself on macOS
+    # (only a simulated macOS on a Windows runner would flip its separators).
+    assert by_name["Macintosh HD"] == str(Path("/Volumes/Macintosh HD"))
+    assert by_name["Backup"] == str(Path("/Volumes/Backup"))
 
 
 # --------------------------------------------------- fs/list: Linux ROOTS tail
@@ -239,6 +265,7 @@ async def test_fs_list_roots_sentinel_lists_macos_volumes_when_monkeypatched(
 # `_list_windows_drives`) -- exactly parallel to the Windows tests above.
 
 
+@pytest.mark.usefixtures("linux_roots")
 async def test_fs_list_roots_sentinel_lists_linux_mount_roots_when_monkeypatched(
     client, monkeypatch, context: LibraryContext, tmp_path: Path
 ) -> None:
@@ -260,7 +287,6 @@ async def test_fs_list_roots_sentinel_lists_linux_mount_roots_when_monkeypatched
     ):
         directory.mkdir()
 
-    monkeypatch.setattr(lora_routes, "_is_linux", lambda: True)
     monkeypatch.setattr(
         lora_routes,
         "_linux_mount_root_candidates",
@@ -307,12 +333,12 @@ async def test_fs_list_roots_sentinel_lists_linux_mount_roots_when_monkeypatched
     ]
 
 
+@pytest.mark.usefixtures("linux_roots")
 async def test_fs_list_roots_sentinel_skips_nonexistent_linux_candidates(
     client, monkeypatch, tmp_path: Path
 ) -> None:
     real_dir = tmp_path / "real"
     real_dir.mkdir()
-    monkeypatch.setattr(lora_routes, "_is_linux", lambda: True)
     monkeypatch.setattr(
         lora_routes,
         "_linux_mount_root_candidates",
@@ -328,6 +354,7 @@ async def test_fs_list_roots_sentinel_skips_nonexistent_linux_candidates(
     assert "mnt" not in names
 
 
+@pytest.mark.usefixtures("linux_roots")
 async def test_fs_list_roots_sentinel_skips_unreadable_linux_candidate_not_fatal(
     client, monkeypatch, tmp_path: Path
 ) -> None:
@@ -335,7 +362,6 @@ async def test_fs_list_roots_sentinel_skips_unreadable_linux_candidate_not_fatal
     unreadable.mkdir()
     readable = tmp_path / "readable"
     readable.mkdir()
-    monkeypatch.setattr(lora_routes, "_is_linux", lambda: True)
     monkeypatch.setattr(
         lora_routes,
         "_linux_mount_root_candidates",
@@ -359,12 +385,12 @@ async def test_fs_list_roots_sentinel_skips_unreadable_linux_candidate_not_fatal
     assert "good" in names
 
 
+@pytest.mark.usefixtures("linux_roots")
 async def test_fs_list_roots_sentinel_dedupes_duplicate_linux_candidate_paths(
     client, monkeypatch, tmp_path: Path
 ) -> None:
     shared = tmp_path / "shared"
     shared.mkdir()
-    monkeypatch.setattr(lora_routes, "_is_linux", lambda: True)
     monkeypatch.setattr(
         lora_routes,
         "_linux_mount_root_candidates",
@@ -377,11 +403,11 @@ async def test_fs_list_roots_sentinel_dedupes_duplicate_linux_candidate_paths(
     assert matches[0]["name"] == "First label"
 
 
+@pytest.mark.usefixtures("linux_roots")
 async def test_fs_list_roots_sentinel_does_not_duplicate_home_when_a_linux_root_coincides(
     client, monkeypatch
 ) -> None:
     home = str(Path.home().resolve())
-    monkeypatch.setattr(lora_routes, "_is_linux", lambda: True)
     monkeypatch.setattr(
         lora_routes, "_linux_mount_root_candidates", lambda: [("Home again", home)]
     )
@@ -441,6 +467,7 @@ async def test_fs_list_uri_style_error_names_the_actual_scheme(client) -> None:
 # unrelated checks.
 
 
+@pytest.mark.usefixtures("posix_server")
 async def test_fs_list_rejects_a_windows_shaped_dir_with_a_helpful_message(client) -> None:
     response = await client.get(
         "/lora_library/fs/list", params={"dir": r"Z:\docs\short_prompts"}
@@ -452,6 +479,7 @@ async def test_fs_list_rejects_a_windows_shaped_dir_with_a_helpful_message(clien
     assert "must be an absolute path" not in data["error"]
 
 
+@pytest.mark.usefixtures("posix_server")
 async def test_fs_list_rejects_a_unc_shaped_dir_with_a_helpful_message(client) -> None:
     response = await client.get(
         "/lora_library/fs/list", params={"dir": r"\\server\share\docs"}
@@ -507,18 +535,26 @@ async def test_fs_list_locally_absolute_dir_is_unaffected(client, tmp_path: Path
 
 
 async def test_fs_list_drive_root_parent_climbs_to_roots_under_monkeypatched_windows(
-    client, monkeypatch
+    client, monkeypatch, tmp_path: Path
 ) -> None:
-    # "/" doubles as our only real, listable filesystem root on this test
-    # machine — `_is_windows` alone decides which label a root's parent
-    # gets, so patching just that seam is enough to exercise the branch.
+    # This machine's own filesystem root ("/" on macOS/Linux, a real drive
+    # root like "C:\\" on a Windows runner) is the one real, listable root
+    # every host has -- `_is_windows` alone decides which label a root's
+    # parent gets, so patching just that seam is enough to exercise the
+    # branch (and on Windows it is the real thing).
+    root = tmp_path.anchor
     monkeypatch.setattr(lora_routes, "_is_windows", lambda: True)
-    response = await client.get("/lora_library/fs/list", params={"dir": "/"})
+    response = await client.get("/lora_library/fs/list", params={"dir": root})
     data = await response.json()
-    assert data["dir"] == "/"
+    assert data["dir"] == root
     assert data["parent"] == "ROOTS"
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX '/' is a foreign path on a Windows server; the drive-root test "
+    "above covers the Windows root",
+)
 async def test_fs_list_posix_root_climbs_back_to_roots(client) -> None:
     """2026-07-26: this used to assert ``parent is None`` for ``/`` -- which
     WAS the bug (owner: "I can no longer access root on linux when I
@@ -603,8 +639,13 @@ def test_safe_current_username_returns_a_string_or_none_on_this_real_machine() -
 
 
 def test_safe_current_uid_returns_an_int_on_this_real_posix_machine() -> None:
+    # Never raises: the real uid where `os.getuid` exists (POSIX), None where
+    # it doesn't (Windows) -- which just drops the GVFS candidate.
     uid = lora_routes._safe_current_uid()
-    assert isinstance(uid, int)
+    if hasattr(os, "getuid"):
+        assert uid == os.getuid()
+    else:
+        assert uid is None
 
 
 def test_linux_mount_root_candidates_keeps_the_documented_order() -> None:
@@ -779,6 +820,7 @@ class TestListableDirGuard:
         target.write_text("x", encoding="utf-8")
         assert lora_routes._is_listable_dir(target) is False
 
+    @needs_posix_permissions
     def test_unreadable_directory_fails(self, tmp_path: Path) -> None:
         blocked = tmp_path / "rootlike"
         blocked.mkdir()
@@ -790,6 +832,7 @@ class TestListableDirGuard:
 
 
 class TestRootsOmitsUnlistableHome:
+    @needs_posix_permissions
     def test_home_dropped_when_unreadable(
         self, context: LibraryContext, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -921,7 +964,9 @@ class TestMountedFilesystemDiscovery:
             lora_routes, "_list_linux_mount_roots", lambda: [("Filesystem root", "/")]
         )
         entries = lora_routes._platform_root_entries(False)
-        assert [e["path"] for e in entries] == ["/mnt/nas", "/"]
+        # Entries carry str(Path(raw)) (separators flip only on a Windows
+        # runner simulating Linux); the ORDER is what this pins.
+        assert [e["path"] for e in entries] == [str(Path("/mnt/nas")), str(Path("/"))]
 
 
 # --------- v0.87.1: an unready server must not take the whole pack down
@@ -1007,6 +1052,7 @@ class TestBannerNeverCreatesTheLibrary:
         assert not unreachable.exists()
         assert not unreachable.parent.exists()
 
+    @needs_posix_permissions
     def test_library_dir_still_raises_on_an_unreachable_mount(
         self, context, tmp_path
     ) -> None:

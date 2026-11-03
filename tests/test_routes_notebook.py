@@ -20,6 +20,7 @@ from pathlib import Path
 
 import pytest
 from aiohttp import web
+from conftest import symlink_or_skip
 
 from lora_library import markdown_store, routes_notebook
 from lora_library.context import LibraryContext
@@ -2116,7 +2117,7 @@ async def test_a_symlink_out_of_a_shared_folder_is_still_refused(
     secret = tmp_path / "secret.md"
     secret.write_text("## Secret\nnope\n", encoding="utf-8")
     link = shared / "innocent.md"
-    link.symlink_to(secret)
+    symlink_or_skip(link, secret)
 
     client = await aiohttp_client(make_app(context))
     resp = await client.get(
