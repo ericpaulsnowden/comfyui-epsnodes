@@ -27,11 +27,11 @@ from aiohttp import web
 
 from eps_image import routes_state_registry
 from eps_image.nodes_bypass import EPSBypass
-from eps_image.nodes_group_bypass import EPSGroupBypass
 from eps_image.nodes_checkpoint_switcher import EPSCheckpointSwitcher
 from eps_image.nodes_cross_sweep import EPSCrossSweep
 from eps_image.nodes_distributor import EPSDistributor
 from eps_image.nodes_frame_saver import EPSFrameSaver
+from eps_image.nodes_group_bypass import EPSGroupBypass
 from eps_image.nodes_image_grid import EPSImageGrid
 from eps_image.nodes_number_controller import EPSNumberController
 from eps_image.nodes_resolution import EPSResolution

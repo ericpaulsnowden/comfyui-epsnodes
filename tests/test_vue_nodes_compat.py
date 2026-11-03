@@ -33,10 +33,10 @@ from pathlib import Path
 import pytest
 
 from eps_image.nodes_bypass import EPSBypass
-from eps_image.nodes_group_bypass import EPSGroupBypass
 from eps_image.nodes_checkpoint_switcher import EPSCheckpointSwitcher
 from eps_image.nodes_distributor import EPSDistributor
 from eps_image.nodes_frame_saver import EPSFrameSaver
+from eps_image.nodes_group_bypass import EPSGroupBypass
 from eps_image.nodes_image_grid import EPSImageGrid
 from eps_image.nodes_switcher import (
     EPSAudioSwitcher,
