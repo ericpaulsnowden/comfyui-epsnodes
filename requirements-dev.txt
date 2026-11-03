@@ -1,0 +1,31 @@
+# Development and CI dependencies for comfyui-epsnodes. Not needed to RUN the pack.
+#
+#     python -m pip install -r requirements.txt -r requirements-dev.txt
+#
+# Install into a throwaway venv, NOT into your ComfyUI environment: these are
+# exact pins and would replace the versions ComfyUI itself runs on. (ComfyUI
+# Manager only ever reads requirements.txt, so none of this reaches users.)
+#
+# Pinned to the versions the suite is verified green on, so an upstream release
+# cannot redden CI on its own. Transitive dependencies are left to pip.
+#
+# torch is deliberately NOT listed: ComfyUI provides it, and a plain
+# `pip install torch` on Linux is a multi-GB CUDA download. Seven test modules
+# (Frame Saver, Image Grid, Resolution, Splat Placement, ...) skip cleanly
+# without it -- 515 of 4385 tests. CI installs the CPU build in its own step
+# (.github/workflows/ci.yml); locally, run the suite from your ComfyUI venv or add:
+#     pip install torch --extra-index-url https://download.pytorch.org/whl/cpu
+
+# --- test runner and linter ---
+pytest==9.1.1
+pytest-asyncio==1.4.0        # pyproject.toml sets asyncio_mode = "auto"
+pytest-aiohttp==1.1.1        # supplies the `aiohttp_client` fixture the route tests use
+ruff==0.15.22
+
+# --- packages ComfyUI normally provides, which the suite imports ---
+aiohttp==3.14.2
+pillow==12.3.0
+numpy==2.5.1; python_version >= "3.12"
+numpy==2.2.6; python_version < "3.12"     # numpy 2.5 needs Python >= 3.12
+av==18.0.0; python_version >= "3.11"
+av==17.1.0; python_version < "3.11"       # av 18 needs Python >= 3.11

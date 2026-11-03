@@ -170,7 +170,7 @@ User install and update (requirements, clone, library-folder setting, hard refre
 cd ComfyUI/custom_nodes
 git clone https://github.com/ericpaulsnowden/comfyui-epsnodes
 cd comfyui-epsnodes
-python -m pip install pytest pytest-asyncio pytest-aiohttp ruff   # the repo has no dev-requirements file
+python -m pip install -r requirements.txt -r requirements-dev.txt   # exact pins; torch is deliberate, see the file
 python -m pytest -p no:cacheprovider -q tests
 ruff check .
 ```
