@@ -12,6 +12,8 @@ lines, the scan has lost the cases it was built for.
 
 from __future__ import annotations
 
+import asyncio
+import concurrent.futures
 import os
 import sys
 import types
@@ -503,6 +505,271 @@ class TestEgressHooksIntercept:
         assert "GET" in rows[0]["methods"]
         # Attributed to the caller's pack (this repo), not to aiohttp itself.
         assert rows[0]["pack"] == os.path.basename(repo)
+
+
+# ------------------------------------- egress attribution (who is blamed)
+
+
+def _run_as(filename: str, source: str, **namespace) -> dict:
+    """Execute *source* as if it lived in the file *filename*.
+
+    Frames report the filename the code was COMPILED under, so this makes a
+    function that looks, to the stack walk, like it belongs to any pack (or to
+    ComfyUI core) without writing a file. The file need not exist.
+    """
+    scope = {"__name__": "fake_caller", **namespace}
+    exec(compile(source, filename, "exec"), scope)
+    return scope
+
+
+_URLLIB_CALLER = (
+    "import urllib.request\n"
+    "def fetch(url):\n"
+    "    return urllib.request.urlopen(url)\n"
+)
+_REQUESTS_CALLER = (
+    "import requests\n"
+    "def fetch(url):\n"
+    "    with requests.Session() as session:\n"
+    "        return session.request('GET', url)\n"
+)
+_AIOHTTP_CALLER = (
+    "import aiohttp\n"
+    "async def fetch(url):\n"
+    "    async with aiohttp.ClientSession() as session:\n"
+    "        return await session.get(url)\n"
+)
+
+def _in_clean_thread(fn, *args):
+    """Call ``fn(*args)`` on a worker thread and return its result.
+
+    The attribution walk climbs the WHOLE stack for the innermost pack frame,
+    and a test function living in this repo is itself a frame inside a pack
+    root. Run from the test thread, a "core" caller would therefore be blamed
+    on whichever pack the test file belongs to. On a fresh thread the stack
+    above the caller is only the standard library, which is what a call from
+    ComfyUI core with no pack node running looks like.
+    """
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+        return pool.submit(fn, *args).result()
+
+
+#: What each stubbed client entry point hands back, so a test can also assert
+#: the wrapper passed the real result straight through.
+_STUB_RESULT = {
+    "urllib": "urllib-result",
+    "requests": "requests-result",
+    "aiohttp": "aiohttp-result",
+}
+
+#: The callers every client is driven from; the keys of ``world.callers``.
+_CALLERS = ["another pack", "core comfy/", "core nodes.py", "EPSNodes itself"]
+
+
+class TestEgressAttribution:
+    """The egress lens must blame the CALLER, never its own wrapper.
+
+    The wrappers live inside EPSNodes, so a stack walk that starts at the
+    wrapper finds EPSNodes first and reports it for every other pack's
+    request. That shipped (found by external review, FORMAT.md §9
+    2026-11-03) because the single test of it called from inside EPSNodes,
+    where the wrong answer matches the right one. These tests therefore drive
+    the REAL wrappers from code compiled under filenames of three different
+    owners, and assert all three answers.
+
+    Only the network itself is stubbed: each client's entry point is replaced
+    by a stub BEFORE the real ``install_egress_hooks`` wraps it, so the wrapper
+    under test is the production one and nothing leaves the machine.
+    """
+
+    @pytest.fixture
+    def world(self, tmp_path, monkeypatch):
+        import urllib.request
+
+        import aiohttp
+
+        # The checkout stands in for the EPSNodes pack: its real folder is
+        # `comfyui-epsnodes` in production, and here whatever the checkout is
+        # called. The real observers.py sits inside it, which is the whole
+        # point -- the wrapper must read as EPSNodes' code to this test.
+        repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        roots = [attribution.normalize_root(os.path.dirname(repo))]
+        eps_pack = os.path.basename(repo)
+        assert attribution.pack_of_path(observers.__file__, roots) == eps_pack
+
+        # ComfyUI core is anywhere OUTSIDE every custom_nodes root.
+        comfy_root = tmp_path / "ComfyUI"
+        core_files = [str(comfy_root / "comfy" / "foo.py"), str(comfy_root / "nodes.py")]
+        if any(attribution.pack_of_path(path, roots) for path in core_files):
+            pytest.skip("checkout sits so near the filesystem root that tmp_path is inside a root")
+
+        stubbed = {}
+
+        def fake_urlopen(url, *args, **kwargs):
+            return _STUB_RESULT["urllib"]
+
+        async def fake_aiohttp_request(self, method, url, *args, **kwargs):
+            return _STUB_RESULT["aiohttp"]
+
+        monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+        monkeypatch.setattr(aiohttp.ClientSession, "_request", fake_aiohttp_request)
+        stubbed["urllib"] = stubbed["aiohttp"] = True
+        try:
+            import requests.sessions
+        except ImportError:  # not a dependency of this pack
+            stubbed["requests"] = False
+        else:
+            monkeypatch.setattr(
+                requests.sessions.Session, "request",
+                lambda self, method, url, *args, **kwargs: _STUB_RESULT["requests"],
+            )
+            stubbed["requests"] = True
+
+        log = observers.EgressLog()
+        monkeypatch.setattr(observers, "EGRESS", log)
+        monkeypatch.setattr(observers, "_hooks_installed", None)
+        status = observers.install_egress_hooks(roots)
+        # A client that quietly failed to wrap would leave the tests below
+        # asserting against a call nothing observed.
+        assert all(status[name] for name, present in stubbed.items() if present), status
+
+        # who is calling -> (a filename to compile the caller under, the pack
+        # the report must name for it)
+        callers = {
+            "another pack": (
+                os.path.join(os.path.dirname(repo), "other-pack", "client.py"), "other-pack"),
+            "core comfy/": (core_files[0], "(not a custom node)"),
+            "core nodes.py": (core_files[1], "(not a custom node)"),
+            "EPSNodes itself": (os.path.join(repo, "eps_image", "remote_fetch.py"), eps_pack),
+        }
+        return types.SimpleNamespace(
+            roots=roots, log=log, callers=callers, stubbed=stubbed, eps_pack=eps_pack,
+            tmp_path=tmp_path,
+        )
+
+    @staticmethod
+    def _only_row(log) -> dict:
+        rows = log.snapshot()
+        assert len(rows) == 1, rows
+        assert rows[0]["host"] == "example.com"
+        return rows[0]
+
+    @pytest.mark.parametrize("caller", _CALLERS)
+    @pytest.mark.parametrize(
+        "client, source", [("urllib", _URLLIB_CALLER), ("requests", _REQUESTS_CALLER)])
+    def test_sync_clients_blame_the_caller(self, world, client, source, caller) -> None:
+        if not world.stubbed[client]:
+            pytest.skip(f"{client} is not installed")
+        filename, expected = world.callers[caller]
+        fetch = _run_as(filename, source)["fetch"]
+        result = _in_clean_thread(fetch, "https://example.com/path")
+        assert result == _STUB_RESULT[client]              # called straight through
+        assert self._only_row(world.log)["pack"] == expected
+
+    @pytest.mark.parametrize("caller", _CALLERS)
+    def test_aiohttp_blames_the_caller(self, world, caller) -> None:
+        filename, expected = world.callers[caller]
+        fetch = _run_as(filename, _AIOHTTP_CALLER)["fetch"]
+        result = _in_clean_thread(asyncio.run, fetch("https://example.com/path"))
+        assert result == _STUB_RESULT["aiohttp"]
+        row = self._only_row(world.log)
+        assert row["pack"] == expected
+        assert row["methods"] == ["GET"]
+
+    def test_a_client_library_between_the_caller_and_the_wrapper_is_climbed(self, world) -> None:
+        # The usual real shape: a pack calls a helper library which calls
+        # urllib. The library is neither a pack nor the wrapper, so the walk
+        # has to climb through it and land on the pack that asked.
+        library = _run_as(
+            str(world.tmp_path / "site-packages" / "somelib" / "api.py"),
+            "import urllib.request\ndef get(url):\n    return urllib.request.urlopen(url)\n",
+        )
+        filename, expected = world.callers["another pack"]
+        caller_source = "def fetch(url):\n    return lib['get'](url)\n"
+        fetch = _run_as(filename, caller_source, lib=library)["fetch"]
+        _in_clean_thread(fetch, "https://example.com/path")
+        assert self._only_row(world.log)["pack"] == expected
+
+    def test_a_core_call_made_under_pack_code_is_blamed_on_that_pack(self, world) -> None:
+        # The deliberate flip side of the core cases above: the walk takes the
+        # INNERMOST pack frame anywhere on the stack, so core code that a pack
+        # called into is the pack's doing. Only a call with no pack frame
+        # above it is unattributed.
+        core = _run_as(world.callers["core nodes.py"][0], _URLLIB_CALLER)
+        filename, expected = world.callers["another pack"]
+        run = _run_as(filename, "def run(url):\n    return core['fetch'](url)\n", core=core)["run"]
+        _in_clean_thread(run, "https://example.com/path")
+        assert self._only_row(world.log)["pack"] == expected
+
+
+class TestPackOfFrameSkipFiles:
+    """``pack_of_frame`` steps over instrumentation by FILE, never by pack."""
+
+    def _stack(self, tmp_path):
+        root = attribution.normalize_root(str(tmp_path / "custom_nodes"))
+        wrapper_file = str(tmp_path / "custom_nodes" / "eps-pack" / "wrapper.py")
+        sibling_file = str(tmp_path / "custom_nodes" / "eps-pack" / "route.py")
+        caller_file = str(tmp_path / "custom_nodes" / "other-pack" / "client.py")
+        wrapper = _run_as(
+            wrapper_file,
+            "def note(pack_of_frame, roots, skip_files):\n"
+            "    return pack_of_frame(roots, skip_files=skip_files)\n",
+        )
+        return root, wrapper_file, sibling_file, caller_file, wrapper
+
+    def test_listed_files_are_stepped_over(self, tmp_path) -> None:
+        root, wrapper_file, _, caller_file, wrapper = self._stack(tmp_path)
+        caller = _run_as(
+            caller_file,
+            "def call():\n    return note(pack_of_frame, [root], (wrapper_file,))\n",
+            note=wrapper["note"], pack_of_frame=attribution.pack_of_frame,
+            root=root, wrapper_file=wrapper_file,
+        )
+        assert caller["call"]() == "other-pack"
+
+    def test_nothing_is_skipped_unless_asked(self, tmp_path) -> None:
+        # With no skip_files the first pack frame wins, which here is the
+        # wrapper's own pack. This is the pre-fix behaviour, kept reachable
+        # so the contrast stays visible in the tests.
+        root, _, _, caller_file, wrapper = self._stack(tmp_path)
+        caller = _run_as(
+            caller_file,
+            "def call():\n    return note(pack_of_frame, [root], ())\n",
+            note=wrapper["note"], pack_of_frame=attribution.pack_of_frame, root=root,
+        )
+        assert caller["call"]() == "eps-pack"
+
+    def test_a_sibling_file_of_the_same_pack_is_not_skipped(self, tmp_path) -> None:
+        # EPSNodes' own code that makes a request must still be blamed on
+        # EPSNodes: only the listed instrumentation files are stepped over,
+        # not everything in the pack that owns them.
+        root, wrapper_file, sibling_file, _, wrapper = self._stack(tmp_path)
+        route = _run_as(
+            sibling_file,
+            "def call():\n    return note(pack_of_frame, [root], (wrapper_file,))\n",
+            note=wrapper["note"], pack_of_frame=attribution.pack_of_frame,
+            root=root, wrapper_file=wrapper_file,
+        )
+        assert route["call"]() == "eps-pack"
+
+    def test_the_attribution_module_is_never_the_caller(self, tmp_path) -> None:
+        # If a helper inside attribution.py ever calls pack_of_frame, that
+        # helper is machinery, not the caller. Compile a stand-in under
+        # attribution.py's own filename and put it between a pack and the walk.
+        repo = os.path.dirname(os.path.dirname(os.path.abspath(attribution.__file__)))
+        root = attribution.normalize_root(os.path.dirname(repo))
+        assert attribution.pack_of_path(attribution.__file__, [root]) == os.path.basename(repo)
+        helper = _run_as(
+            attribution.__file__,
+            "def helper(roots):\n    return pack_of_frame(roots)\n",
+            pack_of_frame=attribution.pack_of_frame,
+        )
+        client = _run_as(
+            os.path.join(os.path.dirname(repo), "other-pack", "client.py"),
+            "def call(roots):\n    return helper(roots)\n",
+            helper=helper["helper"],
+        )
+        assert client["call"]([root]) == "other-pack"
 
 
 # ------------------------------------------------------------------ report

@@ -5981,10 +5981,68 @@ isolation is an OS-level concern (separate user, container, namespace).
   inventory becoming its own privacy problem. Load order does not matter
   here — the wrap is on the client library, not the caller — but it can only
   see calls made after it attached, so hooks install at pack load, never
-  from a node run (an audit must not change the process it reports on).
+  from a node run (an audit must not change the process it reports on). The
+  pack named on a row is the innermost custom-node file on the call stack,
+  found AFTER stepping over the wrappers' own frames (see "Egress attribution"
+  below); a call with no pack frame anywhere on its stack is labelled
+  `(not a custom node)`.
 - **Source scan** — regex over installed `.py` for the recurring idioms
   (`scanner.RULES`). Test trees and hidden directories are skipped: ComfyUI
   does not import them, so they are not attack surface.
+
+### Egress attribution: the wrapper is not the caller (2026-11-03)
+
+**What was wrong.** The egress wrappers (`aiohttp`, `urllib`, `requests`)
+sit inside this pack, and the attribution walk began its climb AT the wrapper
+(`note(..., skip=1)` was off by one). The first frame it examined was
+therefore always EPSNodes' own `observers.py`, which belongs to
+`comfyui-epsnodes`, so every destination in the report was filed under
+EPSNodes whichever pack actually made the request. Reproduced by compiling a
+caller under `custom_nodes/other-pack/client.py`, invoking the real `urllib`
+wrapper with the network stubbed, and reading the log: it said
+`comfyui-epsnodes` contacted `example.com`.
+
+**This was a correctness defect in the bookkeeping, not evidence that
+anything was calling out maliciously.** The wrappers recorded the real
+host, method and count of real calls; only the PACK COLUMN was wrong. Two
+consequences are worth stating plainly: EPSNodes appeared to contact hosts it
+never does, and every other pack appeared to make no outbound calls at all
+-- the opposite of what an egress lens is for. A report saved from before the
+fix has a trustworthy destination list and an untrustworthy pack column. The
+counters live in memory and restart with the server, so re-running the audit
+after updating gives a clean tally.
+
+**Why it was not caught.** The single test of the real wrapper made its call
+from inside EPSNodes (the test file is in this repo), where the wrong answer
+and the right one are the same name.
+
+**The fix skips the instrumentation EXPLICITLY, by file.**
+`attribution.pack_of_frame(roots, skip_files=...)` first steps over every
+leading frame whose code file is `attribution.py` itself or one of
+`skip_files` (the egress hooks pass `observers.py`), then attributes the
+first frame that remains. Deliberately not a frame COUNT, which is what broke;
+and deliberately not "skip every EPSNodes frame", because a genuine request
+made by this pack's own code (an `eps_image` route calling `urllib`) must
+still be reported as EPSNodes. The stepped-over frames do not spend the
+25-frame climb budget, the walk is still `sys._getframe` with no caching
+layer, and the cost per outgoing call is unchanged to within a few frame
+reads.
+
+**What the label does and does not mean.** The walk takes the INNERMOST pack
+frame anywhere within the climb, so core or library code that a pack called
+into is the pack's doing, and is reported as that pack. `(not a custom node)`
+therefore means "no pack frame was on the stack", which for a call that
+ComfyUI core makes on its own is correct, and is also what a call looks like
+when a library hands it to another thread. It is an inventory of who to ask
+about a destination, not proof of which line of which file sent it.
+
+**Pinned by** `TestEgressAttribution` and `TestPackOfFrameSkipFiles` in
+`tests/test_eps_audit.py`. They run the REAL wrappers (only the network
+entry point underneath is stubbed) from code compiled under the filename of
+another pack, of ComfyUI core (`comfy/…`, `nodes.py`) and of EPSNodes
+itself, and assert all three answers for all three clients. Against the old
+`skip=1` code every other-pack and core case fails (it names the EPSNodes
+folder), so the suite can no longer pass by coincidence.
 
 ### Two readers, one report (v0.90.0)
 

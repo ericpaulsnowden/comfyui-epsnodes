@@ -21,7 +21,9 @@ strictly more complete.
 than the callers, and the calls it cares about happen at render time, long
 after every pack has imported — so load order does not matter. Attribution
 walks the stack at call time to find the innermost pack frame
-(:func:`attribution.pack_of_frame`).
+(:func:`attribution.pack_of_frame`), stepping over this module's own wrapper
+frames by file first: they live inside EPSNodes, so counting them as the
+caller would blame EPSNodes for every other pack's request.
 
 **Fail loud.** :func:`install_egress_hooks` returns exactly which hooks
 attached, and the pack logs that at startup: an interposition that quietly
@@ -124,6 +126,12 @@ def _split_url(url) -> tuple[str, str]:
         return "", "?"
 
 
+#: Files whose frames are the egress wrappers themselves. The attribution walk
+#: steps over these before it looks for a caller. Taken from a function in this
+#: module so it is spelled exactly the way a frame here reports it.
+_INSTRUMENTATION_FILES = (_split_url.__code__.co_filename,)
+
+
 def install_egress_hooks(roots) -> dict[str, bool]:
     """Wrap the HTTP clients so outbound calls are tallied. Idempotent.
 
@@ -138,10 +146,13 @@ def install_egress_hooks(roots) -> dict[str, bool]:
 
     status: dict[str, bool] = {}
 
-    def note(url, method, skip):
+    def note(url, method):
         try:
             scheme, host = _split_url(url)
-            EGRESS.record(pack_of_frame(roots, skip=skip), scheme, host, method)
+            EGRESS.record(
+                pack_of_frame(roots, skip_files=_INSTRUMENTATION_FILES),
+                scheme, host, method,
+            )
         except Exception:  # observation must never break the observed call
             logger.debug("EPSNodes audit: egress bookkeeping failed", exc_info=True)
 
@@ -151,7 +162,7 @@ def install_egress_hooks(roots) -> dict[str, bool]:
         original_request = aiohttp.ClientSession._request
         if not getattr(original_request, "_eps_audit_wrapped", False):
             async def _request(self, method, str_or_url, *args, **kwargs):
-                note(str_or_url, method, skip=1)
+                note(str_or_url, method)
                 return await original_request(self, method, str_or_url, *args, **kwargs)
 
             _request._eps_audit_wrapped = True
@@ -167,7 +178,7 @@ def install_egress_hooks(roots) -> dict[str, bool]:
         if not getattr(original_urlopen, "_eps_audit_wrapped", False):
             def _urlopen(url, *args, **kwargs):
                 method = getattr(url, "get_method", lambda: "GET")()
-                note(url, method, skip=1)
+                note(url, method)
                 return original_urlopen(url, *args, **kwargs)
 
             _urlopen._eps_audit_wrapped = True
@@ -182,7 +193,7 @@ def install_egress_hooks(roots) -> dict[str, bool]:
         original_send = requests.sessions.Session.request
         if not getattr(original_send, "_eps_audit_wrapped", False):
             def _send(self, method, url, *args, **kwargs):
-                note(url, method, skip=1)
+                note(url, method)
                 return original_send(self, method, url, *args, **kwargs)
 
             _send._eps_audit_wrapped = True

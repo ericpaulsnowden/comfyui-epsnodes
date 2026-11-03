@@ -1,1 +1,1 @@
-export const FRONTEND_VERSION = '0.105.1';
+export const FRONTEND_VERSION = '0.106.0';
