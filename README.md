@@ -1,5 +1,7 @@
 # EPSNodes
 
+![CI](https://github.com/ericpaulsnowden/comfyui-epsnodes/actions/workflows/ci.yml/badge.svg)
+
 Eric Paul Snowden's ComfyUI node pack — practical workflow utilities that
 live in **plain files you own**. Everything appears under **EPSNodes** in
 the node browser and Settings. It started as a LoRA family and has grown
