@@ -283,9 +283,17 @@ class LibraryContext:
         config is where ``library_dir`` lives, so a save may point the
         library somewhere new, and the next :meth:`library_dir` call must
         create/verify THAT folder for real.
+
+        Also drops :meth:`load_config`'s memo outright rather than trusting
+        the new file's mtime to differ: on a coarse-timestamp filesystem
+        (NTFS stamps at the ~1-16 ms clock tick, exFAT 10 ms, FAT 2 s) two
+        same-size saves within one tick leave ``(mtime_ns, size)`` unchanged,
+        and this process would keep reading back the config it just replaced
+        (found by the Windows CI leg).
         """
         self.user_dir.mkdir(parents=True, exist_ok=True)
         _atomic_write_text(self._config_path, json.dumps(config, indent=2) + "\n")
+        self._config_cache = None
         self.forget_ensured_dirs()
 
     # ------------------------------------------------------------- library dir

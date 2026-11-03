@@ -498,7 +498,7 @@ class TestRefsCarryPerFrameMtime:
         list_params = {"uuid": VALID_UUID}
         await self._add(client, fake_input_dir, "a.png")
         before = await (await client.get("/eps_image_grid/list", params=list_params)).json()
-        time.sleep(0.002)  # ms-precision keys
+        time.sleep(0.02)  # past one mtime tick (NTFS stamps at ~16 ms)
         await self._add(client, fake_input_dir, "b.png")
         after = await (await client.get("/eps_image_grid/list", params=list_params)).json()
         assert after["refs"][0]["mtime"] == before["refs"][0]["mtime"]

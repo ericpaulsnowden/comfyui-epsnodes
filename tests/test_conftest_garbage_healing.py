@@ -15,9 +15,11 @@ import os
 from pathlib import Path
 
 import conftest
+from conftest import needs_posix_permissions, symlink_or_skip
 
 
 class TestHealUnreadableGarbageDirs:
+    @needs_posix_permissions
     def test_heals_an_unreadable_top_level_garbage_dir(self, tmp_path: Path) -> None:
         garbage = tmp_path / "garbage-abc123"
         garbage.mkdir()
@@ -31,6 +33,7 @@ class TestHealUnreadableGarbageDirs:
         assert healed == 1
         assert os.access(garbage, os.R_OK | os.W_OK | os.X_OK)
 
+    @needs_posix_permissions
     def test_heals_a_nested_unreadable_dir(self, tmp_path: Path) -> None:
         garbage = tmp_path / "garbage-nested"
         nested = garbage / "blocked"
@@ -69,7 +72,7 @@ class TestHealUnreadableGarbageDirs:
         real_target = tmp_path / "elsewhere"
         real_target.mkdir()
         link = tmp_path / "garbage-link"
-        link.symlink_to(real_target, target_is_directory=True)
+        symlink_or_skip(link, real_target, target_is_directory=True)
         # Must not follow the symlink (never touch *real_target*, never raise).
         assert conftest._heal_unreadable_garbage_dirs(tmp_path) == 0
         assert os.access(real_target, os.R_OK | os.W_OK | os.X_OK)

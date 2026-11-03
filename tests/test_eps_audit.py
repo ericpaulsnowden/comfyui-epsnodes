@@ -20,6 +20,7 @@ import types
 
 import pytest
 from aiohttp import web
+from conftest import symlink_or_skip
 
 from eps_audit import attribution, audit, observers, report, scanner
 from eps_audit.routes_audit import build_routes
@@ -52,10 +53,7 @@ class TestAttribution:
         module.write_text("x", encoding="utf-8")
         nodes_dir = tmp_path / "custom_nodes"
         nodes_dir.mkdir()
-        try:
-            os.symlink(real, nodes_dir / "linked_pack")
-        except (OSError, NotImplementedError):
-            pytest.skip("symlinks unavailable on this platform/user")
+        symlink_or_skip(nodes_dir / "linked_pack", real, target_is_directory=True)
         root = attribution.normalize_root(str(nodes_dir))
         assert attribution.pack_of_path(str(nodes_dir / "linked_pack" / "pkg" / "mod.py"), [root]) \
             == "linked_pack"

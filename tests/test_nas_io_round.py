@@ -682,7 +682,9 @@ def test_list_sets_still_skips_bad_files_and_invalid_slugs_under_the_cache(
 
     sets_dir = context.sets_dir()
     (sets_dir / "broken.json").write_text("{not json", encoding="utf-8")
-    (sets_dir / "My Set.json").write_text(json.dumps({"format": 1, "name": "x", "loras": []}))
+    (sets_dir / "My Set.json").write_text(
+        json.dumps({"format": 1, "name": "x", "loras": []}), encoding="utf-8"
+    )
     sets_store.save_set(context, {"name": "Good", "loras": []})
     with caplog.at_level(logging.WARNING, logger="lora_library"):
         listed = sets_store.list_sets(context)
@@ -703,6 +705,36 @@ def test_vanished_sets_dir_is_recreated_and_the_ensured_memo_forgotten(
     shutil.rmtree(sets_dir)
     assert sets_store.list_sets(context) == []
     assert sets_dir.is_dir()  # re-created: the stale "ensured" memo was dropped
+
+
+def test_vanished_sets_dir_recreated_with_the_same_mtime_still_lists_empty(
+    context: LibraryContext, monkeypatch
+) -> None:
+    """A coarse-timestamp filesystem (NTFS stamps at the ~1-16 ms clock tick,
+    exFAT 10 ms, FAT 2 s, many NAS shares) can give a folder deleted and
+    re-created within one tick the SAME mtime it had before. The listing
+    cache is keyed on that mtime, so it must not survive the folder
+    vanishing -- found by the Windows CI leg, where the test above failed
+    intermittently with the three deleted sets still listed. Simulated
+    deterministically here by stamping the re-created folder with the old
+    mtime."""
+    _three_sets(context)
+    sets_dir = context.sets_dir()
+    sets_store.list_sets(context)
+    old_ns = sets_dir.stat().st_mtime_ns
+    import shutil
+
+    shutil.rmtree(sets_dir)
+    real_sets_dir = LibraryContext.sets_dir
+
+    def same_tick_sets_dir(self: LibraryContext) -> Path:
+        directory = real_sets_dir(self)
+        if directory.is_dir():  # the re-creating call, not the memoized one
+            os.utime(directory, ns=(old_ns, old_ns))
+        return directory
+
+    monkeypatch.setattr(LibraryContext, "sets_dir", same_tick_sets_dir)
+    assert sets_store.list_sets(context) == []
 
 
 def test_load_layout_reads_the_file_once_per_mtime_and_rides_the_cached_listing(
@@ -733,7 +765,9 @@ def test_load_layout_reads_the_file_once_per_mtime_and_rides_the_cached_listing(
     # an edit by another machine (new mtime/size) is re-read
     time.sleep(0.02)
     layout_file = sets_store.layout_path(context)
-    layout_file.write_text(json.dumps({"categories": ["Other"], "order": {"Other": ["apple"]}}))
+    layout_file.write_text(
+        json.dumps({"categories": ["Other"], "order": {"Other": ["apple"]}}), encoding="utf-8"
+    )
     os.utime(
         layout_file,
         ns=(layout_file.stat().st_atime_ns, layout_file.stat().st_mtime_ns + 1_000_000_000),
@@ -919,10 +953,11 @@ class TestGvfsReplaceFallback:
 
 class TestIsForeignAbsolute:
     """Truth table for the module-level `context.is_foreign_absolute` --
-    exercised for real on this POSIX dev/CI machine, plus the reverse
-    direction via the injectable `_IS_WINDOWS` seam (same shape as
-    `lora_library/routes.py`'s `_is_windows()` function seam, but a plain
-    constant here -- see the seam's own docstring)."""
+    the POSIX-host direction (`posix_server`, a no-op on macOS/Linux) plus
+    the reverse direction via the injectable `_IS_WINDOWS` seam (same shape
+    as `lora_library/routes.py`'s `_is_windows()` function seam, but a plain
+    constant here -- see the seam's own docstring). Both directions run on
+    every CI host, Windows included."""
 
     @pytest.mark.parametrize(
         "value",
@@ -933,6 +968,7 @@ class TestIsForeignAbsolute:
         ],
         ids=["backslash", "forward-slash", "unc"],
     )
+    @pytest.mark.usefixtures("posix_server")
     def test_windows_shaped_values_are_foreign_on_posix(self, value: str) -> None:
         assert context_module.is_foreign_absolute(value) is True
 
@@ -940,6 +976,7 @@ class TestIsForeignAbsolute:
     def test_relative_names_are_never_foreign(self, value: str) -> None:
         assert context_module.is_foreign_absolute(value) is False
 
+    @pytest.mark.usefixtures("posix_server")
     def test_locally_absolute_posix_path_is_not_foreign_on_posix(self) -> None:
         assert context_module.is_foreign_absolute("/mnt/nas/loras.md") is False
 
@@ -973,9 +1010,12 @@ class TestIsForeignAbsolute:
         assert context_module.is_foreign_absolute("smb://host/share/loras.md") is False
 
 
+@pytest.mark.usefixtures("posix_server")
 class TestHealForeignAbsoluteHelper:
     """Direct unit coverage of `context.heal_foreign_absolute` /
-    `_foreign_path_segments`, below the `resolve_notebook_file` level."""
+    `_foreign_path_segments`, below the `resolve_notebook_file` level.
+    Written from a POSIX host's side (`posix_server`); the reverse-direction
+    test flips the seam itself."""
 
     def test_no_tail_exists_returns_the_longest_one(self, tmp_path: Path) -> None:
         result = context_module.heal_foreign_absolute(r"Z:\docs\short_prompts.md", tmp_path)
@@ -1002,8 +1042,12 @@ class TestHealForeignAbsoluteHelper:
 
     def test_never_produces_a_backslash_or_drive_colon_on_posix(self, tmp_path: Path) -> None:
         result = context_module.heal_foreign_absolute(r"Z:\docs\short_prompts.md", tmp_path)
-        assert "\\" not in str(result)
-        assert all(":" not in part for part in result.parts)
+        # Only the segments joined UNDER the base came from the foreign value
+        # (the base itself is this host's own path, backslashes and all on a
+        # Windows runner) -- those are what must be clean.
+        joined = result.relative_to(tmp_path).parts
+        assert joined == ("docs", "short_prompts.md")
+        assert not any("\\" in part or ":" in part for part in joined)
 
     def test_a_bare_drive_root_with_no_segments_does_not_crash(self, tmp_path: Path) -> None:
         # Degenerate input (no real `file` widget would hold just "Z:\\"),
@@ -1014,9 +1058,11 @@ class TestHealForeignAbsoluteHelper:
 
 
 class TestForeignAbsoluteNote:
+    @pytest.mark.usefixtures("posix_server")
     def test_names_windows_flavor_on_posix(self) -> None:
-        note = context_module.foreign_absolute_note(Path("/lib/short_prompts.md"))
-        assert note == "tried as a Windows path from another machine: /lib/short_prompts.md"
+        candidate = Path("/lib/short_prompts.md")
+        note = context_module.foreign_absolute_note(candidate)
+        assert note == f"tried as a Windows path from another machine: {candidate}"
 
     def test_names_posix_flavor_on_simulated_windows(self, monkeypatch) -> None:
         monkeypatch.setattr(context_module, "_IS_WINDOWS", True)
@@ -1024,8 +1070,11 @@ class TestForeignAbsoluteNote:
         assert note.startswith("tried as a POSIX path from another machine:")
 
 
+@pytest.mark.usefixtures("posix_server")
 class TestResolveNotebookFileHealsForeignAbsolutePaths:
-    """`LibraryContext.resolve_notebook_file`'s heal-on-read, end to end."""
+    """`LibraryContext.resolve_notebook_file`'s heal-on-read, end to end --
+    from a POSIX host's side (`posix_server`); the reverse-direction test
+    flips the seam itself."""
 
     def test_owner_exact_path_heals_to_the_existing_short_tail(
         self, context: LibraryContext, library_dir: Path
@@ -1071,11 +1120,11 @@ class TestResolveNotebookFileHealsForeignAbsolutePaths:
         assert resolved == target
 
     def test_never_produces_a_backslash_or_drive_colon_on_posix(
-        self, context: LibraryContext
+        self, context: LibraryContext, library_dir: Path
     ) -> None:
         resolved = context.resolve_notebook_file(r"Z:\docs\short_prompts.md")
-        assert "\\" not in str(resolved)
-        assert all(":" not in part for part in resolved.parts)
+        joined = resolved.relative_to(library_dir).parts
+        assert not any("\\" in part or ":" in part for part in joined)
 
     def test_scheme_value_still_raises_before_any_foreign_absolute_handling(
         self, context: LibraryContext
@@ -1094,8 +1143,8 @@ class TestResolveNotebookFileHealsForeignAbsolutePaths:
         buggy_join = library_dir / "Z:\\docs\\short_prompts.md"
         resolved = context.resolve_notebook_file(r"Z:\docs\short_prompts.md")
         assert resolved != buggy_join
-        assert "\\" not in str(resolved)
-        assert all(":" not in part for part in resolved.parts)
+        joined = resolved.relative_to(library_dir).parts
+        assert not any("\\" in part or ":" in part for part in joined)
 
 
 class TestRelativizeLibraryPath:

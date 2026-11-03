@@ -991,7 +991,7 @@ class TestListRoute:
     ) -> None:
         directory = fake_folder_paths / store.DIRNAME / VALID_UUID
         directory.mkdir(parents=True)
-        (directory / store.MANIFEST_FILENAME).write_text("{not valid json")
+        (directory / store.MANIFEST_FILENAME).write_text("{not valid json", encoding="utf-8")
         response = await client.get("/eps_image_grid/list", params={"uuid": VALID_UUID})
         assert response.status == 200
         assert (await response.json())["refs"] == []

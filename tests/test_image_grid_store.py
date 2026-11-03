@@ -219,7 +219,7 @@ class TestAppendBatch:
     def test_manifest_records_frames_in_order(self, fake_folder_paths: Path) -> None:
         store.append_batch(VALID_UUID, _make_batch(2))
         directory = fake_folder_paths / store.DIRNAME / VALID_UUID
-        manifest = json.loads((directory / store.MANIFEST_FILENAME).read_text())
+        manifest = json.loads((directory / store.MANIFEST_FILENAME).read_text(encoding="utf-8"))
         assert manifest["frames"] == ["0001.png", "0002.png"]
 
     def test_refs_have_the_ui_images_shape(self, fake_folder_paths: Path) -> None:
@@ -414,7 +414,7 @@ class TestManifestSafety:
     def test_malformed_manifest_json_is_treated_as_empty(self, fake_folder_paths: Path) -> None:
         directory = fake_folder_paths / store.DIRNAME / VALID_UUID
         directory.mkdir(parents=True)
-        (directory / store.MANIFEST_FILENAME).write_text("{not valid json")
+        (directory / store.MANIFEST_FILENAME).write_text("{not valid json", encoding="utf-8")
 
         assert store.list_refs(VALID_UUID) == []
         assert store.read_all_as_tensors(VALID_UUID) == []
@@ -422,7 +422,9 @@ class TestManifestSafety:
     def test_manifest_with_wrong_shape_is_treated_as_empty(self, fake_folder_paths: Path) -> None:
         directory = fake_folder_paths / store.DIRNAME / VALID_UUID
         directory.mkdir(parents=True)
-        (directory / store.MANIFEST_FILENAME).write_text(json.dumps({"frames": "not-a-list"}))
+        (directory / store.MANIFEST_FILENAME).write_text(
+            json.dumps({"frames": "not-a-list"}), encoding="utf-8"
+        )
 
         assert store.list_refs(VALID_UUID) == []
 
@@ -431,7 +433,7 @@ class TestManifestSafety:
     ) -> None:
         directory = fake_folder_paths / store.DIRNAME / VALID_UUID
         directory.mkdir(parents=True)
-        (directory / store.MANIFEST_FILENAME).write_text("garbage")
+        (directory / store.MANIFEST_FILENAME).write_text("garbage", encoding="utf-8")
 
         refs = store.append_batch(VALID_UUID, _make_batch(1))
         assert [r["filename"] for r in refs] == ["0001.png"]
@@ -640,7 +642,7 @@ class TestCloneBuffer:
         dst_dir = fake_folder_paths / store.DIRNAME / OTHER_VALID_UUID
         pngs = sorted(p.name for p in dst_dir.glob("*.png"))
         assert pngs == ["0001.png", "0002.png", "0003.png"]
-        manifest = json.loads((dst_dir / store.MANIFEST_FILENAME).read_text())
+        manifest = json.loads((dst_dir / store.MANIFEST_FILENAME).read_text(encoding="utf-8"))
         assert manifest["frames"] == ["0001.png", "0002.png", "0003.png"]
 
     def test_returned_refs_use_the_dst_uuid_subfolder(self, fake_folder_paths: Path) -> None:
@@ -740,7 +742,7 @@ class TestBufferGeneration:
 
         import time
 
-        time.sleep(0.002)  # mtime resolution guard (ms-precision token)
+        time.sleep(0.02)  # past one mtime tick (NTFS stamps at ~16 ms)
         store.clear(VALID_UUID)
         store.append_batch(VALID_UUID, _make_batch(1))
 
@@ -790,7 +792,7 @@ class TestRemoveFrame:
 
         store.append_batch(VALID_UUID, _make_batch(2))
         gen_before = store.buffer_generation(VALID_UUID)
-        time.sleep(0.002)
+        time.sleep(0.02)  # past one mtime tick (NTFS stamps at ~16 ms)
         store.remove_frame(VALID_UUID, store.list_refs(VALID_UUID)[0]["filename"])
         assert store.buffer_generation(VALID_UUID) != gen_before
 
@@ -872,7 +874,7 @@ class TestWithFrameMtimes:
         store.append_batch(VALID_UUID, _make_batch(1))
         first = store.with_frame_mtimes(VALID_UUID, store.list_refs(VALID_UUID))[0]["mtime"]
         generation_before = store.buffer_generation(VALID_UUID)
-        time.sleep(0.002)  # ms-precision keys
+        time.sleep(0.02)  # past one mtime tick (NTFS stamps at ~16 ms)
         store.append_batch(VALID_UUID, _make_batch(1))
         again = store.with_frame_mtimes(VALID_UUID, store.list_refs(VALID_UUID))
         assert again[0]["mtime"] == first  # THE fix: frame 1's key survives frame 2
@@ -883,7 +885,7 @@ class TestWithFrameMtimes:
 
         store.append_batch(VALID_UUID, _make_batch(1))
         first = store.with_frame_mtimes(VALID_UUID, store.list_refs(VALID_UUID))[0]["mtime"]
-        time.sleep(0.002)
+        time.sleep(0.02)  # past one mtime tick (NTFS stamps at ~16 ms)
         store.clear(VALID_UUID)
         store.append_batch(VALID_UUID, _make_batch(1))
         [ref] = store.with_frame_mtimes(VALID_UUID, store.list_refs(VALID_UUID))
@@ -1096,7 +1098,7 @@ class TestThumbnailPath:
         stamp = first.stat().st_mtime_ns
         assert stamp == source.stat().st_mtime_ns  # stamped with the SOURCE's mtime
         data = first.read_bytes()
-        time.sleep(0.002)
+        time.sleep(0.02)  # past one mtime tick (NTFS stamps at ~16 ms)
         again = store.thumbnail_path(VALID_UUID, "0001.png")
         assert again == first
         assert again.stat().st_mtime_ns == stamp  # not regenerated
@@ -1107,7 +1109,7 @@ class TestThumbnailPath:
 
         store.append_batch(VALID_UUID, _make_batch(1, height=50, width=50))
         old_stamp = store.thumbnail_path(VALID_UUID, "0001.png").stat().st_mtime_ns
-        time.sleep(0.002)
+        time.sleep(0.02)  # past one mtime tick (NTFS stamps at ~16 ms)
         store.clear(VALID_UUID)
         assert not self._thumb().exists()  # clear took the thumbs with it
         store.append_batch(VALID_UUID, _make_batch(1, height=50, width=50))

@@ -599,16 +599,29 @@ def _splice_listing_cache(
         # logged) takes over exactly as if this splice never ran.
         _listing_cache.pop(sets_dir, None)
         return
+    if sets_dir not in _listing_cache:
+        # That stat found the folder gone (and re-created it): the listing we
+        # spliced into described a folder that no longer exists -- stay cold.
+        return
     _listing_cache[sets_dir] = (dir_key, time.monotonic(), spliced)
 
 
 def _sets_dir_mtime_ns(context: LibraryContext, sets_dir: Path) -> int:
     """The sets directory's mtime_ns -- the LISTING layer's key. A vanished
     directory (``FileNotFoundError``) forgets the context's ensured-dir memo
-    and re-creates it once; any other ``OSError`` propagates."""
+    and re-creates it once; any other ``OSError`` propagates.
+
+    The vanished case also forgets the cached LISTING outright: it described
+    a folder that no longer exists, and the re-created folder's mtime is no
+    proof of change -- on a coarse-timestamp filesystem (NTFS stamps at the
+    ~1-16 ms clock tick, exFAT 10 ms, FAT 2 s) a folder deleted and
+    re-created within one tick gets the SAME mtime, so the stale listing
+    would be served for up to :data:`LISTING_RESCAN_S` (found by the
+    Windows CI leg)."""
     try:
         return sets_dir.stat().st_mtime_ns
     except FileNotFoundError:
+        _forget_listing(sets_dir)
         context.forget_ensured_dirs()
         return context.sets_dir().stat().st_mtime_ns
 

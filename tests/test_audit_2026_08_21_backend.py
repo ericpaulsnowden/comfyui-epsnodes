@@ -7,6 +7,7 @@ unshare mismatch, and the picker feed's preview sweep."""
 from __future__ import annotations
 
 import json
+import os
 import re
 import sys
 from pathlib import Path
@@ -108,6 +109,20 @@ class TestConfigCache:
         context.save_config({"a": 1})
         assert context.load_config() == {"a": 1}
         context.save_config({"a": 2})
+        assert context.load_config() == {"a": 2}
+
+    def test_a_same_size_save_within_one_timestamp_tick_is_still_read_back(
+        self, context: LibraryContext
+    ) -> None:
+        """Coarse-timestamp filesystems (NTFS's clock tick, exFAT, FAT) can
+        give two quick same-size saves the SAME mtime -- simulated here by
+        stamping the second file with the first one's mtime. The process
+        that just saved must still read back what it saved."""
+        context.save_config({"a": 1})
+        assert context.load_config() == {"a": 1}
+        stamp = context._config_path.stat().st_mtime_ns
+        context.save_config({"a": 2})
+        os.utime(context._config_path, ns=(stamp, stamp))
         assert context.load_config() == {"a": 2}
 
 

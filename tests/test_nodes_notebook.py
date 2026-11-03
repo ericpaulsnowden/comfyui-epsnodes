@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 
 import pytest
+from conftest import needs_posix_permissions
 
 from lora_library import nodes_notebook
 from lora_library.context import LibraryContext
@@ -143,6 +144,7 @@ class TestMissingFileErrorNamesResolvedPath:
             node.read_entry(file="loras.md", entry="Anything")
         assert "isn't reachable from the server machine" not in str(exc_info.value)
 
+    @needs_posix_permissions
     def test_unreachable_hint_when_the_configured_library_dir_cannot_be_created(
         self, context: LibraryContext, tmp_path: Path
     ) -> None:
@@ -150,10 +152,9 @@ class TestMissingFileErrorNamesResolvedPath:
         # read-only parent means `library_dir()`'s `mkdir(parents=True)`
         # genuinely cannot create the configured folder — unlike a plain
         # nonexistent path under a writable tmp_path, which `mkdir`
-        # would just create. Root bypasses permission bits entirely, so
-        # this needs a non-root test runner (the usual case).
-        if hasattr(os, "geteuid") and os.geteuid() == 0:
-            pytest.skip("cannot simulate a permission-denied directory as root")
+        # would just create. Needs enforced permission bits: root bypasses
+        # them and Windows ignores them on directories (the
+        # monkeypatched twin below covers the same message everywhere).
         readonly_parent = tmp_path / "readonly"
         readonly_parent.mkdir()
         readonly_parent.chmod(0o555)
@@ -218,8 +219,11 @@ class TestMissingFileErrorNamesResolvedPath:
 # saved on the Windows PC. The `file` widget held `Z:\docs\short_prompts.md`;
 # on POSIX that used to join WHOLE under `library_dir`
 # (`context.is_foreign_absolute`/`heal_foreign_absolute` fix that instead).
+# Written from that POSIX host's side; `posix_server` simulates it on a
+# Windows CI runner, where `Z:\...` is an ordinary local path.
 
 
+@pytest.mark.usefixtures("posix_server")
 class TestForeignAbsoluteFileHealing:
     def test_reads_the_entry_after_healing_to_an_existing_tail(
         self, library_dir: Path
@@ -238,10 +242,12 @@ class TestForeignAbsoluteFileHealing:
         message = str(exc_info.value)
         assert "tried as a Windows path from another machine:" in message
         tried = message.split("tried as a Windows path from another machine: ", 1)[1]
-        # The candidate NAMED in the hint is a clean local path -- no
+        # The candidate NAMED in the hint is a clean local path -- exactly the
+        # foreign value's segments joined under the library folder, no
         # leftover backslash/drive-colon from the original foreign value.
-        assert "\\" not in tried.split(")", 1)[0]
-        assert str(library_dir / "docs" / "short_prompts.md") in message
+        named = Path(tried.split(")", 1)[0])
+        assert named == library_dir / "docs" / "short_prompts.md"
+        assert named.relative_to(library_dir).parts == ("docs", "short_prompts.md")
 
     def test_ordinary_missing_file_still_uses_the_plain_resolved_wording(
         self, library_dir: Path
@@ -291,6 +297,14 @@ class TestMultiSelect:
         node = nodes_notebook.LoraLibraryNotebook()
         assert node.read_entry(file="loras.md", entry="A\nB")[1] == ["A", "B"]
         _write_notebook(library_dir, "loras.md", "## B\nbodyB\n## A\nbodyA\n")
+        # Same SIZE as before, so only the mtime tells the parse cache the
+        # file changed. A real (human-paced) edit lands in a later timestamp
+        # tick; two writes microseconds apart may not (NTFS stamps at the
+        # clock tick -- this failed intermittently on the Windows CI leg), so
+        # move the mtime on explicitly.
+        path = library_dir / "loras.md"
+        stamp = path.stat().st_mtime_ns + 1_000_000_000
+        os.utime(path, ns=(stamp, stamp))
         assert node.read_entry(file="loras.md", entry="A\nB")[1] == ["B", "A"]
 
     def test_texts_and_names_stay_paired_across_categories(self, library_dir: Path) -> None:

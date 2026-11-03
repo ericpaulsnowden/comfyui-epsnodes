@@ -345,7 +345,7 @@ def heal_api(tmp_path_factory: pytest.TempPathFactory) -> dict:
     )
 
     result = subprocess.run(
-        [NODE, str(probe)], capture_output=True, text=True, timeout=60, cwd=layout
+        [NODE, str(probe)], capture_output=True, encoding="utf-8", timeout=60, cwd=layout
     )
     assert result.returncode == 0, f"probe failed:\n{result.stderr}"
     return json.loads(result.stdout)
@@ -374,7 +374,7 @@ def _function_body(source_text: str, signature: str) -> str:
 
 def test_path_heal_js_parses() -> None:
     result = subprocess.run(
-        [NODE, "--check", str(PATH_HEAL_JS)], capture_output=True, text=True, timeout=60
+        [NODE, "--check", str(PATH_HEAL_JS)], capture_output=True, encoding="utf-8", timeout=60
     )
     assert result.returncode == 0, result.stderr
 
