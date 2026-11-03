@@ -29,6 +29,14 @@ from pathlib import Path
 
 import pytest
 
+from eps_image import nodes_switcher
+from eps_image.nodes_switcher import (
+    EPSClipSwitcher,
+    EPSModelSwitcher,
+    EPSSwitcher,
+    EPSVaeSwitcher,
+)
+
 
 @pytest.fixture(autouse=True)
 def _fake_execution_blocker(monkeypatch: pytest.MonkeyPatch):

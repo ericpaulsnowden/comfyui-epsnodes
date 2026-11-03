@@ -5,8 +5,49 @@ live in **plain files you own**. Everything appears under **EPSNodes** in
 the node browser and Settings. It started as a LoRA family and has grown
 beyond it — image-flow utilities now live here too.
 
-**Where to find them.** Right-click the canvas → **Add Node → EPSNodes**,
-then pick a folder:
+## Install
+
+You need ComfyUI (a 2025+ build) and git. The pack has no pip dependencies,
+so there is nothing else to install. (rgthree-comfy is optional, and only one
+node uses it — see [The twenty-two nodes](#the-twenty-two-nodes).)
+
+```bash
+cd ComfyUI/custom_nodes
+git clone https://github.com/ericpaulsnowden/comfyui-epsnodes
+```
+
+Restart ComfyUI. The server log shows `EPSNodes vX.Y.Z loaded`, and Settings
+gains an **EPSNodes** section.
+
+To update, run `git pull` inside `custom_nodes/comfyui-epsnodes`, restart
+ComfyUI, and hard-refresh the browser tab — the version shown in
+**Settings → EPSNodes** must match on both halves (see
+[Versioning](#versioning)). The full steps, including pointing the library at
+a folder of your choice, are in [docs/INSTALL.md](docs/INSTALL.md).
+
+## Quick start
+
+1. **Clone** the repo into `ComfyUI/custom_nodes/` (the command above).
+2. **Restart ComfyUI and hard-refresh your browser tab.** Check
+   **Settings → EPSNodes**: it should list the pack's version. (The count in
+   the server-log line can read lower than twenty-two — the two State
+   Controllers are drawn in the browser and aren't counted there.)
+3. **Find the nodes.** Right-click the canvas → **Add Node → EPSNodes**. They
+   sit in six folders — Images, Prompts, Controllers, Utilities, LoRA and
+   Switchers — listed below.
+4. **Try an example.** Drag
+   [`examples/eps-test-distributor.json`](examples/eps-test-distributor.json)
+   onto the canvas (or File → Open) and press **Run**. It needs no checkpoint
+   and no GPU: it sends ComfyUI's own `example.png` down three branches, and
+   the note on the canvas shows how to switch one off. The other examples are
+   listed in [examples/README.md](examples/README.md), simplest first.
+5. **Look up a node.** The table under
+   [The twenty-two nodes](#the-twenty-two-nodes) is the map; each node then has
+   its own section further down. Your notebooks, saved lora sets and size
+   presets live in one library folder — see
+   [The library folder](#the-library-folder) if you want to move it.
+
+**Where to find them.** The six folders under **Add Node → EPSNodes**:
 
 | Folder | What's in it |
 | --- | --- |
@@ -1978,11 +2019,6 @@ as an image.
 **Nested subgraphs (v1.2.0).** The Frame Saver follows its `video` wire across
 subgraph boundaries, so a Load Video inside (or outside) a subgraph still
 previews.
-
-## Install
-
-See [docs/INSTALL.md](docs/INSTALL.md). Short version: clone into
-`ComfyUI/custom_nodes/` and restart ComfyUI. No pip requirements.
 
 ## The library folder
 

@@ -1859,7 +1859,8 @@ class TestSelectedDragReorder:
     rest of this file."""
 
     @pytest.fixture(scope="class")
-    def source(self) -> str:
+    @classmethod
+    def source(cls) -> str:
         return PICKER_JS.read_text(encoding="utf-8")
 
     def test_every_row_gets_a_handle_that_never_gates_on_view_or_ghost(self, source: str) -> None:
@@ -1968,7 +1969,8 @@ class TestLiveSyncLinkedLoader:
     above for the one pure decision core this round factored out."""
 
     @pytest.fixture(scope="class")
-    def source(self) -> str:
+    @classmethod
+    def source(cls) -> str:
         return PICKER_JS.read_text(encoding="utf-8")
 
     # -- the property: registration, restore, never a sync from onPropertyChanged
@@ -2269,7 +2271,8 @@ class TestUiRound20260814:
     for the OFF half: fixed node, scrolling list.)"""
 
     @pytest.fixture(scope="class")
-    def source(self) -> str:
+    @classmethod
+    def source(cls) -> str:
         return PICKER_JS.read_text(encoding="utf-8")
 
     def test_scope_bar_is_gone_and_clear_scope_moved_into_the_crumbs(self, source: str) -> None:
@@ -2330,7 +2333,8 @@ class TestSendRowGraphWatchV0632:
     error, so it must not linger once it is untrue."""
 
     @pytest.fixture(scope="class")
-    def source(self) -> str:
+    @classmethod
+    def source(cls) -> str:
         return PICKER_JS.read_text(encoding="utf-8")
 
     def test_send_row_repaints_on_graph_add_and_remove(self, source: str) -> None:
@@ -2364,7 +2368,8 @@ class TestClickToLoadV0640:
     exactly what + Add does. Ghosts stay click-inert."""
 
     @pytest.fixture(scope="class")
-    def source(self) -> str:
+    @classmethod
+    def source(cls) -> str:
         return PICKER_JS.read_text(encoding="utf-8")
 
     def test_second_click_adds_first_click_highlights(self, source: str) -> None:
@@ -2402,7 +2407,8 @@ class TestTabSwitchFixesV0651:
     every time and (b) sat on "Loading loras…" for seconds."""
 
     @pytest.fixture(scope="class")
-    def source(self) -> str:
+    @classmethod
+    def source(cls) -> str:
         return PICKER_JS.read_text(encoding="utf-8")
 
     def test_restore_resets_the_growth_baseline(self, source: str) -> None:
@@ -2437,7 +2443,8 @@ class TestPerfRoundV0681:
     the whole workflow; the dead per-family `find` adapters gone."""
 
     @pytest.fixture(scope="class")
-    def source(self) -> str:
+    @classmethod
+    def source(cls) -> str:
         return PICKER_JS.read_text(encoding="utf-8")
 
     def test_feed_fetch_is_shared_with_a_short_ttl(self, source: str) -> None:
@@ -2685,7 +2692,8 @@ class TestFixedHeightRound20260822:
     node-touching half is pinned by source."""
 
     @pytest.fixture(scope="class")
-    def source(self) -> str:
+    @classmethod
+    def source(cls) -> str:
         return PICKER_JS.read_text(encoding="utf-8")
 
     # -- the pure helpers, driven under Node --------------------------------
@@ -2899,7 +2907,8 @@ class TestSplitDividerRoundM5:
     source-pinned, this file's standing convention."""
 
     @pytest.fixture(scope="class")
-    def source(self) -> str:
+    @classmethod
+    def source(cls) -> str:
         return PICKER_JS.read_text(encoding="utf-8")
 
     # -- the pure helpers, driven under Node ---------------------------------
@@ -3122,7 +3131,8 @@ class TestDividerTracksPointer_v0_100_1:
     0.6 the divider ran 1.67x ahead of the pointer."""
 
     @pytest.fixture(scope="class")
-    def source(self) -> str:
+    @classmethod
+    def source(cls) -> str:
         return PICKER_JS.read_text(encoding="utf-8")
 
     # -- pure helpers, driven under Node --------------------------------------
@@ -3209,7 +3219,8 @@ class TestStrengthEditSurvivesTeardown20260901:
     prompt_builder.js's own `node.onRemoved`-chained teardown does."""
 
     @pytest.fixture(scope="class")
-    def source(self) -> str:
+    @classmethod
+    def source(cls) -> str:
         return PICKER_JS.read_text(encoding="utf-8")
 
     def test_wire_node_cleanup_installed_at_attach_after_configure_reload(

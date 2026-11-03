@@ -429,7 +429,8 @@ class TestV0610MultiImageAndLayout:
     source-text pins per this file's convention."""
 
     @pytest.fixture(scope="class")
-    def source(self) -> str:
+    @classmethod
+    def source(cls) -> str:
         return (REPO_ROOT / "web" / "eps_image" / "resolution.js").read_text(encoding="utf-8")
 
     def test_migration_decides_from_the_incoming_file(self, source: str) -> None:
@@ -480,7 +481,8 @@ class TestCopyFromImageV0630:
     ``tests/test_resolution_rows_js.py``."""
 
     @pytest.fixture(scope="class")
-    def source(self) -> str:
+    @classmethod
+    def source(cls) -> str:
         return (REPO_ROOT / "web" / "eps_image" / "resolution.js").read_text(encoding="utf-8")
 
     def test_button_label_is_the_owners_wording(self, source: str) -> None:
