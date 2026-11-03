@@ -63,7 +63,9 @@ PARSE_CASES = [
     ("2", 2),
     ("1.5", 1.5),
     ("'1.5'", 1.5),
-    ("-1", 0),
+    ("-1", 1),  # v1.14.0: a negative value divides
+    ("-2", 0.5),
+    ("-0.5", 2),
     ("undefined", 0),
     ("null", 0),
     ("'bogus'", 0),
@@ -137,7 +139,7 @@ SCALE_SIDE_CASES = [
     (-1, 2.0, -1),
 ]
 
-FORMAT_CASES = [(2, "2x"), (1.5, "1.5x"), (0.25, "0.25x"), (1, "1x"), (0.1, "0.1x")]
+FORMAT_CASES = [(2, "2x"), (1.5, "1.5x"), (0.25, "0.25x"), (1, "1x"), (0.1, "0.1x"), (-2, "÷2"), (-1.5, "÷1.5")]
 
 #: getScaleReadoutLine() inputs (JSON) and the expected line.
 READOUT_CASES = [

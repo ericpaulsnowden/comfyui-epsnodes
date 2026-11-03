@@ -27,6 +27,7 @@ from aiohttp import web
 
 from eps_image import routes_state_registry
 from eps_image.nodes_bypass import EPSBypass
+from eps_image.nodes_group_bypass import EPSGroupBypass
 from eps_image.nodes_checkpoint_switcher import EPSCheckpointSwitcher
 from eps_image.nodes_cross_sweep import EPSCrossSweep
 from eps_image.nodes_distributor import EPSDistributor
@@ -86,6 +87,7 @@ _STATE_BEARING_SPECS: list[tuple[str, type, str]] = [
     ("EPSCheckpointSwitcher", EPSCheckpointSwitcher, "EPS Checkpoint Switcher"),
     ("EPSNumberController", EPSNumberController, "EPS Number Controller"),
     ("EPSBypass", EPSBypass, "EPS Bypass"),
+    ("EPSGroupBypass", EPSGroupBypass, "EPS Group Bypass"),
 ]
 
 #: The COMPLETE closed set of widget kinds (module docstring / §6.16) -- the

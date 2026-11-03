@@ -1310,7 +1310,7 @@ def test_collapsed_groups_property_read_and_write_halves(source: str) -> None:
     sync_prop = _method_body(source, "_syncCollapsedGroupsProperty()")
     assert "properties[PROP_COLLAPSED_GROUPS] = Array.from(this._collapsedCategories)" in sync_prop
     assert "this.setDirtyCanvas(true, true)" in sync_prop
-    toggle = _method_body(source, "_toggleCategoryCollapsed(category)")
+    toggle = _method_body(source, "_toggleCategoryCollapsed(category, all = false)")
     assert "this._syncCollapsedGroupsProperty()" in toggle
 
 

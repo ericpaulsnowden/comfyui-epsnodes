@@ -573,7 +573,8 @@ class TestStateGroupsV0650:
         assert "window.addEventListener('pointermove', onMove, { capture: true })" in drag
         assert "this._guarded('state row click', () => this._onSetPicked(drag.label))" in drag
         # a plain tap on a header collapses its group
-        assert "this._guarded('group collapse', () => this._toggleCategoryCollapsed(drag.category))" in drag
+        assert "this._guarded('group collapse', () =>" in drag
+        assert "this._toggleCategoryCollapsed(drag.category, drag.altKey || upEvent.altKey)" in drag
 
     def test_moves_are_layout_edits_healed_by_the_server(self, controller_source: str) -> None:
         finish = controller_source.split("_finishStateDrag(drag) {", 1)[1].split("\n      }\n", 1)[0]
@@ -1525,7 +1526,7 @@ class TestCollapsedGroupsPersistPerWorkflowV20260825:
         """The 5 sites named in the owner's ask: the toggle, the rename
         migration, the group delete, the drag-landing reveal, and the
         fresh-category open."""
-        toggle = _method_body(controller_source, "_toggleCategoryCollapsed(category)")
+        toggle = _method_body(controller_source, "_toggleCategoryCollapsed(category, all = false)")
         assert "this._syncCollapsedGroupsProperty()" in toggle
         assert toggle.index("this._syncCollapsedGroupsProperty()") < toggle.index(
             "this._renderStateList()"

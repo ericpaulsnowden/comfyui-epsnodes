@@ -882,3 +882,22 @@ export function subscribeWidgetsChangedExternally(handler) {
   window.addEventListener(WIDGETS_CHANGED_EXTERNALLY_EVENT, listener, { capture: true })
   return () => window.removeEventListener(WIDGETS_CHANGED_EXTERNALLY_EVENT, listener, { capture: true })
 }
+
+/**
+ * Option/Alt-click on a section arrow opens or closes EVERY section at once
+ * (owner ask 2026-11-02, the Finder disclosure-triangle convention): the
+ * clicked section decides the direction -- a closed one opens all, an open
+ * one closes all. Returns the new collapsed-name Set for *categories* (the
+ * panel's full section list). Shared by the Prompt Notebook, the LoRA State
+ * Controller and the Universal State Controller so the three cannot drift.
+ * @param {Set<string>} collapsed @param {string[]} categories @param {string} clicked
+ * @returns {Set<string>}
+ */
+export function collapseAllFrom(collapsed, categories, clicked) {
+  return collapsed.has(clicked) ? new Set() : new Set(categories || [])
+}
+
+/** The header tooltip that names the Option/Alt-click gesture. */
+export function sectionHeaderTitle(category) {
+  return `${category}\nOption/Alt-click the arrow row to open or close every section`
+}

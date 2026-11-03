@@ -1726,7 +1726,7 @@ RESOLUTION_SCALE_MODE_CASES = [
     ("on_with_a_non_image_input_only", 2, {"mask": _LINKED}, False),
     ("string_multiplier_from_a_hand_edited_file", "1.5", {"image": _LINKED}, True),
     ("garbage_multiplier_is_off", "x", {"image": _LINKED}, False),
-    ("negative_is_off", -1, {"image": _LINKED}, False),
+    ("negative_divides_so_is_on", -2, {"image": _LINKED}, True),  # v1.14.0
     ("inputs_undefined_is_off", 2, None, False),
 ]
 
@@ -2147,7 +2147,7 @@ def test_resolution_preset_count_mirrors_parse_preset_names(cross_sweep_api: dic
 
 def test_resolution_scale_mode_active_mirrors_resolve(cross_sweep_api: dict) -> None:
     """v0.101.0: the K factor is 1 exactly when nodes_resolution.py's
-    resolve() drops the presets -- multiplier > 0 AND an image wired to
+    resolve() drops the presets -- multiplier non-zero (v1.14.0) AND an image wired to
     `image` or any `image_N`."""
     for (name, _mult, _inputs, expected), got in zip(
         RESOLUTION_SCALE_MODE_CASES, cross_sweep_api["resolutionScaleModes"], strict=True

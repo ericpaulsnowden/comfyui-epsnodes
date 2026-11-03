@@ -100,7 +100,13 @@ RATIO_CUSTOM_OPTION = "custom…"
 #: `onFloatValueChange` re-rounds every commit), while the finer `round`
 #: leaves room for a user who raised `Comfy.FloatRoundingPrecision` to type
 #: 1.25 and keep it.
-SCALE_MULTIPLIER_MIN = 0.0
+#:
+#: v1.14.0 (owner ask 2026-11-02, "should be able to go down to -2.0 not
+#: just up to 2.0"): a NEGATIVE multiplier DIVIDES -- ``-2`` halves, the
+#: mirror of ``2`` doubling -- so the minimum is ``-2.0``. ``0`` stays off;
+#: :func:`coerce_scale_multiplier` turns ``-N`` into the factor ``1/N``
+#: before anything else sees it, so every caller below works in factors.
+SCALE_MULTIPLIER_MIN = -2.0
 SCALE_MULTIPLIER_MAX = 4.0
 SCALE_MULTIPLIER_STEP = 0.1
 SCALE_MULTIPLIER_ROUND = 0.01
@@ -259,9 +265,11 @@ RATIO_STATE_MAX_LEN = 32
 
 
 def coerce_scale_multiplier(raw: Any) -> float:
-    """The `scale_multiplier` widget value as a usable float, or ``0.0``
-    ("off") for anything that isn't a finite positive number -- ``None``,
-    a non-numeric string from a hand-edited workflow, NaN/inf. Degrade-
+    """The `scale_multiplier` widget value as the FACTOR to scale by, or
+    ``0.0`` ("off"). A positive value is the factor itself; a negative one
+    divides (``-2`` -> ``0.5``, v1.14.0); ``0`` and anything that isn't a
+    finite number -- ``None``, a non-numeric string from a hand-edited
+    workflow, NaN/inf -- is off. Degrade-
     don't-crash, the same posture as :func:`_parse_preset_names` and
     :func:`parse_ratio`: a garbled multiplier must never fail a run
     that would have been fine before the field existed. Mirrors
@@ -272,9 +280,9 @@ def coerce_scale_multiplier(raw: Any) -> float:
         value = float(raw)
     except (TypeError, ValueError):
         return 0.0
-    if not math.isfinite(value) or value <= 0:
+    if not math.isfinite(value) or value == 0:
         return 0.0
-    return value
+    return value if value > 0 else 1.0 / -value
 
 
 def round_half_up(value: float) -> int:
@@ -1166,8 +1174,9 @@ class EPSResolution:
                         "tooltip": (
                             "0 = off. Above 0, a wired image comes out at "
                             "its own size times this number (2 doubles "
-                            "it, 0.5 halves it; every extra image scales "
-                            "from its own size), resampled with "
+                            "it, 0.5 halves it); below 0 it is divided "
+                            "(-2 halves it, the same as 0.5). Every extra "
+                            "image scales from its own size, resampled with "
                             "'interpolation'. Width, height, multiple_of, "
                             "ratio (and its custom box), resize_method, "
                             "presets and rotate are then "

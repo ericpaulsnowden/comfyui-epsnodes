@@ -367,7 +367,7 @@ export function resolutionPresetCount(raw) {
 /**
  * v0.101.0 (§6.5 `scale_multiplier`): whether a Resolution node is in its
  * "scale the wired image from its own size" mode -- the multiplier is a
- * finite number > 0 AND an image is wired to `image` or any `image_N`. In
+ * finite non-zero number (a negative one divides, v1.14.0) AND an image is wired to `image` or any `image_N`. In
  * that mode nodes_resolution.py's `resolve()` ignores every ticked preset
  * and runs ONCE, so the caller's K factor is 1, never the preset count.
  * With no image wired the presets still fan out (each run scales its own
@@ -381,8 +381,9 @@ export function resolutionPresetCount(raw) {
  * @returns {boolean}
  */
 export function resolutionScaleModeActive(scaleMultiplier, inputs) {
+  // v1.14.0: a negative multiplier divides, so any non-zero number is on.
   const multiplier = Number(scaleMultiplier)
-  if (!(Number.isFinite(multiplier) && multiplier > 0)) return false
+  if (!(Number.isFinite(multiplier) && multiplier !== 0)) return false
   for (const [name, link] of Object.entries(inputs || {})) {
     if (link && (name === 'image' || /^image_[2-8]$/.test(name))) return true
   }

@@ -1422,7 +1422,9 @@ class TestScaleMultiplierPureHelpers:
             (2, 2.0),
             (1.5, 1.5),
             ("1.5", 1.5),  # a hand-edited workflow's string still works
-            (-1, 0.0),  # non-positive is "off"
+            (-1, 1.0),  # v1.14.0: a negative value divides
+            (-2, 0.5),
+            (-0.5, 2.0),
             (None, 0.0),
             ("bogus", 0.0),
             (float("nan"), 0.0),
@@ -1477,7 +1479,7 @@ class TestScaleMultiplierPureHelpers:
 
 class TestScaleMultiplierTailPosition:
     """§8 LAW: `scale_multiplier` is the NEW last real widget, after
-    `ratio` -- declared in `optional`, FLOAT, 0.0 default (off), 0.0..4.0,
+    `ratio` -- declared in `optional`, FLOAT, 0.0 default (off), -2.0..4.0 (v1.14.0),
     step 0.1 -- and declared in the §6.16 registry as a float."""
 
     def test_scale_multiplier_is_the_last_key_in_optional(self) -> None:
@@ -1489,7 +1491,7 @@ class TestScaleMultiplierTailPosition:
         kind, options = optional["scale_multiplier"]
         assert kind == "FLOAT"
         assert options["default"] == 0.0
-        assert options["min"] == 0.0
+        assert options["min"] == -2.0  # v1.14.0: a negative value divides
         assert options["max"] == 4.0
         assert options["step"] == 0.1
         # core KSampler.cfg's own step/round pairing (nodes.py)
@@ -1498,7 +1500,7 @@ class TestScaleMultiplierTailPosition:
 
     def test_registry_declares_it_as_a_bounded_float(self) -> None:
         spec = nodes_resolution.EPSResolution.EPS_STATE_WIDGETS["widgets"]["scale_multiplier"]
-        assert spec == {"kind": "float", "min": 0.0, "max": 4.0}
+        assert spec == {"kind": "float", "min": -2.0, "max": 4.0}
 
 
 class TestScaleMultiplierWithImage:

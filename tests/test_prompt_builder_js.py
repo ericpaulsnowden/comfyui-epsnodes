@@ -760,7 +760,7 @@ def test_left_pane_groups_by_category_and_search_never_hides_a_match(source: str
 def test_group_header_row_toggles_collapse_and_shows_the_count(source: str) -> None:
     header = _body(source, "buildGroupHeaderRow(state, category, count)")
     assert "isSectionCollapsed(state.collapsedSections, category)" in header
-    assert "toggleGroupCollapse(state, category)" in header
+    assert "toggleGroupCollapse(state, category, event.altKey)" in header
     assert "${category} (${count})" in header
     assert "eps-pb-group-header" in header
 
@@ -789,7 +789,7 @@ def test_collapsed_sections_property_mirrors_notebook_exactly(source: str) -> No
     sync_fn = _body(source, "syncCollapsedSectionsProperty(state)")
     assert "node.properties[PROP_COLLAPSED_SECTIONS] = state.collapsedSections" in sync_fn
     assert "node.graph?.setDirtyCanvas(true, true)" in sync_fn
-    toggle_fn = _body(source, "toggleGroupCollapse(state, category)")
+    toggle_fn = _body(source, "toggleGroupCollapse(state, category, all = false)")
     assert "toggleCollapsedSection(state.collapsedSections, category)" in toggle_fn
     assert "syncCollapsedSectionsProperty(state)" in toggle_fn
     assert "renderLeftPane(state)" in toggle_fn

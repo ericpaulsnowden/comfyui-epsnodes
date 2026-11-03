@@ -2021,15 +2021,17 @@ export function registerControllerNode() {
           'div',
           {
             className: 'lusc-category',
-            attrs: { tabindex: '0', title: category, 'data-category': category }
+            attrs: { tabindex: '0', title: api.sectionHeaderTitle(category), 'data-category': category }
           },
           [label, deleteBtn]
         )
         headerEl.addEventListener('click', (event) => {
           if (event.target === deleteBtn || searching) return
-          this._guarded('group collapse', () => this._toggleCategoryCollapsed(category))
+          this._guarded('group collapse', () => this._toggleCategoryCollapsed(category, event.altKey))
         })
         headerEl.addEventListener('dblclick', (event) => {
+          // Two quick Option-clicks are close-all then open-all, never a rename.
+          if (event.altKey) return
           event.preventDefault()
           event.stopPropagation()
           this._guarded('group rename', () => this._beginCategoryRename(category))
@@ -2037,7 +2039,7 @@ export function registerControllerNode() {
         headerEl.addEventListener('keydown', (event) => {
           if (event.key !== 'Enter' && event.key !== ' ') return
           event.preventDefault()
-          if (!searching) this._guarded('group collapse', () => this._toggleCategoryCollapsed(category))
+          if (!searching) this._guarded('group collapse', () => this._toggleCategoryCollapsed(category, event.altKey))
         })
         return headerEl
       }
@@ -2130,8 +2132,13 @@ export function registerControllerNode() {
         })
       }
 
-      _toggleCategoryCollapsed(category) {
-        if (this._collapsedCategories.has(category)) this._collapsedCategories.delete(category)
+      /** *all* (Option/Alt-click, owner ask 2026-11-02): open or close
+       * every group, the clicked one deciding which (api.js
+       * `collapseAllFrom`). */
+      _toggleCategoryCollapsed(category, all = false) {
+        if (all) {
+          this._collapsedCategories = api.collapseAllFrom(this._collapsedCategories, this._layoutCache.categories, category)
+        } else if (this._collapsedCategories.has(category)) this._collapsedCategories.delete(category)
         else this._collapsedCategories.add(category)
         this._syncCollapsedGroupsProperty()
         this._renderStateList()

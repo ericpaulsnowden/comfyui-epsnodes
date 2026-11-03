@@ -3655,7 +3655,7 @@ export function registerControllerNode() {
           'div',
           {
             className: 'llsc-category',
-            attrs: { tabindex: '0', title: category, 'data-category': category }
+            attrs: { tabindex: '0', title: api.sectionHeaderTitle(category), 'data-category': category }
           },
           [label, deleteBtn]
         )
@@ -3668,6 +3668,8 @@ export function registerControllerNode() {
         // two preceding taps each toggled collapse (and re-rendered), so the
         // editor mounts on the CURRENT header element, found by name.
         header.addEventListener('dblclick', (event) => {
+          // Two quick Option-clicks are close-all then open-all, never a rename.
+          if (event.altKey) return
           event.preventDefault()
           event.stopPropagation()
           this._stateDrag?.cleanup?.()
@@ -3677,7 +3679,7 @@ export function registerControllerNode() {
         header.addEventListener('keydown', (event) => {
           if (event.key !== 'Enter' && event.key !== ' ') return
           event.preventDefault()
-          this._toggleCategoryCollapsed(category)
+          this._toggleCategoryCollapsed(category, event.altKey)
         })
         return header
       }
@@ -3852,8 +3854,13 @@ export function registerControllerNode() {
         })
       }
 
-      _toggleCategoryCollapsed(category) {
-        if (this._collapsedCategories.has(category)) this._collapsedCategories.delete(category)
+      /** *all* (Option/Alt-click, owner ask 2026-11-02): open or close
+       * every group, the clicked one deciding which (api.js
+       * `collapseAllFrom`). */
+      _toggleCategoryCollapsed(category, all = false) {
+        if (all) {
+          this._collapsedCategories = api.collapseAllFrom(this._collapsedCategories, this._layoutCache.categories, category)
+        } else if (this._collapsedCategories.has(category)) this._collapsedCategories.delete(category)
         else this._collapsedCategories.add(category)
         this._syncCollapsedGroupsProperty()
         this._renderStateList()
@@ -3892,6 +3899,7 @@ export function registerControllerNode() {
           slug: source.kind === 'entry' ? source.entry.slug : null,
           label: source.kind === 'entry' ? source.entry.label : null,
           category: source.kind === 'header' ? source.category : null,
+          altKey: !!event.altKey,
           startX: event.clientX,
           startY: event.clientY,
           active: false,
@@ -3948,7 +3956,9 @@ export function registerControllerNode() {
           } else if (drag.kind === 'entry') {
             this._guarded('state row click', () => this._onSetPicked(drag.label))
           } else {
-            this._guarded('group collapse', () => this._toggleCategoryCollapsed(drag.category))
+            this._guarded('group collapse', () =>
+              this._toggleCategoryCollapsed(drag.category, drag.altKey || upEvent.altKey)
+            )
           }
           this._flushDeferredRender()
         }

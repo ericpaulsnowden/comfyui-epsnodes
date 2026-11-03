@@ -13,14 +13,14 @@ then pick a folder:
 | **Images** | Image Grid, Save Image, Resolution, Frame Saver |
 | **Prompts** | Prompt Notebook, Prompt Builder |
 | **Controllers** | Number Controller, Universal State Controller |
-| **Utilities** | Node Audit, Distributor, Bypass, Splat Placement, Run Multiplier |
+| **Utilities** | Node Audit, Distributor, Bypass, Group Bypass, Splat Placement, Run Multiplier |
 | **LoRA** | LoRA Picker, Apply LoRA Set, LoRA Iterator, Lora Loader State Controller |
 | **Switchers** | Image, Model, CLIP, VAE, Audio, and Checkpoint Switchers |
 
 Moving a node between folders only changes where it sits in that menu —
 workflows you've already saved are unaffected, and nothing needs updating.
 
-## The twenty-three nodes
+## The twenty-four nodes
 
 No third-party packs required — every node here runs on ComfyUI alone;
 the Lora Loader State Controller is built to extend rgthree-comfy, but only
@@ -44,11 +44,12 @@ section further down; this is the map.
 | [**EPS Audio Switcher**](#eps-audio-switcher-shipped) | The same switcher for audio: any number of audio inputs, each on/off, enabled ones fan out (N enabled → N runs), and a switched-off clip's Load Audio (or speech/music generator) never runs. *(v1.8.0)* | Nothing — drag-and-drop with core nodes. |
 | [**EPS Distributor**](#eps-distributor-shipped) | The mirror of the Switcher: one image — or one text — in, up to sixteen branches out, each independently on/off. New outputs appear as you wire them up. Toggle a branch off and only that branch is skipped — everything happens in one run. | Nothing — drag-and-drop with core nodes. |
 | [**EPS Bypass**](#eps-bypass-shipped) | Plug anything into it — audio, an image, a model, a mask — and switch it off: whatever it feeds then behaves exactly as if nothing were connected, and the wire comes back when you switch it on. For inputs that are optional (a video node's audio, an optional mask); if what it feeds needs that input, the switch refuses and names the node. The Universal State Controller can save and recall the on/off state. *(v0.99.0)* | Nothing — drag-and-drop with core nodes. |
+| [**EPS Group Bypass**](#eps-group-bypass-shipped) | An on/off switch for a whole group: pick the group from a dropdown and switch it off to bypass every node in it (or mute them, with the `mute` switch on). Wire a boolean into the switch — an EPS Number Controller row set to 1 or 0, or any toggle — and that drives the group instead. The group changes the moment the switch does, before you run. *(v1.14.0)* | Nothing — drag-and-drop with core nodes; pairs with the Number Controller. |
 | [**EPS Splat Placement**](#eps-splat-placement-shipped) | Makes core **Render Splat** draw a gaussian splat exactly as the 3D viewer (Save Splat, Preview Splat, Load 3D) shows it, by moving, rotating and scaling the splat the way the viewer did. Without it, a splat you fitted to the viewer renders as a dot. *(v0.100.0)* | Core's Get Splat and Render Splat, plus the viewer node's `model_3d_info` and `camera_info`. |
 | [**EPS Node Audit**](#eps-node-audit-shipped) | A plain-language look at what your other installed node packs can reach: their web routes, where they've called out to, and a scan of their code for a few patterns worth knowing about — green/yellow/red per pack, with a verbose toggle for the technical detail. | Nothing — reads whatever else is installed. |
 | [**EPS Number Controller**](#eps-number-controller-shipped) | Every number a workflow uses, kept in one place: named rows, each a plain number box. Wire one into a socket and it quietly becomes the right kind of number for it — whole, decimal, or an on/off switch you drive with a 1 or a 0. Untick a row and whatever it was plugged into goes back to its own value. The Universal State Controller can save and recall the whole set, including which rows are switched on. | Nothing — drag-and-drop with core nodes. |
 | [**EPS Checkpoint Switcher**](#eps-checkpoint-switcher-shipped) | Tick several checkpoint files in a list; one queue runs the workflow once per ticked checkpoint, with each run's model, CLIP, and VAE kept together and a label for save paths. | Your checkpoint files — drag-and-drop with core nodes. |
-| [**EPS Resolution**](#eps-resolution-shipped) | Image-first resize + size in one node: target size (with a drag pad, a ratio lock you can type your own ratio into, and a rotate button), four resize modes, and the original image + both sets of dimensions passed through. Named size presets are shared across your machines — tick several and one Run resizes once per preset. Wire in extra images and they all come out at the same target size in one Run — or set `scale_multiplier` and each comes out at its own size × that factor. | Nothing — drag-and-drop with core nodes. |
+| [**EPS Resolution**](#eps-resolution-shipped) | Image-first resize + size in one node: target size (with a drag pad, a ratio lock you can type your own ratio into, and a rotate button), four resize modes, and the original image + both sets of dimensions passed through. Named size presets are shared across your machines — tick several and one Run resizes once per preset. Wire in extra images and they all come out at the same target size in one Run — or set `scale_multiplier` and each comes out at its own size × that factor (a negative factor divides: `-2` halves). | Nothing — drag-and-drop with core nodes. |
 | [**EPS Image Grid**](#eps-image-grid-shipped) | Collects images across separate Runs into a buffer that survives restarts, shows them as a thumbnail grid, and fans the whole set out on demand. Add whole batches at once — a multiselect picker, a folder importer, or one big drag. | Nothing — drag-and-drop with core nodes. |
 | [**EPS Run Multiplier**](#eps-run-multiplier-shipped) | Multiplies whatever you wire in: a sweep group (LoRA Iterator, or Checkpoint Switcher with its VAEs) × images × texts, in one node — or just images × texts with no sweep at all — with per-run save paths so big runs land in tidy folders. | Any of: EPS LoRA Iterator / EPS Checkpoint Switcher / EPS Model + VAE Switchers (`models`→`model`, `models_low`→`model_low`, `vaes`→`vae`) on the sweep side; an Image Grid or Image Switcher plus a multi-select Prompt Notebook on the pair side. |
 | [**EPS Save Image**](#eps-save-image-shipped) | Save Image with provenance baked in: wire the Run Multiplier's `run_info` and every saved file carries a workflow already soloed to the run that made it — drop the image onto the canvas to recreate just that one. Without `run_info` it is exactly Save Image. A **preview_only** switch (v1.1.0) turns it into a Preview Image — nothing saved — without swapping nodes. A **format** choice (png, exr or avif — with bit depth and color space under *Show advanced inputs*) saves more than PNG. | Nothing — a drop-in for the core Save Image node; `run_info` from EPS Run Multiplier unlocks the recreate-one-image drop. exr and avif need a ComfyUI that has those encoders. |
@@ -57,9 +58,10 @@ section further down; this is the map.
 > **Status: pre-release.** Contracts live in
 > [docs/FORMAT.md](docs/FORMAT.md). Want to see the nodes working? Every
 > workflow in [examples/](examples/) is annotated on the canvas and ready
-> to load — nine example files between them cover fifteen of the sixteen
-> nodes (the new LoRA Picker's example is still to come), some
-> sharing a graph. Most just want a Run; the LoRA trio (Apply LoRA Set,
+> to load — twelve example files between them cover sixteen of the
+> twenty-four nodes (the newer ones — LoRA Picker, Universal State
+> Controller, Number Controller, Bypass, Group Bypass, Audio Switcher, Splat
+> Placement, Node Audit — have no example yet), some sharing a graph. Most just want a Run; the LoRA trio (Apply LoRA Set,
 > LoRA Iterator, and the rgthree-dependent Lora Loader State Controller) only
 > shows up in `eps-test-cross-sweep.json` and `eps-full-pipeline.json`,
 > which need a real checkpoint and a saved LoRA state to actually generate.
@@ -271,6 +273,12 @@ captions).
   sequence no longer matters. (This renumbers `t{N}` for workflows where
   those two used to differ, so a solo token you wrote down before now
   points at a different run.)
+- **Option-click opens or closes every section (v1.14.0).** Hold Option
+  (Alt on Windows/Linux) and click any section heading: if that section is
+  open, every section closes; if it's closed, every section opens — the
+  Finder's disclosure-triangle shortcut. It's a view change only: nothing is
+  selected, and two quick Option-clicks never open the rename box. The same
+  shortcut works in the Prompt Builder and both State Controllers.
 - **Section headers now match the State Controller (v0.81.0).** A collapsed
   section shows its prompt count — `▸ Styles (4)` — and every header carries
   the controller's armed two-click ✕: first click asks `sure?`, second
@@ -302,7 +310,8 @@ happen there — and the Builder assembles prompts *out of* it:
   list is read-only here on purpose: one place to edit, no drift.
 - **Grouped like your notebook.** Prompts sit under the same group headings,
   in the same order, with a count on each. Click a heading to collapse it —
-  remembered per node. Searching still works across groups, and a group with
+  remembered per node; Option/Alt-click one to open or close every heading
+  at once (v1.14.0). Searching still works across groups, and a group with
   no matches disappears heading and all rather than leaving an empty title.
 - **Right pane: building blocks.** Double-click a prompt on the left and it's
   appended as a block. Drag blocks to reorder; the ✕ removes a block from
@@ -362,8 +371,9 @@ switches, multiplier modes, save prefixes — and applies it back later, or in
 another session.
 
 - **Looks and works like the Lora State Controller**: grouped states
-  (`# name` makes a group), search, Save/Apply/Delete, instant-feel saves
-  with loud failures. States live in your library folder
+  (`# name` makes a group; Option/Alt-click a group header to open or close
+  every group at once, v1.14.0), search, Save/Apply/Delete, instant-feel
+  saves with loud failures. States live in your library folder
   (`library/states/`), so they share across machines the same way your
   lora sets do.
 - **The Included-nodes page**: a second tab lists every state-bearing node
@@ -386,8 +396,10 @@ another session.
   (a state can never corrupt a node), and every apply ends with a report —
   "Applied 7 of 9 · 1 not found · 1 skipped". Nothing partial ever happens
   silently.
-- Sixteen node types are covered (EPS Bypass's on/off switch joined in
-  v0.99.0 — applying a state really unplugs and re-plugs its wire); the
+- Every EPS node with settings is covered (EPS Bypass's on/off switch joined
+  in v0.99.0 — applying a state really unplugs and re-plugs its wire; EPS
+  Group Bypass's `enabled` and `mute` switches in v1.14.0 — applying a state
+  switches the group, but never changes which group it points at); the
   grid's server buffer, provenance pins and the solo token are deliberately
   excluded (each would corrupt or surprise). The Lora State Controller keeps its specialized job — your
   existing lora states are untouched.
@@ -449,7 +461,8 @@ the loader stays the loader, this node just moves whole configurations
   `#`-prefixed name (say `# Portraits`) and press **New State** to create a
   group. Drag states between groups or drop one on a group's header; drag a
   header to reorder whole groups; tap a header to collapse it (▸ shows the
-  count). Hover a header for a ✕ that removes just the group — its states
+  count), or Option/Alt-click it to open or close every group at once
+  (v1.14.0). Hover a header for a ✕ that removes just the group — its states
   move back to the ungrouped list, nothing is deleted. Groups and order are
   saved in your shared library folder, so every machine sees the same
   arrangement. **Double-click a group header to rename it** (since v0.68.1) — type the new name, Enter saves, Escape cancels; the group keeps its states and its open/collapsed state. Dropping a state back where it already was changes (and saves) nothing. Creating a group toasts a confirmation, clicking a state keeps the list where you scrolled it (v0.73.0), and group changes show up in your other open State Controllers right away, and saving, renaming or deleting a state no longer triggers a full node-definition reload — the `/object_info` round trip and its two toasts are gone, so Save responds immediately.
@@ -943,6 +956,10 @@ save and recall the whole set at once — which is the point of it.
   plain untyped numbers and send `1`/`0` instead of `true`/`false` — fine for an
   ordinary toggle. Open it on a current version and the rows pick their on/off
   type up again from the wires.
+- **Switch whole groups on and off (v1.14.0).** Wire an on/off row into an
+  [EPS Group Bypass](#eps-group-bypass-shipped)'s `enabled` switch and the row
+  turns a whole group on (`1`) or bypasses it (`0`) — the group changes as you
+  type, before you run.
 
 - **Untick a row to hand control back.** The checkbox switches a row off, which
   unplugs its wire, and **whatever it was connected to goes back to using its
@@ -1109,6 +1126,51 @@ what makes that possible.)
   off also removes any curved reroute points you added on that wire, so
   switching on reconnects it straight.
 
+## EPS Group Bypass (shipped)
+
+`EPSNodes → Utilities → EPS Group Bypass` *(v1.14.0)*: **an on/off switch for
+a whole group of nodes**, which a boolean wire can drive.
+
+- **Pick a group, flip the switch.** The `group` dropdown lists every group in
+  the graph the node sits in. Switch `enabled` off and every node inside the
+  group is **bypassed** (its inputs pass straight through, like Ctrl+B). Turn
+  `mute` on first and switching off **mutes** them instead (they, and
+  anything that needs them, don't run, like Ctrl+M). Switch back on and they
+  all run again.
+- **Drive it from the Number Controller.** Wire an EPS Number Controller row
+  into the `enabled` socket (the small dot beside the switch): the row becomes
+  an on/off row, `1` is on and `0` is off. The switch greys out and reads
+  `enabled ← on` / `enabled ← off`, so you can see what's driving it. The same
+  works for the `mute` socket, and for core's Boolean primitive or any node
+  with a `value` toggle — through Reroutes and subgraphs too.
+- **It happens on the canvas, before you run.** ComfyUI decides which nodes
+  are bypassed before a run starts, so a value worked out *during* a run can't
+  switch a group in that same run. This node therefore reads the value sitting
+  on the canvas at the other end of the wire. Flip the row and the group
+  changes straight away — what you see is what runs. If the wire comes from
+  something that only has a value once a run happens (a compare or math
+  node), the switch reads `enabled ← ? (not readable before the run)` and the
+  group is left as it is.
+- **Renaming is safe; duplicate names are told apart.** The node remembers
+  the group itself, not its title: rename the group and the dropdown follows.
+  Two groups with the same title show as `Upscale [#1]` and `Upscale [#2]`.
+- **It never switches itself off**, even when it sits inside its own group —
+  and neither does the node driving it (the Number Controller), so you can
+  always turn the group back on.
+- **It only acts when the switch moves.** Bypass or un-bypass a single node
+  inside the group by hand and it keeps your setting until the switch next
+  changes. Loading, pasting, undoing or switching tabs never rewrites any
+  modes — the workflow opens exactly as it was saved. A flip is one undo
+  step, together with the Number Controller change that caused it.
+- **Changing the group while it's off** switches the old group back on before
+  switching the new one off.
+- **Saved states include both switches.** The Universal State Controller
+  records `enabled` and `mute` (not which group — that's part of the layout).
+- **Known limit:** a node you drag *into* the group while it's off isn't
+  switched off until the switch next changes. A node belongs to a group when
+  its centre is inside it — ComfyUI's own rule.
+- **Works the same in both node designs** (classic and Nodes 2.0).
+
 ## EPS Splat Placement (shipped)
 
 `EPSNodes → Utilities → EPS Splat Placement` *(v0.100.0)*: **get an image of a
@@ -1191,6 +1253,10 @@ wire into save paths so results land in folders named by model.
   upstream feeds differently-sized images, instead of guessing. If a result
   would pass 16384 on either side the Run fails with a message naming the
   image size, the multiplier and the result, rather than clamping quietly.
+  - **Negative numbers divide (v1.14.0).** The box now goes down to `-2.0`:
+    `-2` halves the image (the same as `0.5`), `-1.5` divides by one and a
+    half, mirroring `2` and `1.5` on the way up. The readout shows it as
+    `÷2`. `0` is still off.
   - **With no image wired** the multiplier scales the size you typed instead
     (then `multiple_of` rounds it): `1000 × 1000` at `1.5` with
     `multiple_of` 64 gives `1472 × 1472`, and the readout shows

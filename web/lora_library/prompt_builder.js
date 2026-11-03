@@ -1332,8 +1332,18 @@ function syncCollapsedSectionsProperty(state) {
  * selection, no rename, no delete: every edit still stays in the Notebook
  * (owner spec, "read-only here"), unlike notebook.js's own dual-purpose
  * header tap. */
-function toggleGroupCollapse(state, category) {
-  state.collapsedSections = toggleCollapsedSection(state.collapsedSections, category)
+function toggleGroupCollapse(state, category, all = false) {
+  // Option/Alt-click (owner ask 2026-11-02): every section at once, the
+  // clicked one deciding which way (api.js `collapseAllFrom`).
+  state.collapsedSections = all
+    ? Array.from(
+        api.collapseAllFrom(
+          new Set(state.collapsedSections),
+          groupEntriesByCategory(state.entries).map((group) => group.category).filter(Boolean),
+          category
+        )
+      )
+    : toggleCollapsedSection(state.collapsedSections, category)
   syncCollapsedSectionsProperty(state)
   renderLeftPane(state)
 }
@@ -1349,11 +1359,11 @@ function buildGroupHeaderRow(state, category, count) {
   const row = el('div', {
     className: 'eps-pb-group-header',
     text: `${collapsed ? '▸' : '▾'} ${category} (${count})`,
-    attrs: { tabindex: '0', title: category }
+    attrs: { tabindex: '0', title: api.sectionHeaderTitle(category) }
   })
   row.addEventListener('click', (event) => {
     event.stopPropagation()
-    toggleGroupCollapse(state, category)
+    toggleGroupCollapse(state, category, event.altKey)
   })
   return row
 }

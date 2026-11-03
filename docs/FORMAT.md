@@ -495,8 +495,9 @@ Route paths are FROZEN once shipped (§8).
 v0.50.1 layout):** a node's `CATEGORY` is a browse-menu path and NOTHING
 else — saved workflows, search, and class ids are untouched by it, so
 category moves are always display-safe and need no migration. Every one of
-the pack's 22 registered nodes now sits in exactly one folder (EPS Bypass joined
-`Utilities` in v0.99.0, §6.18; EPS Splat Placement in v0.100.0, §6.19); `EPSNodes`
+the pack's 24 registered nodes now sits in exactly one folder (EPS Bypass joined
+`Utilities` in v0.99.0, §6.18; EPS Splat Placement in v0.100.0, §6.19; EPS
+Audio Switcher in v1.8.0, `Switchers`; EPS Group Bypass in v1.14.0, §6.20); `EPSNodes`
 itself holds no loose nodes:
 
 | Folder | Nodes |
@@ -504,9 +505,9 @@ itself holds no loose nodes:
 | `EPSNodes/Images` | Image Grid, Save Image, Resolution, Frame Saver |
 | `EPSNodes/Prompts` | Prompt Notebook, Prompt Builder |
 | `EPSNodes/Controllers` | Number Controller, Universal State Controller (via `universal_controller.js`'s `NODE_CATEGORY`) |
-| `EPSNodes/Utilities` | Node Audit, Distributor, Bypass, Splat Placement, Run Multiplier |
+| `EPSNodes/Utilities` | Node Audit, Distributor, Bypass, Group Bypass, Splat Placement, Run Multiplier |
 | `EPSNodes/LoRA` | LoRA Picker, Apply LoRA Set, LoRA Iterator, Lora Loader State Controller (via `controller.js`'s `NODE_CATEGORY`) |
-| `EPSNodes/Switchers` | Image/Model/CLIP/VAE (the `nodes_switcher.py` factory's `"CATEGORY"` key), Checkpoint Switcher |
+| `EPSNodes/Switchers` | Image/Model/CLIP/VAE/Audio (the `nodes_switcher.py` factory's `"CATEGORY"` key), Checkpoint Switcher |
 
 `EPSNodes/audit` is retired — its one node moved to `Utilities`. Note the
 two frontend-only virtual nodes (both State Controllers) carry their
@@ -687,6 +688,25 @@ markers keep appear/disappear visible). Unselected entries change freely.
 re-`stat`ed every call, so cross-machine edits are never missed — and
 `resolve_selection` reads through it too.
 
+
+**Option/Alt-click opens or closes every section (v1.14.0, owner ask
+2026-11-02: "You should be able to option click on arrows to open/close all
+sections at once").** The clicked header decides the direction: an open one
+closes every section, a closed one opens every section (the Finder
+disclosure-triangle convention). One shared pure helper, `api.js`
+`collapseAllFrom(collapsed, categories, clicked)`, returns the new collapsed
+Set; the Notebook (`setAllCategoriesCollapse`), the Prompt Builder
+(`toggleGroupCollapse(state, category, all)`), the Lora Loader State
+Controller and the Universal State Controller
+(`_toggleCategoryCollapsed(category, all)`) all call it and then write the
+result through their usual `Collapsed sections` / `Collapsed groups`
+property, so it persists exactly like a single collapse. The Alt state is
+read at pointerdown OR pointerup (whichever carries it). It never selects a
+category (the Notebook's "first tap only selects" rule does not apply), and a
+header's `dblclick` returns early when Alt is held, so two quick Option-clicks
+are close-all then open-all, never a rename. Keyboard: Alt+Enter/Space on a
+focused header does the same. Every header's tooltip
+(`api.js` `sectionHeaderTitle`) names the gesture.
 
 **Collapsed sections persist per workflow (v0.79.0, owner ask 2026-08-23:
 "I often group by type of workflow so I never want to see specific prompts
@@ -1870,7 +1890,8 @@ Delete should be next to each other not stacked."*
   `presets` existed.
 
 **`scale_multiplier` (v0.101.0, owner spec 2026-10-29).** A FLOAT widget,
-default `0.0` (= off), `0.0..4.0`, `step 0.1`, `round 0.01` (core's own
+default `0.0` (= off), `-2.0..4.0` (the negative half since v1.14.0, below),
+`step 0.1`, `round 0.01` (core's own
 `KSampler.cfg` pairing: the frontend derives a one-decimal display
 precision from `step`, so arrows step 0.1 → 0.2 → 0.3 and never show
 `0.30000000000000004` — `useFloatWidget.ts`'s `onFloatValueChange`
@@ -1887,8 +1908,23 @@ saved array is v1.5.0's seven bytes plus this one trailing value, an older
 save loads with the multiplier at 0, and a save from here loads on the
 older build with the eighth value simply unread. An old save is one entry short and the widget stays `0.0`,
 which is also `resolve()`'s default for a `/prompt` that omits the field.
-Declared in `EPS_STATE_WIDGETS` as `{"kind": "float", "min": 0.0, "max":
-4.0}`. Two meanings, by whether an image is wired:
+Declared in `EPS_STATE_WIDGETS` as `{"kind": "float", "min": -2.0, "max":
+4.0}`.
+
+**Negative values divide (v1.14.0, owner ask 2026-11-02: "should be able to
+go down to -2.0 not just up to 2.0").** `-N` means the factor `1/N` (`-2`
+halves, the mirror of `2` doubling); `0` stays off. The conversion happens
+once, at the edge: `coerce_scale_multiplier` (backend) and
+`parseScaleMultiplier` (resolution.js) return the FACTOR, so everything
+below them — the scaling, the greying rule, the 16384 guard — works in
+factors unchanged, and "multiplier > 0" in the rules below means "the
+factor". The readout formats the RAW value (`formatScaleMultiplier(-2)` →
+`÷2`, never `0.5x`). The Run Multiplier's estimator (`cross_sweep.js`
+`resolutionScaleModeActive`) treats any finite non-zero value as on. A value
+between `-1` and `0` is legal and divides by less than one (`-0.5` → ×2);
+nothing clamps it. An older state's `0..4` value still applies.
+
+Two meanings, by whether an image is wired:
 
 - **Image wired to `image` or any `image_N`, multiplier > 0** — each wired
   image comes out at ITS OWN size × multiplier, each side
@@ -6445,6 +6481,90 @@ the identity.
 against an independent statement of the viewer model above, for uniform,
 the rig's real fit, and non-uniform. With the F flip removed, all three cases
 fail.
+
+## §6.20 `EPSGroupBypass` (display: "EPS Group Bypass", v1.14.0) — switch a whole group, from a boolean wire
+
+**Owner ask (2026-11-02):** "Is there a group bypass switch that takes an
+input like a boolean? One that I could control from the EPS Number node?"
+Agreed shape: an on/off switch, a group dropdown, a `mute` SWITCH (owner:
+"Make mute a switch not a dropdown since it's a boolean"), and the switch's
+own socket as the optional boolean input.
+
+**Why frontend-only (decided).** Core fixes every node's mode BEFORE a run:
+`graphToPrompt` leaves muted nodes out and wires bypassed ones through. A
+value computed during a run cannot bypass anything in the same run, so the
+node reads the value on the CANVAS and sets modes there. The backend class
+(`eps_image/nodes_group_bypass.py`) has `RETURN_TYPES = ()` and no
+`OUTPUT_NODE`, so `validate_prompt` (which walks from output nodes only)
+never validates or executes it — which is also why the `group` combo may hold
+labels the backend's one-entry list `["(none)"]` never heard of. It still
+appears in the submitted prompt; a rig run with it present succeeded.
+
+**Widgets (§8 positional, do not reorder):** `enabled` (BOOLEAN, default
+true, `label_on "on"`/`label_off "off"`), `mute` (BOOLEAN, default false),
+`group` (COMBO, default `(none)`), then hidden `group_id` (STRING, optional,
+`"hidden": True`, default `""`). Every widget has its own socket on the
+installed frontend; wiring the `enabled` (or `mute`) socket is the boolean
+input.
+
+**Targeting.** `group_id` holds the target group's litegraph `id` (string);
+`group` is its display label. Options come from a FUNCTION over the node's
+own graph's groups (`graph.groups`), `["(none)", ...labels]`; a title
+shared by several groups, an empty title, or a title of `(none)` is shown as
+`Title [#id]` so every label is unique (`groupOptions`). Resolution
+(`findTargetGroup`): by id first, else by label (a save without an id; the
+id is then recorded). A rename updates the label on the next poll.
+
+**Reading a driven switch** (`readSwitch`): the socket's real source via
+`api.js` `resolveInputSources`, through legacy Reroute nodes
+(`resolveSourcesAt`, ≤16 hops) and subgraph boundaries. An
+`EPSNumberController` source reads `values[num_N].value` for the linked
+output's name (`numberControllerRowValue`, non-zero = true — the backend's
+`value != 0`); any other source reads its `value` widget (or its only
+widget). `coerceBoolean` accepts booleans, finite numbers, and
+`true/false/on/off/yes/no`. Several sources (a shared subgraph definition)
+must agree. Unreadable → `null`: the label says
+`enabled ← ? (not readable before the run)` and the group is left alone.
+A readable driven value is mirrored into the widget's `value` and its label
+becomes `enabled ← on|off` (`widget.label`, display only); the linked
+widget is greyed by core in both renderers.
+
+**Wanted mode** (`wantedMode`): enabled → ALWAYS (0) regardless of `mute`;
+off → NEVER (2) with mute, else BYPASS (4); an unreadable `enabled`, or an
+unreadable `mute` while off, → `null` (no change).
+
+**Applying — transitions only.** One shared 200 ms `setInterval`
+(`refreshAll`, also called straight after a click) computes the key
+`groupId|mode` per node. `state.last` undefined (fresh attach, and reset by
+every `onConfigure` — load, paste, undo, tab switch) ADOPTS the current key
+without writing: saved modes are already right, and the driver may not have
+restored its value when this node's `onConfigure` runs. Otherwise, only
+when the key changes: if the old group still exists and was not ALWAYS, its
+members go back to ALWAYS first; then every member of the target group
+(`group.recomputeInsideNodes()` then `group.nodes` — core's centre-inside
+rule) is set to the wanted mode with `node.mode = x` (core's own
+`toggleSelectedNodesMode` write), EXCEPT this node and every source node
+driving it. A change that touched any node dirties the canvas and requests an
+undo capture (`button_row.js` `captureUndoState`) — rig: one Comfy.Undo puts
+back both the Number Controller value and the modes. Skipped while
+`app.configuringGraph`. Never re-asserts: a member set by hand keeps its
+mode until the next transition; a node dragged into the group while off is
+not switched until then (stated limit, rgthree's Fast Groups Bypasser
+behaves the same).
+
+**§6.16 state registry:** `enabled` and `mute` as kind `boolean`; `group`
+and `group_id` EXCLUDED (retargeting is layout, and an id only means
+something in the workflow it was picked in). An Apply writes the widget and
+the poll performs the transition.
+
+**Tests:** `tests/test_group_bypass.py` (backend declaration; the real
+module under Node against a hand-built graph: adopt-without-writing,
+bypass/mute/on, never-reassert, Number Controller driving, unreadable
+driver, retarget-while-off, rename and label-only saves, pure helpers).
+Rig-verified 2026-11-02 on frontend 1.52.7, classic and Nodes 2.0: real
+Number Controller row adopting BOOLEAN on the socket, typing 1/0 in its box,
+the mute switch moving off from NEVER to BYPASS, save/reload, group rename,
+`Comfy.Undo`, and a queued run with the node present.
 
 ## §7 Frontend surfaces
 

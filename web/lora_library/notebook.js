@@ -4076,7 +4076,7 @@ function buildCategoryHeaderRow(state, category) {
 
   const headerEl = el(
     'div',
-    { className: classes.join(' '), attrs: { tabindex: '0', title: category } },
+    { className: classes.join(' '), attrs: { tabindex: '0', title: api.sectionHeaderTitle(category) } },
     [labelEl, deleteBtn]
   )
   headerEl.__llnbName = category
@@ -4092,6 +4092,8 @@ function buildCategoryHeaderRow(state, category) {
     // that lands on the ✕ must arm/confirm the delete, never open the
     // rename editor underneath it.
     if (event.target === deleteBtn) return
+    // Two quick Option-clicks are close-all then open-all, never a rename.
+    if (event.altKey) return
     event.preventDefault()
     event.stopPropagation()
     state.drag?.cleanup?.()
@@ -4111,6 +4113,10 @@ function buildCategoryHeaderRow(state, category) {
   headerEl.addEventListener('keydown', (event) => {
     if (event.key !== 'Enter' && event.key !== ' ') return
     event.preventDefault()
+    if (event.altKey) {
+      setAllCategoriesCollapse(state, category)
+      return
+    }
     toggleCategoryCollapse(state, category)
     selectCategory(state, category).catch((error) => api.warn('select category failed', error))
   })
@@ -4391,6 +4397,15 @@ function syncOpenCategoryProperty(state) {
  * expanded, or expanding it if it was collapsed); once it IS the active
  * category, taps toggle collapse exactly as before. Every entry stays reachable
  * at the moment you go to rename its category. */
+/** Option/Alt-click (owner ask 2026-11-02): open or close EVERY section,
+ * the clicked one deciding which (api.js `collapseAllFrom`). Selection is
+ * left alone -- this is a view gesture only. */
+function setAllCategoriesCollapse(state, category) {
+  state.collapsedCategories = api.collapseAllFrom(state.collapsedCategories, state.categories, category)
+  syncCollapsedSectionsProperty(state)
+  renderList(state)
+}
+
 function toggleCategoryCollapse(state, category) {
   if (state.activeCategory !== category) {
     // The selecting tap: never hide the contents, but do reveal them if this
@@ -5154,6 +5169,7 @@ function onCategoryPointerDown(state, event, category) {
     kind: 'category',
     pointerId: event.pointerId,
     category,
+    altKey: !!event.altKey,
     startX: event.clientX,
     startY: event.clientY,
     active: false,
@@ -5179,6 +5195,8 @@ function onCategoryPointerDown(state, event, category) {
     detach()
     if (drag.active) {
       finishDrag(state, drag)
+    } else if (drag.altKey || upEvent.altKey) {
+      setAllCategoriesCollapse(state, category)
     } else {
       toggleCategoryCollapse(state, category)
       selectCategory(state, category).catch((error) => api.warn('select category failed', error))

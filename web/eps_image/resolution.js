@@ -4007,7 +4007,8 @@ function wireMultipleOfLock(node) {
 // ------------------------------------------- v0.101.0: scale multiplier
 //
 // Owner spec 2026-10-29 (FORMAT.md §6.5 `scale_multiplier`): a FLOAT widget
-// (0 = off, 0.0..4.0, step 0.1), appended LAST by the backend (§8 tail
+// (0 = off, -2.0..4.0, step 0.1; a negative value divides -- v1.14.0),
+// appended LAST by the backend (§8 tail
 // law -- nodes_resolution.py's own comment). Its two meanings -- "a wired
 // image at its OWN size times the multiplier" vs "the typed size times the
 // multiplier, no image" -- are the backend's contract (`_resolve_one`/
@@ -4110,14 +4111,16 @@ const GRID_INERT_TITLE =
   "output is the image's own size times the multiplier. Set the multiplier " +
   'back to 0 to use the pad again.'
 
-/** The `scale_multiplier` widget value as a usable factor, or 0 ("off")
- * for anything not a finite positive number -- mirrors nodes_resolution.py's
- * `coerce_scale_multiplier` exactly (own implementation, same rule, tests
- * on both). Pure; exported for tests.
+/** The `scale_multiplier` widget value as the FACTOR to scale by, or 0
+ * ("off"): a positive value is the factor, a negative one divides (`-2` ->
+ * 0.5, v1.14.0), 0 and anything not a finite number is off -- mirrors
+ * nodes_resolution.py's `coerce_scale_multiplier` exactly (own
+ * implementation, same rule, tests on both). Pure; exported for tests.
  * @param {unknown} raw @returns {number} */
 export function parseScaleMultiplier(raw) {
   const value = Number(raw)
-  return Number.isFinite(value) && value > 0 ? value : 0
+  if (!Number.isFinite(value) || value === 0) return 0
+  return value > 0 ? value : 1 / -value
 }
 
 /** Whether any image input -- `image` or an `image_N` extra -- carries a
@@ -4191,10 +4194,14 @@ export function scaleSide(size, multiplier) {
   return Math.max(1, roundHalfUp(s * multiplier))
 }
 
-/** `2x` / `1.5x` / `0.25x` -- the factor as the user typed it, trailing
- * zeros dropped (the widget rounds to 0.01, so two decimals is exact).
- * Pure; exported for tests. */
+/** `2x` / `1.5x` / `0.25x` -- or `÷2` for a negative (dividing) value --
+ * the number as the user typed it, trailing zeros dropped (the widget
+ * rounds to 0.01, so two decimals is exact). Takes the RAW widget value,
+ * not the factor, so `-2` reads `÷2` rather than `0.5x`. Pure; exported
+ * for tests. */
 export function formatScaleMultiplier(multiplier) {
+  const raw = Number(multiplier)
+  if (Number.isFinite(raw) && raw < 0) return `÷${Number((-raw).toFixed(2))}`
   const m = parseScaleMultiplier(multiplier)
   return `${Number(m.toFixed(2))}x`
 }
@@ -4223,7 +4230,7 @@ export function formatScaleMultiplier(multiplier) {
 export function getScaleReadoutLine({ multiplier, imageWired, summary, rawW, rawH, multipleOf }) {
   const m = parseScaleMultiplier(multiplier)
   if (!(m > 0)) return null
-  const factor = formatScaleMultiplier(m)
+  const factor = formatScaleMultiplier(multiplier)
   if (imageWired) {
     if (summary?.kind === 'single') {
       const w = scaleSide(summary.width, m)
@@ -4277,7 +4284,9 @@ function isScaleModeActive(node) {
  * disagree about what is wired. */
 function currentScaleReadoutLine(node) {
   return getScaleReadoutLine({
-    multiplier: currentScaleMultiplierValue(node),
+    // The RAW value, so a dividing `-2` reads `÷2` (getScaleReadoutLine
+    // parses it to the factor itself).
+    multiplier: widgetByName(node, SCALE_MULTIPLIER_WIDGET_NAME)?.value,
     imageWired: anyImageInputWired(node.inputs),
     summary: resolveIncomingImageSummary(node),
     rawW: widgetByName(node, 'width')?.value,

@@ -33,6 +33,7 @@ from pathlib import Path
 import pytest
 
 from eps_image.nodes_bypass import EPSBypass
+from eps_image.nodes_group_bypass import EPSGroupBypass
 from eps_image.nodes_checkpoint_switcher import EPSCheckpointSwitcher
 from eps_image.nodes_distributor import EPSDistributor
 from eps_image.nodes_frame_saver import EPSFrameSaver
@@ -63,6 +64,7 @@ def _input_options(node_class, name: str) -> dict:
     ("node_class", "input_name"),
     [
         (EPSBypass, "links"),
+        (EPSGroupBypass, "group_id"),
         (EPSDistributor, "toggles"),
         (EPSSwitcher, "toggles"),
         (EPSModelSwitcher, "toggles"),
