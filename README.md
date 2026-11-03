@@ -955,6 +955,13 @@ patterns worth knowing about.
   exact file and line.
 - **`include_this_pack`** (on by default) scans EPSNodes' own code too — it
   gets the same scrutiny as anyone else's.
+- **Each outbound call is listed under the pack that made it.** Earlier
+  versions filed every call under EPSNodes itself, whichever pack it came
+  from. That was a mistake in how the report was labelled, not a sign that
+  anything was calling out unexpectedly: the hosts and counts were right and
+  only the pack name was wrong. If you kept an older report, trust its list
+  of hosts but not which pack each belonged to. `(not a custom node)` means
+  the call didn't come from any installed pack's code.
 - Observe-only: it never blocks, patches or changes any pack.
 
 ## EPS Number Controller (shipped)

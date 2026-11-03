@@ -78,7 +78,12 @@ def _path_forms(path: str) -> list[str]:
     return forms
 
 
-def pack_of_frame(roots, skip=0) -> str | None:
+#: This module's own source file, spelled the way a frame reports it. Frames
+#: in here are measurement machinery, never a caller.
+_THIS_FILE = pack_of_path.__code__.co_filename
+
+
+def pack_of_frame(roots, skip_files=()) -> str | None:
     """Name of the pack whose code is calling us right now, or ``None``.
 
     Walks up the live stack and returns the FIRST frame that belongs to a
@@ -88,11 +93,29 @@ def pack_of_frame(roots, skip=0) -> str | None:
     ``inspect.stack()``, which builds a full FrameInfo (source lines and
     context reads) for every level and is far too expensive to sit in front
     of another pack's network call.
+
+    **The instrumentation frames are skipped by FILE, not by count.** The
+    egress wrappers live inside EPSNodes, so on a stack that starts at one
+    of them the first "pack" found is always EPSNodes itself — which is how
+    other packs' network calls were once reported under ``comfyui-epsnodes``
+    (FORMAT.md §9, 2026-11-03). A hand-counted ``skip`` is how that happened:
+    it was off by one, and nothing noticed because the only test called from
+    inside EPSNodes, where the wrong answer is also the right one. The caller
+    passes the files that hold its wrappers in *skip_files*; every leading
+    frame from this module or those files is stepped over before attribution
+    begins. Frames from EPSNodes' OWN code that call out (a route handler
+    using ``urllib``, say) are not in those files, so they still attribute to
+    EPSNodes, which is correct.
+
+    The skipped frames do not count against :data:`_MAX_FRAMES`.
     """
     try:
-        frame = sys._getframe(skip + 1)
+        frame = sys._getframe(1)
     except ValueError:
         return None
+    ignore = (_THIS_FILE, *skip_files)
+    while frame is not None and frame.f_code.co_filename in ignore:
+        frame = frame.f_back
     for _ in range(_MAX_FRAMES):
         if frame is None:
             return None
