@@ -283,6 +283,51 @@ the server refuses with `409 {"error", "mtime"}` and writes nothing; the UI
 offers reload-then-reapply. Omitting `base_mtime` skips the check (first
 save to a brand-new file).
 
+**Within one server, each mutation is one locked transaction (v0.107.0; 2026-09-13
+release review #3).** The check above only compares mtimes. Every
+notebook mutation route used to load, check, mutate and save as four separate
+awaits, so two overlapping requests from the same base both passed the check
+and the second save silently dropped the first's change, even when they
+touched different entries.
+
+- **What is locked.** All six routes (`entry`, `category`, `delete`, `move`,
+  `move_category`, `delete_category`) now run the whole sequence inside ONE
+  `asyncio.to_thread` call while holding `path_locks.lock_for(path)`. That is
+  a `threading.Lock` keyed on `realpath` plus `normcase`, and it is resolved
+  in the worker because a NAS `realpath` can block.
+- **The effect.** A request that overlaps another now gets an honest 409 (its
+  base really is stale by then) and the panel's Reload/Overwrite banner.
+  Each request re-reads the file under the lock, so even where a
+  coarse-mtime filesystem lets the second request pass the check, its change
+  is applied on top of the first rather than to a stale copy of the file.
+  Successful responses are unchanged.
+- **The panel never races itself.** Every write path sets `state.busy` before
+  its first await; the multi-select move and delete functions now also check
+  it themselves.
+- **Other shared files that are read, changed and rewritten take the same
+  lock.** `lora_picker.json` (§6.13: star, recents stamp, clear recents,
+  favorites reorder) and `resolution_presets.json` (§6.5: preset save and
+  delete; added in the 2026-11-03 sidecar audit, same race).
+- **Still NOT locked, deliberately.**
+  - Both groups/layout sidecars (`lora_sets_layout.json` §4.2,
+    `universal_states_layout.json` §4.3) and updates to an existing set or
+    Universal State file: the client sends the whole document and the server
+    heals it against the folder listing, never against the old file. Two
+    overlapping writes are plain last-write-wins; there is no server-side
+    merge to race. (Two saves of a NEW set or state under the same name at
+    the same instant can both pick the same slug and one replaces the other;
+    accepted as too rare to lock.)
+  - `config.json` (`POST /config`, `POST /remote_dirs`): it IS a
+    read-modify-write across a thread handoff (load on the event loop, await
+    `_probe_writable_dir` / `_merge_remote_dirs` in a worker, save), so two
+    overlapping settings changes can drop one. Left unfixed: both routes are
+    loopback-only and user-initiated, and the fix is not a one-liner (the
+    save runs on the loop, while the lock must be taken in a worker).
+
+The lock is per PROCESS. Two ComfyUI servers sharing a NAS notebook still rely
+on `base_mtime` alone, which catches their saves when they happen one after
+another. A truly simultaneous save from two machines is not guarded.
+
 ### §3.6 Line endings
 
 On write, the file's dominant existing line ending (CRLF vs LF; LF for new
@@ -2116,6 +2161,8 @@ is the functional core WITHOUT the grid.
   same-dir writes; a malformed file or entry degrades per-entry with a
   WARNING, never crashes; §3.5's `base_mtime` conflict convention verbatim
   (`check_conflict`/`ConflictError`, current mtime echoed in the 409 body).
+  Save and delete each hold §3.5's per-path lock across load -> check ->
+  write (2026-11-03), so two overlapping saves can't drop a preset.
   - **Routes** (`eps_image/routes_resolution_presets.py`, registered
     defensively from `__init__.py` with the shared `_context`):
     `GET /eps_resolution/presets` → `{presets, mtime}`;
@@ -2709,8 +2756,10 @@ add; single batch-aware IMAGE input; disk-backed, survive-restart, NO cap.
     `AbortController` (verified: `api.fetchApi` spreads its options bag
     into `fetch`, so `signal` passes through) plus a cooperative flag; ONE
     aggregate toast (added/skipped/failed); a busy-guard refusing a second
-    concurrent batch per node (manifest read-modify-write is unlocked —
-    §6.6's own atomicity note); and the batch's `grid_uuid` captured ONCE
+    concurrent batch per node (the manifest read-modify-write was unlocked
+    when this shipped; the store now locks it, "Concurrency" below, so the
+    guard only keeps one panel's batch in order); and the batch's
+    `grid_uuid` captured ONCE
     up front (the uuid-remint race, roadmap risk #1).
   - **Uploads always send a BARE BASENAME** (owner bug 2026-07-29, "Adding
     a folder fails", reproduced live): a `webkitdirectory` pick names every
@@ -2770,8 +2819,9 @@ add; single batch-aware IMAGE input; disk-backed, survive-restart, NO cap.
   name is never reused). No confirm dialog, deliberately: frames are this
   store's OWN re-encoded PNGs — deleting one never touches the user's
   original upload under `input/` (verified end-to-end in the store before
-  shipping). Refused with a toast while a bulk batch is running (the
-  manifest read-modify-write is unlocked). A focused-tile delete returns
+  shipping). Refused with a toast while a bulk batch is running (added
+  when the manifest read-modify-write was unlocked; the store now locks
+  it, "Concurrency" below). A focused-tile delete returns
   to grid view via `setNodeImagesFromRefs`' existing changed-content path.
 - **PIL `SyntaxError` is part of the soft-fail catch (2026-07-29):**
   `PngImagePlugin` raises a PLAIN `SyntaxError` — not an
@@ -2818,6 +2868,32 @@ add; single batch-aware IMAGE input; disk-backed, survive-restart, NO cap.
   management (per-image remove — SHIPPED as "Delete one tile" above,
   2026-07-29; count, reorder, batch-count guard still open). No cap in
   v1. No module-scope torch/ComfyUI import (lazy inside functions).
+
+**Concurrency: one lock per grid (v0.107.0; 2026-09-13 release review #2).** Every store
+mutator holds a per-grid `threading.RLock` across its whole read-manifest -> allocate-name ->
+write -> commit-manifest sequence: `append_batch`, `append_uploaded_image`, `remove_frame`,
+`clear` and `clone_buffer`. The lock is keyed on the buffer directory after `realpath` and
+`normcase`.
+
+Before this, two writers to the same grid could both read the same manifest and both
+allocate `0001.png`. One image vanished while both callers reported success. The frontend
+serialised only its OWN `/add` calls, so a workflow run collecting while the browser pasted,
+removed, cleared or cloned into the same grid still raced.
+
+- **Lock type.** A `threading` lock, never `asyncio.Lock`, because `append_batch` runs on the
+  prompt-executor thread and the routes run on `to_thread` workers; neither is on the loop.
+- **Clone.** `clone_buffer` locks source and destination in sorted-key order, so opposite
+  clones cannot deadlock, and a grid cloned onto itself takes one lock. It must hold the
+  destination lock because it REPLACES the destination manifest.
+- **Readers stay lock-free.** `os.replace` makes each manifest swap atomic. Thumbnails are
+  idempotent derived files.
+- **Different grids never wait on each other.**
+- **The mtime display cache has its own small lock.** A lock-free get-then-`move_to_end`
+  could raise `KeyError` when a write on another thread invalidated the same uuid between
+  the two calls.
+
+Cross-PROCESS writers (two servers sharing one output dir) are out of scope: grid buffers
+live in each server's own output directory.
 
 ## §6.7 `EPSFrameSaver` (display: "EPS Frame Saver") — video frame picker
 
@@ -4102,7 +4178,8 @@ apply/text helpers, so it drops in anywhere Apply LoRA Set does.
   favorite/recent ROUTES deliberately never send one: a star click or a
   recents stamp must not 409; the read-modify-write race between two
   machines inside the same second is accepted and self-heals on the next
-  write.
+  write. (Within one server the store's per-path lock serializes them,
+  §3.5.)
 - **Node execution**: parse `selection`; for each `on` row resolve the
   file via `sets_store.resolve_lora` (the §4 separator-insensitive,
   rgthree-lenient match — a selection saved on the PC must resolve on the

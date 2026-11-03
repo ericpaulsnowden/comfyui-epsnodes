@@ -19,6 +19,26 @@ request that touched it instead of stalling every request on the server
 (queue submissions included). The handlers' error mapping is unchanged:
 the thread call raises exactly what the direct call raised, where it
 raised it.
+
+**Each mutation is one locked transaction, not four separate steps**
+(RELEASE-REVIEW-2026-09-13.md finding 3): every ``POST`` handler below
+used to ``load_notebook``, ``check_conflict``, mutate, then
+``save_notebook`` as four separate awaits, with the event loop free to
+run a SECOND request's ``load_notebook`` in between the first's load and
+save -- both would pass the conflict check against the same
+``base_mtime`` and the second save would silently discard the first's
+change, even though the two requests touched different entries. Every
+mutating route's ``_*_worker`` function now runs that whole sequence as
+ONE synchronous unit inside ONE ``asyncio.to_thread`` call, holding
+``path_locks.lock_for(path)`` for the worker's entire duration -- so no
+other request touching the SAME resolved file can observe it between
+this one's load and save. A second request overlapping the first now
+gets an honest 409 (its ``base_mtime`` really is stale by the time it's
+checked) instead of a silent lost update. This is a single-process
+guard, layered on top of -- not a replacement for -- FORMAT.md §3.5's
+``base_mtime`` check, which still exists for the two-MACHINE case
+(the same NAS file, resolved to two different local paths one process
+can't lock together).
 """
 
 from __future__ import annotations
@@ -32,11 +52,151 @@ from pathlib import Path
 
 from aiohttp import web
 
-from . import markdown_store
+from . import markdown_store, path_locks
 from .context import LibraryContext
 from .routes import error_response, notebook_path_error, request_is_loopback
 
 logger = logging.getLogger("lora_library")
+
+
+class _NameNotFoundError(Exception):
+    """Internal signal, raised only inside ``post_notebook_delete``'s
+    locked worker: one of a batch delete's ``names`` wasn't an existing
+    entry. ``markdown_store.remove_entry`` reports this as a plain
+    ``False`` return rather than an exception, so this class exists
+    purely to carry that 404 back out of the worker thread (through
+    ``asyncio.to_thread``, which only propagates exceptions) with the
+    EXACT message text the handler always built -- moving the check
+    inside the locked transaction must not change the response.
+    """
+
+
+# --------------------------------------------------------- locked workers
+#
+# One function per mutating route, each run as a single unit inside a
+# single `asyncio.to_thread` call while holding `path_locks.lock_for(path)`
+# -- see the module docstring's "one locked transaction" paragraph. Every
+# exception these raise is either `markdown_store`'s own (unchanged
+# messages/types) or `_NameNotFoundError` above; the calling handler maps
+# each to the exact response the old, unlocked four-step version produced.
+
+
+def _entry_worker(
+    path: Path,
+    base_mtime: float | None,
+    name: str,
+    text: str,
+    category: str | None,
+    rename_to: str | None,
+    after: str | None,
+) -> tuple[float, dict, list[dict]]:
+    """``post_notebook_entry``'s whole load->check->upsert->save sequence."""
+    with path_locks.lock_for(path):
+        parsed, current_mtime, line_ending = markdown_store.load_notebook(path)
+        markdown_store.check_conflict(base_mtime, current_mtime)
+        result = markdown_store.upsert_entry(
+            parsed, name, text, category=category, rename_to=rename_to, after=after
+        )
+        new_mtime = markdown_store.save_notebook(path, parsed, line_ending)
+        return new_mtime, result, markdown_store.list_entries(parsed)
+
+
+def _category_worker(
+    path: Path,
+    base_mtime: float | None,
+    name: str,
+    description: str | None,
+    after: str | None,
+    rename_to: str | None,
+) -> tuple[float, dict, list[dict], list[str]]:
+    """``post_notebook_category``'s whole load->check->create/describe/
+    rename->save sequence."""
+    with path_locks.lock_for(path):
+        parsed, current_mtime, line_ending = markdown_store.load_notebook(path)
+        markdown_store.check_conflict(base_mtime, current_mtime)
+        if markdown_store.get_category_description(parsed, name) is None:
+            result = markdown_store.create_category(parsed, name, description or "", after=after)
+        else:
+            result = markdown_store.set_category_description(parsed, name, description or "")
+            if rename_to and rename_to.strip():
+                markdown_store.set_category_name(parsed, name, rename_to)
+        new_mtime = markdown_store.save_notebook(path, parsed, line_ending)
+        return (
+            new_mtime,
+            result,
+            markdown_store.list_entries(parsed),
+            markdown_store.list_categories(parsed),
+        )
+
+
+def _delete_worker(
+    path: Path, base_mtime: float | None, names: list[str]
+) -> tuple[float, list[dict]]:
+    """``post_notebook_delete``'s whole load->check->remove(*N)->save
+    sequence -- an unknown name anywhere in *names* raises
+    :class:`_NameNotFoundError` before anything is written, same
+    all-or-nothing shape the unlocked code had."""
+    with path_locks.lock_for(path):
+        parsed, current_mtime, line_ending = markdown_store.load_notebook(path)
+        markdown_store.check_conflict(base_mtime, current_mtime)
+        for entry_name in names:
+            if not markdown_store.remove_entry(parsed, entry_name):
+                raise _NameNotFoundError(f"no such entry {entry_name!r} in {path}")
+        new_mtime = markdown_store.save_notebook(path, parsed, line_ending)
+        return new_mtime, markdown_store.list_entries(parsed)
+
+
+def _move_worker(
+    path: Path,
+    base_mtime: float | None,
+    names: list[str],
+    before: str | None,
+    category: str | None,
+) -> tuple[float, list[dict]]:
+    """``post_notebook_move``'s whole load->check->move(*N)->save
+    sequence."""
+    with path_locks.lock_for(path):
+        parsed, current_mtime, line_ending = markdown_store.load_notebook(path)
+        markdown_store.check_conflict(base_mtime, current_mtime)
+        for entry_name in names:
+            markdown_store.move_entry(parsed, entry_name, before=before, category=category)
+        new_mtime = markdown_store.save_notebook(path, parsed, line_ending)
+        return new_mtime, markdown_store.list_entries(parsed)
+
+
+def _move_category_worker(
+    path: Path, base_mtime: float | None, name: str, before: str | None
+) -> tuple[float, list[dict], list[str]]:
+    """``post_notebook_move_category``'s whole load->check->move->save
+    sequence."""
+    with path_locks.lock_for(path):
+        parsed, current_mtime, line_ending = markdown_store.load_notebook(path)
+        markdown_store.check_conflict(base_mtime, current_mtime)
+        markdown_store.move_category(parsed, name, before=before)
+        new_mtime = markdown_store.save_notebook(path, parsed, line_ending)
+        return (
+            new_mtime,
+            markdown_store.list_entries(parsed),
+            markdown_store.list_categories(parsed),
+        )
+
+
+def _delete_category_worker(
+    path: Path, base_mtime: float | None, name: str
+) -> tuple[float, dict, list[dict], list[str]]:
+    """``post_notebook_delete_category``'s whole load->check->delete->save
+    sequence."""
+    with path_locks.lock_for(path):
+        parsed, current_mtime, line_ending = markdown_store.load_notebook(path)
+        markdown_store.check_conflict(base_mtime, current_mtime)
+        result = markdown_store.delete_category(parsed, name)
+        new_mtime = markdown_store.save_notebook(path, parsed, line_ending)
+        return (
+            new_mtime,
+            result,
+            markdown_store.list_entries(parsed),
+            markdown_store.list_categories(parsed),
+        )
 
 
 def _resolve_path(
@@ -324,36 +484,19 @@ def register(context: LibraryContext, routes: web.RouteTableDef) -> None:
             return error_response(400, "'base_mtime' must be a number")
 
         try:
-            parsed, current_mtime, line_ending = await asyncio.to_thread(
-                markdown_store.load_notebook, path
+            new_mtime, result, entries, categories = await asyncio.to_thread(
+                _category_worker, path, base_mtime, name, description, after, rename_to
             )
-        except markdown_store.MarkdownStoreError as exc:
-            return error_response(400, str(exc))
-        try:
-            markdown_store.check_conflict(base_mtime, current_mtime)
         except markdown_store.ConflictError as exc:
             return web.json_response({"error": str(exc), "mtime": exc.current_mtime}, status=409)
-
-        try:
-            if markdown_store.get_category_description(parsed, name) is None:
-                result = markdown_store.create_category(
-                    parsed, name, description or "", after=after
-                )
-            else:
-                result = markdown_store.set_category_description(parsed, name, description or "")
-                if rename_to and rename_to.strip():
-                    markdown_store.set_category_name(parsed, name, rename_to)
         except markdown_store.MarkdownStoreError as exc:
             return error_response(400, str(exc))
 
-        new_mtime = await asyncio.to_thread(
-            markdown_store.save_notebook, path, parsed, line_ending
-        )
         response = {
             "ok": True,
             "mtime": new_mtime,
-            "entries": markdown_store.list_entries(parsed),
-            "categories": markdown_store.list_categories(parsed),
+            "entries": entries,
+            "categories": categories,
             # §3.4 demote-don't-refuse (v0.48.1) -- see post_notebook_entry.
             "adjusted_headings": result["adjusted_headings"],
         }
@@ -417,30 +560,18 @@ def register(context: LibraryContext, routes: web.RouteTableDef) -> None:
             return error_response(400, "'base_mtime' must be a number")
 
         try:
-            parsed, current_mtime, line_ending = await asyncio.to_thread(
-                markdown_store.load_notebook, path
+            new_mtime, result, entries = await asyncio.to_thread(
+                _entry_worker, path, base_mtime, name, text, category, rename_to, after
             )
-        except markdown_store.MarkdownStoreError as exc:
-            return error_response(400, str(exc))
-        try:
-            markdown_store.check_conflict(base_mtime, current_mtime)
         except markdown_store.ConflictError as exc:
             return web.json_response({"error": str(exc), "mtime": exc.current_mtime}, status=409)
-
-        try:
-            result = markdown_store.upsert_entry(
-                parsed, name, text, category=category, rename_to=rename_to, after=after
-            )
         except markdown_store.MarkdownStoreError as exc:
             return error_response(400, str(exc))
 
-        new_mtime = await asyncio.to_thread(
-            markdown_store.save_notebook, path, parsed, line_ending
-        )
         response = {
             "ok": True,
             "mtime": new_mtime,
-            "entries": markdown_store.list_entries(parsed),
+            "entries": entries,
             # §3.4 demote-don't-refuse (v0.48.1): how many heading-looking
             # lines were demoted to keep the file format safe -- 0 for the
             # overwhelming majority of saves.
@@ -486,27 +617,18 @@ def register(context: LibraryContext, routes: web.RouteTableDef) -> None:
             return error_response(400, "'base_mtime' must be a number")
 
         try:
-            parsed, current_mtime, line_ending = await asyncio.to_thread(
-                markdown_store.load_notebook, path
-            )
-        except markdown_store.MarkdownStoreError as exc:
-            return error_response(400, str(exc))
-        try:
-            markdown_store.check_conflict(base_mtime, current_mtime)
+            new_mtime, entries = await asyncio.to_thread(_delete_worker, path, base_mtime, names)
         except markdown_store.ConflictError as exc:
             return web.json_response({"error": str(exc), "mtime": exc.current_mtime}, status=409)
+        except _NameNotFoundError as exc:
+            return error_response(404, str(exc))
+        except markdown_store.MarkdownStoreError as exc:
+            return error_response(400, str(exc))
 
-        for entry_name in names:
-            if not markdown_store.remove_entry(parsed, entry_name):
-                return error_response(404, f"no such entry {entry_name!r} in {path}")
-
-        new_mtime = await asyncio.to_thread(
-            markdown_store.save_notebook, path, parsed, line_ending
-        )
         response = {
             "ok": True,
             "mtime": new_mtime,
-            "entries": markdown_store.list_entries(parsed),
+            "entries": entries,
         }
         if is_batch:
             response["names"] = names
@@ -556,29 +678,20 @@ def register(context: LibraryContext, routes: web.RouteTableDef) -> None:
             return error_response(400, "'base_mtime' must be a number")
 
         try:
-            parsed, current_mtime, line_ending = await asyncio.to_thread(
-                markdown_store.load_notebook, path
+            new_mtime, entries = await asyncio.to_thread(
+                _move_worker, path, base_mtime, names, before, category
             )
-        except markdown_store.MarkdownStoreError as exc:
-            return error_response(400, str(exc))
-        try:
-            markdown_store.check_conflict(base_mtime, current_mtime)
         except markdown_store.ConflictError as exc:
             return web.json_response({"error": str(exc), "mtime": exc.current_mtime}, status=409)
-
-        try:
-            for entry_name in names:
-                markdown_store.move_entry(parsed, entry_name, before=before, category=category)
         except markdown_store.EntryNotFoundError as exc:
             return error_response(404, str(exc))
+        except markdown_store.MarkdownStoreError as exc:
+            return error_response(400, str(exc))
 
-        new_mtime = await asyncio.to_thread(
-            markdown_store.save_notebook, path, parsed, line_ending
-        )
         response = {
             "ok": True,
             "mtime": new_mtime,
-            "entries": markdown_store.list_entries(parsed),
+            "entries": entries,
         }
         if is_batch:
             response["names"] = names
@@ -614,30 +727,22 @@ def register(context: LibraryContext, routes: web.RouteTableDef) -> None:
             return error_response(400, "'base_mtime' must be a number")
 
         try:
-            parsed, current_mtime, line_ending = await asyncio.to_thread(
-                markdown_store.load_notebook, path
+            new_mtime, entries, categories = await asyncio.to_thread(
+                _move_category_worker, path, base_mtime, name, before
             )
-        except markdown_store.MarkdownStoreError as exc:
-            return error_response(400, str(exc))
-        try:
-            markdown_store.check_conflict(base_mtime, current_mtime)
         except markdown_store.ConflictError as exc:
             return web.json_response({"error": str(exc), "mtime": exc.current_mtime}, status=409)
-
-        try:
-            markdown_store.move_category(parsed, name, before=before)
         except markdown_store.CategoryNotFoundError as exc:
             return error_response(404, str(exc))
+        except markdown_store.MarkdownStoreError as exc:
+            return error_response(400, str(exc))
 
-        new_mtime = await asyncio.to_thread(
-            markdown_store.save_notebook, path, parsed, line_ending
-        )
         return web.json_response(
             {
                 "ok": True,
                 "mtime": new_mtime,
-                "entries": markdown_store.list_entries(parsed),
-                "categories": markdown_store.list_categories(parsed),
+                "entries": entries,
+                "categories": categories,
             }
         )
 
@@ -676,30 +781,22 @@ def register(context: LibraryContext, routes: web.RouteTableDef) -> None:
             return error_response(400, "'base_mtime' must be a number")
 
         try:
-            parsed, current_mtime, line_ending = await asyncio.to_thread(
-                markdown_store.load_notebook, path
+            new_mtime, result, entries, categories = await asyncio.to_thread(
+                _delete_category_worker, path, base_mtime, name
             )
-        except markdown_store.MarkdownStoreError as exc:
-            return error_response(400, str(exc))
-        try:
-            markdown_store.check_conflict(base_mtime, current_mtime)
         except markdown_store.ConflictError as exc:
             return web.json_response({"error": str(exc), "mtime": exc.current_mtime}, status=409)
-
-        try:
-            result = markdown_store.delete_category(parsed, name)
         except markdown_store.CategoryNotFoundError as exc:
             return error_response(404, str(exc))
+        except markdown_store.MarkdownStoreError as exc:
+            return error_response(400, str(exc))
 
-        new_mtime = await asyncio.to_thread(
-            markdown_store.save_notebook, path, parsed, line_ending
-        )
         return web.json_response(
             {
                 "ok": True,
                 "mtime": new_mtime,
-                "entries": markdown_store.list_entries(parsed),
-                "categories": markdown_store.list_categories(parsed),
+                "entries": entries,
+                "categories": categories,
                 "merged_into": result["merged_into"],
                 "entries_moved": result["entries"],
             }
