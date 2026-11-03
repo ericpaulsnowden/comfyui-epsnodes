@@ -29,6 +29,14 @@ from pathlib import Path
 
 import pytest
 
+from eps_image import nodes_switcher
+from eps_image.nodes_switcher import (
+    EPSClipSwitcher,
+    EPSModelSwitcher,
+    EPSSwitcher,
+    EPSVaeSwitcher,
+)
+
 
 @pytest.fixture(autouse=True)
 def _fake_execution_blocker(monkeypatch: pytest.MonkeyPatch):
@@ -50,13 +58,6 @@ def _fake_execution_blocker(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setitem(sys.modules, "comfy_execution.graph", graph_module)
     return FakeExecutionBlocker
 
-from eps_image import nodes_switcher
-from eps_image.nodes_switcher import (
-    EPSClipSwitcher,
-    EPSModelSwitcher,
-    EPSSwitcher,
-    EPSVaeSwitcher,
-)
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 

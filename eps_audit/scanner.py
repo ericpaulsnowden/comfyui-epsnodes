@@ -28,7 +28,7 @@ from __future__ import annotations
 
 import os
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 #: Ranked worst-first for reporting. Not a CVSS — just the order a human
 #: should read them in.
@@ -432,7 +432,7 @@ def scan_pack(pack_dir: str, *, pack: str = "", rules=RULES) -> list[Finding]:
             try:
                 if os.path.getsize(full) > MAX_FILE_BYTES:
                     continue
-                with open(full, "r", encoding="utf-8", errors="replace") as handle:
+                with open(full, encoding="utf-8", errors="replace") as handle:
                     text = handle.read()
             except OSError:
                 continue

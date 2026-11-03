@@ -114,7 +114,8 @@ class TestMirrorsComboIsPureV0681:
     and the vanished-loader self-heal moved to a graph-removal watch."""
 
     @pytest.fixture(scope="class")
-    def source(self) -> str:
+    @classmethod
+    def source(cls) -> str:
         return SETS_JS.read_text(encoding="utf-8")
 
     def test_values_is_pure_and_display_is_identity_mapped(self, source: str) -> None:
@@ -165,7 +166,8 @@ class TestPinDriftFanoutDedup:
     slug share a single request."""
 
     @pytest.fixture(scope="class")
-    def source(self) -> str:
+    @classmethod
+    def source(cls) -> str:
         return SETS_JS.read_text(encoding="utf-8")
 
     def test_cache_and_in_flight_maps_exist_at_module_scope(self, source: str) -> None:
@@ -233,7 +235,8 @@ class TestMirrorsPickerNestedV0640:
     path-id labels matching controller.js's target combo."""
 
     @pytest.fixture(scope="class")
-    def source(self) -> str:
+    @classmethod
+    def source(cls) -> str:
         return SETS_JS.read_text(encoding="utf-8")
 
     def test_mirror_candidates_span_both_families_and_subgraphs(self, source: str) -> None:
@@ -259,7 +262,8 @@ class TestComboDisplaysNamesV0650:
     ComboWidget's own options.getOptionLabel seam."""
 
     @pytest.fixture(scope="class")
-    def source(self) -> str:
+    @classmethod
+    def source(cls) -> str:
         return SETS_JS.read_text(encoding="utf-8")
 
     def test_get_option_label_maps_slug_to_name_with_slug_fallback(self, source: str) -> None:

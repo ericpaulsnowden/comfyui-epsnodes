@@ -5,8 +5,49 @@ live in **plain files you own**. Everything appears under **EPSNodes** in
 the node browser and Settings. It started as a LoRA family and has grown
 beyond it — image-flow utilities now live here too.
 
-**Where to find them.** Right-click the canvas → **Add Node → EPSNodes**,
-then pick a folder:
+## Install
+
+You need ComfyUI (a 2025+ build) and git. The pack has no pip dependencies,
+so there is nothing else to install. (rgthree-comfy is optional, and only one
+node uses it — see [The twenty-two nodes](#the-twenty-two-nodes).)
+
+```bash
+cd ComfyUI/custom_nodes
+git clone https://github.com/ericpaulsnowden/comfyui-epsnodes
+```
+
+Restart ComfyUI. The server log shows `EPSNodes vX.Y.Z loaded`, and Settings
+gains an **EPSNodes** section.
+
+To update, run `git pull` inside `custom_nodes/comfyui-epsnodes`, restart
+ComfyUI, and hard-refresh the browser tab — the version shown in
+**Settings → EPSNodes** must match on both halves (see
+[Versioning](#versioning)). The full steps, including pointing the library at
+a folder of your choice, are in [docs/INSTALL.md](docs/INSTALL.md).
+
+## Quick start
+
+1. **Clone** the repo into `ComfyUI/custom_nodes/` (the command above).
+2. **Restart ComfyUI and hard-refresh your browser tab.** Check
+   **Settings → EPSNodes**: it should list the pack's version. (The count in
+   the server-log line can read lower than twenty-two — the two State
+   Controllers are drawn in the browser and aren't counted there.)
+3. **Find the nodes.** Right-click the canvas → **Add Node → EPSNodes**. They
+   sit in six folders — Images, Prompts, Controllers, Utilities, LoRA and
+   Switchers — listed below.
+4. **Try an example.** Drag
+   [`examples/eps-test-distributor.json`](examples/eps-test-distributor.json)
+   onto the canvas (or File → Open) and press **Run**. It needs no checkpoint
+   and no GPU: it sends ComfyUI's own `example.png` down three branches, and
+   the note on the canvas shows how to switch one off. The other examples are
+   listed in [examples/README.md](examples/README.md), simplest first.
+5. **Look up a node.** The table under
+   [The twenty-two nodes](#the-twenty-two-nodes) is the map; each node then has
+   its own section further down. Your notebooks, saved lora sets and size
+   presets live in one library folder — see
+   [The library folder](#the-library-folder) if you want to move it.
+
+**Where to find them.** The six folders under **Add Node → EPSNodes**:
 
 | Folder | What's in it |
 | --- | --- |
@@ -56,14 +97,16 @@ section further down; this is the map.
 > **Status: pre-release.** Contracts live in
 > [docs/FORMAT.md](docs/FORMAT.md). Want to see the nodes working? Every
 > workflow in [examples/](examples/) is annotated on the canvas and ready
-> to load — nine example files between them cover fifteen of the sixteen
-> nodes (the new LoRA Picker's example is still to come), some
-> sharing a graph. Most just want a Run; the LoRA trio (Apply LoRA Set,
-> LoRA Iterator, and the rgthree-dependent Lora Loader State Controller) only
-> shows up in `eps-test-cross-sweep.json` and `eps-full-pipeline.json`,
-> which need a real checkpoint and a saved LoRA state to actually generate.
-> See [examples/README.md](examples/README.md) for which need setup and
-> which just want a Run.
+> to load — eleven example workflows between them cover sixteen of the
+> twenty-two nodes, some sharing a graph. The LoRA Picker, Universal State
+> Controller, Number Controller, Bypass, Splat Placement and Node Audit have
+> no example yet. Some examples just want a Run; the LoRA ones need a real
+> checkpoint and a saved LoRA state to actually generate (Apply LoRA Set and
+> LoRA Iterator are in `eps-test-cross-sweep.json` and
+> `eps-full-pipeline.json`; the rgthree-dependent Lora Loader State
+> Controller is only in the full pipeline). See
+> [examples/README.md](examples/README.md) for which need setup and which
+> just want a Run.
 
 ## A note on ComfyUI's "New node design (beta)"
 
@@ -381,8 +424,10 @@ another session.
   (a state can never corrupt a node), and every apply ends with a report —
   "Applied 7 of 9 · 1 not found · 1 skipped". Nothing partial ever happens
   silently.
-- Sixteen node types are covered (EPS Bypass's on/off switch joined in
-  v0.99.0 — applying a state really unplugs and re-plugs its wire); the
+- Eighteen node types are covered — every node in the table at the top
+  except the two State Controllers, Splat Placement and Node Audit, with the
+  Model / CLIP / VAE Switcher counted as three (EPS Bypass's on/off switch
+  joined in v0.99.0 — applying a state really unplugs and re-plugs its wire); the
   grid's server buffer, provenance pins and the solo token are deliberately
   excluded (each would corrupt or surprise). The Lora State Controller keeps its specialized job — your
   existing lora states are untouched.
@@ -1578,11 +1623,6 @@ as an image.
   the frame extracted on Run is exact (decoded server-side with PyAV).
 - Common codecs (H.264 mp4, webm) play and scrub smoothly; an exotic codec the
   browser can't decode still extracts correctly on Run, it just won't preview.
-
-## Install
-
-See [docs/INSTALL.md](docs/INSTALL.md). Short version: clone into
-`ComfyUI/custom_nodes/` and restart ComfyUI. No pip requirements.
 
 ## The library folder
 
