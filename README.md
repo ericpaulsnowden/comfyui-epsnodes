@@ -257,6 +257,11 @@ captions).
   paths (including NAS shares) work as-is. Edit it in ComfyUI, VS Code, or
   on the other machine; the node re-reads the file every run, so external
   edits are picked up automatically (`IS_CHANGED` hashes the file).
+- **Two tabs, one notebook, no lost edits (v0.107.0):** if two browser tabs (on this
+  computer or another one using the same ComfyUI) change the same notebook at
+  almost the same moment, the second one gets the usual "File changed on disk"
+  banner with Reload and Overwrite. Earlier versions could quietly undo the
+  other change.
 - **Putting it on a NAS — just click it in Browse…:** the picker lists the
   shares and drives your machine already has mounted, **wherever they
   live**, named for humans (`personal_folder on my-nas.local`,
@@ -1512,6 +1517,9 @@ times to gather images, then send the whole set through a workflow at once.
   folder, keyed to that node), so it's still there after you close and reopen
   ComfyUI. A **Clear** button wipes it; deleting the node abandons it. No cap.
 - Each node keeps its own independent buffer, even after copy/paste.
+- **Safe to use while it runs (v0.107.0).** Paste, delete, clear or copy images in a grid while a queued
+  run is still collecting into it, and nothing is lost. In earlier versions two changes landing
+  at the same moment could silently drop one image.
 - **Copy/paste:** right-click a collected image → Copy image (to the OS
   clipboard, for Photoshop/etc.) or Copy (Clipspace) (into the mask editor or
   another node). Five ways to ADD images: the **Add images… button** (a

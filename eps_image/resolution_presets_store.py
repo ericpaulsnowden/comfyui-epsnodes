@@ -65,6 +65,7 @@ try:
     # (eps_image.resolution_presets_store's own enclosing package is
     # eps_image, so ".." reaches its parent) lands on that shared top
     # package, then back down into lora_library.context.
+    from ..lora_library import path_locks
     from ..lora_library.context import LibraryContext, _atomic_write_text
 except ImportError:
     # Flat import context (pytest's rootdir setup, tests/conftest.py: the
@@ -73,6 +74,7 @@ except ImportError:
     # relative form above raises "attempted relative import beyond
     # top-level package", and this absolute form is what actually
     # resolves).
+    from lora_library import path_locks
     from lora_library.context import LibraryContext, _atomic_write_text
 
 logger = logging.getLogger("eps_image")
@@ -387,14 +389,21 @@ def save_preset(
     # unreachable library folder to empty presets (fine for a read), but a
     # WRITE against that state must fail loudly with the folder named --
     # not silently target a file that cannot be written (audit 2026-08-08).
-    _require_presets_path(context)
+    path = _require_presets_path(context)
 
-    presets, current_mtime = load_presets(context)
-    check_conflict(base_mtime, current_mtime)
+    # Locked load->check->mutate->write (2026-11-03 sidecar audit): two
+    # saves of DIFFERENT presets from two tabs/nodes, each in its own
+    # worker thread, both loaded the same file and the second write dropped
+    # the first's preset -- the notebook race (lora_library/path_locks.py,
+    # FORMAT.md §3.5). The base_mtime check inside still covers the
+    # two-machine case.
+    with path_locks.lock_for(path):
+        presets, current_mtime = load_presets(context)
+        check_conflict(base_mtime, current_mtime)
 
-    presets[clean_name] = clean_values
-    new_mtime = _write(context, presets)
-    return presets, new_mtime
+        presets[clean_name] = clean_values
+        new_mtime = _write(context, presets)
+        return presets, new_mtime
 
 
 def delete_preset(
@@ -419,13 +428,14 @@ def delete_preset(
     # existence check: against an unreachable folder load_presets degrades
     # to empty presets, which would misreport the failure as a 404 "no such
     # preset" instead of naming the real problem (audit 2026-08-08).
-    _require_presets_path(context)
+    path = _require_presets_path(context)
 
-    presets, current_mtime = load_presets(context)
-    check_conflict(base_mtime, current_mtime)
+    with path_locks.lock_for(path):  # same locked transaction as save_preset
+        presets, current_mtime = load_presets(context)
+        check_conflict(base_mtime, current_mtime)
 
-    if clean_name not in presets:
-        raise PresetNotFoundError(f"no such preset {clean_name!r}")
-    del presets[clean_name]
-    new_mtime = _write(context, presets)
-    return presets, new_mtime
+        if clean_name not in presets:
+            raise PresetNotFoundError(f"no such preset {clean_name!r}")
+        del presets[clean_name]
+        new_mtime = _write(context, presets)
+        return presets, new_mtime

@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import json
 import os
+import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -466,3 +468,92 @@ class TestNonUtf8PresetsFile:
         # overwrite every preset in the file.
         assert mtime == (library_dir / store.PRESETS_FILENAME).stat().st_mtime
         assert any("could not read" in r.message for r in caplog.records)
+
+
+# --------------------------------------------------------------- concurrency
+#
+# 2026-11-03 sidecar audit: save_preset/delete_preset each do load ->
+# check_conflict -> mutate -> write of the ONE shared resolution_presets.json,
+# and each route runs that in its own worker thread -- so two overlapping
+# requests (two tabs, or two Resolution nodes saving at once) both loaded the
+# same file and the later write dropped the earlier one's preset. Same shape
+# and same fix as the notebook (lora_library/path_locks.py, FORMAT.md §3.5).
+
+
+def _slow_load_presets(monkeypatch: pytest.MonkeyPatch, delay: float = 0.05) -> None:
+    """Sleep *delay* after every real read, so a second concurrent call is
+    sure to have started before the first one writes."""
+    real_load_presets = store.load_presets
+
+    def slow_load_presets(ctx):
+        result = real_load_presets(ctx)
+        time.sleep(delay)
+        return result
+
+    monkeypatch.setattr(store, "load_presets", slow_load_presets)
+
+
+def _run_concurrently(*funcs) -> list[BaseException]:
+    errors: list[BaseException] = []
+
+    def run(fn) -> None:
+        try:
+            fn()
+        except BaseException as exc:  # pragma: no cover - surfaced via the return value
+            errors.append(exc)
+
+    threads = [threading.Thread(target=run, args=(fn,)) for fn in funcs]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=10)
+    return errors
+
+
+class TestConcurrency:
+    def test_concurrent_saves_of_different_presets_both_survive(
+        self, context: LibraryContext, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _slow_load_presets(monkeypatch)
+
+        errors = _run_concurrently(
+            lambda: store.save_preset(context, "Portrait", VALUES),
+            lambda: store.save_preset(context, "Square", _other_values(width=1024, height=1024)),
+        )
+
+        assert not errors
+        presets, _mtime = store.load_presets(context)
+        assert set(presets) == {"Portrait", "Square"}
+
+    def test_concurrent_save_and_delete_never_lose_either(
+        self, context: LibraryContext, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        store.save_preset(context, "Old", VALUES)
+        _slow_load_presets(monkeypatch)
+
+        errors = _run_concurrently(
+            lambda: store.delete_preset(context, "Old"),
+            lambda: store.save_preset(context, "New", VALUES),
+        )
+
+        assert not errors
+        presets, _mtime = store.load_presets(context)
+        assert set(presets) == {"New"}
+
+    def test_overlapping_saves_from_the_same_base_get_one_conflict(
+        self, context: LibraryContext, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """With a base_mtime (what the panel sends), the second of two
+        overlapping saves sees the first one's write and gets an honest
+        ConflictError -- never two silent successes with one preset lost."""
+        _presets, base_mtime = store.save_preset(context, "Seed", VALUES)
+        _slow_load_presets(monkeypatch)
+
+        errors = _run_concurrently(
+            lambda: store.save_preset(context, "A", VALUES, base_mtime=base_mtime),
+            lambda: store.save_preset(context, "B", VALUES, base_mtime=base_mtime),
+        )
+
+        assert len(errors) == 1 and isinstance(errors[0], store.ConflictError)
+        presets, _mtime = store.load_presets(context)
+        assert set(presets) in ({"Seed", "A"}, {"Seed", "B"})

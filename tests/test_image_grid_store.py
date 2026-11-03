@@ -12,8 +12,11 @@ real tensor/PNG round trips rather than faking them.
 
 from __future__ import annotations
 
+import itertools
 import json
 import sys
+import threading
+import time
 import types
 from pathlib import Path
 
@@ -83,6 +86,52 @@ def _make_batch(count: int, height: int = 4, width: int = 6) -> torch.Tensor:
         value = (i + 1) / (count + 1)
         frames.append(torch.full((height, width, 3), value, dtype=torch.float32))
     return torch.stack(frames, dim=0)
+
+
+def _make_flat_batch(value: float, height: int = 4, width: int = 6) -> torch.Tensor:
+    """A `[1,H,W,C]` batch, every pixel the SAME *value* -- the concurrency
+    tests below use this so each racing thread's own contributed frame
+    carries an identifiable, distinct pixel value (unlike `_make_batch`,
+    which always builds several frames' worth in one call)."""
+    return torch.full((1, height, width, 3), value, dtype=torch.float32)
+
+
+def _write_colored_png(path: Path, gray_value: int, size: tuple[int, int] = (4, 4)) -> None:
+    """Writes a flat-gray PNG at *path* -- a separate, parameterized sibling
+    of `_write_fake_upload` above (which always writes the same fixed
+    color) so the concurrency tests can give each simulated paste its own
+    identifiable value, the upload-side equivalent of `_make_flat_batch`."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    image = Image.new("RGB", size, (gray_value, gray_value, gray_value))
+    with open(path, "wb") as fh:
+        image.save(fh, format="PNG")
+
+
+def _widen_manifest_read_race(monkeypatch: pytest.MonkeyPatch, delay: float = 0.05) -> None:
+    """Monkeypatches `_load_manifest` to sleep for *delay* seconds right
+    AFTER reading -- deterministically widens the exact
+    read-manifest -> allocate-name -> write window the pre-fix code raced
+    in, so concurrently-started threads reliably land inside each other's
+    window without depending on OS scheduling luck.
+
+    Deliberately a sleep, not a `threading.Barrier` placed after the read:
+    with the fix's lock in place, only ONE thread at a time can ever be
+    inside `_load_manifest` for a given grid while holding that grid's
+    lock, so a second thread can never reach a barrier positioned there --
+    it would simply block on the LOCK first, and the test would deadlock
+    waiting for a barrier party that can never arrive. A sleep has no such
+    problem: it just makes whichever single thread currently holds the
+    lock (post-fix) or is mid-race (pre-fix) slower, which is exactly the
+    widening these tests want either way.
+    """
+    original = store._load_manifest
+
+    def slow_load_manifest(directory):
+        result = original(directory)
+        time.sleep(delay)
+        return result
+
+    monkeypatch.setattr(store, "_load_manifest", slow_load_manifest)
 
 
 VALID_UUID = "a1b2c3d4-e5f6-47a8-9b0c-d1e2f3a4b5c6"
@@ -1102,3 +1151,430 @@ class TestThumbnailPath:
         store.clone_buffer(VALID_UUID, OTHER_VALID_UUID)
         assert not (store.buffer_dir(OTHER_VALID_UUID) / store.THUMBS_DIRNAME).exists()
         assert len(store.list_refs(OTHER_VALID_UUID)) == 3
+
+
+# --------------------------------------------------- concurrency (2026-09-13)
+# Data-loss fix, RELEASE-REVIEW-2026-09-13.md finding #2: every mutator here
+# used to read manifest.json -> allocate a name -> write the image(s) ->
+# `os.replace` the manifest with NO lock at all. Two concurrent callers of
+# the SAME grid (a workflow Run's `append_batch` on ComfyUI's executor
+# thread racing a browser paste/remove/clear/clone via `asyncio.to_thread`
+# in `routes_image_grid.py`, or two overlapping Runs of the same node) could
+# both read the same manifest, both allocate the SAME next filename, and one
+# image + its manifest entry would silently vanish while BOTH callers
+# reported success. `image_grid_store.py`'s `_grid_locks`/`_locked` fix this
+# with a per-grid `threading.RLock` held across that whole sequence -- these
+# tests reproduce the race (widened deterministically via
+# `_widen_manifest_read_race`, never a `threading.Barrier` placed after the
+# read -- see that helper's own docstring for why a barrier there would
+# deadlock once the fix is in place) and check it's actually closed.
+
+
+class TestAppendBatchConcurrency:
+    def test_n_threads_append_batch_concurrently_all_frames_survive_with_correct_pixels(
+        self, fake_folder_paths: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        thread_count = 12
+        _widen_manifest_read_race(monkeypatch)
+        expected_values = [(i + 1) / (thread_count + 2) for i in range(thread_count)]
+        errors: list[BaseException] = []
+
+        def worker(value: float) -> None:
+            try:
+                store.append_batch(VALID_UUID, _make_flat_batch(value))
+            except BaseException as exc:  # pragma: no cover - surfaced via `errors`
+                errors.append(exc)
+
+        threads = [threading.Thread(target=worker, args=(v,)) for v in expected_values]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=10)
+
+        assert not errors, f"append_batch raised in a worker thread: {errors}"
+
+        refs = store.list_refs(VALID_UUID)
+        names = [r["filename"] for r in refs]
+        assert len(names) == thread_count, (
+            f"expected all {thread_count} concurrent appends to survive, got "
+            f"{len(names)} surviving frame(s): {names}"
+        )
+        assert len(set(names)) == thread_count  # every filename unique -- no clobbered writer
+
+        directory = store.buffer_dir(VALID_UUID)
+        for name in names:
+            assert (directory / name).is_file(), f"manifest lists {name!r} but its file is missing"
+
+        # Content check, not just presence: confirms no two threads' writes
+        # landed on the same filename and clobbered each other's pixels --
+        # the exact set of contributed values must all still be there.
+        tensors = store.read_all_as_tensors(VALID_UUID)
+        assert len(tensors) == thread_count
+        decoded_values = sorted(float(t.mean()) for t in tensors)
+        for decoded, expected in zip(decoded_values, sorted(expected_values), strict=True):
+            assert abs(decoded - expected) < 1.0 / 255.0 + 1e-6
+
+    def test_mixed_append_batch_and_append_uploaded_image_concurrently_all_survive(
+        self, fake_folder_paths: Path, fake_input_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The same race, but half the threads go through `append_batch`
+        (the Collect-mode node execution path) and half through
+        `append_uploaded_image` (the paste-to-add route path) -- exactly
+        the cross-path collision the review called out (a workflow Run
+        collecting while the user pastes into the same grid)."""
+        _widen_manifest_read_race(monkeypatch)
+        batch_values = [0.15, 0.35, 0.55, 0.75]
+        upload_grays = [40, 90, 140, 190]
+        for i, gray in enumerate(upload_grays):
+            _write_colored_png(fake_input_dir / f"paste_{i}.png", gray)
+
+        errors: list[BaseException] = []
+
+        def append_batch_worker(value: float) -> None:
+            try:
+                store.append_batch(VALID_UUID, _make_flat_batch(value))
+            except BaseException as exc:  # pragma: no cover - surfaced via `errors`
+                errors.append(exc)
+
+        def append_upload_worker(index: int) -> None:
+            try:
+                store.append_uploaded_image(VALID_UUID, f"paste_{index}.png")
+            except BaseException as exc:  # pragma: no cover - surfaced via `errors`
+                errors.append(exc)
+
+        threads = [threading.Thread(target=append_batch_worker, args=(v,)) for v in batch_values]
+        threads += [
+            threading.Thread(target=append_upload_worker, args=(i,))
+            for i in range(len(upload_grays))
+        ]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=10)
+
+        assert not errors, f"a worker thread raised: {errors}"
+
+        total = len(batch_values) + len(upload_grays)
+        refs = store.list_refs(VALID_UUID)
+        names = [r["filename"] for r in refs]
+        assert len(names) == total, f"expected {total} surviving frames, got {len(names)}: {names}"
+        assert len(set(names)) == total
+
+        directory = store.buffer_dir(VALID_UUID)
+        for name in names:
+            assert (directory / name).is_file(), f"manifest lists {name!r} but its file is missing"
+            assert store.read_frame_as_tensor(VALID_UUID, name) is not None
+
+
+class TestGridMutatorsRaceSafely:
+    """`append_batch`/`append_uploaded_image` racing `remove_frame`/`clear`/
+    `clone_buffer` on the SAME grid is exactly as unsafe, unlocked, as two
+    concurrent appends -- all five mutators share the identical unlocked
+    read-manifest -> write -> commit-manifest shape. This races all four
+    together on one destination grid and checks the settled result is
+    internally consistent."""
+
+    def test_append_races_remove_clear_and_clone_into_destination(
+        self, fake_folder_paths: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Seed the destination with two frames -- one will be targeted by
+        # the concurrent `remove_frame`.
+        store.append_batch(VALID_UUID, _make_flat_batch(0.11))
+        store.append_batch(VALID_UUID, _make_flat_batch(0.22))
+        remove_target = store.list_refs(VALID_UUID)[0]["filename"]
+
+        # A separate SOURCE grid to clone FROM, never mutated during the
+        # race -- its content is fixed and known, so a destination snapshot
+        # that exactly matches it unambiguously means "the clone landed".
+        store.append_batch(OTHER_VALID_UUID, _make_flat_batch(0.77))
+        source_names = [r["filename"] for r in store.list_refs(OTHER_VALID_UUID)]
+
+        _widen_manifest_read_race(monkeypatch)
+
+        # ---- commit-order instrumentation ----------------------------
+        # `_mtime_cache_invalidate` is called exactly once per successful
+        # write, from INSIDE `_locked`, immediately after that write's
+        # manifest commit, in every mutator (see image_grid_store.py) --
+        # wrapping it gives the TRUE serialization order the fix's lock
+        # enforces, each entry tagged with which logical operation just
+        # committed via a thread-local the worker sets right before calling
+        # the real store function.
+        commit_log: list[dict] = []
+        log_lock = threading.Lock()
+        counter = itertools.count(1)
+        op_label = threading.local()
+        original_invalidate = store._mtime_cache_invalidate
+
+        def logging_invalidate(grid_uuid: str) -> None:
+            directory = store.buffer_dir(grid_uuid)
+            frames = list(store._load_manifest(directory)["frames"]) if directory else []
+            entry = {
+                "seq": next(counter),
+                "uuid": grid_uuid,
+                "op": getattr(op_label, "value", "?"),
+                "frames": frames,
+            }
+            with log_lock:
+                commit_log.append(entry)
+            original_invalidate(grid_uuid)
+
+        monkeypatch.setattr(store, "_mtime_cache_invalidate", logging_invalidate)
+
+        errors: list[BaseException] = []
+
+        def run(label, fn, *args) -> None:
+            op_label.value = label
+            try:
+                fn(*args)
+            except BaseException as exc:  # pragma: no cover - surfaced via `errors`
+                errors.append(exc)
+
+        append_value = 0.55
+        threads = [
+            threading.Thread(
+                target=run,
+                args=("append", store.append_batch, VALID_UUID, _make_flat_batch(append_value)),
+            ),
+            threading.Thread(
+                target=run, args=("remove", store.remove_frame, VALID_UUID, remove_target)
+            ),
+            threading.Thread(target=run, args=("clear", store.clear, VALID_UUID)),
+            threading.Thread(
+                target=run, args=("clone", store.clone_buffer, OTHER_VALID_UUID, VALID_UUID)
+            ),
+        ]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=10)
+
+        assert not errors, f"a worker thread raised: {errors}"
+
+        # ------------------------------------------------- self-consistency
+        # THE primary invariant: whatever the settled manifest says, every
+        # entry must point at a file that actually exists and decodes.
+        # `os.replace` makes each individual manifest swap atomic on its
+        # own, so this can only fail if two mutators interleaved their
+        # reads/writes against each other (the bug this fix closes).
+        final_refs = store.list_refs(VALID_UUID)
+        final_names = [r["filename"] for r in final_refs]
+        assert len(final_names) == len(set(final_names)), "duplicate filename in final manifest"
+        directory = store.buffer_dir(VALID_UUID)
+        for name in final_names:
+            assert (directory / name).is_file(), f"manifest lists {name!r} but its file is missing"
+            assert store.read_frame_as_tensor(VALID_UUID, name) is not None, (
+                f"{name!r} is listed in the manifest but does not decode"
+            )
+
+        # --------------------------------------------- reconstruct true order
+        dest_log = sorted(
+            (e for e in commit_log if e["uuid"] == VALID_UUID), key=lambda e: e["seq"]
+        )
+        assert dest_log, "no mutator of the destination grid ever committed"
+        assert dest_log[-1]["frames"] == final_names, (
+            "the last logged commit doesn't match the settled manifest -- something wrote "
+            "after the last commit this log saw, or the log missed a write entirely"
+        )
+
+        # clear and a clone landing on the destination are BOTH a full
+        # manifest replace -- structurally identical erasure risk -- so
+        # either can legitimately explain an earlier append's disappearance.
+        # remove_frame can only legitimately erase the ONE frame it targeted.
+        erasing_ops = {"clear", "clone"}
+        for commit in (e for e in dest_log if e["op"] == "append"):
+            appended_name = commit["frames"][-1]
+            survives = appended_name in final_names
+            later_erase = any(
+                e["seq"] > commit["seq"] and e["op"] in erasing_ops for e in dest_log
+            )
+            assert survives or later_erase, (
+                f"append at seq={commit['seq']} (frame {appended_name!r}) vanished with no "
+                "later clear/clone to explain it -- the exact data-loss bug this fix closes"
+            )
+
+        # remove_frame (if it actually removed something -- a soft no-op
+        # never calls `_mtime_cache_invalidate`, so it simply never appears
+        # in the log) must not have silently dropped anything beyond its
+        # own target.
+        for commit in (e for e in dest_log if e["op"] == "remove"):
+            assert remove_target not in commit["frames"]
+
+        # A clone landing on the destination must be an EXACT copy of the
+        # source's fixed content -- never a partial/mismatched copy (which
+        # would mean the clone read a torn state of source or destination).
+        for commit in (e for e in dest_log if e["op"] == "clone"):
+            assert commit["frames"] == source_names
+
+
+class TestEachMutatorHoldsTheGridLock:
+    """One deterministic ordering test per mutator that the all-four race
+    above can't pin on its own (there, a `clear`/`clone` landing last
+    legitimately explains any loss, so dropping the lock from `remove_frame`,
+    `clear` or `clone_buffer` alone still passed it -- checked 2026-11-03 by
+    disabling each mutator's lock in turn).
+
+    Each test starts thread ONE, waits until it has read a manifest while
+    holding the grid's lock (:func:`_pause_after_first_manifest_read`), then
+    starts thread TWO against the same grid. With the lock, TWO must wait
+    for ONE to commit, so the settled buffer is exactly ONE-then-TWO. Without
+    it, TWO acts on the manifest ONE is still holding in memory and one
+    side's change is lost or the manifest lists a deleted file.
+    """
+
+    def test_remove_frame_waits_for_an_in_flight_append(
+        self, fake_folder_paths: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        store.append_batch(VALID_UUID, _make_flat_batch(0.1))
+        store.append_batch(VALID_UUID, _make_flat_batch(0.2))
+        pause = _pause_after_first_manifest_read(monkeypatch)
+
+        _start_second_after_first_reads(
+            pause,
+            lambda: store.append_batch(VALID_UUID, _make_flat_batch(0.3)),
+            lambda: store.remove_frame(VALID_UUID, "0001.png"),
+        )
+
+        directory = store.buffer_dir(VALID_UUID)
+        names = [ref["filename"] for ref in store.list_refs(VALID_UUID)]
+        assert names == ["0002.png", "0003.png"], (
+            "append then remove must leave the append AND the removal -- "
+            f"got {names}"
+        )
+        for name in names:
+            assert (directory / name).is_file(), f"manifest lists {name!r} but its file is missing"
+        assert not (directory / "0001.png").exists()
+
+    def test_clear_waits_for_an_in_flight_append(
+        self, fake_folder_paths: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        store.append_batch(VALID_UUID, _make_flat_batch(0.1))
+        pause = _pause_after_first_manifest_read(monkeypatch)
+        cleared: list[bool] = []
+
+        _start_second_after_first_reads(
+            pause,
+            lambda: store.append_batch(VALID_UUID, _make_flat_batch(0.3)),
+            lambda: cleared.append(store.clear(VALID_UUID)),
+        )
+
+        assert cleared == [True]
+        # Clear ran AFTER the append committed, so it took everything --
+        # never an append resurrecting a manifest that lists frames Clear
+        # already deleted.
+        assert store.list_refs(VALID_UUID) == []
+        assert not store.buffer_dir(VALID_UUID).exists()
+
+    def test_append_into_a_clone_destination_waits_for_the_clone(
+        self, fake_folder_paths: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        store.append_batch(OTHER_VALID_UUID, _make_flat_batch(0.77))
+        pause = _pause_after_first_manifest_read(monkeypatch)
+
+        _start_second_after_first_reads(
+            pause,
+            lambda: store.clone_buffer(OTHER_VALID_UUID, VALID_UUID),
+            lambda: store.append_batch(VALID_UUID, _make_flat_batch(0.33)),
+        )
+
+        names = [ref["filename"] for ref in store.list_refs(VALID_UUID)]
+        assert names == ["0001.png", "0002.png"], (
+            "the clone's frame and the append's frame must both survive, in that "
+            f"order -- got {names}"
+        )
+        pause["active"] = False
+        cloned = store.read_frame_as_tensor(VALID_UUID, "0001.png")
+        appended = store.read_frame_as_tensor(VALID_UUID, "0002.png")
+        assert cloned is not None and appended is not None
+        assert abs(float(cloned.mean()) - 0.77) < 1.0 / 255.0 + 1e-6
+        assert abs(float(appended.mean()) - 0.33) < 1.0 / 255.0 + 1e-6
+
+
+def _pause_after_first_manifest_read(
+    monkeypatch: pytest.MonkeyPatch, delay: float = 0.1
+) -> dict:
+    """Patches `_load_manifest` to sleep *delay* after every read while
+    ``state["active"]``, and to set ``state["read"]`` (a
+    :class:`threading.Event`) on the first read -- so a test can start a
+    second thread at a known point INSIDE the first thread's critical
+    section instead of hoping two threads overlap."""
+    original = store._load_manifest
+    state = {"read": threading.Event(), "active": True}
+
+    def pausing_load_manifest(directory):
+        result = original(directory)
+        if state["active"]:
+            state["read"].set()
+            time.sleep(delay)
+        return result
+
+    monkeypatch.setattr(store, "_load_manifest", pausing_load_manifest)
+    return state
+
+
+def _start_second_after_first_reads(pause: dict, first, second) -> None:
+    errors: list[BaseException] = []
+
+    def run(fn) -> None:
+        try:
+            fn()
+        except BaseException as exc:  # pragma: no cover - surfaced via `errors`
+            errors.append(exc)
+
+    one = threading.Thread(target=run, args=(first,))
+    one.start()
+    assert pause["read"].wait(timeout=5), "the first mutator never read its manifest"
+    two = threading.Thread(target=run, args=(second,))
+    two.start()
+    one.join(timeout=10)
+    two.join(timeout=10)
+    pause["active"] = False
+    assert not one.is_alive() and not two.is_alive(), "a mutator thread hung"
+    assert not errors, f"a mutator raised: {errors}"
+
+
+class TestIndependentGridsAreNotSerialized:
+    def test_two_different_grids_append_concurrently_without_serializing(
+        self, fake_folder_paths: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Proves the fix's lock is PER-GRID, not one global lock -- holding
+        one grid's lock while its PNGs are written (`_locked`'s own
+        docstring) must never block a completely different grid's mutator.
+
+        Both appends meet at a two-party barrier inside `_save_manifest`,
+        i.e. while each holds its OWN grid's lock. That can only happen if
+        neither lock blocks the other: with one shared lock the second
+        append could never reach the barrier, it would time out, and both
+        threads would raise. A barrier rather than a wall-clock comparison
+        so a slow CI box can't make it flaky."""
+        barrier = threading.Barrier(2, timeout=5)
+        original_save = store._save_manifest
+
+        def save_manifest_at_barrier(directory, manifest):
+            barrier.wait()
+            original_save(directory, manifest)
+
+        monkeypatch.setattr(store, "_save_manifest", save_manifest_at_barrier)
+
+        errors: list[BaseException] = []
+
+        def worker(grid_uuid: str) -> None:
+            try:
+                store.append_batch(grid_uuid, _make_flat_batch(0.5))
+            except BaseException as exc:  # pragma: no cover - surfaced via `errors`
+                errors.append(exc)
+
+        threads = [
+            threading.Thread(target=worker, args=(VALID_UUID,)),
+            threading.Thread(target=worker, args=(OTHER_VALID_UUID,)),
+        ]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=15)
+
+        assert not errors, (
+            f"the two grids' appends could not both be inside their locked sections at "
+            f"once -- they look serialized against each other: {errors}"
+        )
+        assert len(store.list_refs(VALID_UUID)) == 1
+        assert len(store.list_refs(OTHER_VALID_UUID)) == 1
