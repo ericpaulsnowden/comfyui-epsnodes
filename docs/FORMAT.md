@@ -17,9 +17,13 @@ formats must all match what is written here. Any interface change amends this
 file FIRST, in the same commit as the code. Section numbers are stable —
 cite them in code comments as `FORMAT.md §N`.
 
+New here? Read [DEVELOPING.md](DEVELOPING.md) first: a short architecture
+map, module ownership and where to add a node, route or panel control. This
+file is the contract it cites by section.
+
 Contents: §1 library directory · §2 security posture · §3 notebook markdown
 grammar · §4 set files · §5 HTTP routes · §6 nodes · §7 frontend surfaces ·
-§8 versioning & stability.
+§8 versioning & stability · §9 Node Audit.
 
 ---
 

@@ -1,9 +1,10 @@
 /**
  * @file Entry point for the comfyui-epsnodes frontend extension.
  * ComfyUI auto-imports every top-level `.js` file under `WEB_DIRECTORY`
- * (`./web`, set by the Python backend) — this is the only such file; every
- * other module lives under `lora_library/` and is wired together here into
- * exactly one `app.registerExtension(...)` call (FORMAT.md §7.1).
+ * (`./web`, set by the Python backend) — this file and `eps_image.js` are
+ * the two such files; every other module of this family lives under
+ * `lora_library/` and is wired together here into exactly one
+ * `app.registerExtension(...)` call (FORMAT.md §7.1).
  *
  * Each hook defensively catches errors from its module so one broken
  * sub-feature never prevents the others from loading (pattern inherited
