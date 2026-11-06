@@ -289,7 +289,9 @@ export const SWITCHER_CLASSES = {
   EPSVaeSwitcher: { prefix: 'vae', type: 'VAE', noun: 'VAEs' },
   // v1.8.0 (owner ask 2026-10-25): the fifth class -- "no audios connected"
   // reads oddly, so the header says "audio clips".
-  EPSAudioSwitcher: { prefix: 'audio', type: 'AUDIO', noun: 'audio clips' }
+  EPSAudioSwitcher: { prefix: 'audio', type: 'AUDIO', noun: 'audio clips' },
+  // v0.109.0 (owner ask 2026-11-06): the fifth class, for LATENT dicts.
+  EPSLatentSwitcher: { prefix: 'latent', type: 'LATENT', noun: 'latents' }
 }
 for (const spec of Object.values(SWITCHER_CLASSES)) {
   spec.inputRe = new RegExp(`^${spec.prefix}_(\\d+)$`)

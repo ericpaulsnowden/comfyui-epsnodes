@@ -132,6 +132,14 @@ _VAE_INPUT_PATTERN = re.compile(r"vae_(\d+)")
 #: v1.8.0 (owner ask 2026-10-25: "add an EPS Audio Switcher to the switcher
 #: list") -- the fifth parameterization of the same shape.
 _AUDIO_INPUT_PATTERN = re.compile(r"audio_(\d+)")
+#: v0.109.0 (owner ask 2026-11-06: "a new switcher node -- EPS Latent Switcher,
+#: the same as the other switchers but for latents").
+_LATENT_INPUT_PATTERN = re.compile(r"latent_(\d+)")
+_LATENT_INPUT_TOOLTIP = (
+    "A latent to include when enabled. Toggle it from the row on the node; "
+    "when off, nothing upstream of this socket runs at all (a VAE Encode or "
+    "a sampler feeding a switched-off row never runs)."
+)
 
 #: Per-type hover tooltip for slot 1 and every dynamically-grown slot alike,
 #: so e.g. model_2+ reads identically to model_1 on hover -- see
@@ -322,7 +330,7 @@ def _connected_slot_indices(kwargs: dict[str, Any], pattern: re.Pattern[str]) ->
 
 def _switcher_is_statically_all_off(node: dict) -> bool:
     """True when *node* is a prompt entry for one of this module's switcher
-    classes (EPSSwitcher/EPSModelSwitcher/EPSClipSwitcher/EPSVaeSwitcher)
+    classes (EPSSwitcher/EPSModelSwitcher/EPSClipSwitcher/EPSVaeSwitcher/EPSLatentSwitcher)
     that provably emits nothing: every ``<prefix>_N`` slot it has wired is
     turned off in its own ``toggles`` (or it has none wired at all).
 
@@ -330,7 +338,7 @@ def _switcher_is_statically_all_off(node: dict) -> bool:
     MODEL/CLIP/VAE): *node*'s ``class_type`` is looked up in
     ``_SWITCHER_SLOT_PATTERNS`` to find THAT class's own slot-name pattern --
     e.g. an EPSModelSwitcher upstream is scanned for ``model_N`` keys, not
-    whatever prefix the CALLER happens to use -- so any of the four classes
+    whatever prefix the CALLER happens to use -- so any of the five classes
     is recognized as a sibling, not just the caller's own type.
 
     "Provably" from the PROMPT ALONE -- ``toggles`` must be a literal string
@@ -1434,4 +1442,61 @@ EPSAudioSwitcher = _make_switcher_ns(
         "across every run."
     ),
     class_doc=_EPS_AUDIO_SWITCHER_CLASS_DOC,
+)
+
+# --------------------------------------------------------- EPSLatentSwitcher
+
+_EPS_LATENT_SWITCHER_CLASS_DOC = """Any number of ``latent_N`` inputs, each independently on/off,
+fanned into one ``LATENT`` list output (FORMAT.md §6.4b; v0.109.0, owner ask
+2026-11-06: "a new switcher node -- EPS Latent Switcher, the same as the
+other switchers but for latents"). The fifth parameterization of
+``_make_switcher_ns`` -- the identical shape as ``EPSSwitcher`` with
+"latent" in place of "image"; see that class's own docstring for the full
+mechanism write-up.
+
+A LATENT is ComfyUI's ``{"samples": tensor, ...}`` dict (optionally with a
+``noise_mask`` / ``batch_index``); this node only selects and returns those
+dicts, never reads or copies their tensors, so a latent handed downstream is
+the upstream node's own cached object (the §6.4b pass-through rule).
+
+``INPUT_IS_LIST = True``: a list-producing upstream is merged element-wise
+into the output. Each ``latent_N`` slot is ALSO ``lazy``: a toggled-off
+slot's upstream -- a VAE Encode, an Empty Latent Image, a whole sampler
+chain feeding a disabled row -- is never requested and so never executes.
+
+Zero enabled latents -- everything toggled off, or nothing connected -- is a
+VALID queue: ``execute`` returns an ``ExecutionBlocker``, so the queue
+succeeds and the downstream latent branch simply doesn't run (§6.4's all-off
+rule; a core sampler cannot run without its latent, so it is skipped).
+"""
+
+EPSLatentSwitcher = _make_switcher_ns(
+    class_id="EPSLatentSwitcher",
+    prefix="latent",
+    pattern=_LATENT_INPUT_PATTERN,
+    io_type="LATENT",
+    # The family's `<prefix>s` list naming (images/models/clips/vaes) --
+    # this output IS a list, one latent per enabled row.
+    output_name="latents",
+    log_prefix="EPS Latent Switcher",
+    noun="latent",
+    input_tooltip=_LATENT_INPUT_TOOLTIP,
+    output_tooltip=(
+        "Every enabled latent, in slot order, as a list -- the rest of the "
+        "workflow runs once per latent."
+    ),
+    description=(
+        "Toggle any number of latent inputs on or off; the enabled ones fan "
+        "out in slot order, so N enabled latents make the rest of the "
+        "workflow run N times. Wire anything that makes a latent: an Empty "
+        "Latent, a VAE Encode, a sampler's output, a Load Latent. A "
+        "toggled-off input's upstream branch never executes at all -- an "
+        "encode or a whole sampler chain feeding a disabled row never runs, "
+        "not just filtered out afterward. Turning every input off, or "
+        "connecting none at all, is a valid state: the queue still succeeds "
+        "and the downstream branch simply doesn't run. A value wired further "
+        "downstream that isn't itself a list, like a fixed seed, repeats "
+        "identically across every run."
+    ),
+    class_doc=_EPS_LATENT_SWITCHER_CLASS_DOC,
 )

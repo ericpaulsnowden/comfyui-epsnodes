@@ -33,7 +33,7 @@ module scope (type-checking-only imports aside); each is imported inside the fun
   on purpose.
 - `eps_audit/`: the outward-looking audit family (egress hooks, scanner, report, route, node).
 
-**The 22 nodes** = 20 Python classes + 2 frontend-only virtual nodes. Folder = `EPSNodes/<Folder>`; the two
+**The 25 nodes** = 23 Python classes + 2 frontend-only virtual nodes. Folder = `EPSNodes/<Folder>`; the two
 virtual nodes set theirs in a JS `NODE_CATEGORY` constant, which a search of `.py` files misses.
 
 | Class id | Display name | Source | Folder | Panel in `web/` | FORMAT |
@@ -47,6 +47,7 @@ virtual nodes set theirs in a JS `NODE_CATEGORY` constant, which a search of `.p
 | `EPSModelSwitcher` | EPS Model Switcher | same (factory `_make_switcher_ns`) | Switchers | same | §6.4b |
 | `EPSClipSwitcher` | EPS CLIP Switcher | same | Switchers | same | §6.4b |
 | `EPSVaeSwitcher` | EPS VAE Switcher | same | Switchers | same | §6.4b |
+| `EPSLatentSwitcher` | EPS Latent Switcher | same | Switchers | same | §6.4b |
 | `EPSCheckpointSwitcher` | EPS Checkpoint Switcher | `eps_image/nodes_checkpoint_switcher.py` | Switchers | `eps_image/checkpoint_switcher.js` | §6.12 |
 | `EPSResolution` | EPS Resolution | `eps_image/nodes_resolution.py` | Images | `eps_image/resolution.js` | §6.5 |
 | `EPSImageGrid` | EPS Image Grid | `eps_image/nodes_image_grid.py` | Images | `eps_image/image_grid.js` | §6.6 |
@@ -227,7 +228,7 @@ ruff check .
    timing matters. Import it in the family entry file and call it through `safely(...)` from `init` /
    `nodeCreated`.
 6. Docs and tests: amend FORMAT.md first (a new `§6.N`; routes into the §5 table); add a README section and
-   table row; update the node counts (README "The twenty-two nodes", `pyproject.toml` description, FORMAT.md
+   table row; update the node counts (README "The twenty-five nodes", `pyproject.toml` description, FORMAT.md
    §6 opening); add an annotated workflow in `examples/` plus a row in `examples/README.md`; add
    `tests/test_<name>.py` (+ `_js.py`); bump (section 8).
 

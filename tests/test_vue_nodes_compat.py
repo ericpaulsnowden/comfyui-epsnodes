@@ -41,6 +41,7 @@ from eps_image.nodes_image_grid import EPSImageGrid
 from eps_image.nodes_switcher import (
     EPSAudioSwitcher,
     EPSClipSwitcher,
+    EPSLatentSwitcher,
     EPSModelSwitcher,
     EPSSwitcher,
     EPSVaeSwitcher,
@@ -71,6 +72,7 @@ def _input_options(node_class, name: str) -> dict:
         (EPSClipSwitcher, "toggles"),
         (EPSVaeSwitcher, "toggles"),
         (EPSAudioSwitcher, "toggles"),
+        (EPSLatentSwitcher, "toggles"),
         (EPSCheckpointSwitcher, "selection"),
         (EPSImageGrid, "grid_uuid"),
         (EPSFrameSaver, "video_path"),

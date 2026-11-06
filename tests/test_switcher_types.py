@@ -33,6 +33,7 @@ from eps_image import nodes_switcher
 from eps_image.nodes_switcher import (
     EPSAudioSwitcher,
     EPSClipSwitcher,
+    EPSLatentSwitcher,
     EPSModelSwitcher,
     EPSSwitcher,
     EPSVaeSwitcher,
@@ -72,6 +73,7 @@ _SWITCHER_TYPES = [
     # v1.8.0 (owner ask 2026-10-25): the fifth class, driven through every
     # generic test below exactly like its siblings.
     pytest.param(EPSAudioSwitcher, "audio", "AUDIO", "audios", id="audio"),
+    pytest.param(EPSLatentSwitcher, "latent", "LATENT", "latents", id="latent"),
 ]
 
 #: Round-robin sibling for cross-type checks: a DIFFERENT registered
@@ -82,13 +84,14 @@ _OTHER_SWITCHER = {
     EPSModelSwitcher: (EPSClipSwitcher, "clip"),
     EPSClipSwitcher: (EPSVaeSwitcher, "vae"),
     EPSVaeSwitcher: (EPSAudioSwitcher, "audio"),
-    EPSAudioSwitcher: (EPSModelSwitcher, "model"),
+    EPSAudioSwitcher: (EPSLatentSwitcher, "latent"),
+    EPSLatentSwitcher: (EPSModelSwitcher, "model"),
 }
 
 #: A different new-class prefix, for "rejects a sibling class's own prefix"
 #: coverage (distinct from "rejects image_N", which every test below also
 #: checks directly).
-_OTHER_PREFIX = {"model": "clip", "clip": "vae", "vae": "audio", "audio": "model"}
+_OTHER_PREFIX = {"model": "clip", "clip": "vae", "vae": "audio", "audio": "latent", "latent": "model"}
 
 
 def _toggles(**overrides: bool) -> str:
@@ -700,6 +703,7 @@ class TestClassShape:
             "clip": "EPSClipSwitcher",
             "vae": "EPSVaeSwitcher",
             "audio": "EPSAudioSwitcher",
+            "latent": "EPSLatentSwitcher",
         }[prefix]
 
 
@@ -718,9 +722,10 @@ class TestDescriptionAndTooltipWording:
         self, cls, prefix, io_type, output_name
     ) -> None:
         # The upstream a disabled row skips is named per type: a checkpoint
-        # load for model/clip/vae, a Load Audio for the v1.8.0 audio class
-        # (audio never comes from a checkpoint).
-        upstream = "load audio" if prefix == "audio" else "checkpoint"
+        # load for model/clip/vae, a Load Audio for the v1.8.0 audio class, a
+        # sampler chain for the v0.109.0 latent class (neither comes from a
+        # checkpoint).
+        upstream = {"audio": "load audio", "latent": "sampler"}.get(prefix, "checkpoint")
         assert upstream in cls.DESCRIPTION.lower()
         assert "never run" in cls.DESCRIPTION.lower() or "never execute" in cls.DESCRIPTION.lower()
 
@@ -759,6 +764,7 @@ class TestRegistration:
             ("EPSModelSwitcher", "EPS Model Switcher"),
             ("EPSClipSwitcher", "EPS CLIP Switcher"),
             ("EPSVaeSwitcher", "EPS VAE Switcher"),
+            ("EPSLatentSwitcher", "EPS Latent Switcher"),
         ],
     )
     def test_new_switcher_registered_with_display_name(
@@ -810,7 +816,9 @@ class TestEPSSwitcherIdentityViaFactory:
         assert EPSSwitcher.RETURN_NAMES == ("images", "masks")
 
     @pytest.mark.parametrize(
-        "cls", [EPSModelSwitcher, EPSClipSwitcher, EPSVaeSwitcher], ids=["model", "clip", "vae"]
+        "cls",
+        [EPSModelSwitcher, EPSClipSwitcher, EPSVaeSwitcher, EPSLatentSwitcher],
+        ids=["model", "clip", "vae", "latent"],
     )
     def test_siblings_carry_no_mask_partner(self, cls) -> None:
         """The mask partner is EPSSwitcher's alone: no `pass_masks` widget,

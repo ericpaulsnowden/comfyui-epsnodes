@@ -244,7 +244,8 @@ export const SWITCHER_PREFIXES = {
   EPSModelSwitcher: 'model',
   EPSClipSwitcher: 'clip',
   EPSVaeSwitcher: 'vae',
-  EPSAudioSwitcher: 'audio'
+  EPSAudioSwitcher: 'audio',
+  EPSLatentSwitcher: 'latent'
 }
 
 /** Reroute node types followed straight through (core + rgthree). */

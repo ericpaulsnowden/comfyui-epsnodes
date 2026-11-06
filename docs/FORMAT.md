@@ -1820,9 +1820,9 @@ per-input toggle + toggle-all header + N-enabled→N-runs fan-out.
   fanned runs — surface this in the node description (per-image variation
   needs an explicit seed list).
 
-## §6.4b `EPSModelSwitcher` / `EPSClipSwitcher` / `EPSVaeSwitcher` (v0.44.0) / `EPSAudioSwitcher` (v1.8.0)
+## §6.4b `EPSModelSwitcher` / `EPSClipSwitcher` / `EPSVaeSwitcher` (v0.44.0) / `EPSAudioSwitcher` (v1.8.0) / `EPSLatentSwitcher` (v0.109.0)
 
-Four sibling classes of §6.4's `EPSSwitcher` (three since v0.44.0, `EPSAudioSwitcher` added in v1.8.0), built by the SAME factory
+Five sibling classes of §6.4's `EPSSwitcher` (three since v0.44.0, `EPSAudioSwitcher` added in v1.8.0, `EPSLatentSwitcher` in v0.109.0), built by the SAME factory
 (`nodes_switcher.py`'s `_make_switcher_ns`) and attached by the SAME frontend
 (`switcher.js`'s `SWITCHER_CLASSES` registry): every §6.4 contract — growing
 `<prefix>_N` optional inputs resolved BY NAME through the flexible-dict
@@ -1839,6 +1839,7 @@ only the prefix and IO type substituted:
 | `EPSClipSwitcher` | EPS CLIP Switcher | `clip_N` | CLIP | `clips` |
 | `EPSVaeSwitcher` | EPS VAE Switcher | `vae_N` | VAE | `vaes` |
 | `EPSAudioSwitcher` | EPS Audio Switcher | `audio_N` | AUDIO | `audios` (v1.8.0, owner ask 2026-10-25; registered in `switcher.js` `SWITCHER_CLASSES` with the header noun "audio clips", and in `cross_sweep.js` `SWITCHER_PREFIXES` so the run-count estimator counts its enabled rows) |
+| `EPSLatentSwitcher` | EPS Latent Switcher | `latent_N` | LATENT | `latents` (v0.109.0, owner ask 2026-11-06 — a LATENT is the `{"samples": tensor, ...}` dict; selected and returned by reference like a MODEL, never read or copied; no row partner) |
 
 - **`EPSSwitcher` itself is untouched** — same class id, `image_N` names,
   behavior byte-identical (its pre-refactor class attributes and
@@ -1847,7 +1848,7 @@ only the prefix and IO type substituted:
   holds: the factory is an internal reorganization, not a contract change.
 - **The empty-sibling consumer skip (§6.4) is cross-type.** The
   statically-all-off recognition now keys off a class-id → slot-pattern
-  registry (`_SWITCHER_SLOT_PATTERNS`) covering all four classes, each
+  registry (`_SWITCHER_SLOT_PATTERNS`) covering all six classes, each
   scanned with the UPSTREAM's own prefix — so e.g. a `vae_N` slot fed by an
   all-off `EPSModelSwitcher` is still skipped, pinned by a cross-class test.
 - **Pass-through safety**: these nodes only select and return; they never
