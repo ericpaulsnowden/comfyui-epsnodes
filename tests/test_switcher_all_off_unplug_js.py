@@ -622,6 +622,7 @@ def test_pure_memory_helpers(probe: dict) -> None:
     assert pure["serializedEmpty"] is None
     assert pure["exempt"] == sorted(
         [
+            "EPSAudioSwitcher",  # v1 only
             "EPSBypass",
             "EPSCheckpointSwitcher",
             "EPSClipSwitcher",
