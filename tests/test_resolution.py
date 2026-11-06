@@ -1752,3 +1752,39 @@ class TestScaleMultiplierOmittedIsSafeDefault:
         )
         assert (width, height) == (32, 32)
         assert tuple(resized.shape) == (1, 32, 32, 3)
+
+
+# ------------------------------------------------ lazy images (2026-11-05)
+class TestLazyImagesSkipAnAllOffSwitcher:
+    def test_image_inputs_are_lazy_and_the_hidden_prompt_is_declared(self) -> None:
+        from eps_image.nodes_resolution import EPSResolution
+
+        types = EPSResolution.INPUT_TYPES()
+        assert types["optional"]["image"][1]["lazy"] is True
+        assert types["optional"]["image_5"][1]["lazy"] is True  # the flexible extras too
+        assert types["hidden"] == {"prompt": "PROMPT", "unique_id": "UNIQUE_ID"}
+        assert EPSResolution.LAZY_IMAGE_INPUTS == (
+            "image", "image_2", "image_3", "image_4", "image_5", "image_6", "image_7", "image_8"
+        )
+
+    def test_check_lazy_status_skips_the_all_off_feed_only(self) -> None:
+        from eps_image.nodes_resolution import EPSResolution
+
+        prompt = {
+            "3": {"class_type": "EPSSwitcher", "inputs": {"image_1": ["1", 0], "toggles": '{"image_1": false}'}},
+            "5": {
+                "class_type": "EPSResolution",
+                "inputs": {"image": ["3", 0], "image_2": ["2", 0], "width": 512, "height": 512},
+            },
+        }
+        node = EPSResolution()
+        assert node.check_lazy_status(prompt=prompt, unique_id="5") == ["image_2"]
+        assert node.check_lazy_status() == list(EPSResolution.LAZY_IMAGE_INPUTS)
+
+    def test_resolve_ignores_the_hidden_inputs(self) -> None:
+        from eps_image.nodes_resolution import EPSResolution
+
+        # Hidden inputs ride in through **extra and must never be mistaken
+        # for an image_N (the extras collector matches image_[2-8] only).
+        result = EPSResolution().resolve(width=640, height=480, prompt={}, unique_id="5")
+        assert result[2] == [640] and result[3] == [480]

@@ -115,8 +115,8 @@ def test_ensure_reads_the_live_canvas_class(probe: dict) -> None:
     assert probe["ensureMissing"] is False
 
 
-def test_both_dimming_files_install_the_hook_before_dimming() -> None:
-    for name in ("save_image.js", "image_grid.js"):
+def test_every_dimming_file_installs_the_hook_before_dimming() -> None:
+    for name in ("save_image.js", "image_grid.js", "switcher.js", "checkpoint_switcher.js"):
         source = (REPO_ROOT / "web" / "eps_image" / name).read_text(encoding="utf-8")
         assert "import { ensureOwnedLinkColourHook } from './owned_link_colour.js'" in source
         hook = source.index("if (desired.size) ensureOwnedLinkColourHook()")

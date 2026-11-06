@@ -894,6 +894,14 @@ several models/VAEs in one queue".
   double-click rename, all-off is valid (queue succeeds, downstream skips),
   an off row stays off when you re-plug or swap its model (v0.100.3), and
   Ctrl+Shift+V keeps every wire (v0.100.4).
+- **All rows off now looks and acts unplugged (v0.108.0).** With every row
+  off (or nothing wired), the switcher's output wires draw dimmed, and the
+  EPS nodes that can work without that input act as if it were not wired:
+  the Run Multiplier runs its text-only sweep instead of being skipped with
+  everything after it, EPS Resolution gives its typed size, the Image Grid
+  behaves as with nothing wired. The same goes for an EPS Checkpoint
+  Switcher with no checkpoint ticked. Core nodes, which can't run without
+  their image, are still skipped silently, as before.
 - **A toggled-off branch never runs at all.** Wire three Load Checkpoint
   nodes into a Model Switcher, tick one off, and that checkpoint is never
   even loaded — not loaded-then-discarded. Verified against a real loader.
@@ -1587,6 +1595,13 @@ identity collisions, the refresh after a run and the Collect-only wire dimming
 all reach across subgraph boundaries.
 
 ## EPS Run Multiplier (shipped)
+
+- **An all-off switcher no longer stops the sweep (v0.108.0).** If the
+  Image, Model, CLIP, VAE or Checkpoint Switcher feeding one of this node's
+  optional inputs has every row off (or nothing ticked), that input now
+  counts as not wired: the multiplier runs with the axes it does have (a
+  text-only sweep, say) instead of being skipped along with everything
+  after it. The run-count readout counts the same way.
 
 - **Dropping a saved image runs first time.** An image saved by EPS Save
   Image carries the exact run that made it, and the workflow inside it is

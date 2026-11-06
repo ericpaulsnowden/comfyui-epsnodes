@@ -1160,3 +1160,53 @@ class TestPassMasks:
                        "mask_1": ["1", 1], "pass_masks": True},
         }
         assert nodes_switcher._switcher_is_statically_all_off(node) is True
+
+
+# ---------------------------------------------------------- all-off, by name (2026-11-05)
+class TestAllOffRecognitionByName:
+    """The consumer-side half of the §6.4 all-off rule, generalized by input
+    NAME so the Run Multiplier / Resolution / Image Grid can leave a slot fed
+    by a provably-empty switcher unrequested (owner, 2026-11-05: "if all of
+    the toggles are off it should look like nothing is connected")."""
+
+    def test_checkpoint_switcher_with_an_empty_selection_is_statically_all_off(self) -> None:
+        from eps_image.nodes_switcher import _switcher_is_statically_all_off as off
+
+        ck = lambda sel: {"class_type": "EPSCheckpointSwitcher", "inputs": {"selection": sel}}  # noqa: E731
+        assert off(ck("[]")) is True
+        assert off(ck("")) is True
+        assert off(ck('[null, ""]')) is True  # no string entry -> loads nothing
+        assert off(ck('["a.safetensors"]')) is False
+        assert off(ck(["9", 0])) is False  # linked: not statically knowable
+        assert off(ck("not json")) is False  # unparseable: not PROVABLY empty
+        assert off(ck('{"a": 1}')) is False
+        assert off({"class_type": "EPSCheckpointSwitcher"}) is False
+
+    def test_inputs_fed_by_an_all_off_switcher_names_only_the_empty_feeds(self) -> None:
+        from eps_image.nodes_switcher import inputs_fed_by_an_all_off_switcher as fed
+
+        prompt = {
+            "3": {"class_type": "EPSSwitcher", "inputs": {"image_1": ["1", 0], "toggles": '{"image_1": false}'}},
+            "9": {"class_type": "EPSModelSwitcher", "inputs": {"model_1": ["8", 0], "toggles": "{}"}},
+            "4": {"class_type": "EPSCheckpointSwitcher", "inputs": {"selection": "[]"}},
+            "7": {
+                "class_type": "EPSCrossSweep",
+                "inputs": {"image": ["3", 0], "model": ["9", 0], "clip": ["4", 1], "text": "x"},
+            },
+        }
+        names = ("model", "model_low", "clip", "vae", "image", "mask")
+        assert fed(prompt, "7", names) == {"image", "clip"}
+        assert fed(prompt, 7, names) == {"image", "clip"}  # int ids compare as strings
+        assert fed(prompt, "7", ("text",)) == set()  # a literal, not a link
+        assert fed(prompt, "nope", names) == set()
+        assert fed(None, "7", names) == set()
+        assert fed(prompt, None, names) == set()
+
+    def test_wired_input_names_keeps_order_and_is_conservative_without_a_prompt(self) -> None:
+        from eps_image.nodes_switcher import wired_input_names as wired
+
+        prompt = {"7": {"inputs": {"image": ["3", 0], "model": ["9", 0], "text": "x", "vae": None}}}
+        names = ("model", "model_low", "clip", "vae", "image", "mask")
+        assert wired(prompt, "7", names) == ["model", "image"]
+        assert wired(None, "7", names) == list(names)  # unreadable prompt -> request everything
+        assert wired(prompt, "nope", names) == list(names)
