@@ -231,8 +231,9 @@
  * like an unwired input. Every link on every OUTPUT (`images`/`models`/
  * `clips`/`vaes`, plus the `masks`/`models_low` tails) is then drawn in
  * §6.6 "Collect only"'s dim grey via the shared `owned_link_colour.js`
- * hook -- WITHOUT unplugging anything, and restored to its exact prior
- * colour the instant one row comes back on. `reconcileLinkDimming` is a
+ * hook, and restored to its exact prior colour the instant one row comes
+ * back on. The dim never unplugs anything itself; the links it colours are
+ * whichever ones the unplug below left in place. `reconcileLinkDimming` is a
  * BY-HAND copy of image_grid.js's/save_image.js's (owner tag
  * `LINK_COLOR_OWNER_SWITCHER`, the shared `__epsLinkColorOwner` key, a
  * WeakMap stash of the exact prior colour, a per-node tracked Set, the
@@ -244,6 +245,36 @@
  * `onConfigure` (load/undo/redo/paste/tab switch), and `onRemoved` (force
  * undim). Not dimmed while `toggles` arrives over a wire (not statically
  * knowable -- the backend's own rule). No toast.
+ *
+ * **All-off unplugs what it safely can (owner report 2026-11-06: an all-off
+ * Image Switcher into core's TextEncodeQwenImageEdit -- `image` OPTIONAL --
+ * still stopped the run).** Core skips ANY node that receives a blocker on
+ * ANY input, and a core node has no lazy skip, so the only "nothing
+ * connected" it understands is the link not being in the prompt -- EPS
+ * Bypass's mechanism (FORMAT.md §6.18), reused by IMPORT
+ * (number_controller.js's `reconnectRememberedTargets` /
+ * `normalizeRememberedLinks`, bypass.js's `inputVerdict` / `sameTarget`).
+ * When at least one row is wired AND every wired row is off (and `toggles`
+ * is not wired), every OUTPUT link (main + tails) whose target is (a) a
+ * named input bypass.js's `inputVerdict` calls safe (`optional` / `shape` /
+ * `widget`) on (b) a node outside `UNPLUG_EXEMPT_CLASSES` (the pack's lazy
+ * consumers and switchers, which need the wire for their own skip and the
+ * estimator, and the pass-throughs Bypass/Distributor) is disconnected
+ * and remembered in the node PROPERTY `EPSSwitcher.unplugged` (JSON
+ * `{"owner": id, "outputs": {"<output name>": [{"node", "input"}]}}`;
+ * `owner` makes a pasted copy's memory stale). Required/unknown inputs and
+ * exempt classes keep their wire (and the dim). Unlike Bypass there is no
+ * refusal: a switcher may always go all-off. The moment it is not all-off
+ * (a row on, Toggle All, `toggles` written or wired) the memory is
+ * replayed once, per item fail-soft, and cleared. Unplugging happens only
+ * on TRANSITIONS the user drives (a toggle change, an input-side wiring
+ * change, the settled post-configure pass): an output wire dragged onto an
+ * already all-off switcher stays where it was dropped, dimmed, and is
+ * unplugged by the next toggle-off. Nothing wired at all ->
+ * nothing happens (a fresh switcher keeps the output wire just dragged
+ * in). Never rewired mid-restore: the restore loop is guarded and
+ * `onConfigure` schedules one settled pass. Triggers, order (unplug/replug
+ * first, then the dim) and the re-entrancy flag: `syncAllOff`.
  *
  * **0.28.1 caveat**: this file was built and live-verified against the dev
  * rig's ComfyUI 0.28.0 / `comfyui-frontend-package` 1.45.21. Every litegraph
@@ -259,6 +290,8 @@
 
 import { app } from '../../../scripts/app.js'
 import { ensureOwnedLinkColourHook } from './owned_link_colour.js'
+import { normalizeRememberedLinks, reconnectRememberedTargets } from './number_controller.js'
+import { inputVerdict, sameTarget } from './bypass.js'
 
 const PREFIX = '[eps_image:switcher]'
 
@@ -1346,7 +1379,7 @@ function handleRowToggleClick(node, localPos) {
   for (const rect of rects) {
     if (x >= rect.x && x <= rect.x + rect.w && y >= rect.y && y <= rect.y + rect.h) {
       toggleRowEnabled(node, rect.name)
-      syncLinkDimming(node, 'row click')
+      syncAllOff(node, 'row click')
       node.graph?.setDirtyCanvas(true, true)
       return true
     }
@@ -1441,7 +1474,7 @@ function addHeaderWidget(node) {
       const type = event && event.type
       if (typeof type !== 'string' || !type.endsWith('down')) return false
       toggleAllRows(mouseNode)
-      syncLinkDimming(mouseNode, 'toggle all')
+      syncAllOff(mouseNode, 'toggle all')
       mouseNode.graph?.setDirtyCanvas(true, true)
       return true
     }
@@ -1764,14 +1797,19 @@ function installTogglesDimSync(node) {
   widget.callback = function (...args) {
     const result =
       typeof originalCallback === 'function' ? originalCallback.apply(this, args) : undefined
-    syncLinkDimming(node, 'toggles callback')
+    syncAllOff(node, 'toggles callback')
     return result
   }
 }
 
+/** litegraph's `NodeSlotType.OUTPUT` (`onConnectionsChange`'s first arg). */
+const LINK_SLOT_OUTPUT = 2
+
 /**
  * Chains `onConnectionsChange` (never replaces): a wire landing on or
- * leaving ANY input or output. Cheap and idempotent, so it runs on every
+ * leaving ANY input or output. Input-side changes and output-side
+ * DISCONNECTS run the full `syncAllOff` (unwiring the last row that was on
+ * is a transition into all-off); an output link LANDING only dims. Cheap and idempotent, so it runs on every
  * call unfiltered -- including configure()'s restore loop, where it is
  * merely premature (the `onConfigure` wrap settles it once the toggles are
  * restored).
@@ -1782,7 +1820,16 @@ function installLinkDimConnectionsSync(node) {
   const original = node.onConnectionsChange
   node.onConnectionsChange = function (...args) {
     const result = typeof original === 'function' ? original.apply(this, args) : undefined
-    syncLinkDimming(this, 'onConnectionsChange')
+    const [type, , isConnected] = args
+    if (type === LINK_SLOT_OUTPUT && isConnected) {
+      // An OUTPUT link landing: the user just dragged it here. Never pull it
+      // out from under the cursor -- only dim it (the backend blocker makes
+      // it inert). It becomes an unplug candidate on the next transition
+      // INTO all-off (a toggle-off), not now.
+      if (!this.__epsSwitcherRewiring) syncLinkDimming(this, 'output link landed')
+    } else {
+      syncAllOff(this, 'onConnectionsChange')
+    }
     return result
   }
 }
@@ -1800,6 +1847,7 @@ function installLinkDimConfigureSync(node) {
   node.onConfigure = function (...args) {
     const result = typeof original === 'function' ? original.apply(this, args) : undefined
     syncLinkDimming(this, 'onConfigure')
+    scheduleUnplugReconcile(this) // unplug/replug once the restore settles
     return result
   }
 }
@@ -1820,6 +1868,285 @@ function installLinkDimCleanup(node) {
       console.warn(PREFIX, 'link dim cleanup (onRemoved) failed', error)
     }
     return typeof original === 'function' ? original.apply(this, args) : undefined
+  }
+}
+
+// ---------------------------------------------------------------------------
+// All-off -> UNPLUG the optional targets (file header "All-off unplugs what
+// it safely can"). Owner report 2026-11-06: an all-off Image Switcher wired
+// into core's TextEncodeQwenImageEdit (`image` is OPTIONAL) skipped the
+// encoder -- core skips ANY node that receives an ExecutionBlocker on ANY
+// input -- so the sampler never ran. A core node has no lazy skip; the only
+// "nothing connected" it understands is the link genuinely not being in the
+// prompt, which is EPS Bypass's mechanism (bypass.js, FORMAT.md §6.18). The
+// unplug/replug machinery is IMPORTED, never copied (bypass.js's header):
+// number_controller.js's `reconnectRememberedTargets` /
+// `normalizeRememberedLinks` and bypass.js's `inputVerdict` / `sameTarget`.
+// `disconnectAllTargets` is all-or-nothing and does not fit a per-target
+// choice, so the one local piece is `disconnectTarget` below.
+// ---------------------------------------------------------------------------
+
+/** The serialized-properties memory key (persists with the workflow; not a
+ * widget -- no positional widgets_values hazard, outside the §6.16 state
+ * registry). Value: a JSON STRING (a properties panel shows it as text)
+ * `{"owner": <node id>, "outputs": {"<output name>": [{"node": id,
+ * "input": name}, ...]}}`, absent entirely when nothing is remembered. */
+export const UNPLUGGED_PROPERTY = 'EPSSwitcher.unplugged'
+
+/**
+ * Target classes that already handle an all-off upstream themselves and
+ * therefore always KEEP their wire: the lazy consumers (Run Multiplier,
+ * Resolution, Image Grid, every switcher, the Checkpoint Switcher) need it
+ * for the backend lazy skip, cross_sweep.js's estimator and v1's broadcast
+ * liveness; the pass-throughs (Bypass, Distributor) would forward
+ * "nothing" as None into arbitrary required inputs downstream.
+ */
+export const UNPLUG_EXEMPT_CLASSES = new Set([
+  'EPSCrossSweep',
+  'EPSResolution',
+  'EPSImageGrid',
+  'EPSCheckpointSwitcher',
+  'EPSBypass',
+  'EPSDistributor',
+  ...Object.keys(SWITCHER_CLASSES)
+])
+
+/**
+ * Parses the unplug memory for *ownerId*. Never throws. Returns `{<output
+ * name>: [{node, input}, ...]}` with only non-empty, sanitised lists, or
+ * `{}` for: nothing stored, malformed JSON, a non-object, or a missing/
+ * foreign `owner` -- bypass.js `parseMemory`'s rule exactly (ids compared
+ * as strings): a pasted copy has a new id, and its inherited memory names
+ * the ORIGINAL's consumers, so it is stale. Accepts the stored string or an
+ * already-parsed object (a hand-edited workflow). Exported for tests.
+ */
+export function parseUnplugMemory(raw, ownerId) {
+  try {
+    const parsed = typeof raw === 'string' ? JSON.parse(raw || '{}') : raw
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return {}
+    if (parsed.owner == null || ownerId == null) return {}
+    if (String(parsed.owner) !== String(ownerId)) return {}
+    const outputs = parsed.outputs
+    if (!outputs || typeof outputs !== 'object' || Array.isArray(outputs)) return {}
+    const result = {}
+    for (const [name, list] of Object.entries(outputs)) {
+      const clean = normalizeRememberedLinks(list)
+      if (name && clean.length > 0) result[name] = clean
+    }
+    return result
+  } catch (error) {
+    return {}
+  }
+}
+
+/** Inverse of `parseUnplugMemory`: the JSON string, or `null` when nothing
+ * survives sanitising (the caller then deletes the property -- a switcher
+ * with nothing remembered carries no residue in its saved workflow). */
+export function serializeUnplugMemory(ownerId, outputs) {
+  const clean = {}
+  for (const [name, list] of Object.entries(outputs || {})) {
+    const links = normalizeRememberedLinks(list)
+    if (name && links.length > 0) clean[name] = links
+  }
+  return Object.keys(clean).length > 0 ? JSON.stringify({ owner: ownerId, outputs: clean }) : null
+}
+
+function readUnplugMemory(node) {
+  return parseUnplugMemory(node.properties?.[UNPLUGGED_PROPERTY], node.id)
+}
+
+/** The SOLE writer of the memory property; deletes it when empty. */
+function writeUnplugMemory(node, outputs) {
+  const json = serializeUnplugMemory(node.id, outputs)
+  if (json === null) {
+    if (node.properties && UNPLUGGED_PROPERTY in node.properties) {
+      delete node.properties[UNPLUGGED_PROPERTY]
+    }
+    return
+  }
+  if (!node.properties || typeof node.properties !== 'object') node.properties = {}
+  node.properties[UNPLUGGED_PROPERTY] = json
+}
+
+/** A switcher that is statically all-off AND has at least one wired row --
+ * the only state that unplugs. `isSwitcherAllOff` alone is also true for a
+ * brand-new switcher with nothing wired yet, whose output wire the user
+ * just dragged in: that must never vanish. */
+export function isSwitcherAllOffWithWiredRows(node) {
+  return isSwitcherAllOff(node) && connectedImageEntries(node).length > 0
+}
+
+/**
+ * Whether the link *linkId* (settled `output.links` only -- a wire still
+ * being dragged lives in `_floatingLinks` and is never looked at) may be
+ * unplugged. Returns `{target, slot, entry}` or `null`. Qualifies only when
+ * ALL hold: the target node and its input exist and the input has a NAME
+ * (a nameless/dynamic input or a legacy Reroute NODE could never be put
+ * back -- bypass.js `collectTargetVerdicts`'s checks); the target's class
+ * is not in `UNPLUG_EXEMPT_CLASSES`; and bypass.js's `inputVerdict` says
+ * the input is safe to leave empty (`optional` / `shape` / `widget`). A
+ * required or unknown input keeps its wire: the backend blocker skips that
+ * consumer, the best "nothing connected" a required input can get.
+ */
+function unplugCandidate(graph, linkId) {
+  const link = linkById(graph, linkId)
+  if (!link) return null
+  const target = graph?.getNodeById?.(link.target_id)
+  const slot = target?.inputs?.[link.target_slot]
+  if (!target || !slot || typeof slot.name !== 'string' || slot.name === '') return null
+  if (target.type === 'Reroute' || nodeClassOf(target) === 'Reroute') return null
+  if (UNPLUG_EXEMPT_CLASSES.has(nodeClassOf(target))) return null
+  if (!inputVerdict(target, slot).safe) return null
+  return { target, slotIndex: link.target_slot, entry: { node: link.target_id, input: slot.name } }
+}
+
+/** `target.disconnectInput(slot)` for ONE chosen target, behind this file's
+ * never-throw posture. True when the input is actually empty afterwards. */
+function disconnectTarget(target, slotIndex) {
+  try {
+    if (typeof target.disconnectInput !== 'function') return false
+    target.disconnectInput(slotIndex)
+    return target.inputs?.[slotIndex]?.link == null
+  } catch (error) {
+    console.warn(PREFIX, 'disconnectInput (all-off unplug) failed', error)
+    return false
+  }
+}
+
+/** Unplugs every qualifying target on EVERY output (main + `masks` /
+ * `models_low` tails) and merges what came off into the memory. */
+function unplugSafeTargets(node) {
+  const graph = node.graph
+  const memory = readUnplugMemory(node)
+  let changed = false
+  for (const output of node.outputs || []) {
+    if (!output?.name || !Array.isArray(output.links) || output.links.length === 0) continue
+    // Snapshot first: each disconnect mutates `output.links`.
+    const picks = [...output.links].map((id) => unplugCandidate(graph, id)).filter(Boolean)
+    for (const pick of picks) {
+      if (!disconnectTarget(pick.target, pick.slotIndex)) continue
+      const list = memory[output.name] || (memory[output.name] = [])
+      if (!list.some((known) => sameTarget(known, pick.entry))) list.push(pick.entry)
+      changed = true
+    }
+  }
+  if (changed) {
+    writeUnplugMemory(node, memory)
+    graph?.setDirtyCanvas?.(true, true)
+  }
+}
+
+/** Replays the memory through `reconnectRememberedTargets` (per item fail-
+ * soft: a vanished node, renamed input or socket now taken is skipped
+ * silently), output by NAME -- a tail output that has since gone is
+ * skipped too -- then forgets it: ONE attempt, like Bypass. */
+function replugRemembered(node) {
+  const memory = readUnplugMemory(node)
+  for (const [name, list] of Object.entries(memory)) {
+    const idx = (node.outputs || []).findIndex((output) => output?.name === name)
+    if (idx === -1) continue
+    reconnectRememberedTargets(node, idx, list)
+  }
+  writeUnplugMemory(node, {})
+  node.graph?.setDirtyCanvas?.(true, true)
+}
+
+/** True while litegraph is restoring this node or the whole graph: the
+ * restore loop fires `onConnectionsChange` with half-restored state (the
+ * `toggles` widget still at its default), so nothing may be rewired then;
+ * `onConfigure` schedules a settled pass instead. */
+function isRestoring(node) {
+  return Boolean(node.__epsSwitcherConfiguring) || Boolean(app?.configuringGraph)
+}
+
+/**
+ * The unplug/replug decision, always DERIVED from `toggles` + the wiring +
+ * the memory: all-off with wired rows -> unplug every qualifying target;
+ * not all-off (a row on, `toggles` wired) -> replug the memory and clear
+ * it; nothing wired -> leave everything as it is. A memory whose owner is
+ * not this node (a pasted copy) is dropped. Re-entrancy: our own
+ * disconnect/connect calls fire this node's `onConnectionsChange`, so the
+ * whole pass runs under `node.__epsSwitcherRewiring` and bails while it is
+ * set. Never runs mid-restore or off-graph. Exported for tests.
+ */
+export function reconcileUnplug(node) {
+  if (!node || !node.graph || !switcherSpecOf(node)) return
+  if (node.__epsSwitcherRewiring || isRestoring(node)) return
+  node.__epsSwitcherRewiring = true
+  try {
+    const raw = node.properties?.[UNPLUGGED_PROPERTY]
+    if (raw != null && Object.keys(readUnplugMemory(node)).length === 0) {
+      writeUnplugMemory(node, {}) // stale (pasted copy) or malformed
+    }
+    if (isSwitcherAllOff(node)) {
+      if (connectedImageEntries(node).length > 0) unplugSafeTargets(node)
+    } else if (Object.keys(readUnplugMemory(node)).length > 0) {
+      replugRemembered(node)
+    }
+  } finally {
+    node.__epsSwitcherRewiring = false
+  }
+}
+
+/**
+ * The one all-off re-derive every trigger calls (row click, Toggle All, the
+ * `toggles` callback, `onConnectionsChange`, the deferred configure pass):
+ * unplug/replug FIRST, then the dim -- which only colours the links that
+ * remain. A call arriving from inside our own rewiring is ignored outright
+ * (the outer pass dims once it is done). Never throws.
+ */
+function syncAllOff(node, where) {
+  if (node?.__epsSwitcherRewiring) return
+  try {
+    reconcileUnplug(node)
+  } catch (error) {
+    console.warn(PREFIX, `all-off unplug (${where}) failed`, error)
+  }
+  syncLinkDimming(node, where)
+}
+
+/** Max re-tries of the deferred configure pass while a whole-graph load is
+ * still in progress (it is synchronous, so one is normally enough). */
+const DEFERRED_UNPLUG_RETRIES = 20
+
+/** Schedules ONE settled `syncAllOff` on the next macrotask (coalesced) --
+ * after a load/undo/paste has finished configuring every node, and after a
+ * paste has given this node its NEW id (so an inherited memory reads as
+ * stale). A `clone()` that never joins a graph, or a node removed meanwhile,
+ * is skipped by `reconcileUnplug`'s graph check. */
+function scheduleUnplugReconcile(node, tries = 0) {
+  if (tries === 0) {
+    if (node.__epsSwitcherUnplugScheduled) return
+    node.__epsSwitcherUnplugScheduled = true
+  }
+  setTimeout(() => {
+    if (Boolean(app?.configuringGraph) && tries < DEFERRED_UNPLUG_RETRIES) {
+      scheduleUnplugReconcile(node, tries + 1)
+      return
+    }
+    node.__epsSwitcherUnplugScheduled = false
+    if (!node.graph) return
+    syncAllOff(node, 'onConfigure (settled)')
+  }, 0)
+}
+
+/**
+ * Chains `configure` (never replaces) to mark this node's own restore, so
+ * `onConnectionsChange`'s restore loop never rewires from half-restored
+ * state. A depth counter, so a nested configure cannot clear it early.
+ */
+function installUnplugConfigureGuard(node) {
+  if (node.__epsSwitcherUnplugConfigureWrapped) return
+  node.__epsSwitcherUnplugConfigureWrapped = true
+  const original = node.configure
+  if (typeof original !== 'function') return
+  node.configure = function (...args) {
+    this.__epsSwitcherConfiguring = (this.__epsSwitcherConfiguring || 0) + 1
+    try {
+      return original.apply(this, args)
+    } finally {
+      this.__epsSwitcherConfiguring -= 1
+    }
   }
 }
 
@@ -1878,7 +2205,8 @@ export function attach(node) {
     wireRowToggleClicks(node)
     addHeaderWidget(node)
     wireRowRename(node)
-    installTogglesDimSync(node) // all-off: dim/restore the outgoing wires
+    installUnplugConfigureGuard(node) // all-off: no rewiring mid-restore
+    installTogglesDimSync(node) // all-off: unplug/replug, then dim/restore
     installLinkDimConnectionsSync(node)
     installLinkDimConfigureSync(node)
     installLinkDimCleanup(node)

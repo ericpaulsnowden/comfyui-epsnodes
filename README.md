@@ -867,8 +867,18 @@ several models/VAEs in one queue".
   the Run Multiplier runs its text-only sweep instead of being skipped with
   everything after it, EPS Resolution gives its typed size, the Image Grid
   behaves as with nothing wired. The same goes for an EPS Checkpoint
-  Switcher with no checkpoint ticked. Core nodes, which can't run without
-  their image, are still skipped silently, as before.
+  Switcher with no checkpoint ticked.
+- **…and for other nodes' optional inputs, the wire is really unplugged
+  (v0.110.0).** Turn every row off and a wire into an *optional* input of
+  any other node — Text Encode Qwen Image's `image`, say — is taken off, so
+  that node runs as it would with nothing connected, and the whole workflow
+  keeps going; the moment you turn a row back on (or Toggle All), the same
+  wires plug themselves back in. Wires into *required* inputs stay and turn
+  grey: that node can't run without its image, so it is skipped silently,
+  as before. A wire you drag from an all-off switcher stays where you put it
+  (grey) until the next time you turn the last row off. A workflow saved
+  all-off with such wires before this version is tidied once on load, which
+  marks it modified.
 - **A toggled-off branch never runs at all.** Wire three Load Checkpoint
   nodes into a Model Switcher, tick one off, and that checkpoint is never
   even loaded — not loaded-then-discarded. Verified against a real loader.

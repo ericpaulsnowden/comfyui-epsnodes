@@ -190,3 +190,48 @@ def _heal_stale_pytest_garbage_dirs(tmp_path_factory: pytest.TempPathFactory) ->
             f"[conftest] healed {healed} unreadable leftover pytest garbage "
             f"dir(s) under {pytest_of_user_root}"
         )
+
+
+# --- switcher.js served layout -------------------------------------------------
+#
+# web/eps_image/switcher.js imports owned_link_colour.js (the all-off dim),
+# and -- since the all-off unplug -- number_controller.js and bypass.js (the
+# shared unplug/replug machinery; bypass.js in turn imports distributor.js and
+# both import ``../lora_library/api.js``). Every Node harness that loads the
+# REAL switcher.js lays these out the same way, so it lives here once.
+
+_EPS_WEB = Path(__file__).resolve().parent.parent / "web" / "eps_image"
+_SWITCHER_JS_CLOSURE = (
+    "switcher.js",
+    "owned_link_colour.js",
+    "number_controller.js",
+    "bypass.js",
+    "distributor.js",
+)
+
+
+@pytest.fixture(scope="session")
+def install_switcher_js():
+    """A function ``install(layout, app_js=...)`` that copies switcher.js and
+    its import closure into ``layout/extensions/comfyui-epsnodes/eps_image``,
+    writes the ``scripts/app.js`` stub (*app_js*), and stubs
+    ``lora_library/api.js`` (only ``subscribeWidgetsChangedExternally`` is
+    imported, and only called from attach paths of other node classes)."""
+    import shutil
+
+    def install(layout: Path, app_js: str = "export const app = {}\n") -> Path:
+        module_dir = layout / "extensions" / "comfyui-epsnodes" / "eps_image"
+        module_dir.mkdir(parents=True, exist_ok=True)
+        for name in _SWITCHER_JS_CLOSURE:
+            shutil.copyfile(_EPS_WEB / name, module_dir / name)
+        lora_library = layout / "extensions" / "comfyui-epsnodes" / "lora_library"
+        lora_library.mkdir(parents=True, exist_ok=True)
+        (lora_library / "api.js").write_text(
+            "export function subscribeWidgetsChangedExternally() {}\n", encoding="utf-8"
+        )
+        scripts = layout / "scripts"
+        scripts.mkdir(parents=True, exist_ok=True)
+        (scripts / "app.js").write_text(app_js, encoding="utf-8")
+        return module_dir
+
+    return install

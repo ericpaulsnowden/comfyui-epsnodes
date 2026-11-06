@@ -1742,6 +1742,47 @@ per-input toggle + toggle-all header + N-enabled→N-runs fan-out.
   toward NOT dimming: a row wired to a dead-end reroute still counts as
   wired on the canvas, and a switcher fed only by another all-off switcher
   is not dimmed (it needs cross-node triggers).
+  **Core consumers with an OPTIONAL input: the wire is UNPLUGGED (v0.110.0,
+  owner report 2026-11-06: an all-off image switcher into Text Encode Qwen
+  Image's optional `image` -- "the connector goes gray but the workflow
+  still doesn't run; bypass the switcher and it runs").** A core node
+  cannot lazy-skip, and a blocker on its optional input skips it (and
+  everything after it); the only thing that makes it run "as if nothing
+  were connected" is the link not being in the prompt -- EPS Bypass's
+  mechanism (§6.18), reused by import (`number_controller.js`'s
+  `reconnectRememberedTargets` / `normalizeRememberedLinks`, `bypass.js`'s
+  `inputVerdict` / `sameTarget`). When at least one row is wired and every
+  wired row is toggled off (`toggles` not itself wired), `switcher.js`'s
+  `syncAllOff` unplugs, on every output (the `masks` / `models_low` tails
+  included), each link whose target input is optional by `inputVerdict`
+  (definition `optional`, hollow-circle shape, or widget-backed) on any
+  node OTHER than the classes that handle an all-off upstream themselves --
+  `EPSCrossSweep`, `EPSResolution`, `EPSImageGrid`, `EPSCheckpointSwitcher`,
+  every switcher -- and the pass-throughs `EPSBypass` / `EPSDistributor`
+  (which would forward "nothing" as `None` into arbitrary required inputs).
+  Required inputs, unclassifiable inputs, legacy Reroute nodes and the
+  exempt classes keep their wire (dimmed) and the blocker; there is no
+  refusal -- a switcher may always go all-off. The unplugged targets are
+  remembered in `node.properties["EPSSwitcher.unplugged"]` (a JSON string:
+  `{"owner": <id>, "outputs": {"<output name>": [{"node", "input"}, ...]}}`
+  -- properties, not a widget, so no §8 positional hazard and outside the
+  §6.16 registry; keyed by output NAME because a tail output can go and
+  come back; deleted when empty; a pasted copy's new id makes inherited
+  memory stale and it is cleared). The moment the node is no longer all-off
+  (a row on, Toggle All, a state Apply, a row re-wired) the memory is
+  replayed through `reconnectRememberedTargets` -- per item fail-soft: a
+  vanished node, a renamed input, a socket now taken is skipped -- and
+  cleared. Unplugging happens only on the transitions the USER drives
+  (toggle changes, an input-side wiring change that makes the node all-off)
+  plus ONE deferred settled pass after `configure` (a workflow saved before
+  this version with optional targets still wired -- it is marked modified
+  on load; the pass waits out a half-restored `toggles` and
+  `app.configuringGraph`); a link landing on an OUTPUT while already all-off
+  stays, dimmed, until the next toggle-off. Nothing wired at all: no unplug,
+  no replug, memory kept. The whole pass runs under a
+  `node.__epsSwitcherRewiring` re-entrancy flag (its own disconnect/connect
+  calls fire `onConnectionsChange`). A `masks` / `models_low` tail removed
+  while its wires are unplugged cannot replug them (dropped silently).
 - **Backend:** a real (non-virtual) node; `INPUT_TYPES` uses the flexible
   optional dict, which also carries the `toggles` STRING bridge (in `optional`,
   NOT `required` — a required input absent from a hand-built `/prompt` is

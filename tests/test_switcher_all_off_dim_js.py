@@ -347,15 +347,9 @@ process.stdout.write(JSON.stringify(out))
 
 
 @pytest.fixture(scope="module")
-def probe(tmp_path_factory: pytest.TempPathFactory) -> dict:
+def probe(tmp_path_factory: pytest.TempPathFactory, install_switcher_js) -> dict:
     layout = tmp_path_factory.mktemp("web_root_all_off")
-    module_dir = layout / "extensions" / "comfyui-epsnodes" / "eps_image"
-    module_dir.mkdir(parents=True)
-    shutil.copyfile(SWITCHER_JS, module_dir / "switcher.js")
-    shutil.copyfile(EPS_WEB / "owned_link_colour.js", module_dir / "owned_link_colour.js")
-    scripts = layout / "scripts"
-    scripts.mkdir(parents=True, exist_ok=True)
-    (scripts / "app.js").write_text("export const app = {}\n", encoding="utf-8")
+    install_switcher_js(layout)
     (layout / "probe.mjs").write_text(PROBE_JS, encoding="utf-8")
     result = subprocess.run(
         [NODE, str(layout / "probe.mjs")],
@@ -465,10 +459,26 @@ def test_by_hand_copy_not_an_import_of_image_grid(source: str) -> None:
 
 
 def test_every_trigger_rederives_and_attach_installs_them(source: str) -> None:
-    assert "syncLinkDimming(node, 'row click')" in source
-    assert "syncLinkDimming(mouseNode, 'toggle all')" in source
+    # Every trigger goes through `syncAllOff`: unplug/replug FIRST, then the
+    # dim (which only colours the links that remain).
+    assert "syncAllOff(node, 'row click')" in source
+    assert "syncAllOff(mouseNode, 'toggle all')" in source
+    assert "syncAllOff(node, 'toggles callback')" in source
+    assert "syncAllOff(this, 'onConnectionsChange')" in source
+    # An OUTPUT link landing only dims -- it is never unplugged on arrival.
+    conn = source.split("function installLinkDimConnectionsSync(node) {", 1)[1]
+    conn = conn.split("\n}\n", 1)[0]
+    assert "type === LINK_SLOT_OUTPUT && isConnected" in conn
+    assert "syncLinkDimming(this, 'output link landed')" in conn
+    sync = source.split("function syncAllOff(node, where) {", 1)[1].split("\n}\n", 1)[0]
+    assert sync.index("reconcileUnplug(node)") < sync.index("syncLinkDimming(node, where)")
+    configure = source.split("function installLinkDimConfigureSync(node) {", 1)[1]
+    configure = configure.split("\n}\n", 1)[0]
+    assert "syncLinkDimming(this, 'onConfigure')" in configure
+    assert "scheduleUnplugReconcile(this)" in configure
     attach = source.split("export function attach(node) {", 1)[1]
     for call in (
+        "installUnplugConfigureGuard(node)",
         "installTogglesDimSync(node)",
         "installLinkDimConnectionsSync(node)",
         "installLinkDimConfigureSync(node)",
