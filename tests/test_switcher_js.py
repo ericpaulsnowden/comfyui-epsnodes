@@ -43,7 +43,6 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SWITCHER_JS = REPO_ROOT / "web" / "eps_image" / "switcher.js"
-OWNED_LINK_COLOUR_JS = REPO_ROOT / "web" / "eps_image" / "owned_link_colour.js"
 
 NODE = shutil.which("node")
 
@@ -137,25 +136,17 @@ process.stdout.write(JSON.stringify(out))
 
 
 @pytest.fixture(scope="module")
-def switcher_api(tmp_path_factory: pytest.TempPathFactory) -> dict:
+def switcher_api(tmp_path_factory: pytest.TempPathFactory, install_switcher_js) -> dict:
     """Runs the probe against the REAL switcher.js in a served-layout tmp
     dir (see module docstring) and returns its JSON output."""
     layout = tmp_path_factory.mktemp("web_root")
 
-    module_dir = layout / "extensions" / "comfyui-epsnodes" / "eps_image"
-    module_dir.mkdir(parents=True)
-    shutil.copyfile(SWITCHER_JS, module_dir / "switcher.js")
-    # switcher.js imports the shared renderLink hook (all-off dimming).
-    shutil.copyfile(OWNED_LINK_COLOUR_JS, module_dir / "owned_link_colour.js")
-
-    # switcher.js's single import -- `../../../scripts/app.js`, used only
-    # for `app.canvas` in activeCanvas(). Stubbed exactly as
-    # tests/test_distributor_js.py/test_resolution_grid_js.py do it, which
-    # makes the relative-import DEPTH part of what this test proves: get it
-    # wrong and Node fails to resolve the module at all.
-    scripts = layout / "scripts"
-    scripts.mkdir(parents=True, exist_ok=True)
-    (scripts / "app.js").write_text("export const app = {}\n", encoding="utf-8")
+    # switcher.js + its import closure (the shared renderLink hook, the
+    # all-off unplug machinery) and the `../../../scripts/app.js` stub --
+    # conftest.py's `install_switcher_js`. The relative-import DEPTH is part
+    # of what this test proves: get it wrong and Node fails to resolve the
+    # module at all.
+    install_switcher_js(layout)
 
     regex_probes = [
         [class_name, candidate]
@@ -1225,18 +1216,11 @@ OFF_2_TO_5 = {"model_2": False, "model_3": False, "model_4": False, "model_5": F
 
 
 @pytest.fixture(scope="module")
-def switcher_attach_api(tmp_path_factory: pytest.TempPathFactory) -> dict:
+def switcher_attach_api(tmp_path_factory: pytest.TempPathFactory, install_switcher_js) -> dict:
     """Runs ATTACH_PROBE_JS against the REAL switcher.js in the same
     served-layout tmp dir shape as `switcher_api` (module docstring)."""
     layout = tmp_path_factory.mktemp("web_root_attach")
-    module_dir = layout / "extensions" / "comfyui-epsnodes" / "eps_image"
-    module_dir.mkdir(parents=True)
-    shutil.copyfile(SWITCHER_JS, module_dir / "switcher.js")
-    # switcher.js imports the shared renderLink hook (all-off dimming).
-    shutil.copyfile(OWNED_LINK_COLOUR_JS, module_dir / "owned_link_colour.js")
-    scripts = layout / "scripts"
-    scripts.mkdir(parents=True, exist_ok=True)
-    (scripts / "app.js").write_text("export const app = {}\n", encoding="utf-8")
+    install_switcher_js(layout)
     probe = layout / "probe.mjs"
     probe.write_text(ATTACH_PROBE_JS, encoding="utf-8")
     result = subprocess.run(
@@ -1880,22 +1864,15 @@ process.stdout.write(JSON.stringify(out))
 
 
 @pytest.fixture(scope="module")
-def switcher_mask_api(tmp_path_factory: pytest.TempPathFactory) -> dict:
+def switcher_mask_api(tmp_path_factory: pytest.TempPathFactory, install_switcher_js) -> dict:
     """Runs MASK_PROBE_JS against the REAL switcher.js in the served-layout
     shape, with an `app` stub whose toast surface RECORDS what switcher.js
     tells the user (the refusal probes read it back)."""
     layout = tmp_path_factory.mktemp("web_root_masks")
-    module_dir = layout / "extensions" / "comfyui-epsnodes" / "eps_image"
-    module_dir.mkdir(parents=True)
-    shutil.copyfile(SWITCHER_JS, module_dir / "switcher.js")
-    # switcher.js imports the shared renderLink hook (all-off dimming).
-    shutil.copyfile(OWNED_LINK_COLOUR_JS, module_dir / "owned_link_colour.js")
-    scripts = layout / "scripts"
-    scripts.mkdir(parents=True, exist_ok=True)
-    (scripts / "app.js").write_text(
+    install_switcher_js(
+        layout,
         "export const app = { extensionManager: { toast: { add: (t) => "
         "globalThis.__toasts.push(t) } } }\n",
-        encoding="utf-8",
     )
     probe = layout / "probe.mjs"
     probe.write_text(MASK_PROBE_JS, encoding="utf-8")

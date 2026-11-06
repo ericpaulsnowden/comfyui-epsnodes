@@ -292,6 +292,9 @@ export function outputLabelFor(enabled, type) {
  *  4. Otherwise `'unknown'`, which refuses: an unplugged REQUIRED input fails
  *     the run, an unnecessary refusal only costs a message.
  */
+// Also IMPORTED by switcher.js (the all-off unplug decides per target with
+// this exact rule) -- a change here changes both; run
+// tests/test_switcher_all_off_unplug_js.py too.
 export function inputVerdict(targetNode, slot) {
   if (!slot || typeof slot !== 'object') return { safe: false, why: 'unknown' }
   if (slot.widget) return { safe: true, why: 'widget' }

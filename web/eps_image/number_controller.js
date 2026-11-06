@@ -1105,7 +1105,10 @@ function subgraphOutputIsTaken(slot) {
  * (ROADMAP-shared-panel-code.md). A change to any of the four is a change to
  * BOTH nodes: grep `web/` for the name and run tests/test_bypass_js.py.
  * They take an output INDEX, never a row, so nothing about them is
- * number-controller-specific.
+ * number-controller-specific. Since the all-off unplug, switcher.js imports
+ * `reconnectRememberedTargets` and `normalizeRememberedLinks` too (plus
+ * bypass.js's `inputVerdict`/`sameTarget`) -- also run
+ * tests/test_switcher_all_off_unplug_js.py.
  */
 export function collectOutputTargets(node, idx) {
   const targets = []
