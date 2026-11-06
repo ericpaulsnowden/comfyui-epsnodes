@@ -188,7 +188,8 @@ export const SWITCHER_PREFIXES = {
   EPSSwitcher: 'image',
   EPSModelSwitcher: 'model',
   EPSClipSwitcher: 'clip',
-  EPSVaeSwitcher: 'vae'
+  EPSVaeSwitcher: 'vae',
+  EPSLatentSwitcher: 'latent'
 }
 
 /** Reroute node types followed straight through (core + rgthree). */

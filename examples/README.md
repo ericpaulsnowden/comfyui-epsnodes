@@ -31,7 +31,7 @@ Two files here are **not** workflows — don't drag them onto the canvas:
 | [`eps-test-run-multiplier.json`](eps-test-run-multiplier.json) | 2 images × 4 prompts = 8 runs | none | yes — copy `eps-cross-test-prompts.md` into your library first |
 | [`eps-test-prompt-builder.json`](eps-test-prompt-builder.json) | Notebook prompts composed into combined outputs — blocks, reorder, live references (v0.76.0) | none | yes — copy `eps-cross-test-prompts.md` into your library first |
 | [`eps-test-cross-sweep.json`](eps-test-cross-sweep.json) | 3 lora strengths × 8 image/prompt pairs = 24 runs, foldered by strength | checkpoint, LoRA | no — pick a checkpoint and a saved lora state |
-| [`eps-full-pipeline.json`](eps-full-pipeline.json) | Ten of the twenty-two nodes stitched into one graph — the full tour | checkpoint, LoRA, rgthree | no — pick a checkpoint, images, a video path, prompts, and a lora state |
+| [`eps-full-pipeline.json`](eps-full-pipeline.json) | Ten of the twenty-three nodes stitched into one graph — the full tour | checkpoint, LoRA, rgthree | no — pick a checkpoint, images, a video path, prompts, and a lora state |
 
 ---
 
@@ -256,7 +256,7 @@ lora state are the only things standing between this file and a real run.
 lora state, and [rgthree-comfy](https://github.com/rgthree/rgthree-comfy) for
 the state-controller corner.
 
-Ten of the twenty-two nodes stitched into one complex workflow. This is the
+Ten of the twenty-three nodes stitched into one complex workflow. This is the
 tour, not the starting point — if you want to understand one node, the small
 `eps-test-*.json` files above are far quicker. The four switcher nodes
 (Checkpoint / Model / CLIP / VAE) don't appear here at all; they have their

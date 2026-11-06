@@ -37,6 +37,7 @@ from eps_image.nodes_resolution import EPSResolution
 from eps_image.nodes_save_image import EPSSaveImage
 from eps_image.nodes_switcher import (
     EPSClipSwitcher,
+    EPSLatentSwitcher,
     EPSModelSwitcher,
     EPSSwitcher,
     EPSVaeSwitcher,
@@ -75,6 +76,7 @@ _STATE_BEARING_SPECS: list[tuple[str, type, str]] = [
     ("EPSModelSwitcher", EPSModelSwitcher, "EPS Model Switcher"),
     ("EPSClipSwitcher", EPSClipSwitcher, "EPS CLIP Switcher"),
     ("EPSVaeSwitcher", EPSVaeSwitcher, "EPS VAE Switcher"),
+    ("EPSLatentSwitcher", EPSLatentSwitcher, "EPS Latent Switcher"),
     ("EPSResolution", EPSResolution, "EPS Resolution"),
     ("EPSImageGrid", EPSImageGrid, "EPS Image Grid"),
     ("EPSFrameSaver", EPSFrameSaver, "EPS Frame Saver"),
@@ -236,6 +238,7 @@ class TestSwitcherPatterns:
             (EPSModelSwitcher, r"^model_\d+$"),
             (EPSClipSwitcher, r"^clip_\d+$"),
             (EPSVaeSwitcher, r"^vae_\d+$"),
+            (EPSLatentSwitcher, r"^latent_\d+$"),
         ],
     )
     def test_each_switcher_carries_its_own_toggles_pattern(
@@ -245,12 +248,10 @@ class TestSwitcherPatterns:
         assert toggles["kind"] == "json_object"
         assert toggles["key_pattern"] == expected_pattern
 
-    def test_the_four_patterns_are_all_distinct(self) -> None:
-        patterns = {
-            cls.EPS_STATE_WIDGETS["widgets"]["toggles"]["key_pattern"]
-            for cls in (EPSSwitcher, EPSModelSwitcher, EPSClipSwitcher, EPSVaeSwitcher)
-        }
-        assert len(patterns) == 4
+    def test_the_five_patterns_are_all_distinct(self) -> None:
+        classes = (EPSSwitcher, EPSModelSwitcher, EPSClipSwitcher, EPSVaeSwitcher, EPSLatentSwitcher)
+        patterns = {cls.EPS_STATE_WIDGETS["widgets"]["toggles"]["key_pattern"] for cls in classes}
+        assert len(patterns) == len(classes) == 5
 
 
 # -------------------------------------------------- out-of-scope nodes

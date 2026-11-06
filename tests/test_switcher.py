@@ -721,6 +721,7 @@ class TestHiddenInputsDeclared:
 EPSModelSwitcher = nodes_switcher.EPSModelSwitcher
 EPSClipSwitcher = nodes_switcher.EPSClipSwitcher
 EPSVaeSwitcher = nodes_switcher.EPSVaeSwitcher
+EPSLatentSwitcher = nodes_switcher.EPSLatentSwitcher
 
 
 class TestModelHighLowPairsV0660:
@@ -738,6 +739,7 @@ class TestModelHighLowPairsV0660:
         # ...and the sibling classes are untouched single-output nodes.
         assert EPSClipSwitcher.RETURN_TYPES == ("CLIP",)
         assert EPSVaeSwitcher.RETURN_TYPES == ("VAE",)
+        assert EPSLatentSwitcher.RETURN_TYPES == ("LATENT",)
 
     def test_input_types_accepts_low_slots(self) -> None:
         optional = EPSModelSwitcher.INPUT_TYPES()["optional"]

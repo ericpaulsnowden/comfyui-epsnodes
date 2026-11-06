@@ -56,12 +56,14 @@ PREFIXES: dict[str, str] = {
     "EPSModelSwitcher": "model",
     "EPSClipSwitcher": "clip",
     "EPSVaeSwitcher": "vae",
+    "EPSLatentSwitcher": "latent",
 }
 TYPES: dict[str, str] = {
     "EPSSwitcher": "IMAGE",
     "EPSModelSwitcher": "MODEL",
     "EPSClipSwitcher": "CLIP",
     "EPSVaeSwitcher": "VAE",
+    "EPSLatentSwitcher": "LATENT",
 }
 
 #: (class name, candidate input name, expected inputRe.test() result) --

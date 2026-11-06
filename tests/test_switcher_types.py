@@ -32,6 +32,7 @@ import pytest
 from eps_image import nodes_switcher
 from eps_image.nodes_switcher import (
     EPSClipSwitcher,
+    EPSLatentSwitcher,
     EPSModelSwitcher,
     EPSSwitcher,
     EPSVaeSwitcher,
@@ -68,6 +69,7 @@ _SWITCHER_TYPES = [
     pytest.param(EPSModelSwitcher, "model", "MODEL", "models", id="model"),
     pytest.param(EPSClipSwitcher, "clip", "CLIP", "clips", id="clip"),
     pytest.param(EPSVaeSwitcher, "vae", "VAE", "vaes", id="vae"),
+    pytest.param(EPSLatentSwitcher, "latent", "LATENT", "latents", id="latent"),
 ]
 
 #: Round-robin sibling for cross-type checks: a DIFFERENT registered
@@ -77,13 +79,14 @@ _SWITCHER_TYPES = [
 _OTHER_SWITCHER = {
     EPSModelSwitcher: (EPSClipSwitcher, "clip"),
     EPSClipSwitcher: (EPSVaeSwitcher, "vae"),
-    EPSVaeSwitcher: (EPSModelSwitcher, "model"),
+    EPSVaeSwitcher: (EPSLatentSwitcher, "latent"),
+    EPSLatentSwitcher: (EPSModelSwitcher, "model"),
 }
 
 #: A different new-class prefix, for "rejects a sibling class's own prefix"
 #: coverage (distinct from "rejects image_N", which every test below also
 #: checks directly).
-_OTHER_PREFIX = {"model": "clip", "clip": "vae", "vae": "model"}
+_OTHER_PREFIX = {"model": "clip", "clip": "vae", "vae": "latent", "latent": "model"}
 
 
 def _toggles(**overrides: bool) -> str:
@@ -694,6 +697,7 @@ class TestClassShape:
             "model": "EPSModelSwitcher",
             "clip": "EPSClipSwitcher",
             "vae": "EPSVaeSwitcher",
+            "latent": "EPSLatentSwitcher",
         }[prefix]
 
 
@@ -711,7 +715,11 @@ class TestDescriptionAndTooltipWording:
     def test_description_mentions_a_checkpoint_load_never_running(
         self, cls, prefix, io_type, output_name
     ) -> None:
-        assert "checkpoint" in cls.DESCRIPTION.lower()
+        # The never-runs example is a checkpoint load for model/clip/vae; a
+        # latent never comes from a checkpoint, so its description names a
+        # sampler chain instead (v0.109.0).
+        upstream = "sampler" if prefix == "latent" else "checkpoint"
+        assert upstream in cls.DESCRIPTION.lower()
         assert "never run" in cls.DESCRIPTION.lower() or "never execute" in cls.DESCRIPTION.lower()
 
     def test_input_tooltip_does_not_leak_image_wording(
@@ -749,6 +757,7 @@ class TestRegistration:
             ("EPSModelSwitcher", "EPS Model Switcher"),
             ("EPSClipSwitcher", "EPS CLIP Switcher"),
             ("EPSVaeSwitcher", "EPS VAE Switcher"),
+            ("EPSLatentSwitcher", "EPS Latent Switcher"),
         ],
     )
     def test_new_switcher_registered_with_display_name(
@@ -800,7 +809,9 @@ class TestEPSSwitcherIdentityViaFactory:
         assert EPSSwitcher.RETURN_NAMES == ("images", "masks")
 
     @pytest.mark.parametrize(
-        "cls", [EPSModelSwitcher, EPSClipSwitcher, EPSVaeSwitcher], ids=["model", "clip", "vae"]
+        "cls",
+        [EPSModelSwitcher, EPSClipSwitcher, EPSVaeSwitcher, EPSLatentSwitcher],
+        ids=["model", "clip", "vae", "latent"],
     )
     def test_siblings_carry_no_mask_partner(self, cls) -> None:
         """The mask partner is EPSSwitcher's alone: no `pass_masks` widget,

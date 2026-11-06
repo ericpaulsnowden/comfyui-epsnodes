@@ -11,7 +11,7 @@ beyond it — image-flow utilities now live here too.
 
 You need ComfyUI (a 2025+ build) and git. The pack has no pip dependencies,
 so there is nothing else to install. (rgthree-comfy is optional, and only one
-node uses it — see [The twenty-two nodes](#the-twenty-two-nodes).)
+node uses it — see [The twenty-three nodes](#the-twenty-three-nodes).)
 
 ```bash
 cd ComfyUI/custom_nodes
@@ -33,7 +33,7 @@ Developing or running the tests: [docs/DEVELOPING.md](docs/DEVELOPING.md).
 1. **Clone** the repo into `ComfyUI/custom_nodes/` (the command above).
 2. **Restart ComfyUI and hard-refresh your browser tab.** Check
    **Settings → EPSNodes**: it should list the pack's version. (The count in
-   the server-log line can read lower than twenty-two — the two State
+   the server-log line can read lower than twenty-three — the two State
    Controllers are drawn in the browser and aren't counted there.)
 3. **Find the nodes.** Right-click the canvas → **Add Node → EPSNodes**. They
    sit in six folders — Images, Prompts, Controllers, Utilities, LoRA and
@@ -45,7 +45,7 @@ Developing or running the tests: [docs/DEVELOPING.md](docs/DEVELOPING.md).
    the note on the canvas shows how to switch one off. The other examples are
    listed in [examples/README.md](examples/README.md), simplest first.
 5. **Look up a node.** The table under
-   [The twenty-two nodes](#the-twenty-two-nodes) is the map; each node then has
+   [The twenty-three nodes](#the-twenty-three-nodes) is the map; each node then has
    its own section further down. Your notebooks, saved lora sets and size
    presets live in one library folder — see
    [The library folder](#the-library-folder) if you want to move it.
@@ -64,12 +64,12 @@ Developing or running the tests: [docs/DEVELOPING.md](docs/DEVELOPING.md).
 | **Controllers** | Number Controller, Universal State Controller |
 | **Utilities** | Node Audit, Distributor, Bypass, Splat Placement, Run Multiplier |
 | **LoRA** | LoRA Picker, Apply LoRA Set, LoRA Iterator, Lora Loader State Controller |
-| **Switchers** | Image, Model, CLIP, VAE, and Checkpoint Switchers |
+| **Switchers** | Image, Model, CLIP, VAE, Latent, and Checkpoint Switchers |
 
 Moving a node between folders only changes where it sits in that menu —
 workflows you've already saved are unaffected, and nothing needs updating.
 
-## The twenty-two nodes
+## The twenty-three nodes
 
 No third-party packs required — every node here runs on ComfyUI alone;
 the Lora Loader State Controller is built to extend rgthree-comfy, but only
@@ -90,6 +90,7 @@ section further down; this is the map.
 | [**EPS LoRA Iterator**](#eps-lora-iterator-shipped) | Auditions any `LORA_STACK` by strength: set min/max/increment and one queue runs your workflow once per step (per lora, or all together). | A `LORA_STACK` source (usually Apply LoRA Set) + a model. |
 | [**EPS Image Switcher**](#eps-image-switcher-shipped) | Any number of image inputs, each independently on/off; the enabled ones fan out (N enabled → N runs). Disabled branches never execute. | Nothing — drag-and-drop with core nodes. |
 | [**EPS Model / CLIP / VAE Switcher**](#eps-model--clip--vae-switcher-shipped) | The image Switcher's exact mechanism for models, CLIPs, and VAEs: any number of inputs, each on/off, enabled ones fan out (N enabled → N runs), disabled branches — including their checkpoint loads — never execute. | Nothing — drag-and-drop with core nodes. |
+| [**EPS Latent Switcher**](#eps-latent-switcher-shipped) | The same switch for latents: any number of LATENT inputs, each on/off, the enabled ones fan out in slot order so the rest of the workflow runs once per latent. Wire an Empty Latent, a VAE Encode or a sampler's output into each row. | Nothing — drag-and-drop with core nodes. |
 | [**EPS Distributor**](#eps-distributor-shipped) | The mirror of the Switcher: one image — or one text — in, up to sixteen branches out, each independently on/off. New outputs appear as you wire them up. Toggle a branch off and only that branch is skipped — everything happens in one run. | Nothing — drag-and-drop with core nodes. |
 | [**EPS Bypass**](#eps-bypass-shipped) | Plug anything into it — audio, an image, a model, a mask — and switch it off: whatever it feeds then behaves exactly as if nothing were connected, and the wire comes back when you switch it on. For inputs that are optional (a video node's audio, an optional mask); if what it feeds needs that input, the switch refuses and names the node. The Universal State Controller can save and recall the on/off state. *(v0.99.0)* | Nothing — drag-and-drop with core nodes. |
 | [**EPS Splat Placement**](#eps-splat-placement-shipped) | Makes core **Render Splat** draw a gaussian splat exactly as the 3D viewer (Save Splat, Preview Splat, Load 3D) shows it, by moving, rotating and scaling the splat the way the viewer did. Without it, a splat you fitted to the viewer renders as a dot. *(v0.100.0)* | Core's Get Splat and Render Splat, plus the viewer node's `model_3d_info` and `camera_info`. |
@@ -106,7 +107,7 @@ section further down; this is the map.
 > [docs/FORMAT.md](docs/FORMAT.md). Want to see the nodes working? Every
 > workflow in [examples/](examples/) is annotated on the canvas and ready
 > to load — eleven example workflows between them cover sixteen of the
-> twenty-two nodes, some sharing a graph. The LoRA Picker, Universal State
+> twenty-three nodes, some sharing a graph. The LoRA Picker, Universal State
 > Controller, Number Controller, Bypass, Splat Placement and Node Audit have
 > no example yet. Some examples just want a Run; the LoRA ones need a real
 > checkpoint and a saved LoRA state to actually generate (Apply LoRA Set and
@@ -437,7 +438,7 @@ another session.
   (a state can never corrupt a node), and every apply ends with a report —
   "Applied 7 of 9 · 1 not found · 1 skipped". Nothing partial ever happens
   silently.
-- Eighteen node types are covered — every node in the table at the top
+- Nineteen node types are covered — every node in the table at the top
   except the two State Controllers, Splat Placement and Node Audit, with the
   Model / CLIP / VAE Switcher counted as three (EPS Bypass's on/off switch
   joined in v0.99.0 — applying a state really unplugs and re-plugs its wire); the
@@ -807,7 +808,7 @@ off means three runs.
 - **The checkboxes line up in one straight column — across every switcher
   in the workflow**, not just within a node (since v0.62.0). Rename rows to
   whatever you like and the boxes still form a single vertical line at the
-  furthest-right one, so a stack of Image/Model/CLIP/VAE Switchers reads as
+  furthest-right one, so a stack of Image/Model/CLIP/VAE/Latent Switchers reads as
   a tidy column instead of a ragged stagger. If one node's names are too
   long for its width, widen that node — its box has to stay clear of the
   socket to remain clickable.
@@ -880,6 +881,23 @@ several models/VAEs in one queue".
   aligned as one axis by construction.
 - Loading several checkpoints in one queue is heavy on disk and RAM/VRAM;
   ComfyUI offloads between runs, but start with two or three, not ten.
+
+## EPS Latent Switcher (shipped)
+
+- **The image Switcher's exact mechanism for latents (v0.109.0).** Any
+  number of `latent_N` inputs, each with its own on/off row; the enabled
+  ones fan out in slot order, so N enabled latents make the rest of the
+  workflow run N times. Wire anything that makes a latent: an Empty
+  Latent, a VAE Encode, a sampler's latent output, a Load Latent.
+- **Everything the other Switchers do, identically:** growing sockets, Toggle
+  All, double-click rename, an off row's upstream never runs (a VAE Encode
+  or a whole sampler chain feeding a disabled row is never executed), an
+  off row stays off when you re-plug it, all-off is valid (the queue
+  succeeds; a core sampler can't run without its latent, so it is skipped
+  silently), and the output wires draw grey while every row is off.
+- **One switcher = one axis.** Wired next to a Model Switcher into the same
+  sampler, ComfyUI pairs the two lists index by index (3 latents × 2 models
+  = 3 runs, not 6); to cross them, go through the EPS Run Multiplier.
 
 ## EPS Node Audit (shipped)
 

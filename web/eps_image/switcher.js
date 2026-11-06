@@ -286,7 +286,9 @@ export const SWITCHER_CLASSES = {
   // where the prefix is an initialism -- "no CLIPs connected" reads right,
   // "no clips connected" reads like film clips.
   EPSClipSwitcher: { prefix: 'clip', type: 'CLIP', noun: 'CLIPs' },
-  EPSVaeSwitcher: { prefix: 'vae', type: 'VAE', noun: 'VAEs' }
+  EPSVaeSwitcher: { prefix: 'vae', type: 'VAE', noun: 'VAEs' },
+  // v0.109.0 (owner ask 2026-11-06): the fifth class, for LATENT dicts.
+  EPSLatentSwitcher: { prefix: 'latent', type: 'LATENT', noun: 'latents' }
 }
 for (const spec of Object.values(SWITCHER_CLASSES)) {
   spec.inputRe = new RegExp(`^${spec.prefix}_(\\d+)$`)
