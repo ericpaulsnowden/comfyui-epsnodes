@@ -34,6 +34,7 @@ import re
 from typing import Any, ClassVar
 
 from . import resolution_presets_store as presets_store
+from .nodes_switcher import inputs_fed_by_an_all_off_switcher, wired_input_names
 
 logger = logging.getLogger("eps_image")
 
@@ -538,13 +539,14 @@ def _execution_blocker() -> Any:
 
 class _FlexibleResolutionOptional(dict):
     """Accept ``image_2``..``image_8`` by NAME -- §6.4's flexible-optional
-    trick, LOCAL and NON-LAZY on purpose: this node defines no
-    ``check_lazy_status``, so the switcher factory's ``lazy: True``
-    synthesis must not be reused here (a lazy input nobody requests is
-    never fetched). Plain iteration still yields only the statically
-    inserted entries, so /object_info (and the default socket render)
-    shows one image socket; the frontend grows the rest (§6.4's converge
-    pattern)."""
+    trick, LOCAL. Lazy since 2026-11-05: every wired ``image_N`` is
+    requested by :meth:`EPSResolution.check_lazy_status` EXCEPT one fed by a
+    switcher that provably emits nothing, which is then simply absent -- the
+    size-calculator path, as if nothing were wired (a lazy input nobody
+    requests is never fetched, which is exactly the point). Plain iteration
+    still yields only the statically inserted entries, so /object_info (and
+    the default socket render) shows one image socket; the frontend grows
+    the rest (§6.4's converge pattern)."""
 
     def __contains__(self, key: object) -> bool:
         if isinstance(key, str) and _EXTRA_IMAGE_PATTERN.fullmatch(key):
@@ -558,6 +560,7 @@ class _FlexibleResolutionOptional(dict):
             return (
                 "IMAGE",
                 {
+                    "lazy": True,
                     "tooltip": (
                         "Another image resized with the same settings -- "
                         "it comes out of its own resized_N output."
@@ -952,6 +955,7 @@ class EPSResolution:
                 "image": (
                     "IMAGE",
                     {
+                        "lazy": True,
                         "tooltip": (
                             "The image to resize. Leave unwired to use "
                             "this node purely as a size calculator."
@@ -1055,6 +1059,7 @@ class EPSResolution:
                     },
                 ),
             }),
+            "hidden": {"prompt": "PROMPT", "unique_id": "UNIQUE_ID"},
         }
 
     @classmethod
@@ -1079,6 +1084,32 @@ class EPSResolution:
         if not names:
             return "no-presets-selected"
         return f"{_presets_file_token(_context)}:{presets}"
+
+    #: ``image`` plus the §6.5 extras, the lazy set :meth:`check_lazy_status`
+    #: governs (2026-11-05).
+    LAZY_IMAGE_INPUTS: ClassVar[tuple[str, ...]] = ("image", *(f"image_{n}" for n in range(2, 9)))
+
+    def check_lazy_status(
+        self, prompt: Any = None, unique_id: Any = None, **kwargs: Any
+    ) -> list[str]:
+        """Every WIRED image input, except one fed by a switcher that
+        provably emits nothing (``nodes_switcher.inputs_fed_by_an_all_off_switcher``)
+        -- that one is never requested, the switcher never runs, and this
+        node takes its size-calculator path for it as if the socket were
+        empty (the owner's 2026-11-05 "all toggles off should look like
+        nothing is connected"; before, the switcher's blocker skipped this
+        node and every width/height consumer with it). Core keeps calling
+        until nothing new is requested, so naming an already-resolved input
+        is harmless."""
+        wired = wired_input_names(prompt, unique_id, self.LAZY_IMAGE_INPUTS)
+        skip = inputs_fed_by_an_all_off_switcher(prompt, unique_id, wired)
+        if skip:
+            logger.info(
+                "EPS Resolution: not requesting %s -- fed by a switcher with "
+                "everything toggled off, so it is treated as unwired",
+                ", ".join(sorted(skip)),
+            )
+        return [name for name in wired if name not in skip]
 
     def resolve(
         self,

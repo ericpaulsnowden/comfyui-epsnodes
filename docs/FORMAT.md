@@ -1696,6 +1696,52 @@ per-input toggle + toggle-all header + N-enabled→N-runs fan-out.
   IndexErrors in `slice_dict`'s `v[-1]`. `ExecutionBlocker(None)`'s null
   message is what keeps the skip silent (`execution_block_cb` only errors
   on a non-None message).
+  **Consumers that can run without it treat an all-off switcher as UNWIRED
+  (v0.108.0, owner report 2026-11-05: "if all of the toggles are off it
+  should look like nothing is connected; currently downstream nodes still
+  expect an image and fail").** The blocker above skips ANY consumer, so an
+  all-off image switcher wired into the Run Multiplier's optional `image`
+  skipped the whole multiplier, text sweep included -- where an unwired
+  image would have run it text-only ("nothing runs" from the owner's
+  chair). The output must stay a blocker (a graph-dependent output is
+  unsound under core's input-only cache key -- the rejected `[]`
+  experiment above); the fix is the consumer-side lazy skip this section
+  already uses switcher-to-switcher, generalized by input NAME:
+  `nodes_switcher.inputs_fed_by_an_all_off_switcher(prompt, unique_id,
+  names)` + `wired_input_names(...)`. The Run Multiplier's six
+  switcher-feedable inputs (`model`, `model_low`, `clip`, `vae`, `image`,
+  `mask`), EPS Resolution's `image`/`image_2..8` and EPS Image Grid's
+  `image` are `lazy` now, each with a `check_lazy_status` that requests
+  every wired one EXCEPT a slot whose upstream is statically all-off -- so
+  that switcher never runs and the consumer runs exactly as with the socket
+  empty (text-only sweep; the size-calculator path; the grid's nothing-wired
+  path). `_switcher_is_statically_all_off` also recognizes
+  `EPSCheckpointSwitcher` with an empty literal `selection` (§6.12), so an
+  empty checkpoint pick skips the multiplier's model/clip/vae the same way.
+  The decision reads only the upstream's own prompt entry, which is part of
+  the consumer's cache signature -- a toggle flip re-runs it. Core consumers
+  (and EPS Bypass / Distributor, deliberate pass-throughs where "nothing"
+  would travel on as `None` into arbitrary required inputs) keep the silent
+  skip. Rig, both ComfyUI v0.36.0 and current master: all-off -> Multiplier
+  ran the text axis; all-off -> Resolution emitted the typed size; all-off
+  -> PreviewImage still skipped silently. The frontend mirrors it: the
+  run-count estimator counts an all-off switcher feeding those inputs as an
+  absent axis (not a zero-collapse) and never paints the §6.10 dead-output
+  error for an all-off-fed member (that output's consumers count as
+  known-zero: per-run blockers skip them), and the switcher's output wires
+  draw dimmed while every row is off so it also LOOKS unplugged: every link
+  on its outputs (the `masks` / `models_low` tails included) in §6.6's dim
+  grey `rgba(128,128,128,0.25)` through the shared `owned_link_colour.js`
+  hook, owner tag `EPSSwitcher:all-off`; nothing is unplugged, each link's
+  exact prior colour returns the moment one row is switched back on;
+  re-derived on a row click, toggle-all, the `toggles` widget callback, every
+  connection change, `onConfigure` and removal; never while `toggles`
+  arrives over a wire (not statically knowable). The Checkpoint Switcher
+  dims the same way for an empty selection (owner tag
+  `EPSCheckpointSwitcher:empty-selection`, §6.12). Known gaps, erring
+  toward NOT dimming: a row wired to a dead-end reroute still counts as
+  wired on the canvas, and a switcher fed only by another all-off switcher
+  is not dimmed (it needs cross-node triggers).
 - **Backend:** a real (non-virtual) node; `INPUT_TYPES` uses the flexible
   optional dict, which also carries the `toggles` STRING bridge (in `optional`,
   NOT `required` — a required input absent from a hand-built `/prompt` is
@@ -3225,6 +3271,13 @@ deletion:
 
 ### §6.10 `EPSCrossSweep` (display: "EPS Run Multiplier") — sweep × pairs, organized
 
+**Lazy sweep members (v0.108.0).** `model`, `model_low`, `clip`, `vae`,
+`image` and `mask` carry `lazy: True`; `check_lazy_status` requests every
+wired one except a slot fed by a statically all-off switcher (§6.4's
+consumer-side rule, `nodes_switcher.inputs_fed_by_an_all_off_switcher`), which
+is then simply absent -- the unwired path (text-only pairs when it is the
+image). `text`, `name`, `label` and `base_folder` stay eager.
+
 **The readout grew a little taller on every tab switch, forever (§7.9,
 tab-switch sweep 2026-08-31, reproduced live on the rig).** A Run Multiplier
 showing a WRAPPED (grown) readout got measurably taller on every round-trip
@@ -3839,6 +3892,14 @@ function: with NOTHING wired at restore there is no evidence to tell a
 grown-then-abandoned value from a deliberate one, so it is kept.
 
 ## §6.12 `EPSCheckpointSwitcher` (display: "EPS Checkpoint Switcher") — tick N checkpoints, run N times
+
+**Empty selection reads as all-off (v0.108.0).** `nodes_switcher.
+_switcher_is_statically_all_off` recognizes this class by its literal
+`selection` (a JSON array with no string entry), so the Run Multiplier's lazy
+`model`/`clip`/`vae` skip an empty Checkpoint Switcher exactly as they skip an
+all-off Model Switcher (§6.4), and the panel dims every output link while
+nothing is ticked (owner tag `EPSCheckpointSwitcher:empty-selection`, same
+mechanics as §6.4's dim). A wired `selection` is not statically knowable.
 
 **Bulk-load VRAM parking (v0.80.0 sweep-performance round).** With ≥2
 ticked checkpoints, `execute` ends by best-effort moving every loaded

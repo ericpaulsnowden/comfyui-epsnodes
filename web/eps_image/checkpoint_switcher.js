@@ -71,11 +71,25 @@
  * once via `../lora_library/api.js`, not a bare `window.addEventListener`
  * this file calls itself, and not a pointer/gesture listener at all: see
  * `installExternalWriteSubscription()`/`reloadFromWidget()` below.
+ *
+ * **Empty selection looks unplugged (owner report 2026-11-05, switcher.js's
+ * "All-off looks unplugged" twin).** An empty `selection` emits only
+ * `ExecutionBlocker`s, and the pack's lazy consumers treat it exactly like
+ * an unwired input -- so while nothing is ticked every OUTPUT link is drawn
+ * in §6.6's dim grey through the shared `owned_link_colour.js` hook
+ * (owner tag `LINK_COLOR_OWNER_CKPT`), never unplugged, restored to its
+ * exact prior colour the moment one row is ticked. A BY-HAND copy of
+ * switcher.js's/image_grid.js's `reconcileLinkDimming`, re-derived at the
+ * two points every selection change already converges on
+ * (`writeSelectionWidget`, `reloadFromWidget` -- a tick, a configure, a
+ * Universal State Apply), plus `onConnectionsChange` and `onRemoved`. Not
+ * dimmed while `selection` arrives over a wire. No toast.
  */
 
 import { api } from '../../../scripts/api.js'
 import { healComboValue, isHealEnabled } from '../lora_library/path_heal.js'
 import { subscribeWidgetsChangedExternally } from '../lora_library/api.js'
+import { ensureOwnedLinkColourHook } from './owned_link_colour.js'
 
 /** Frozen once shipped -- mirrors the Python node's class id. */
 export const CLASS_ID = 'EPSCheckpointSwitcher'
@@ -260,6 +274,146 @@ function installMinWidth(node, minWidth) {
   if (node.size && node.size[0] < minWidth) {
     if (typeof node.setSize === 'function') node.setSize([minWidth, node.size[1]])
     else node.size[0] = minWidth
+  }
+}
+
+// --- Empty selection -> dim every outgoing wire (file header). A BY-HAND
+// copy of switcher.js's all-off dimming (docs/ROADMAP-shared-panel-code.md);
+// `link.color` is never serialized, so this is always DERIVED. ---
+
+/** image_grid.js's dim grey -- the same "not really there" look. */
+const DIM_LINK_COLOR = 'rgba(128,128,128,0.25)'
+const LINK_COLOR_OWNER_KEY = '__epsLinkColorOwner'
+export const LINK_COLOR_OWNER_CKPT = 'EPSCheckpointSwitcher:empty-selection'
+const LINK_COLOR_RESYNC_HOOK = '__epsResyncLinkColors'
+
+/** Per-link stash of the pre-dim colour (`{color}`, so a stashed
+ * `undefined` is distinguishable from "never stashed"). */
+const dimStash = new WeakMap()
+
+function linkById(graph, linkId) {
+  if (linkId == null || !graph) return null
+  return graph.links?.[linkId] ?? graph.links?.get?.(linkId) ?? null
+}
+
+/**
+ * The pure "does this node emit nothing?" decision: its `selection` widget
+ * names no checkpoint (`selectionFromWidgetValue` empty -- the backend's
+ * `_parse_selection` empty, the whole-node blocker path) and is not itself
+ * arriving over a wire (then it is only known at run time). Exported for
+ * tests.
+ * @param {object} node @returns {boolean}
+ */
+export function isSelectionEmpty(node) {
+  if (!node || nodeClassOf(node) !== CLASS_ID) return false
+  const wired = (node.inputs || []).some(
+    (inp) =>
+      inp &&
+      (inp.widget?.name === SELECTION_WIDGET_NAME || inp.name === SELECTION_WIDGET_NAME) &&
+      inp.link != null
+  )
+  if (wired) return false
+  const widget = findWidget(node, SELECTION_WIDGET_NAME)
+  if (!widget) return false
+  return selectionFromWidgetValue(widget.value).length === 0
+}
+
+/** Every link id on every output. Exported for tests. */
+export function outputLinkIds(node) {
+  const ids = []
+  for (const output of node.outputs || []) {
+    const links = output?.links
+    if (!Array.isArray(links)) continue
+    for (const id of links) if (id !== null && id !== undefined) ids.push(id)
+  }
+  return ids
+}
+
+/**
+ * Dims or restores every output link to match `isSelectionEmpty` --
+ * switcher.js's `reconcileLinkDimming`, by hand: tracked Set per node,
+ * exact restore + tag cleared + target resync on release, a link another
+ * owner claimed left alone, change-gated repaint, never unplugs. Exported
+ * for tests.
+ */
+export function reconcileLinkDimming(node, { forceUndim = false } = {}) {
+  if (!node) return
+  const shouldDim = !forceUndim && isSelectionEmpty(node)
+  const graph = node.graph
+  const tracked = node.__epsCkptDimmedLinkIds || (node.__epsCkptDimmedLinkIds = new Set())
+  const desired = shouldDim ? new Set(outputLinkIds(node)) : new Set()
+  let changed = false
+
+  for (const id of tracked) {
+    if (desired.has(id)) continue
+    const link = linkById(graph, id)
+    if (link && link[LINK_COLOR_OWNER_KEY] === LINK_COLOR_OWNER_CKPT) {
+      const stash = dimStash.get(link)
+      link.color = stash ? stash.color : undefined
+      delete link[LINK_COLOR_OWNER_KEY]
+      dimStash.delete(link)
+      changed = true
+      try {
+        const target = graph?.getNodeById?.(link.target_id)
+        const resync = target?.[LINK_COLOR_RESYNC_HOOK]
+        if (typeof resync === 'function') resync()
+      } catch (error) {
+        console.warn(PREFIX, 'link colour resync hook failed', error)
+      }
+    }
+    tracked.delete(id)
+  }
+
+  // Frontend 1.52.7 ignores `link.color` on a plain link; this hook makes
+  // it draw a link we've claimed in our colour (owned_link_colour.js).
+  if (desired.size) ensureOwnedLinkColourHook()
+
+  for (const id of desired) {
+    const link = linkById(graph, id)
+    if (!link) continue
+    const owner = link[LINK_COLOR_OWNER_KEY]
+    if (owner && owner !== LINK_COLOR_OWNER_CKPT) continue
+    if (!owner) {
+      dimStash.set(link, { color: link.color })
+      link.color = DIM_LINK_COLOR
+      link[LINK_COLOR_OWNER_KEY] = LINK_COLOR_OWNER_CKPT
+      changed = true
+    }
+    tracked.add(id)
+  }
+
+  if (changed) graph?.setDirtyCanvas?.(true, true)
+}
+
+function syncLinkDimming(node, where) {
+  try {
+    reconcileLinkDimming(node)
+  } catch (error) {
+    console.warn(PREFIX, `link dim sync (${where}) failed`, error)
+  }
+}
+
+/** Chains `onConnectionsChange` (an output link landing/leaving, the
+ * `selection` socket wired) and `onRemoved` (force undim) -- never
+ * replaced, guarded per node. */
+function installLinkDimHooks(node) {
+  if (node.__epsCkptLinkDimWrapped) return
+  node.__epsCkptLinkDimWrapped = true
+  const originalConnections = node.onConnectionsChange
+  node.onConnectionsChange = function (...args) {
+    const result =
+      typeof originalConnections === 'function' ? originalConnections.apply(this, args) : undefined
+    syncLinkDimming(this, 'onConnectionsChange')
+    return result
+  }
+  const originalRemoved = node.onRemoved
+  node.onRemoved = function (...args) {
+    try {
+      reconcileLinkDimming(this, { forceUndim: true })
+    } catch (error) {
+      console.warn(PREFIX, 'link dim cleanup (onRemoved) failed', error)
+    }
+    return typeof originalRemoved === 'function' ? originalRemoved.apply(this, args) : undefined
   }
 }
 
@@ -549,6 +703,7 @@ function reloadFromWidget(state) {
   refreshSpelling(state)
   healSelectionSpelling(state)
   renderList(state)
+  syncLinkDimming(state.node, 'reload')
 }
 
 // Universal State Controller Apply fix (2026-08-29, owner report:
@@ -600,6 +755,7 @@ function writeSelectionWidget(state, nextSelection) {
   const json = JSON.stringify(ordered)
   state.widget.value = json
   state.widget.callback?.(json)
+  syncLinkDimming(state.node, 'selection write')
   state.node.graph?.setDirtyCanvas(true, true)
 }
 
@@ -743,6 +899,8 @@ export function attach(node) {
     hideSelectionWidget(state)
     buildUi(state)
     wireConfigureReload(state)
+    installLinkDimHooks(node) // empty selection: dim/restore the outgoing wires
+    reconcileLinkDimming(node)
     // Universal State Controller Apply fix (see reloadFromWidget's own
     // subscription comment above): publish this node's reload seam and
     // make sure the one shared subscription is installed.

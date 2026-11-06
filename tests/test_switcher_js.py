@@ -43,6 +43,7 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SWITCHER_JS = REPO_ROOT / "web" / "eps_image" / "switcher.js"
+OWNED_LINK_COLOUR_JS = REPO_ROOT / "web" / "eps_image" / "owned_link_colour.js"
 
 NODE = shutil.which("node")
 
@@ -140,6 +141,8 @@ def switcher_api(tmp_path_factory: pytest.TempPathFactory) -> dict:
     module_dir = layout / "extensions" / "comfyui-epsnodes" / "eps_image"
     module_dir.mkdir(parents=True)
     shutil.copyfile(SWITCHER_JS, module_dir / "switcher.js")
+    # switcher.js imports the shared renderLink hook (all-off dimming).
+    shutil.copyfile(OWNED_LINK_COLOUR_JS, module_dir / "owned_link_colour.js")
 
     # switcher.js's single import -- `../../../scripts/app.js`, used only
     # for `app.canvas` in activeCanvas(). Stubbed exactly as
@@ -1225,6 +1228,8 @@ def switcher_attach_api(tmp_path_factory: pytest.TempPathFactory) -> dict:
     module_dir = layout / "extensions" / "comfyui-epsnodes" / "eps_image"
     module_dir.mkdir(parents=True)
     shutil.copyfile(SWITCHER_JS, module_dir / "switcher.js")
+    # switcher.js imports the shared renderLink hook (all-off dimming).
+    shutil.copyfile(OWNED_LINK_COLOUR_JS, module_dir / "owned_link_colour.js")
     scripts = layout / "scripts"
     scripts.mkdir(parents=True, exist_ok=True)
     (scripts / "app.js").write_text("export const app = {}\n", encoding="utf-8")
@@ -1879,6 +1884,8 @@ def switcher_mask_api(tmp_path_factory: pytest.TempPathFactory) -> dict:
     module_dir = layout / "extensions" / "comfyui-epsnodes" / "eps_image"
     module_dir.mkdir(parents=True)
     shutil.copyfile(SWITCHER_JS, module_dir / "switcher.js")
+    # switcher.js imports the shared renderLink hook (all-off dimming).
+    shutil.copyfile(OWNED_LINK_COLOUR_JS, module_dir / "owned_link_colour.js")
     scripts = layout / "scripts"
     scripts.mkdir(parents=True, exist_ok=True)
     (scripts / "app.js").write_text(

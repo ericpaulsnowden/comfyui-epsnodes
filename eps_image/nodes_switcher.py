@@ -333,6 +333,8 @@ def _switcher_is_statically_all_off(node: dict) -> bool:
     existed.
     """
     class_type = str(node.get("class_type") or "")
+    if class_type == CHECKPOINT_SWITCHER_CLASS_ID:
+        return _checkpoint_switcher_is_statically_all_off(node)
     pattern = _SWITCHER_SLOT_PATTERNS.get(class_type)
     if pattern is None:
         return False
@@ -349,6 +351,100 @@ def _switcher_is_statically_all_off(node: dict) -> bool:
         if pattern.fullmatch(key) and isinstance(value, (list, tuple)) and len(value) == 2
     ]
     return all(toggle_map.get(key, True) is False for key in wired)
+
+
+#: ``EPSCheckpointSwitcher``'s class id (eps_image/nodes_checkpoint_switcher.py)
+#: -- recognized by :func:`_switcher_is_statically_all_off` by its
+#: ``selection`` widget rather than a slot pattern. A string constant, not an
+#: import: that module is a checkpoint loader and this one must stay free of
+#: anything heavier than the stdlib at import time.
+CHECKPOINT_SWITCHER_CLASS_ID = "EPSCheckpointSwitcher"
+
+
+def _checkpoint_switcher_is_statically_all_off(node: dict) -> bool:
+    """Whether an ``EPSCheckpointSwitcher`` prompt entry provably loads
+    nothing: its ``selection`` is a literal JSON array with no string entry
+    (2026-11-05, the all-off round -- so a Run Multiplier fed by an empty
+    Checkpoint Switcher skips that slot exactly as it skips an all-off
+    Model Switcher). The same "provably from the prompt alone" posture as
+    the slot-pattern classes: a linked, unparseable or non-list ``selection``
+    is NOT provably empty (the node itself degrades such values to "nothing
+    selected", but a consumer must not bet on that) and answers False."""
+    inputs = node.get("inputs")
+    if not isinstance(inputs, dict):
+        return False
+    selection = inputs.get("selection", "[]")
+    if not isinstance(selection, str):
+        return False
+    try:
+        parsed = json.loads(selection) if selection.strip() else []
+    except (TypeError, ValueError):
+        return False
+    if not isinstance(parsed, list):
+        return False
+    return not any(isinstance(entry, str) and entry for entry in parsed)
+
+
+def inputs_fed_by_an_all_off_switcher(prompt: Any, unique_id: Any, names: Any) -> set[str]:
+    """Which of THIS node's inputs in *names* are wired to a switcher that
+    provably emits nothing (:func:`_switcher_is_statically_all_off`: an
+    Image/Model/CLIP/VAE switcher with every wired row off or nothing wired,
+    or a Checkpoint Switcher with an empty selection).
+
+    The consumer-side half of FORMAT.md §6.4's all-off rule, generalized by
+    NAME (2026-11-05) so nodes with optional, switcher-feedable inputs other
+    than a switcher's own ``<prefix>_N`` slots -- the Run Multiplier's sweep
+    members, Resolution's images, the Image Grid's image -- can leave such a
+    slot unrequested in ``check_lazy_status`` and run exactly as if it were
+    unwired. The owner's report (2026-11-05): "if all of the toggles are off
+    it should look like nothing is connected; currently downstream nodes
+    still expect an image and fail" -- an all-off switcher's blocker skipped
+    the whole Run Multiplier, text sweep included, where an UNWIRED image
+    would have run it text-only. The decision reads only the upstream
+    node's own prompt entry (its toggles / selection and wiring), which is
+    part of this node's cache signature, so it is sound where a graph-
+    dependent OUTPUT is not (see :func:`_slots_fed_by_an_empty_switcher`).
+    *prompt*/*unique_id* must already be unwrapped. Unknown upstreams, a
+    missing prompt entry, or a non-link value answer "not fed by one".
+    """
+    if not isinstance(prompt, dict) or unique_id is None:
+        return set()
+    me = prompt.get(str(unique_id))
+    if not isinstance(me, dict):
+        return set()
+    my_inputs = me.get("inputs")
+    if not isinstance(my_inputs, dict):
+        return set()
+    fed: set[str] = set()
+    for name in names:
+        value = my_inputs.get(name)
+        if not (isinstance(value, (list, tuple)) and len(value) == 2):
+            continue
+        upstream = prompt.get(str(value[0]))
+        if isinstance(upstream, dict) and _switcher_is_statically_all_off(upstream):
+            fed.add(name)
+    return fed
+
+
+def wired_input_names(prompt: Any, unique_id: Any, names: Any) -> list[str]:
+    """Those of *names* that THIS node's prompt entry wires to another node
+    (a two-element ``[origin_id, origin_slot]`` link), in *names* order.
+    When the prompt entry can't be read, EVERY name is returned: a
+    ``check_lazy_status`` built on this then requests all of them, which
+    core trims to the ones that exist -- the conservative answer. (The
+    companion of :func:`inputs_fed_by_an_all_off_switcher`, 2026-11-05.)"""
+    names = list(names)
+    if not isinstance(prompt, dict) or unique_id is None:
+        return names
+    me = prompt.get(str(unique_id))
+    if not isinstance(me, dict) or not isinstance(me.get("inputs"), dict):
+        return names
+    my_inputs = me["inputs"]
+    return [
+        name
+        for name in names
+        if isinstance(my_inputs.get(name), (list, tuple)) and len(my_inputs[name]) == 2
+    ]
 
 
 def _slots_fed_by_an_empty_switcher(
@@ -394,16 +490,11 @@ def _slots_fed_by_an_empty_switcher(
     my_inputs = me.get("inputs")
     if not isinstance(my_inputs, dict):
         return set()
-    skip: set[str] = set()
-    for name, value in my_inputs.items():
-        if not pattern.fullmatch(name):
-            continue
-        if not (isinstance(value, (list, tuple)) and len(value) == 2):
-            continue
-        upstream = prompt.get(str(value[0]))
-        if isinstance(upstream, dict) and _switcher_is_statically_all_off(upstream):
-            skip.add(name)
-    return skip
+    # Name-based since 2026-11-05 (`inputs_fed_by_an_all_off_switcher`); the
+    # pattern just selects THIS class's own slot names.
+    return inputs_fed_by_an_all_off_switcher(
+        prompt, unique_id, [name for name in my_inputs if pattern.fullmatch(name)]
+    )
 
 
 def _make_flexible_optional_inputs_class(

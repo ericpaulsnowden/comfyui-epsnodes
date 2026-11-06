@@ -1907,6 +1907,350 @@ ESTIMATE_CASES += [
 ]
 
 
+
+# ---- 2026-11-05 owner report: "if all of the toggles are off it should look
+# like nothing is connected". The backend made the multiplier's six
+# switcher-feedable inputs (model, model_low, clip, vae, image, mask),
+# Resolution's image inputs and the Grid's image LAZY: a slot whose DIRECT
+# upstream is a STATICALLY empty source (all-off switcher / empty-selection
+# Checkpoint Switcher) is never requested and reads as UNWIRED. Every other
+# known-zero still collapses.
+
+
+def _all_off_image_switcher(wired: int = 2) -> dict:
+    """An Image Switcher whose every wired row is literally toggled off."""
+    names = [f"image_{i}" for i in range(1, wired + 1)]
+    return {
+        "classType": "EPSSwitcher",
+        "widgets": {"toggles": json.dumps(dict.fromkeys(names, False))},
+        "inputs": {name: _link(str(90 + i)) for i, name in enumerate(names, start=1)},
+    }
+
+
+def _two_text_multiplier(inputs: dict, extra: dict) -> dict:
+    """A pair-multiply multiplier with a 2-entry Notebook on `text` plus
+    *inputs*, alongside *extra* nodes and the LoadImages."""
+    nodes = {
+        "30": _notebook("First\nSecond"),
+        "5": {
+            "classType": "EPSCrossSweep",
+            "widgets": {"base_folder": "", "pair_mode": "multiply", "sweep_mode": "multiply"},
+            "inputs": {"text": _link("30", 0), **inputs},
+        },
+        **_LOAD_IMAGES,
+    }
+    nodes.update(extra)
+    return {"nodes": nodes}
+
+
+def _resolution_into_text(res_inputs: dict, extra: dict, scale_multiplier: float = 0.0) -> dict:
+    """A 3-preset Resolution whose `width` (slot 2) feeds a mapped
+    (list-flagged) formatter into the multiplier's `text` -- the count of
+    Resolution's NON-image outputs, i.e. mapLen x presets."""
+    nodes = {
+        "res": _resolution(res_inputs, '["A", "B", "C"]', scale_multiplier),
+        "fmt": {
+            "classType": "SomeIntToString",
+            "widgets": {},
+            "inputs": {"value": _link("res", 2)},
+            "inputIsList": False,
+            "outputIsList": [False],
+        },
+        "5": {
+            "classType": "EPSCrossSweep",
+            "widgets": {"base_folder": "", "pair_mode": "multiply", "sweep_mode": "multiply"},
+            "inputs": {"text": _link("fmt", 0)},
+        },
+        **_LOAD_IMAGES,
+    }
+    nodes.update(extra)
+    return {"nodes": nodes}
+
+
+_TEXT_ONLY_TWO = {
+    "total": 2, "atLeast": False, "steps": 1, "pairs": 2, "unknowns": [], "error": None,
+}
+
+ALL_OFF_CASES = [
+    (
+        "all_off_image_switcher_on_image_reads_as_unwired_text_only",
+        _two_text_multiplier({"image": _link("sw")}, {"sw": _all_off_image_switcher()}),
+        "5",
+        {**_TEXT_ONLY_TWO, "breakdown": "1 sweep step × 2 pairs"},
+    ),
+    (
+        "empty_image_switcher_nothing_wired_reads_as_unwired",
+        _two_text_multiplier(
+            {"image": _link("sw")},
+            {"sw": {"classType": "EPSSwitcher", "widgets": {"toggles": "{}"}, "inputs": {}}},
+        ),
+        "5",
+        _TEXT_ONLY_TWO,
+    ),
+    (
+        "all_off_image_switcher_through_a_reroute_reads_as_unwired",
+        _two_text_multiplier(
+            {"image": _link("rr")},
+            {
+                "sw": _all_off_image_switcher(),
+                "rr": {"classType": "Reroute", "widgets": {}, "inputs": {"": _link("sw")}},
+            },
+        ),
+        "5",
+        _TEXT_ONLY_TWO,
+    ),
+    (
+        # The SAME shape with a Collect-only Grid on `image` is NOT the
+        # lazy-skip shape: still a zero-collapse, named.
+        "collect_only_grid_on_image_still_collapses",
+        _two_text_multiplier(
+            {"image": _link("31")},
+            {"31": {"classType": "EPSImageGrid", "widgets": {"mode": "Collect only"},
+                    "inputs": {}}},
+        ),
+        "5",
+        {"total": 0, "atLeast": False, "error": None,
+         "breakdown": "nothing to run (image input is empty/blocked)"},
+    ),
+    (
+        # A switcher whose ONLY slot is an all-off switcher is not itself
+        # statically all-off (its slot is wired+enabled): it runs, has
+        # nothing to emit, and blocks -- unchanged collapse.
+        "switcher_behind_an_all_off_switcher_still_collapses",
+        _two_text_multiplier(
+            {"image": _link("outer")},
+            {
+                "sw": _all_off_image_switcher(),
+                "outer": {"classType": "EPSSwitcher", "widgets": {"toggles": "{}"},
+                          "inputs": {"image_1": _link("sw")}},
+            },
+        ),
+        "5",
+        {"total": 0, "atLeast": False, "error": None,
+         "breakdown": "nothing to run (image input is empty/blocked)"},
+    ),
+    (
+        # Chained switcher -> switcher with a live sibling slot: the
+        # switcher's own lazy skip, unchanged (2 images x 2 texts).
+        "all_off_switcher_into_a_switcher_with_a_live_slot_is_unchanged",
+        _two_text_multiplier(
+            {"image": _link("outer")},
+            {
+                "sw": _all_off_image_switcher(),
+                "outer": {"classType": "EPSSwitcher", "widgets": {"toggles": "{}"},
+                          "inputs": {"image_1": _link("sw"), "image_2": _link("93")}},
+            },
+        ),
+        "5",
+        {"total": 2, "atLeast": False, "steps": 1, "pairs": 2, "error": None},
+    ),
+    (
+        # image AND mask both from one all-off switcher (pass_masks on):
+        # both lazy, both unwired -- no "mask without image" paint.
+        "all_off_switcher_images_and_masks_both_read_as_unwired",
+        _two_text_multiplier(
+            {"image": _link("sw", 0), "mask": _link("sw", 1)},
+            {"sw": {**_all_off_image_switcher(),
+                    "widgets": {"toggles": '{"image_1": false, "image_2": false}',
+                                "pass_masks": True}}},
+        ),
+        "5",
+        _TEXT_ONLY_TWO,
+    ),
+    (
+        "all_off_model_switcher_on_model_reads_as_no_sweep",
+        _two_text_multiplier(
+            {"model": _link("ms")},
+            {
+                "ms": {"classType": "EPSModelSwitcher",
+                       "widgets": {"toggles": '{"model_1": false}'},
+                       "inputs": {"model_1": _link("11")}},
+                "11": {"classType": "UNETLoader", "widgets": {}, "inputs": {}},
+            },
+        ),
+        "5",
+        _TEXT_ONLY_TWO,
+    ),
+    (
+        # An all-off model switcher alongside a LIVE vae switcher: the model
+        # axis is simply absent, the vae axis still counts.
+        "all_off_model_axis_absent_vae_axis_still_counts",
+        _two_text_multiplier(
+            {"model": _link("ms"), "vae": _link("vs")},
+            {
+                "ms": {"classType": "EPSModelSwitcher", "widgets": {"toggles": "{}"},
+                       "inputs": {}},
+                "vs": {"classType": "EPSVaeSwitcher", "widgets": {"toggles": "{}"},
+                       "inputs": {"vae_1": _link("15"), "vae_2": _link("16")}},
+                "15": {"classType": "VAELoader", "widgets": {}, "inputs": {}},
+                "16": {"classType": "VAELoader", "widgets": {}, "inputs": {}},
+            },
+        ),
+        "5",
+        {"total": 4, "atLeast": False, "steps": 2, "pairs": 2, "error": None},
+    ),
+    (
+        # `label` is NOT lazy: an all-off switcher there still blocks.
+        "all_off_switcher_on_non_lazy_label_still_collapses",
+        _two_text_multiplier(
+            {"label": _link("sw")},
+            {"sw": {"classType": "EPSClipSwitcher", "widgets": {"toggles": "{}"},
+                    "inputs": {}}},
+        ),
+        "5",
+        {"total": 0, "atLeast": False, "error": None,
+         "breakdown": "nothing to run (label input is empty/blocked)"},
+    ),
+    (
+        "empty_checkpoint_switcher_on_model_clip_vae_reads_as_unwired",
+        _two_text_multiplier(
+            {"model": _link("20", 0), "clip": _link("20", 1), "vae": _link("20", 2)},
+            {"20": _checkpoint_switcher([])},
+        ),
+        "5",
+        _TEXT_ONLY_TWO,
+    ),
+    (
+        # ...but an empty-selection Checkpoint Switcher on `label` (not
+        # lazy) still collapses, exactly as before.
+        "empty_checkpoint_switcher_on_label_still_collapses",
+        _two_text_multiplier({"label": _link("20", 3)}, {"20": _checkpoint_switcher([])}),
+        "5",
+        {"total": 0, "atLeast": False, "error": None,
+         "breakdown": "nothing to run (label input is empty/blocked)"},
+    ),
+    (
+        "resolution_fed_an_all_off_switcher_counts_its_presets",
+        _resolution_into_text({"image": _link("sw")}, {"sw": _all_off_image_switcher()}),
+        "5",
+        {"total": 3, "atLeast": False, "steps": 1, "pairs": 3, "error": None},
+    ),
+    (
+        # Scale mode needs an image WIRED; an all-off one is not, so the
+        # presets fan out instead of collapsing to one run.
+        "resolution_scale_mode_off_when_its_image_is_all_off",
+        _resolution_into_text(
+            {"image": _link("sw")}, {"sw": _all_off_image_switcher()}, scale_multiplier=1.5
+        ),
+        "5",
+        {"total": 3, "atLeast": False, "pairs": 3, "error": None},
+    ),
+    (
+        # Resolution's image_3 lazily skipped, its `image` live: the live
+        # image still drives scale mode (one run), nothing collapses.
+        "resolution_extra_image_all_off_live_image_still_counts",
+        _resolution_into_text(
+            {"image": _link("91"), "image_3": _link("sw")},
+            {"sw": _all_off_image_switcher()},
+            scale_multiplier=1.5,
+        ),
+        "5",
+        {"total": 1, "atLeast": False, "pairs": 1, "error": None},
+    ),
+    (
+        # Its resized image output with the image lazily skipped is the same
+        # per-run blocker as with nothing wired -- the multiplier collapses.
+        "resolution_resized_image_with_all_off_image_still_blocks",
+        _resolution_chain({"image": _link("sw")}, {"sw": _all_off_image_switcher(), **_LOAD_IMAGES}),
+        "5",
+        {"total": 0, "atLeast": False, "error": None,
+         "breakdown": "nothing to run (image input is empty/blocked)"},
+    ),
+    (
+        # Emit All grid with an empty buffer: an all-off switcher on its
+        # `image` is "nothing wired" -> the blocked floor (0, atLeast).
+        "emit_all_grid_with_all_off_image_counts_as_unwired",
+        _two_text_multiplier(
+            {"image": _link("31")},
+            {
+                "31": {"classType": "EPSImageGrid", "widgets": {"mode": "Emit All"},
+                       "inputs": {"image": _link("sw")}, "imageGridCount": 0},
+                "sw": _all_off_image_switcher(),
+            },
+        ),
+        "5",
+        {"total": 0, "pairs": 0},
+    ),
+    (
+        # Chained (backend parity 2026-11-05): the inner multiplier's image
+        # comes from an all-off switcher -- run() EXEMPTS that from the
+        # v0.51.0 miswire guard (a deliberate "no images this run"), so no
+        # error; its image output carries only per-run blockers, so the
+        # outer multiplier consuming it is KNOWN-ZERO and named.
+        "chained_inner_image_all_off_consumed_image_output_is_known_zero",
+        {
+            "nodes": {
+                **_two_text_multiplier({"image": _link("sw")},
+                                       {"sw": _all_off_image_switcher()})["nodes"],
+                "6": {
+                    "classType": "EPSCrossSweep",
+                    "widgets": {"pair_mode": "multiply", "sweep_mode": "multiply"},
+                    "inputs": {"image": _link("5", 2), "text": _link("30", 0)},
+                },
+            }
+        },
+        "6",
+        {"total": 0, "atLeast": False, "error": None,
+         "breakdown": "nothing to run (image input is empty/blocked)"},
+    ),
+    (
+        # The inner multiplier itself still runs text-only (2 runs) -- the
+        # exemption never collapses the node that owns the all-off input.
+        "chained_inner_with_all_off_image_still_counts_text_only_itself",
+        {
+            "nodes": {
+                **_two_text_multiplier({"image": _link("sw")},
+                                       {"sw": _all_off_image_switcher()})["nodes"],
+                "6": {
+                    "classType": "EPSCrossSweep",
+                    "widgets": {"pair_mode": "multiply", "sweep_mode": "multiply"},
+                    "inputs": {"image": _link("5", 2), "text": _link("30", 0)},
+                },
+            }
+        },
+        "5",
+        {**_TEXT_ONLY_TWO, "breakdown": "1 sweep step × 2 pairs"},
+    ),
+    (
+        # Same exemption for model: an empty-selection Checkpoint Switcher
+        # on the inner's model, its model output consumed -> known-zero.
+        "chained_inner_model_from_empty_checkpoint_output_is_known_zero",
+        {
+            "nodes": {
+                **_two_text_multiplier({"model": _link("20", 0)},
+                                       {"20": _checkpoint_switcher([])})["nodes"],
+                "6": {
+                    "classType": "EPSCrossSweep",
+                    "widgets": {"pair_mode": "multiply", "sweep_mode": "multiply"},
+                    "inputs": {"model": _link("5", 0), "text": _link("30", 0)},
+                },
+            }
+        },
+        "6",
+        {"total": 0, "atLeast": False, "error": None,
+         "breakdown": "nothing to run (model input is empty/blocked)"},
+    ),
+    (
+        # A genuinely UNWIRED inner image with its output consumed keeps the
+        # v0.51.0 dead-output error.
+        "chained_inner_image_unwired_consumed_image_output_is_still_dead",
+        {
+            "nodes": {
+                **_two_text_multiplier({}, {})["nodes"],
+                "6": {
+                    "classType": "EPSCrossSweep",
+                    "widgets": {"pair_mode": "multiply", "sweep_mode": "multiply"},
+                    "inputs": {"image": _link("5", 2), "text": _link("30", 0)},
+                },
+            }
+        },
+        "6",
+        {"error_contains": ["chained", "image output is consumed", "image input is not wired"]},
+    ),
+]
+
+ESTIMATE_CASES += ALL_OFF_CASES
+
 PROBE_JS = """
 import * as m from './extensions/comfyui-epsnodes/eps_image/cross_sweep.js'
 
@@ -1933,6 +2277,7 @@ const out = {
     eventName: m.EVENT_NAME
   },
   estimates: cases.map(([snapshot, nodeId]) => m.estimateRuns(snapshot, nodeId)),
+  estimateReadouts: cases.map(([snapshot, nodeId]) => m.formatReadout(m.estimateRuns(snapshot, nodeId))),
   readouts: %(readout_inputs)s.map((est) => m.formatReadout(est)),
   iteratorValues: [
     m.iteratorValueCount(0, 1, 0.1),
@@ -2101,6 +2446,37 @@ def test_estimate_runs_case_table(cross_sweep_api: dict) -> None:
                 assert got[key] == want, f"{name}: {key} -> {got!r}, wanted {expected!r}"
 
 
+def test_all_off_readout_says_nothing_about_the_absent_input(cross_sweep_api: dict) -> None:
+    """2026-11-05: an all-off switcher on a LAZY input is simply not an axis --
+    the readout is byte-identical to the one for that input unwired, and
+    never names it as empty/blocked."""
+    names = [name for name, *_ in ESTIMATE_CASES]
+    readouts = dict(zip(names, cross_sweep_api["estimateReadouts"], strict=True))
+    for name in (
+        "all_off_image_switcher_on_image_reads_as_unwired_text_only",
+        "all_off_switcher_images_and_masks_both_read_as_unwired",
+        "empty_checkpoint_switcher_on_model_clip_vae_reads_as_unwired",
+        "all_off_model_switcher_on_model_reads_as_no_sweep",
+    ):
+        assert readouts[name] == {"text": "Runs: 2 — 1 sweep step × 2 pairs", "cls": ""}, name
+
+
+def test_all_off_marker_is_set_once_and_read_only_by_lazy_consumers(source: str) -> None:
+    """The `allOff` marker is born in ONE place (sourceCount's statically-
+    empty check, before every branch) and is consumed ONLY through the
+    lazy helpers -- the non-lazy members keep the plain collapse."""
+    assert source.count("srcId: id, allOff: true }") == 1
+    assert "return src?.allOff ? null : src" in source
+    assert (
+        "export const MULTIPLIER_LAZY_INPUTS = new Set(['model', 'model_low', 'clip', 'vae', "
+        "'image', 'mask'])" in source
+    )
+    body = _function_body(source, "sourceCount(snapshot, link, path)")
+    assert body.index("sourceIsStaticallyEmpty(snapshot, node)") < body.index(
+        "const prefix = SWITCHER_PREFIXES[type]"
+    )
+
+
 def test_estimator_never_hangs_on_a_cycle(cross_sweep_api: dict) -> None:
     """The probe FINISHING is itself the cycle-guard proof (two multipliers
     feeding each other would otherwise recurse forever); the degraded
@@ -2196,8 +2572,10 @@ def test_resolution_branch_is_mapped_not_flattened(source: str) -> None:
     assert "mapLen = Math.max(mapLen, inner.count)" in branch
     assert "Math.max(1, resolutionPresetCount(node.widgets?.presets))" in branch
     # v0.101.0: the scale mode short-circuits the preset factor to 1.
+    # 2026-11-05: scale mode reads only the inputs that survived the lazy
+    # skip (an all-off switcher on `image` is unwired -> presets fan out).
     assert (
-        "const scaleMode = resolutionScaleModeActive(node.widgets?.scale_multiplier, node.inputs)"
+        "const scaleMode = resolutionScaleModeActive(node.widgets?.scale_multiplier, liveInputs)"
         in branch
     )
     assert "const presets = scaleMode ? 1 : Math.max(1, resolutionPresetCount(" in branch
@@ -2523,7 +2901,7 @@ def test_mask_is_a_consumed_member_welded_to_image_in_the_estimator(source: str)
     and the Image Switcher's slot 1 reads as known-blocked while
     `pass_masks` is off, mirroring the backend's one-blocker output."""
     assert "9: 'mask'" in source
-    assert "const maskSrc = sourceCount(snapshot, inputs.mask ?? null, path)" in source
+    assert "const maskSrc = countMember('mask')" in source
     assert "if (maskSrc?.atLeast) unknowns.add('mask')" in source
     assert "mask: maskSrc" in source
     assert "Boolean(maskSrc?.atLeast)" in source

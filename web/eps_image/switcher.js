@@ -223,6 +223,28 @@
  * rename, no column entry of their own -- the row's one toggle governs
  * the pair, backend and frontend alike.
  *
+ * **All-off looks unplugged (owner report 2026-11-05: "if all of the
+ * toggles are off it should look like nothing is connected").** While every
+ * WIRED row is toggled off -- or nothing is wired at all -- the switcher
+ * emits only an `ExecutionBlocker` (FORMAT.md §6.4), and the pack's lazy
+ * consumers (Run Multiplier, Resolution, Image Grid) now treat it exactly
+ * like an unwired input. Every link on every OUTPUT (`images`/`models`/
+ * `clips`/`vaes`, plus the `masks`/`models_low` tails) is then drawn in
+ * §6.6 "Collect only"'s dim grey via the shared `owned_link_colour.js`
+ * hook -- WITHOUT unplugging anything, and restored to its exact prior
+ * colour the instant one row comes back on. `reconcileLinkDimming` is a
+ * BY-HAND copy of image_grid.js's/save_image.js's (owner tag
+ * `LINK_COLOR_OWNER_SWITCHER`, the shared `__epsLinkColorOwner` key, a
+ * WeakMap stash of the exact prior colour, a per-node tracked Set, the
+ * target's `__epsResyncLinkColors` called once on release, a link another
+ * owner has claimed left alone). State is always DERIVED from `toggles` +
+ * the wiring (`link.color` is never serialized), re-derived on a row
+ * click, the header toggle-all, the `toggles` widget's own callback (a
+ * Universal State Apply), every `onConnectionsChange` (input or output),
+ * `onConfigure` (load/undo/redo/paste/tab switch), and `onRemoved` (force
+ * undim). Not dimmed while `toggles` arrives over a wire (not statically
+ * knowable -- the backend's own rule). No toast.
+ *
  * **0.28.1 caveat**: this file was built and live-verified against the dev
  * rig's ComfyUI 0.28.0 / `comfyui-frontend-package` 1.45.21. Every litegraph
  * API used above is checked against that fork's TS source directly (see
@@ -236,6 +258,7 @@
  */
 
 import { app } from '../../../scripts/app.js'
+import { ensureOwnedLinkColourHook } from './owned_link_colour.js'
 
 const PREFIX = '[eps_image:switcher]'
 
@@ -1321,6 +1344,7 @@ function handleRowToggleClick(node, localPos) {
   for (const rect of rects) {
     if (x >= rect.x && x <= rect.x + rect.w && y >= rect.y && y <= rect.y + rect.h) {
       toggleRowEnabled(node, rect.name)
+      syncLinkDimming(node, 'row click')
       node.graph?.setDirtyCanvas(true, true)
       return true
     }
@@ -1415,6 +1439,7 @@ function addHeaderWidget(node) {
       const type = event && event.type
       if (typeof type !== 'string' || !type.endsWith('down')) return false
       toggleAllRows(mouseNode)
+      syncLinkDimming(mouseNode, 'toggle all')
       mouseNode.graph?.setDirtyCanvas(true, true)
       return true
     }
@@ -1578,6 +1603,225 @@ function wireRowRename(node) {
 }
 
 // ---------------------------------------------------------------------------
+// All-off -> dim every outgoing wire (file header "All-off looks
+// unplugged"). image_grid.js's "Collect only" link dimming, copied BY HAND
+// (docs/ROADMAP-shared-panel-code.md: helpers are duplicated per file; grep
+// every sibling before calling one fixed). The cross-file convention is
+// distributor.js's: a link this file dims carries `LINK_COLOR_OWNER_KEY`,
+// so image_grid.js, distributor.js, bypass.js and save_image.js leave its
+// `.color` alone while it is claimed, and the TARGET node's optional
+// `LINK_COLOR_RESYNC_HOOK` is called once on release. `link.color` is never
+// serialized (image_grid.js's finding against the frontend source maps), so
+// every load/undo/paste hands out undimmed links and this state is ALWAYS
+// DERIVED, never stored.
+// ---------------------------------------------------------------------------
+
+/** image_grid.js's dim grey -- the same "not really there" look. */
+const DIM_LINK_COLOR = 'rgba(128,128,128,0.25)'
+const LINK_COLOR_OWNER_KEY = '__epsLinkColorOwner'
+export const LINK_COLOR_OWNER_SWITCHER = 'EPSSwitcher:all-off'
+const LINK_COLOR_RESYNC_HOOK = '__epsResyncLinkColors'
+
+/** Per-link stash of the pre-dim colour, keyed by the LLink object itself
+ * (its identity is its lifetime); `{color}` so a stashed `undefined` -- the
+ * usual case -- is distinguishable from "never stashed". */
+const dimStash = new WeakMap()
+
+/** Same lookup as image_grid.js / save_image.js (own copy, by convention). */
+function linkById(graph, linkId) {
+  if (linkId == null || !graph) return null
+  return graph.links?.[linkId] ?? graph.links?.get?.(linkId) ?? null
+}
+
+/** Whether the `toggles` widget's OWN input socket is wired (frontend 1.5x
+ * gives every widget one) -- then the enabled set is only known at run
+ * time, exactly the backend's `_switcher_is_statically_all_off` "a toggles
+ * arriving as a LINK is not statically knowable", so nothing is dimmed. */
+function isTogglesInputWired(node) {
+  return (node.inputs || []).some(
+    (inp) =>
+      inp &&
+      (inp.widget?.name === TOGGLES_WIDGET_NAME || inp.name === TOGGLES_WIDGET_NAME) &&
+      inp.link != null
+  )
+}
+
+/**
+ * The pure "does this switcher emit nothing?" decision the dim follows --
+ * the live-graph twin of nodes_switcher.py `_switcher_is_statically_all_off`
+ * (and cross_sweep.js's `switcherIsStaticallyAllOff`): every WIRED
+ * `<prefix>_N` row literally toggled off, or no row wired at all
+ * (`allRowsState` false covers both); never while `toggles` itself is
+ * wired. Row partners (`mask_N`, `model_N_low`) are not rows and never
+ * count. Exported for tests.
+ * @param {object} node @returns {boolean}
+ */
+export function isSwitcherAllOff(node) {
+  if (!node || !switcherSpecOf(node)) return false
+  if (isTogglesInputWired(node)) return false
+  return allRowsState(node) === false
+}
+
+/** Every link id on EVERY output of *node* (the main output and any tail --
+ * `masks`/`models_low` are blocked too when nothing is on). A missing/
+ * malformed `.links` contributes nothing. Exported for tests. */
+export function outputLinkIds(node) {
+  const ids = []
+  for (const output of node.outputs || []) {
+    const links = output?.links
+    if (!Array.isArray(links)) continue
+    for (const id of links) if (id !== null && id !== undefined) ids.push(id)
+  }
+  return ids
+}
+
+/**
+ * Dims or restores every output link to match the CURRENT all-off state
+ * (`isSwitcherAllOff`) -- always derived (FORMAT.md §7.9's rebuild law), so
+ * it is called from every place that can change the toggles or the wiring
+ * (file header). Reconciles against `node.__epsSwitcherDimmedLinkIds` (a
+ * per-instance Set; a rebuild hands the node a fresh one, which is right):
+ * anything tracked that should no longer be dimmed gets its stashed colour
+ * back EXACTLY, its owner tag cleared and its target's resync hook called
+ * once; anything newly desired that nobody owns is stashed, dimmed and
+ * tagged. A link another owner has claimed is left alone (and retried next
+ * time). Change-gated repaint; never unplugs anything. Exported for tests.
+ */
+export function reconcileLinkDimming(node, { forceUndim = false } = {}) {
+  if (!node) return
+  const shouldDim = !forceUndim && isSwitcherAllOff(node)
+  const graph = node.graph
+  const tracked = node.__epsSwitcherDimmedLinkIds || (node.__epsSwitcherDimmedLinkIds = new Set())
+  const desired = shouldDim ? new Set(outputLinkIds(node)) : new Set()
+  let changed = false
+
+  // Restore anything tracked that should no longer be dimmed.
+  for (const id of tracked) {
+    if (desired.has(id)) continue
+    const link = linkById(graph, id)
+    if (link && link[LINK_COLOR_OWNER_KEY] === LINK_COLOR_OWNER_SWITCHER) {
+      const stash = dimStash.get(link)
+      link.color = stash ? stash.color : undefined
+      delete link[LINK_COLOR_OWNER_KEY]
+      dimStash.delete(link)
+      changed = true
+      try {
+        const target = graph?.getNodeById?.(link.target_id)
+        const resync = target?.[LINK_COLOR_RESYNC_HOOK]
+        if (typeof resync === 'function') resync()
+      } catch (error) {
+        console.warn(PREFIX, 'link colour resync hook failed', error)
+      }
+    }
+    tracked.delete(id)
+  }
+
+  // Frontend 1.52.7 ignores `link.color` on a plain link; this hook makes
+  // it draw a link we've claimed in our colour (owned_link_colour.js).
+  if (desired.size) ensureOwnedLinkColourHook()
+
+  // Dim anything newly desired that nobody else owns.
+  for (const id of desired) {
+    const link = linkById(graph, id)
+    if (!link) continue
+    const owner = link[LINK_COLOR_OWNER_KEY]
+    if (owner && owner !== LINK_COLOR_OWNER_SWITCHER) continue
+    if (!owner) {
+      dimStash.set(link, { color: link.color })
+      link.color = DIM_LINK_COLOR
+      link[LINK_COLOR_OWNER_KEY] = LINK_COLOR_OWNER_SWITCHER
+      changed = true
+    }
+    tracked.add(id)
+  }
+
+  if (changed) graph?.setDirtyCanvas?.(true, true)
+}
+
+/** `reconcileLinkDimming` behind this file's never-throw posture, for the
+ * click/header call sites. */
+function syncLinkDimming(node, where) {
+  try {
+    reconcileLinkDimming(node)
+  } catch (error) {
+    console.warn(PREFIX, `link dim sync (${where}) failed`, error)
+  }
+}
+
+/**
+ * Chains the hidden `toggles` widget's callback (never replaces it) -- a
+ * Universal State Apply writes the value and calls
+ * `widget.callback?.(v, canvas, node)`, which a row click never does.
+ * Guarded on the WIDGET, like image_grid.js's `installModeDimSync`.
+ */
+function installTogglesDimSync(node) {
+  const widget = getTogglesWidget(node)
+  if (!widget || widget.__epsSwitcherDimSyncInstalled) return
+  widget.__epsSwitcherDimSyncInstalled = true
+  const originalCallback = widget.callback
+  widget.callback = function (...args) {
+    const result =
+      typeof originalCallback === 'function' ? originalCallback.apply(this, args) : undefined
+    syncLinkDimming(node, 'toggles callback')
+    return result
+  }
+}
+
+/**
+ * Chains `onConnectionsChange` (never replaces): a wire landing on or
+ * leaving ANY input or output. Cheap and idempotent, so it runs on every
+ * call unfiltered -- including configure()'s restore loop, where it is
+ * merely premature (the `onConfigure` wrap settles it once the toggles are
+ * restored).
+ */
+function installLinkDimConnectionsSync(node) {
+  if (node.__epsSwitcherLinkDimConnectionsWrapped) return
+  node.__epsSwitcherLinkDimConnectionsWrapped = true
+  const original = node.onConnectionsChange
+  node.onConnectionsChange = function (...args) {
+    const result = typeof original === 'function' ? original.apply(this, args) : undefined
+    syncLinkDimming(this, 'onConnectionsChange')
+    return result
+  }
+}
+
+/**
+ * Chains `onConfigure` (never replaces): it fires at the very end of
+ * `LGraphNode.configure()` -- load, undo/redo, paste, tab switch -- with the
+ * `toggles` widget already restored, so the dim is re-derived from the
+ * final state (a fresh `LLink` is never dimmed on its own).
+ */
+function installLinkDimConfigureSync(node) {
+  if (node.__epsSwitcherLinkDimConfigureWrapped) return
+  node.__epsSwitcherLinkDimConfigureWrapped = true
+  const original = node.onConfigure
+  node.onConfigure = function (...args) {
+    const result = typeof original === 'function' ? original.apply(this, args) : undefined
+    syncLinkDimming(this, 'onConfigure')
+    return result
+  }
+}
+
+/**
+ * Chains `onRemoved` (never replaces): restore anything still dimmed before
+ * the node goes. Belt-and-suspenders -- removal disconnects the links
+ * anyway -- but a tagged link must never outlive the node that dimmed it.
+ */
+function installLinkDimCleanup(node) {
+  if (node.__epsSwitcherLinkDimCleanupWrapped) return
+  node.__epsSwitcherLinkDimCleanupWrapped = true
+  const original = node.onRemoved
+  node.onRemoved = function (...args) {
+    try {
+      reconcileLinkDimming(this, { forceUndim: true })
+    } catch (error) {
+      console.warn(PREFIX, 'link dim cleanup (onRemoved) failed', error)
+    }
+    return typeof original === 'function' ? original.apply(this, args) : undefined
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Node width floor (keeps the per-row toggle box clear of both the input
 // label hit-region and the single `images` output's hit-region -- see file
 // header point 2)
@@ -1632,6 +1876,11 @@ export function attach(node) {
     wireRowToggleClicks(node)
     addHeaderWidget(node)
     wireRowRename(node)
+    installTogglesDimSync(node) // all-off: dim/restore the outgoing wires
+    installLinkDimConnectionsSync(node)
+    installLinkDimConfigureSync(node)
+    installLinkDimCleanup(node)
+    reconcileLinkDimming(node)
   } catch (error) {
     console.warn(PREFIX, 'attach failed', error)
   }

@@ -1122,3 +1122,98 @@ class TestMaskWeldedToImage:
         outputs = EPSCrossSweep().run(image=[], mask=["m"], text=["t"])
         assert len(outputs) == 10
         assert isinstance(outputs[9][0], fake_execution_blocker)
+
+
+# ------------------------------------------------ lazy sweep members (2026-11-05)
+class TestLazySweepMembersSkipAnAllOffSwitcher:
+    """An all-off switcher used to hand this node a blocker and core skipped
+    the whole node, text sweep included. The six switcher-feedable inputs are
+    lazy now and a slot fed by a provably-empty switcher is never requested,
+    so the node runs exactly as with that input unwired."""
+
+    def test_the_six_switcher_feedable_inputs_are_lazy_and_nothing_else_is(self) -> None:
+        from eps_image.nodes_cross_sweep import EPSCrossSweep
+
+        optional = EPSCrossSweep.INPUT_TYPES()["optional"]
+        lazy = {name for name, spec in optional.items() if spec[1].get("lazy")}
+        assert lazy == {"model", "model_low", "clip", "vae", "image", "mask"}
+        assert lazy == set(EPSCrossSweep.LAZY_SWEEP_INPUTS)
+        assert EPSCrossSweep.INPUT_TYPES()["hidden"] == {"prompt": "PROMPT", "unique_id": "UNIQUE_ID"}
+
+    def test_check_lazy_status_requests_wired_members_except_all_off_feeds(self) -> None:
+        from eps_image.nodes_cross_sweep import EPSCrossSweep
+
+        prompt = {
+            "3": {"class_type": "EPSSwitcher", "inputs": {"image_1": ["1", 0], "toggles": '{"image_1": false}'}},
+            "9": {"class_type": "EPSModelSwitcher", "inputs": {"model_1": ["8", 0], "toggles": "{}"}},
+            "7": {"class_type": "EPSCrossSweep", "inputs": {"image": ["3", 0], "model": ["9", 0], "text": "x"}},
+        }
+        node = EPSCrossSweep()
+        # INPUT_IS_LIST: hidden inputs arrive list-wrapped, exactly like run()'s.
+        assert node.check_lazy_status(prompt=[prompt], unique_id=["7"]) == ["model"]
+        # Nothing provably empty -> every wired member is requested.
+        prompt["3"]["inputs"]["toggles"] = "{}"
+        assert node.check_lazy_status(prompt=[prompt], unique_id=["7"]) == ["model", "image"]
+        # No prompt at all (an API caller's stripped context): request everything, core trims.
+        assert node.check_lazy_status() == list(EPSCrossSweep.LAZY_SWEEP_INPUTS)
+
+    def test_an_unrequested_image_runs_the_text_only_sweep(self, fake_execution_blocker) -> None:
+        # The lazy skip leaves `image` absent from run()'s kwargs -- the
+        # pre-existing text-only path, pinned here so the two stay coupled.
+        result = run(image=None, text=["a", "b"])
+        assert sorted(set(result[3])) == ["a", "b"]  # texts flow; two sweep steps x two texts
+        assert len(result[3]) == 4
+
+    def test_a_consumed_image_output_is_not_a_miswire_when_the_image_is_all_off(
+        self, fake_execution_blocker
+    ) -> None:
+        """The v0.51.0 guard fails the queue when the image OUTPUT is consumed
+        with no image INPUT wired. Wired to an all-off switcher is the user's
+        own choice, not a miswire: no error, and the image output carries its
+        per-run blockers like the unwired path."""
+        prompt = {
+            "3": {"class_type": "EPSSwitcher", "inputs": {"image_1": ["1", 0], "toggles": '{"image_1": false}'}},
+            "7": {"class_type": "EPSCrossSweep", "inputs": {"image": ["3", 0], "text": "x"}},
+            "8": {"class_type": "VAEEncode", "inputs": {"pixels": ["7", 2]}},  # consumes the image output
+        }
+        result = run(
+            image=None, text=["a"], model=None, clip=None, label=None,
+            prompt=[prompt], unique_id=["7"],
+        )
+        assert result[3] == ["a"]
+        assert all(isinstance(x, fake_execution_blocker) for x in result[2])
+        # ...and the SAME graph with the image genuinely unwired still fails loudly.
+        prompt["7"]["inputs"].pop("image")
+        with pytest.raises(ValueError, match="image"):
+            run(image=None, text=["a"], model=None, clip=None, label=None, prompt=[prompt], unique_id=["7"])
+
+    def test_cores_missing_placeholder_for_a_skipped_member_reads_as_unwired(
+        self, fake_execution_blocker
+    ) -> None:
+        """Core hands a never-requested lazy input to an INPUT_IS_LIST node as
+        `(None,)` (get_input_data's mark_missing), not bare None. For a member
+        this node skipped it must mean unwired: text-only pairs, not
+        "1 image, None" -> 0 pairs (rig-caught)."""
+        prompt = {
+            "3": {
+                "class_type": "EPSSwitcher",
+                "inputs": {"image_1": ["1", 0], "toggles": '{"image_1": false}', "pass_masks": True},
+            },
+            "7": {"class_type": "EPSCrossSweep", "inputs": {"image": ["3", 0], "mask": ["3", 1], "text": "x"}},
+        }
+        result = run(
+            image=(None,), mask=(None,), text=["a", "b"], model=None, clip=None, label=None,
+            pair_mode="multiply", prompt=[prompt], unique_id=["7"],
+        )
+        assert result[3] == ["a", "b"]
+        assert all(isinstance(x, fake_execution_blocker) for x in result[2])
+        # The same placeholder for a member the prompt did NOT skip is a real
+        # (if odd) upstream list and is not reinterpreted: here `mask` is wired
+        # to something that is not a switcher, so it stays a wired mask and
+        # the image/mask weld check sees it.
+        prompt["7"]["inputs"]["mask"] = ["9", 0]
+        with pytest.raises(ValueError, match="mask"):
+            run(
+                image=(None,), mask=(None,), text=["a", "b"], model=None, clip=None, label=None,
+                pair_mode="multiply", prompt=[prompt], unique_id=["7"],
+            )

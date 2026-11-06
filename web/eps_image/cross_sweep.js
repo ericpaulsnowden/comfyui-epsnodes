@@ -95,6 +95,32 @@
  * matching INPUT is unwired is a queue-time ValueError on the inner node
  * (nodes_cross_sweep.py `_consumed_output_slots` + its dead_outputs
  * block), painted on THIS consumer's readout.
+ *
+ * **ALL-OFF READS AS UNWIRED (owner report 2026-11-05: "if all of the
+ * toggles are off it should look like nothing is connected").** The
+ * backend made three consumers' switcher-feedable inputs LAZY, with a
+ * `check_lazy_status` that never requests a slot whose DIRECT
+ * post-reroute upstream is STATICALLY empty -- an EPS Image/Model/CLIP/
+ * VAE switcher with every wired row toggled off (or nothing wired), or a
+ * Checkpoint Switcher whose literal `selection` names nothing
+ * (`sourceIsStaticallyEmpty`). Those inputs are the multiplier's six
+ * `MULTIPLIER_LAZY_INPUTS` (model, model_low, clip, vae, image, mask),
+ * EPS Resolution's `image`/`image_2..8`, and EPS Image Grid's `image`.
+ * `sourceCount` marks such a source's zero with `allOff: true`, and
+ * exactly those consumer inputs read it through `lazySourceCount` /
+ * `lazyInputWired` as UNWIRED: the multiplier drops that axis (an all-off
+ * image switcher = text-only pairs, nothing about the image in the
+ * readout), Resolution counts "no image" (1 x presets, scale mode off),
+ * the Grid behaves as with nothing wired. A CHAINED multiplier's output
+ * whose lazy backing input is all-off-fed is EXEMPT from the v0.51.0
+ * dead-output error (run() treats it as a deliberate "nothing this run"):
+ * it carries only per-run blockers, so its consumer is KNOWN-ZERO, no
+ * paint; a genuinely unwired backing input keeps the error. EVERY OTHER known-zero -- a
+ * Collect-only Grid, a nested-empty switcher, an empty Notebook (an
+ * error), a blocked loader -- and every NON-lazy input (label, text,
+ * name, core consumers) still collapses exactly as above. The marker
+ * never propagates past the node that earned it (every recursing branch
+ * builds a fresh result).
  */
 
 import { api } from '../../../scripts/api.js'
@@ -569,6 +595,75 @@ function switcherIsStaticallyAllOff(snapshot, node) {
   return true
 }
 
+/**
+ * The CONSUMER-side lazy skip (owner report 2026-11-05: "if all of the
+ * toggles are off it should look like nothing is connected"): true when
+ * *node* is a source the backend's consumers recognise as PROVABLY empty
+ * and therefore never request -- one of the four EPS switchers that is
+ * statically all-off (`switcherIsStaticallyAllOff`), or an EPS Checkpoint
+ * Switcher whose `selection` is a literal widget value naming nothing
+ * (`checkpointSelectionCount` 0 -- nodes_checkpoint_switcher.py
+ * `_parse_selection` empty; a `selection` arriving as a LINK, or as
+ * anything but a string, is not statically knowable and stays false).
+ * A selection naming only files that have since VANISHED is still a
+ * runtime blocker, but not a static fact -- the backend cannot see it
+ * either, so it is not this shape.
+ * @param {{nodes: object}} snapshot
+ * @param {{classType: string, widgets?: object, inputs?: object}|null} node
+ * @returns {boolean}
+ */
+function sourceIsStaticallyEmpty(snapshot, node) {
+  if (!node) return false
+  if (SWITCHER_PREFIXES[node.classType]) return switcherIsStaticallyAllOff(snapshot, node)
+  if (node.classType === 'EPSCheckpointSwitcher') {
+    if (node.inputs?.selection) return false // wired, not a literal widget value
+    const raw = node.widgets?.selection
+    if (raw !== undefined && raw !== null && typeof raw !== 'string') return false
+    return checkpointSelectionCount(raw) === 0
+  }
+  return false
+}
+
+/** The six Run Multiplier inputs the backend declares LAZY (§6.10,
+ * nodes_cross_sweep.py `check_lazy_status`): a slot whose DIRECT
+ * post-reroute upstream is statically empty (`sourceIsStaticallyEmpty`)
+ * is never requested, so the multiplier runs exactly as if that input
+ * were UNWIRED. `label`, `text` and `name` are NOT lazy -- an empty source
+ * there still blocks the node outright (zero-collapse). */
+export const MULTIPLIER_LAZY_INPUTS = new Set(['model', 'model_low', 'clip', 'vae', 'image', 'mask'])
+
+/** EPS Resolution's lazy inputs (§6.5): `image` and `image_2`..`image_8`. */
+function isResolutionImageInput(name) {
+  return name === 'image' || /^image_[2-8]$/.test(name)
+}
+
+/**
+ * Whether a LAZY input carrying *link* is effectively wired: a link
+ * present, a reroute chain that does not dead-end, and a direct upstream
+ * that is NOT statically empty (`sourceIsStaticallyEmpty` -- the consumer
+ * never requests that upstream, so the backend sees `None`, exactly as
+ * for an unwired input).
+ * @param {{nodes: object}} snapshot @param {object|null|undefined} link
+ * @returns {boolean}
+ */
+function lazyInputWired(snapshot, link) {
+  if (!link) return false
+  const resolved = resolveSource(snapshot, link)
+  if (!resolved) return false
+  return !sourceIsStaticallyEmpty(snapshot, resolved.node)
+}
+
+/**
+ * `sourceCount` for a LAZY consumer input: a source marked `allOff` (the
+ * statically-empty upstream the consumer never requests) reads as UNWIRED
+ * (null); every OTHER known-zero result comes back untouched and still
+ * collapses its consumer exactly as before.
+ */
+function lazySourceCount(snapshot, link, path) {
+  const src = sourceCount(snapshot, link, path)
+  return src?.allOff ? null : src
+}
+
 /** Chained-multiplier OUTPUT slot -> the INPUT that must be wired for that
  * output to carry values, positionally off nodes_cross_sweep.py's
  * RETURN_NAMES ('model','clip','image','text','save_prefix','label','vae',
@@ -626,6 +721,19 @@ function sourceCount(snapshot, link, path) {
   if (!resolved) return null
   const { id, node } = resolved
   if (!node) return { count: 1, atLeast: true, srcId: id }
+
+  // A STATICALLY empty source -- an all-off switcher, an empty-selection
+  // Checkpoint Switcher -- is the known-blocked shape `{count: 0, atLeast:
+  // false}` like before, plus the `allOff` marker: the backend's LAZY
+  // consumers (the multiplier's six `MULTIPLIER_LAZY_INPUTS`, Resolution's
+  // image inputs, the Image Grid's image) never request such a slot and
+  // run as if it were unwired, so `lazySourceCount` turns this result into
+  // null for them. Every non-lazy consumer still sees the plain zero and
+  // collapses. The marker never propagates: every recursing branch below
+  // builds a fresh result object.
+  if (sourceIsStaticallyEmpty(snapshot, node)) {
+    return { count: 0, atLeast: false, srcId: id, allOff: true }
+  }
 
   const type = node.classType
   const prefix = SWITCHER_PREFIXES[type]
@@ -778,7 +886,8 @@ function sourceCount(snapshot, link, path) {
       // `focus` -- so exactly 1, no floor. The one exception is the same
       // client-side echo as below: an empty buffer with nothing wired
       // blocks, and it stays a floor because the echo can lag.
-      if (node.imageGridCount === 0 && !node.inputs?.image) {
+      // The Grid's `image` input is LAZY: an all-off upstream is unwired.
+      if (node.imageGridCount === 0 && !lazyInputWired(snapshot, node.inputs?.image ?? null)) {
         return { count: 0, atLeast: true, srcId: id }
       }
       return { count: 1, atLeast: false, srcId: id }
@@ -872,9 +981,22 @@ function sourceCount(snapshot, link, path) {
     // property, no recursion involved.
     const backing = DEAD_OUTPUT_INPUTS[resolved.slot]
     let deadOutputError = null
+    // 2026-11-05 backend parity: a LAZY backing input fed DIRECTLY by a
+    // statically-empty source (all-off switcher, empty-selection
+    // Checkpoint Switcher) is the user's deliberate "nothing this run",
+    // which run() EXEMPTS from the v0.51.0 miswire guard: no error, and
+    // the consumed output just emits its per-run blockers -- so THIS
+    // consumer is KNOWN-ZERO. A genuinely unwired lazy input keeps the
+    // error below.
+    let allOffBacking = false
     if (backing !== undefined) {
       const backingLink = node.inputs?.[backing] ?? null
-      if (!backingLink || !resolveSource(snapshot, backingLink)) {
+      const backingResolved = backingLink ? resolveSource(snapshot, backingLink) : null
+      allOffBacking =
+        MULTIPLIER_LAZY_INPUTS.has(backing) &&
+        Boolean(backingResolved) &&
+        sourceIsStaticallyEmpty(snapshot, backingResolved.node)
+      if (!backingResolved) {
         deadOutputError =
           `chained ${NODE_TITLE}: its ${backing} output is consumed but its ` +
           `${backing} input is not wired, so every run on that wire would be ` +
@@ -887,11 +1009,20 @@ function sourceCount(snapshot, link, path) {
     // time is equally unknowable from here (it paints its own readout
     // red).
     if (path.has(id)) {
+      if (allOffBacking) return { count: 0, atLeast: false, srcId: id }
       return deadOutputError
         ? { count: 1, atLeast: true, srcId: id, error: deadOutputError }
         : { count: 1, atLeast: true, srcId: id }
     }
     const est = estimateInner(snapshot, id, new Set([...path, id]))
+    // An inner that will itself ERROR at queue time stays unknowable from
+    // here (it paints its own readout red); otherwise the all-off-fed
+    // output carries only blockers, whatever the inner's own total.
+    if (allOffBacking) {
+      return est.error
+        ? { count: 1, atLeast: true, srcId: id }
+        : { count: 0, atLeast: false, srcId: id }
+    }
     // A KNOWN-blocked inner never runs, so its v0.51.0 ValueError never
     // raises and the real queue SUCCEEDS with 0 runs -- zero-collapse
     // outranks the dead-output fail paint, the same suppress-lying-
@@ -938,19 +1069,24 @@ function sourceCount(snapshot, link, path) {
     // image wired blocks the consumer outright -- the known-zero family.
     const slot = resolved.slot ?? 0
     const backing = slot <= 1 ? 'image' : slot >= 6 ? `image_${slot - 4}` : null
-    if (backing) {
-      const backingLink = node.inputs?.[backing] ?? null
-      if (!backingLink || !resolveSource(snapshot, backingLink)) {
-        return { count: 0, atLeast: false, srcId: id }
-      }
+    // The image inputs are LAZY: one fed by a statically-empty source (an
+    // all-off switcher) is never requested and reads as unwired -- so its
+    // resized output is the same per-run blocker as with nothing wired.
+    if (backing && !lazyInputWired(snapshot, node.inputs?.[backing] ?? null)) {
+      return { count: 0, atLeast: false, srcId: id }
     }
     if (path.has(id)) return { count: 1, atLeast: true, srcId: id }
     const sub = new Set([...path, id])
     let mapLen = 1
     let atLeast = false
-    for (const inputLink of Object.values(node.inputs || {})) {
-      const inner = sourceCount(snapshot, inputLink ?? null, sub)
+    const liveInputs = {}
+    for (const [inputName, inputLink] of Object.entries(node.inputs || {})) {
+      const lazy = isResolutionImageInput(inputName)
+      const inner = lazy
+        ? lazySourceCount(snapshot, inputLink ?? null, sub)
+        : sourceCount(snapshot, inputLink ?? null, sub)
       if (!inner) continue
+      liveInputs[inputName] = inputLink
       if (inner.error) return { count: 1, atLeast: true, srcId: id, error: inner.error }
       if (inner.count === 0 && !inner.atLeast) return { count: 0, atLeast: false, srcId: id }
       mapLen = Math.max(mapLen, inner.count)
@@ -958,7 +1094,9 @@ function sourceCount(snapshot, link, path) {
     }
     // v0.101.0: in scale mode (multiplier > 0 + an image wired) the
     // backend ignores the ticked presets and runs ONCE per mapped element.
-    const scaleMode = resolutionScaleModeActive(node.widgets?.scale_multiplier, node.inputs)
+    // An image input the lazy skip turned unwired is unwired for scale mode
+    // too (`image is None` in resolve()): the presets fan out again.
+    const scaleMode = resolutionScaleModeActive(node.widgets?.scale_multiplier, liveInputs)
     const presets = scaleMode ? 1 : Math.max(1, resolutionPresetCount(node.widgets?.presets))
     return { count: mapLen * presets, atLeast, srcId: id }
   }
@@ -1084,14 +1222,27 @@ function estimateInner(snapshot, nodeId, path) {
   // wired_sweep parity) -- it participates in zero-collapse, the aligned
   // agreement check, and the axis length, and NEVER adds an axis of its
   // own, so counts stay exactly what they were without it.
+  //
+  // The six LAZY members (`MULTIPLIER_LAZY_INPUTS`: model, model_low,
+  // clip, vae, image, mask) go through `lazySourceCount`: one fed straight
+  // by an all-off switcher / empty-selection Checkpoint Switcher is never
+  // requested by check_lazy_status, so it counts as UNWIRED here (axis
+  // absent -- the image side reads text-only), never as a zero-collapse.
+  // Any other known-zero on them (a Collect-only Grid, a nested-empty
+  // switcher, a blocked loader) still collapses, and label/text/name are
+  // not lazy at all.
+  const countMember = (name) =>
+    MULTIPLIER_LAZY_INPUTS.has(name)
+      ? lazySourceCount(snapshot, inputs[name] ?? null, path)
+      : sourceCount(snapshot, inputs[name] ?? null, path)
   for (const name of ['model', 'model_low', 'clip', 'label', 'vae']) {
-    members[name] = sourceCount(snapshot, inputs[name] ?? null, path)
+    members[name] = countMember(name)
     if (members[name]?.atLeast) unknowns.add(name)
   }
-  const textSrc = sourceCount(snapshot, inputs.text ?? null, path)
-  const imageSrc = sourceCount(snapshot, inputs.image ?? null, path)
-  const nameSrc = sourceCount(snapshot, inputs.name ?? null, path)
-  const maskSrc = sourceCount(snapshot, inputs.mask ?? null, path)
+  const textSrc = countMember('text')
+  const imageSrc = countMember('image')
+  const nameSrc = countMember('name')
+  const maskSrc = countMember('mask')
   if (textSrc?.atLeast) unknowns.add('text')
   if (imageSrc?.atLeast) unknowns.add('image')
   if (nameSrc?.atLeast) unknowns.add('name')

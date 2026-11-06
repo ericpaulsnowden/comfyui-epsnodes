@@ -1174,3 +1174,25 @@ class TestEmitAllMode:
         assert first == EPSImageGrid.IS_CHANGED(mode="Emit All", grid_uuid=VALID_UUID)
         store.append_batch(VALID_UUID, _make_batch(1))
         assert first != EPSImageGrid.IS_CHANGED(mode="Emit All", grid_uuid=VALID_UUID)
+
+
+# ------------------------------------------------ lazy image (2026-11-05)
+class TestLazyImageSkipsAnAllOffSwitcher:
+    def test_image_is_lazy(self) -> None:
+        from eps_image.nodes_image_grid import EPSImageGrid
+
+        assert EPSImageGrid.INPUT_TYPES()["optional"]["image"][1]["lazy"] is True
+
+    def test_check_lazy_status(self) -> None:
+        from eps_image.nodes_image_grid import EPSImageGrid
+
+        prompt = {
+            "3": {"class_type": "EPSSwitcher", "inputs": {"image_1": ["1", 0], "toggles": '{"image_1": false}'}},
+            "6": {"class_type": "EPSImageGrid", "inputs": {"image": ["3", 0], "mode": "Collect"}},
+        }
+        node = EPSImageGrid()
+        assert node.check_lazy_status(prompt=prompt, unique_id="6") == []
+        prompt["3"]["inputs"]["toggles"] = "{}"
+        assert node.check_lazy_status(prompt=prompt, unique_id="6") == ["image"]
+        prompt["6"]["inputs"].pop("image")
+        assert node.check_lazy_status(prompt=prompt, unique_id="6") == []

@@ -106,6 +106,7 @@ from . import image_grid_store as store
 # THIS node found by scanning the API prompt. Same-package import on purpose:
 # one canonical implementation, held in lockstep with the multiplier's guard.
 from .nodes_cross_sweep import _consumed_output_slots, _unwrap_hidden
+from .nodes_switcher import inputs_fed_by_an_all_off_switcher, wired_input_names
 
 logger = logging.getLogger("eps_image")
 
@@ -295,7 +296,10 @@ class EPSImageGrid:
             "optional": {
                 "image": (
                     "IMAGE",
-                    {"tooltip": "The image to pass through; in Collect mode, it's also buffered."},
+                    {
+                        "lazy": True,
+                        "tooltip": "The image to pass through; in Collect mode, it's also buffered.",
+                    },
                 ),
                 # Hidden serialized bridge to this node's per-instance
                 # identity (module docstring; `image_grid.js` generates +
@@ -378,6 +382,25 @@ class EPSImageGrid:
         if mode not in _EMIT_MODES:
             return float("nan")
         return f"emit:{store.buffer_token(str(grid_uuid or ''))}"
+
+    def check_lazy_status(
+        self, prompt: Any = None, unique_id: Any = None, **kwargs: Any
+    ) -> list[str]:
+        """Request ``image`` when it is wired -- unless its upstream is a
+        switcher that provably emits nothing
+        (``nodes_switcher.inputs_fed_by_an_all_off_switcher``), in which case
+        it is never requested and this node runs as with nothing wired
+        (Collect: the §6.6 nothing-to-pass-through warning; Emit / Emit All:
+        the buffer, unaffected) instead of being skipped by that switcher's
+        blocker (the owner's 2026-11-05 all-off ask)."""
+        wired = wired_input_names(prompt, unique_id, ("image",))
+        skip = inputs_fed_by_an_all_off_switcher(prompt, unique_id, wired)
+        if skip:
+            logger.info(
+                "EPS Image Grid: not requesting image -- fed by a switcher with "
+                "everything toggled off, so it is treated as unwired"
+            )
+        return [name for name in wired if name not in skip]
 
     def run(
         self,

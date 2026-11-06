@@ -46,6 +46,8 @@ CHECKPOINT_SWITCHER_JS = REPO_ROOT / "web" / "eps_image" / "checkpoint_switcher.
 PATH_HEAL_JS = REPO_ROOT / "web" / "lora_library" / "path_heal.js"
 API_JS = REPO_ROOT / "web" / "lora_library" / "api.js"
 VERSION_JS = REPO_ROOT / "web" / "lora_library" / "version.js"
+# 2026-11-05: the empty-selection dim imports the shared renderLink hook.
+OWNED_LINK_COLOUR_JS = REPO_ROOT / "web" / "eps_image" / "owned_link_colour.js"
 
 NODE = shutil.which("node")
 
@@ -139,6 +141,57 @@ const out = {
   )
 }
 
+// 2026-11-05: empty selection -> every output link dims (switcher.js's
+// all-off twin), restored exactly once something is ticked.
+{
+  globalThis.LiteGraph = { LGraphCanvas: { prototype: { renderLink() {} } } }
+  const links = new Map()
+  const target = { id: 2, resyncs: 0 }
+  target.__epsResyncLinkColors = () => { target.resyncs += 1 }
+  const graph = {
+    links, setDirtyCanvas() {},
+    getNodeById: (id) => (id === 2 ? target : null)
+  }
+  const node = {
+    id: 1, comfyClass: 'EPSCheckpointSwitcher', graph,
+    inputs: [{ name: 'selection', type: 'STRING', link: null, widget: { name: 'selection' } }],
+    widgets: [{ name: 'selection', value: '[]' }],
+    outputs: [
+      { name: 'model', links: [11] }, { name: 'clip', links: [12] },
+      { name: 'vae', links: null }, { name: 'name', links: [13] }
+    ]
+  }
+  links.set(11, { id: 11, target_id: 2, color: '#abcdef' })
+  links.set(12, { id: 12, target_id: 2 })
+  links.set(13, { id: 13, target_id: 2, color: '#123456', __epsLinkColorOwner: 'someone-else' })
+  const view = () => [11, 12, 13].map((id) => {
+    const l = links.get(id)
+    return [l.color ?? null, l.__epsLinkColorOwner ?? null]
+  })
+  const dim = {}
+  dim.emptyIsEmpty = m.isSelectionEmpty(node)
+  m.reconcileLinkDimming(node)
+  dim.dimmed = view()
+  dim.hook = globalThis.LiteGraph.LGraphCanvas.prototype.renderLink.__epsOwnedLinkColour === true
+  node.widgets[0].value = '["a.safetensors"]'
+  dim.tickedIsEmpty = m.isSelectionEmpty(node)
+  m.reconcileLinkDimming(node)
+  dim.restored = view()
+  dim.resyncs = target.resyncs
+  node.widgets[0].value = 'not json'
+  dim.malformedIsEmpty = m.isSelectionEmpty(node)
+  node.inputs[0].link = 99
+  dim.wiredSelectionIsEmpty = m.isSelectionEmpty(node)
+  node.inputs[0].link = null
+  node.widgets[0].value = '[]'
+  m.reconcileLinkDimming(node)
+  m.reconcileLinkDimming(node, { forceUndim: true })
+  dim.forceUndim = view()
+  dim.otherClass = m.isSelectionEmpty({ comfyClass: 'EPSSwitcher', widgets: [] })
+  out.dim = dim
+  out.ownerTag = m.LINK_COLOR_OWNER_CKPT
+}
+
 process.stdout.write(JSON.stringify(out))
 """
 
@@ -153,6 +206,7 @@ def checkpoint_switcher_api(tmp_path_factory: pytest.TempPathFactory) -> dict:
     module_dir = layout / "extensions" / "comfyui-epsnodes" / "eps_image"
     module_dir.mkdir(parents=True)
     shutil.copyfile(CHECKPOINT_SWITCHER_JS, module_dir / "checkpoint_switcher.js")
+    shutil.copyfile(OWNED_LINK_COLOUR_JS, module_dir / "owned_link_colour.js")
 
     # checkpoint_switcher.js imports `../../../scripts/api.js` -- stubbed
     # exactly as test_distributor_js.py stubs `scripts/app.js` -- and, since
@@ -635,3 +689,36 @@ def test_split_folder_splits_on_either_separator(source: str) -> None:
     neighbours rather than showing a backslash-riddled base name."""
     body = _function_body(source, "splitFolder(name)")
     assert "Math.max(name.lastIndexOf('/'), name.lastIndexOf('\\\\'))" in body
+
+
+def test_empty_selection_dims_every_output_and_restores_exactly(
+    checkpoint_switcher_api: dict,
+) -> None:
+    """2026-11-05 (switcher.js's all-off twin): an empty `selection` emits
+    only blockers, so every output link is drawn dim -- never unplugged --
+    and restored to its EXACT prior colour once a row is ticked; a link
+    another owner claimed is left alone; a wired `selection` (only known at
+    run time) and malformed JSON follow the backend's `_parse_selection`."""
+    dim = checkpoint_switcher_api["dim"]
+    owner = checkpoint_switcher_api["ownerTag"]
+    assert owner == "EPSCheckpointSwitcher:empty-selection"
+    grey = "rgba(128,128,128,0.25)"
+    other = ["#123456", "someone-else"]
+    assert dim["emptyIsEmpty"] is True
+    assert dim["dimmed"] == [[grey, owner], [grey, owner], other]
+    assert dim["hook"] is True
+    assert dim["tickedIsEmpty"] is False
+    assert dim["restored"] == [["#abcdef", None], [None, None], other]
+    assert dim["resyncs"] == 2
+    assert dim["malformedIsEmpty"] is True
+    assert dim["wiredSelectionIsEmpty"] is False
+    assert dim["forceUndim"] == [["#abcdef", None], [None, None], other]
+    assert dim["otherClass"] is False
+
+
+def test_empty_selection_dim_is_rederived_at_every_selection_change(source: str) -> None:
+    """The two points every selection change converges on, plus attach."""
+    assert "syncLinkDimming(state.node, 'reload')" in source
+    assert "syncLinkDimming(state.node, 'selection write')" in source
+    assert "installLinkDimHooks(node)" in source
+    assert "import { ensureOwnedLinkColourHook } from './owned_link_colour.js'" in source

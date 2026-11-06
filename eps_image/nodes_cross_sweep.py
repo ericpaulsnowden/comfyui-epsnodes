@@ -94,6 +94,8 @@ import logging
 import re
 from typing import Any, ClassVar
 
+from .nodes_switcher import inputs_fed_by_an_all_off_switcher, wired_input_names
+
 logger = logging.getLogger("eps_image")
 
 #: Characters replaced with ``_`` inside a single path component: path
@@ -364,6 +366,7 @@ class EPSCrossSweep:
                 "model": (
                     "MODEL",
                     {
+                        "lazy": True,
                         "tooltip": (
                             "The swept models, one per step -- wire from "
                             "EPS LoRA Iterator or EPS Checkpoint Switcher. "
@@ -378,6 +381,7 @@ class EPSCrossSweep:
                 "model_low": (
                     "MODEL",
                     {
+                        "lazy": True,
                         "tooltip": (
                             "Each step's LOW-noise partner model (WAN-style "
                             "high/low pairs) -- wire from EPS Model "
@@ -393,6 +397,7 @@ class EPSCrossSweep:
                 "clip": (
                     "CLIP",
                     {
+                        "lazy": True,
                         "tooltip": (
                             "The swept CLIPs, one per step, index-aligned "
                             "with model -- same source as model. Optional; "
@@ -424,6 +429,7 @@ class EPSCrossSweep:
                 "image": (
                     "IMAGE",
                     {
+                        "lazy": True,
                         "tooltip": (
                             "The images to run. With pair_mode paired "
                             "they arrive index-aligned with text; with "
@@ -445,6 +451,7 @@ class EPSCrossSweep:
                 "mask": (
                     "MASK",
                     {
+                        "lazy": True,
                         "tooltip": (
                             "Each image's mask -- wire EPS Image Switcher's "
                             "masks output (with pass_masks on) alongside its "
@@ -465,6 +472,7 @@ class EPSCrossSweep:
                 "vae": (
                     "VAE",
                     {
+                        "lazy": True,
                         "tooltip": (
                             "Optional per-step VAEs, index-aligned with "
                             "model/clip/label -- wire from EPS Checkpoint "
@@ -585,6 +593,47 @@ class EPSCrossSweep:
             "hidden": {"prompt": "PROMPT", "unique_id": "UNIQUE_ID"},
         }
 
+    #: The sweep inputs a switcher can feed, all ``lazy`` (2026-11-05): see
+    #: :meth:`check_lazy_status`. ``text``/``name``/``label``/``base_folder``
+    #: stay eager -- no switcher carries a STRING.
+    LAZY_SWEEP_INPUTS: ClassVar[tuple[str, ...]] = (
+        "model",
+        "model_low",
+        "clip",
+        "vae",
+        "image",
+        "mask",
+    )
+
+    def check_lazy_status(
+        self, prompt: Any = None, unique_id: Any = None, **kwargs: Any
+    ) -> list[str]:
+        """Which lazy sweep inputs ComfyUI should actually resolve: every
+        WIRED one, except a slot fed by a switcher that provably emits
+        nothing (``nodes_switcher.inputs_fed_by_an_all_off_switcher``:
+        every wired row toggled off, nothing wired, or an empty Checkpoint
+        Switcher selection). Such a slot is never requested, so that
+        switcher never runs and this node sees the slot as UNWIRED -- the
+        owner's 2026-11-05 ask, "if all the toggles are off it should look
+        like nothing is connected": an all-off image switcher used to hand
+        this node a blocker and core skipped it outright, text sweep
+        included; now it runs text-only, exactly as with no image wired.
+        Same lazy mechanism and the same post-filter contract as
+        ``EPSSwitcher.check_lazy_status`` (core keeps calling until nothing
+        new is requested). Received ``INPUT_IS_LIST``-wrapped, like ``run``.
+        """
+        prompt_ = _unwrap_hidden(prompt)
+        uid = _unwrap_hidden(unique_id)
+        wired = wired_input_names(prompt_, uid, self.LAZY_SWEEP_INPUTS)
+        skip = inputs_fed_by_an_all_off_switcher(prompt_, uid, wired)
+        if skip:
+            logger.info(
+                "EPS Run Multiplier: not requesting %s -- fed by a switcher with "
+                "everything toggled off, so it is treated as unwired",
+                ", ".join(sorted(skip)),
+            )
+        return [name for name in wired if name not in skip]
+
     def run(
         self,
         model: Any = None,
@@ -624,6 +673,30 @@ class EPSCrossSweep:
         # blocker path). v0.49.0 generalized this from image/vae to every
         # sweep-group member: steps is the min over the WIRED sweep lists
         # only, and each unwired member's output blocks per run.
+        # 2026-11-05: a lazy member this node declined to request
+        # (`check_lazy_status`: its upstream is a statically all-off
+        # switcher) does NOT arrive as the bare None an unwired input gives
+        # -- core's `get_input_data` fills a never-resolved input with its
+        # `mark_missing()` placeholder `(None,)`, list-wrapped like every
+        # INPUT_IS_LIST input (rig-caught: "1 sweep step x 0 pairs").
+        # Normalize exactly those members to unwired, by name, from the same
+        # prompt reading that skipped them; a real upstream's list is never
+        # reinterpreted.
+        skipped = inputs_fed_by_an_all_off_switcher(
+            _unwrap_hidden(prompt), _unwrap_hidden(unique_id), self.LAZY_SWEEP_INPUTS
+        )
+        if "model" in skipped:
+            model = None
+        if "model_low" in skipped:
+            model_low = None
+        if "clip" in skipped:
+            clip = None
+        if "vae" in skipped:
+            vae = None
+        if "image" in skipped:
+            image = None
+        if "mask" in skipped:
+            mask = None
         model_wired = model is not None
         model_low_wired = model_low is not None
         clip_wired = clip is not None
@@ -646,6 +719,25 @@ class EPSCrossSweep:
         # shows something actually consuming it, that is always a miswire --
         # fail the queue naming both ends instead of silently skipping.
         consumed = _consumed_output_slots(_unwrap_hidden(prompt), _unwrap_hidden(unique_id))
+        # 2026-11-05: a lazy member that IS wired in the prompt but was never
+        # requested (`check_lazy_status`: its upstream is a statically all-off
+        # switcher) arrives as None too, but that is the user's own "no
+        # images this run", not a miswire -- its output simply emits its
+        # per-run blockers, exactly like the unwired path, with no error.
+        # Exempt those outputs from the guard; every other `x is None` is
+        # still a genuinely unwired input and still fails loudly.
+        consumed -= {
+            slot
+            for name, slot in (
+                ("model", 0),
+                ("clip", 1),
+                ("image", 2),
+                ("vae", 6),
+                ("model_low", 7),
+                ("mask", 9),
+            )
+            if name in skipped
+        }
         dead_outputs = []
         if 0 in consumed and not model_wired:
             dead_outputs.append("model (wire a model source into the model input)")
