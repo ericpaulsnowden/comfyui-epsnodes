@@ -3875,7 +3875,8 @@ const RESIZED_NAME_RE = /^resized_(\d+)$/
  * "resized_4" means image_4's result), so the outputs are REORDERED IN
  * PLACE by name -- never removeOutput/addOutput-and-reconnect, because
  * removeOutput disconnects the slot -- and every link riding a moved output
- * gets its origin_slot rewritten to the new index. Missing members up to
+ * (settled in output.links AND floating in output._floatingLinks) gets its
+ * origin_slot rewritten to the new index. Missing members up to
  * the highest wired image_N / highest linked resized_N are appended first.
  * Runs only from the deferred converge, i.e. after configure has resolved
  * the links (the v0.16.0 reentrancy lesson). */
@@ -3905,6 +3906,10 @@ function repairResizedOrder(node, highestWired) {
       const link = links?.get ? links.get(id) : links?.[id]
       if (link) link.origin_slot = first + i
     }
+    // A floating wire (dragged from the output, not yet dropped; saved and
+    // restored by 1.52.7 onto output._floatingLinks) carries its own
+    // origin_slot -- the same LLink object graph.floatingLinks holds.
+    for (const link of output._floatingLinks || []) link.origin_slot = first + i
   })
 }
 

@@ -103,6 +103,21 @@ const out = {}
   revealExtraOutputs(node)
   out.repairHole = { reads: node.reads(95), order: node.order() }
 }
+{ // floating wire restored onto the resized_4 output of a saved 2,4,3 set
+  const node = makeNode([2,4,3], [2,3,4])
+  const floating = { id: 1, origin_slot: 7 } // saved slot of resized_4 in the old file
+  node.outputs[7]._floatingLinks = new Set([floating])
+  revealExtraOutputs(node)
+  out.floatingMoved = { name: node.outputs[floating.origin_slot].name, slot: floating.origin_slot }
+}
+{ // floating wire on the output that moves DOWN (resized_3, slot 8 -> 7) plus a settled one
+  const node = makeNode([2,4,3], [2,3,4]); node.wire('resized_4', 94)
+  const floating = { id: 2, origin_slot: 8 }
+  node.outputs[8]._floatingLinks = new Set([floating])
+  revealExtraOutputs(node)
+  out.floatingOther = { name: node.outputs[floating.origin_slot].name, slot: floating.origin_slot,
+    settled: node.reads(94) }
+}
 process.stdout.write(JSON.stringify(out))
 """
 
@@ -157,3 +172,14 @@ def test_holey_saved_set_is_filled_keeping_the_wired_label(probe: dict) -> None:
     got = probe["repairHole"]
     assert got["order"] == ["resized_2", "resized_3", "resized_4"]
     assert got["reads"] == "resized_4"
+
+
+def test_floating_wire_follows_its_output_when_the_repair_moves_it(probe: dict) -> None:
+    got = probe["floatingMoved"]
+    assert got == {"name": "resized_4", "slot": 8}
+
+
+def test_floating_wire_on_the_output_moving_down_keeps_its_label(probe: dict) -> None:
+    got = probe["floatingOther"]
+    assert got["name"] == "resized_3" and got["slot"] == 7
+    assert got["settled"] == "resized_4"
