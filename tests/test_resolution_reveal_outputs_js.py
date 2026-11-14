@@ -33,13 +33,13 @@ const body = [
   grab(/const EXTRA_IMAGE_RE = [^\n]*/), grab(/const MAX_IMAGES = [^\n]*/), grab(/const RESIZED_PREFIX = [^\n]*/),
   grab(/function outputIndexByName[\s\S]*?\n}\n/),
   grab(/export function isOutputConnected[\s\S]*?\n}\n/).replace('export ', ''),
-  grab(/const RESIZED_NAME_RE = [^\n]*/), grab(/const NODE_TYPE = [^\n]*/), grab(/const savedWireIntent = [^\n]*/), grab(/function intentKey[\s\S]*?\n}\n/),
-  grab(/function recordIntentFromNodes[\s\S]*?\n}\n/), grab(/export function beforeConfigureGraph[\s\S]*?\n}\n/).replace('export ', ''),
+  grab(/const RESIZED_NAME_RE = [^\n]*/), grab(/const NODE_TYPE = [^\n]*/), grab(/const savedWireIntent = [^\n]*/), grab(/const savedFloatingIntent = [^\n]*/),
+  grab(/function recordIntentFromScope[\s\S]*?\n}\n/), grab(/export function beforeConfigureGraph[\s\S]*?\n}\n/).replace('export ', ''),
   grab(/function applySavedOutputIntent[\s\S]*?\n}\n/), grab(/const PREFIX = [^\n]*/),
   grab(/function ensureOriginalSizeOutputs[\s\S]*?\n}\n/), grab(/function revealExtraOutputs[\s\S]*?\n}\n/),
-  'function resyncSize(){}', 'return { revealExtraOutputs, beforeConfigureGraph, applySavedOutputIntent, savedWireIntent }'
+  'function resyncSize(){}', 'return { revealExtraOutputs, beforeConfigureGraph, applySavedOutputIntent, savedWireIntent, savedFloatingIntent }'
 ].join('\n')
-const { revealExtraOutputs, beforeConfigureGraph, applySavedOutputIntent, savedWireIntent } = new Function(body)()
+const { revealExtraOutputs, beforeConfigureGraph, applySavedOutputIntent, savedWireIntent, savedFloatingIntent } = new Function(body)()
 
 const BACKEND = ['image','resized_image','width','height','original_width','original_height',
   'resized_2','resized_3','resized_4','resized_5','resized_6','resized_7','resized_8']
@@ -108,17 +108,23 @@ function forgedNode(savedResized, nodeId = 5) {
   savedResized.forEach(([, ids], i) => { outputs[6 + i].links = ids })
   return { id: nodeId, type: 'EPSResolution', outputs }
 }
-function loadSaved(savedResized, linksById, wiredImages, { subgraph = false } = {}) {
+function loadSaved(savedResized, linksById, wiredImages,
+    { subgraph = false, floating = [], loadedId = 5 } = {}) {
   const saved = forgedNode(savedResized)
+  const nodes = subgraph ? [] : [saved]
   const graphData = subgraph
-    ? { nodes: [], definitions: { subgraphs: [{ id: 'sg-1', nodes: [saved] }] } }
-    : { nodes: [saved] }
+    ? { nodes, definitions: { subgraphs: [{ id: 'sg-1', nodes: [saved], floatingLinks: floating }] } }
+    : { nodes, floatingLinks: floating }
   beforeConfigureGraph(graphData) // sees the RAW names
   // ComfyUI normalizes, litegraph applies saved links BY INDEX: names stay canonical
   const node = makeNode([2,3,4,5,6,7,8], wiredImages)
+  node.id = loadedId // the frontend may de-duplicate node ids AFTER the hook ran
   if (subgraph) node.graph.isRootGraph = false, node.graph.id = 'sg-1'
   saved.outputs.forEach((entry, i) => { if (entry.links) node.outputs[i].links = [...entry.links] })
   for (const [id, slot] of Object.entries(linksById)) node.graphLinks.set(Number(id), { id: Number(id), origin_slot: slot })
+  // saved floating wires restore onto the output at their saved slot (by index)
+  node.floatingRestored = floating.map((f) => ({ ...f }))
+  for (const f of node.floatingRestored) (node.outputs[f.origin_slot]._floatingLinks ??= new Set()).add(f)
   return node
 }
 function deferredPass(node) { revealExtraOutputs(node); applySavedOutputIntent(node) }
@@ -134,12 +140,27 @@ console.warn = (...args) => warnings.push(args.join(' '))
 { // a canonical save is untouched
   const node = loadSaved([['resized_2', null], ['resized_3', [11]]], { 11: 7 }, [2, 3])
   deferredPass(node)
-  out.canonical = { reads: node.reads(11), order: node.order(), recorded: savedWireIntent.size }
+  out.canonical = { reads: node.reads(11), order: node.order(), recorded: savedWireIntent.size + savedFloatingIntent.size }
 }
 { // the same forged save, node inside a subgraph definition
   const node = loadSaved([['resized_2', null], ['resized_4', [13]]], { 13: 7 }, [2, 3, 4], { subgraph: true })
   deferredPass(node)
   out.subgraph = { reads: node.reads(13) }
+}
+{ // frontend dedup renames the node (5 -> 7) between record and apply
+  const node = loadSaved([['resized_2', null], ['resized_4', [14]]], { 14: 7 }, [2, 3, 4],
+    { subgraph: true, loadedId: 7 })
+  deferredPass(node)
+  out.dedup = { reads: node.reads(14), id: node.id }
+}
+{ // saved floating wire from the displaced resized_4 (slot 7)
+  const node = loadSaved([['resized_2', null], ['resized_4', null]], {}, [2, 3, 4],
+    { floating: [{ id: 300, origin_id: 5, origin_slot: 7 }] })
+  const [wire] = node.floatingRestored
+  const before = node.outputs[wire.origin_slot].name
+  deferredPass(node)
+  out.floating = { before, name: node.outputs[wire.origin_slot].name, slot: wire.origin_slot,
+    oldHolds: node.outputs[7]._floatingLinks.has(wire) }
 }
 { // intended output not wired: link stays, one warning
   const node = loadSaved([['resized_2', null], ['resized_4', [12]]], { 12: 7 }, [2, 3])
@@ -225,6 +246,20 @@ def test_configure_defers_the_reveal_so_floating_wires_are_restored_first() -> N
 
 def test_save_inside_a_subgraph_definition_is_restored_too(probe: dict) -> None:
     assert probe["subgraph"]["reads"] == "resized_4"
+
+
+def test_frontend_node_id_dedup_between_record_and_apply_does_not_lose_the_intent(
+    probe: dict,
+) -> None:
+    got = probe["dedup"]
+    assert got["id"] == 7 and got["reads"] == "resized_4"
+
+
+def test_saved_floating_wire_follows_its_saved_output_name(probe: dict) -> None:
+    got = probe["floating"]
+    assert got["before"] == "resized_3"  # where the by-index restore puts it
+    assert got["name"] == "resized_4" and got["slot"] == 8
+    assert got["oldHolds"] is False
 
 
 def test_deferred_converge_applies_the_intent_after_grow_and_trim() -> None:

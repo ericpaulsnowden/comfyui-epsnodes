@@ -2150,11 +2150,13 @@ is the functional core WITHOUT the grid.
   node's `onConfigure` runs), so a pre-fix save whose slot 7 was
   `resized_4` would load with that wire on the canonical `resized_3`.
   The extension's `beforeConfigureGraph(graphData)` hook therefore reads
-  the RAW workflow JSON (root nodes and subgraph definitions), and for
-  each wired `resized_N` entry whose saved index differs from the name's
-  index in the node definition records `{linkId, intendedName}` under the
-  node's id; the deferred converge — after grow/trim — moves the link
-  onto the output of the saved name (a name that does not exist leaves
+  the RAW workflow JSON (root and subgraph definitions, settled links and
+  the separately saved `floatingLinks`), and for each wired `resized_N`
+  entry whose saved index differs from the name's index in the node
+  definition records `{linkId → intendedName}` — keyed by LINK id, never
+  node id, because the frontend de-duplicates node ids after the hook;
+  the deferred converge — after grow/trim — walks the node's own outputs
+  and moves each recorded link (settled or floating) onto the output of the saved name (a name that does not exist leaves
   the link in place with a console warning). Semantics: every wired image is resized
   with the SAME settings — `resized_image` carries `image`'s result,
   `resized_k` carries `image_k`'s; an unwired `image_k` whose

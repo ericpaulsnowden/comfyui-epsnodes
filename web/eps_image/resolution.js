@@ -3860,35 +3860,46 @@ function convergeExtraImageInputs(node) {
 
 const RESIZED_NAME_RE = /^resized_(\d+)$/
 
-/** Saved wire intent per node, read from the RAW workflow JSON.
+/** Saved wire intent, read from the RAW workflow JSON.
  * ComfyUI's node class rebuilds saved outputs against the node definition
  * BEFORE litegraph's configure, so by the time onConfigure runs the saved
  * names are already canonical and a pre-fix save's wire on "resized_4"
  * (slot 7, after an old trim shifted things) looks like a wire on the
  * canonical resized_3. The raw names are visible only to the
- * `beforeConfigureGraph(graphData)` extension hook. Keyed
- * `<scope>/<nodeId>` (scope = 'root' or the subgraph definition id), since
- * node ids survive a load but are only unique per graph. */
-const savedWireIntent = new Map()
+ * `beforeConfigureGraph(graphData)` extension hook.
+ *
+ * The intent is keyed by LINK id, never by node id: the frontend
+ * de-duplicates node ids across graphs AFTER this hook runs, so a node id
+ * recorded here may not exist at apply time, while a link id is what the
+ * loaded node's outputs still carry. Settled links and floating wires
+ * (serialized separately, own id space) get one map each. */
+const savedWireIntent = new Map() // settled linkId -> intended output name
+const savedFloatingIntent = new Map() // floating linkId -> intended output name
 
-function intentKey(scope, nodeId) {
-  return `${scope}/${nodeId}`
-}
-
-/** Record, for every EPSResolution node in *nodes*, each saved wired
- * resized_N entry whose saved index differs from the name's canonical index
- * in the node DEFINITION (never the saved array). */
-function recordIntentFromNodes(nodes, scope, canonicalNames) {
+/** Record intents from one graph scope (root, or a subgraph definition):
+ * *nodes* are its saved nodes, *floatingLinks* its saved floating wires.
+ * Only entries whose saved index differs from the name's canonical index in
+ * the node DEFINITION (never the saved array) are recorded. */
+function recordIntentFromScope(nodes, floatingLinks, canonicalNames) {
+  const misplaced = (savedNode, index) => {
+    const name = savedNode?.outputs?.[index]?.name
+    if (!RESIZED_NAME_RE.test(name || '')) return null
+    const canonical = canonicalNames.indexOf(name)
+    return canonical === -1 || canonical === index ? null : name
+  }
+  const resolutionNodes = new Map()
   for (const savedNode of nodes || []) {
     if (savedNode?.type !== NODE_TYPE) continue
-    const intents = []
+    resolutionNodes.set(savedNode.id, savedNode)
     ;(savedNode.outputs || []).forEach((saved, index) => {
-      if (!RESIZED_NAME_RE.test(saved?.name || '')) return
-      const canonical = canonicalNames.indexOf(saved.name)
-      if (canonical === -1 || canonical === index) return
-      for (const linkId of saved.links || []) intents.push({ linkId, intendedName: saved.name })
+      const name = misplaced(savedNode, index)
+      if (name) for (const linkId of saved.links || []) savedWireIntent.set(linkId, name)
     })
-    if (intents.length) savedWireIntent.set(intentKey(scope, savedNode.id), intents)
+  }
+  for (const link of floatingLinks || []) {
+    const savedNode = resolutionNodes.get(link?.origin_id)
+    const name = savedNode ? misplaced(savedNode, link.origin_slot) : null
+    if (name) savedFloatingIntent.set(link.id, name)
   }
 }
 
@@ -3896,50 +3907,68 @@ function recordIntentFromNodes(nodes, scope, canonicalNames) {
  * graph.configure (web/eps_image.js forwards it). */
 export function beforeConfigureGraph(graphData) {
   savedWireIntent.clear() // drop anything stale from an earlier load
+  savedFloatingIntent.clear()
   const definition = globalThis.LiteGraph?.registered_node_types?.[NODE_TYPE]
   const canonicalNames = definition?.nodeData?.output_name
   if (!Array.isArray(canonicalNames)) return
-  recordIntentFromNodes(graphData?.nodes, 'root', canonicalNames)
+  recordIntentFromScope(graphData?.nodes, graphData?.floatingLinks, canonicalNames)
   for (const subgraph of graphData?.definitions?.subgraphs || []) {
-    recordIntentFromNodes(subgraph?.nodes, subgraph?.id, canonicalNames)
+    recordIntentFromScope(subgraph?.nodes, subgraph?.floatingLinks, canonicalNames)
   }
 }
 
 /** ComfyUI extension hook after the load: anything not yet applied by a
- * deferred converge (a node that never converged) is stale now. The
- * deferred converges are queued during configure, so they run after this
- * only if setTimeout(0) lands later -- hence the clear is itself deferred. */
+ * deferred converge is stale now. The converges queued during configure
+ * fire first (FIFO setTimeout 0), so the clear is itself deferred. */
 export function afterConfigureGraph() {
-  setTimeout(() => savedWireIntent.clear(), 0)
+  setTimeout(() => {
+    savedWireIntent.clear()
+    savedFloatingIntent.clear()
+  }, 0)
 }
 
 /** Apply the recorded intent (deferred converge, AFTER grow/trim so the
- * intended output exists once its image_N is wired). Moves each link to
- * the output of its saved name -- id off the output listing it, onto the
- * target's links, origin_slot rewritten. Never removeOutput (it
- * disconnects). An intended output that does not exist leaves the link
- * where it is and warns once. One pass; the record is then cleared. */
+ * intended output exists once its image_N is wired). Walks THIS node's own
+ * outputs, so it is independent of node-id remapping and of graph scope:
+ * a settled link id (output.links) or floating wire (output._floatingLinks,
+ * the same LLink object graph.floatingLinks holds) found in a map moves to
+ * the output of its saved name -- never removeOutput (it disconnects). An
+ * intended output that does not exist leaves the wire where it is and
+ * warns once per pass. */
 function applySavedOutputIntent(node) {
-  const scope = node.graph && node.graph.isRootGraph === false ? node.graph.id : 'root'
-  const key = intentKey(scope, node.id)
-  const intents = savedWireIntent.get(key)
-  if (!intents?.length) return
-  savedWireIntent.delete(key)
+  if (!savedWireIntent.size && !savedFloatingIntent.size) return
   const links = node.graph?._links ?? node.graph?.links
-  for (const { linkId, intendedName } of intents) {
-    const link = links?.get ? links.get(linkId) : links?.[linkId]
+  let warned = false
+  const targetFor = (intendedName) => {
     const target = outputIndexByName(node, intendedName)
-    if (!link) continue
-    if (target === -1) {
+    if (target === -1 && !warned) {
+      warned = true
       console.warn(PREFIX, `saved wire on ${intendedName} kept on its slot: wire the matching image input`)
-      continue
     }
-    if (link.origin_slot === target) continue
-    for (const output of node.outputs) {
-      if (output.links?.includes(linkId)) output.links = output.links.filter((id) => id !== linkId)
+    return target
+  }
+  for (const output of [...(node.outputs || [])]) {
+    for (const linkId of [...(output.links || [])]) {
+      const intendedName = savedWireIntent.get(linkId)
+      if (intendedName === undefined) continue
+      savedWireIntent.delete(linkId)
+      const target = targetFor(intendedName)
+      if (target === -1 || node.outputs[target] === output) continue
+      output.links = output.links.filter((id) => id !== linkId)
+      ;(node.outputs[target].links ??= []).push(linkId)
+      const link = links?.get ? links.get(linkId) : links?.[linkId]
+      if (link) link.origin_slot = target
     }
-    ;(node.outputs[target].links ??= []).push(linkId)
-    link.origin_slot = target
+    for (const link of [...(output._floatingLinks || [])]) {
+      const intendedName = savedFloatingIntent.get(link.id)
+      if (intendedName === undefined) continue
+      savedFloatingIntent.delete(link.id)
+      const target = targetFor(intendedName)
+      if (target === -1 || node.outputs[target] === output) continue
+      output._floatingLinks.delete(link)
+      ;(node.outputs[target]._floatingLinks ??= new Set()).add(link)
+      link.origin_slot = target
+    }
   }
 }
 
