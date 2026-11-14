@@ -1654,8 +1654,9 @@ function patchAfterRecentChange(state) {
 
 /**
  * ★/☆: optimistic flip + POST, revert + toast on failure (§6.13).
- * Token-guarded: a stale response (or a stale failure's revert) after a
- * newer click is dropped rather than clobbering the newer state.
+ * Token-guarded: a stale SUCCESS after a newer click is dropped rather than
+ * clobbering the newer state; a stale FAILURE is never dropped -- it toasts
+ * and undoes only its own file.
  * 2026-08-26 while-running round: the flip patches the browser instead of
  * a full renderBrowser() -- see patchFavoriteChange's own header.
  */
@@ -1682,8 +1683,17 @@ async function toggleFavorite(state, file, on) {
       }
     }
   } catch (error) {
-    if (token !== state.favoriteToken) return
-    state.favorites = previous
+    // A FAILURE is always shown and always undone. The token only decides
+    // how much to undo: the latest click restores the whole pre-click list;
+    // a superseded one undoes just its own file, since restoring `previous`
+    // would also wipe the newer click's optimistic flip.
+    if (token === state.favoriteToken) {
+      state.favorites = previous
+    } else {
+      state.favorites = on
+        ? state.favorites.filter((name) => name !== file)
+        : [...state.favorites.filter((name) => name !== file), file]
+    }
     patchFavoriteChange(state, file, !on) // revert the icon/row back in place
     api.warn('favorite toggle failed', error)
     toast('error', 'EPS LoRA Picker', `Favorite not saved: ${error?.message || error}`)
@@ -3212,9 +3222,12 @@ async function finishFavoriteDrag(state, drag) {
       renderBrowser(state)
     }
   } catch (error) {
-    if (token !== state.favoriteToken) return
-    state.favorites = previous
-    renderBrowser(state)
+    // Always toast; only the latest request restores its snapshot (a
+    // superseded one would clobber the newer optimistic state).
+    if (token === state.favoriteToken) {
+      state.favorites = previous
+      renderBrowser(state)
+    }
     api.warn('favorites reorder failed', error)
     toast('error', 'EPS LoRA Picker', `Order not saved: ${error?.message || error}`)
   }
