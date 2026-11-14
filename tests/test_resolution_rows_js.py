@@ -638,7 +638,7 @@ class TestTheLockDoesNotWalkAwayFromWhatWasTyped:
     def test_each_edit_lands_exactly_where_it_was_typed(self, run: dict) -> None:
         steps = run["lockStability"]
         assert steps["pick169At1024"] == [1024, 576]
-        assert steps["typed1000"] == [1000, 562]  # NOT 1001
+        assert steps["typed1000"] == [1000, 563]  # NOT 1001; 562.5 rounds half up
         assert steps["typed1001"] == [1001, 563]
         assert steps["typedHeight563"] == [1001, 563]  # height kept, width derived
         assert steps["typed1000At239"] == [1000, 418]  # NOT 999

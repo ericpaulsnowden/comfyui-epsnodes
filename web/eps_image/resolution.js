@@ -3313,32 +3313,17 @@ export function ratioOptionValues(presets, current) {
  */
 function roundToMultipleOf(value, multipleOf) {
   if (!(multipleOf > 0) || !(value > 0)) return value
-  const rounded = roundHalfEven(value / multipleOf) * multipleOf
+  const rounded = roundHalfUp(value / multipleOf) * multipleOf
   return Math.max(multipleOf, rounded)
 }
 
-/** Round half to EVEN -- Python's own `round()` (what nodes_resolution.py's
- * `_round_to_multiple` and `conform_to_ratio` use), NOT `Math.round`, which
- * rounds a tie UP. The two differ only at an exact `.5` (562.5 -> Python 562,
- * `Math.round` 563; 12.5 multiples of 64 -> 768 vs 832), and until 2026-10-05
- * that was an accepted "≤1 px" divergence. It stopped being acceptable when
- * typed ratios made inexact derivations the norm AND the lock stopped
- * re-deriving its own derived writes (see `withRatioDerivedWrite`): the pad
- * now shows exactly the number the lock computes, so that number must be the
- * one the backend will compute from the same inputs -- "the box must never
- * show one number while a different one is what the backend will actually
- * run" (M5's standing principle). The operands are the same IEEE doubles on
- * both sides (the same operations in the same order), so the tie test is
- * exact. Pure on non-negative input; tested against the shared tie table in
- * tests/test_resolution_ratio_js.py / tests/test_resolution.py.
- * @param {number} x @returns {number} */
-function roundHalfEven(x) {
-  const floor = Math.floor(x)
-  const diff = x - floor
-  if (diff < 0.5) return floor
-  if (diff > 0.5) return floor + 1
-  return floor % 2 === 0 ? floor : floor + 1
-}
+/** Ties round half UP on both sides since 2026-11-13: nodes_resolution.py's
+ * `conform_to_ratio` / `_round_to_multiple` use the pack's `round_half_up` and
+ * this file's `roundHalfUp` (below) is the same rule, so the pad shows exactly
+ * the number the backend computes (562.5 -> 563; 12.5 multiples of 64 -> 832).
+ * Until then the panel rounded half to EVEN to match Python's banker's round(),
+ * which read as a plain bug to an artist; the shared tie table in
+ * tests/ratio_cases.py pins both readers to each other, ties included. */
 
 /**
  * Applies the ratio lock: keeps *anchor*'s own dimension of *dims* exactly,
@@ -3366,11 +3351,11 @@ export function conformToRatio(dims, ratio, anchor, multipleOf) {
   if (!parsed) return { width, height }
   if (anchor === 'height') {
     if (!(height > 0)) return { width, height }
-    const derived = Math.max(1, roundHalfEven((height * parsed.w) / parsed.h))
+    const derived = Math.max(1, roundHalfUp((height * parsed.w) / parsed.h))
     return { width: roundToMultipleOf(derived, multipleOf), height }
   }
   if (!(width > 0)) return { width, height }
-  const derived = Math.max(1, roundHalfEven((width * parsed.h) / parsed.w))
+  const derived = Math.max(1, roundHalfUp((width * parsed.h) / parsed.w))
   return { width, height: roundToMultipleOf(derived, multipleOf) }
 }
 
@@ -4466,9 +4451,60 @@ function convergeExtraImageInputs(node) {
   }
 }
 
-/** Reveal resized_N tail outputs through the highest wired image_N -- TRUE
- * add/remove is safe here because they are the genuine tail (appended
- * after original_height, §8). A wired resized_N is never removed. */
+const RESIZED_NAME_RE = /^resized_(\d+)$/
+
+/** Repair a resized_N set saved by a build that could shuffle it (an old
+ * trim removed an unwired resized_3 under a wired resized_4, or re-added it
+ * at the end): outputs are positional, so the on-node order must be the
+ * backend's resized_2..k. The label is the user's intent (a wire on
+ * "resized_4" means image_4's result), so the outputs are REORDERED IN
+ * PLACE by name -- never removeOutput/addOutput-and-reconnect, because
+ * removeOutput disconnects the slot -- and every link riding a moved output
+ * (settled in output.links AND floating in output._floatingLinks) gets its
+ * origin_slot rewritten to the new index. Missing members up to
+ * the highest wired image_N / highest linked resized_N are appended first.
+ * Runs only from the deferred converge, i.e. after configure has resolved
+ * the links (the v0.16.0 reentrancy lesson). */
+function repairResizedOrder(node, highestWired) {
+  const outputs = node.outputs || []
+  const slots = []
+  let wantThrough = highestWired
+  outputs.forEach((output, idx) => {
+    const match = RESIZED_NAME_RE.exec(output?.name || '')
+    if (!match) return
+    slots.push({ idx, n: Number(match[1]) })
+    if (isOutputConnected(output)) wantThrough = Math.max(wantThrough, Number(match[1]))
+  })
+  const names = slots.map((slot) => slot.n)
+  const contiguous = names.every((n, i) => n === i + 2)
+  if (contiguous && names.length >= wantThrough - 1) return
+  for (let n = 2; n <= wantThrough; n++) {
+    if (!names.includes(n)) node.addOutput(`${RESIZED_PREFIX}${n}`, 'IMAGE')
+  }
+  const tail = node.outputs.filter((output) => RESIZED_NAME_RE.test(output?.name || ''))
+  const first = node.outputs.findIndex((output) => RESIZED_NAME_RE.test(output?.name || ''))
+  tail.sort((x, y) => Number(RESIZED_NAME_RE.exec(x.name)[1]) - Number(RESIZED_NAME_RE.exec(y.name)[1]))
+  node.outputs.splice(first, tail.length, ...tail)
+  const links = node.graph?._links ?? node.graph?.links
+  tail.forEach((output, i) => {
+    for (const id of output.links || []) {
+      const link = links?.get ? links.get(id) : links?.[id]
+      if (link) link.origin_slot = first + i
+    }
+    // A floating wire (dragged from the output, not yet dropped; saved and
+    // restored by 1.52.7 onto output._floatingLinks) carries its own
+    // origin_slot -- the same LLink object graph.floatingLinks holds.
+    for (const link of output._floatingLinks || []) link.origin_slot = first + i
+  })
+}
+
+/** Reveal resized_N tail outputs through the highest wired image_N. The
+ * outputs are positional and removeOutput() renumbers every later link's
+ * origin_slot, so the resized_N set is kept CONTIGUOUS (resized_2..k): the
+ * trim only removes an unwired tail and stops at the first wired output
+ * (a wired resized_N and everything below it stays, even above the highest
+ * wired image_N), and growing appends in order -- never a hole, never an
+ * output above a missing lower slot (FORMAT.md §6.5). */
 function revealExtraOutputs(node) {
   ensureOriginalSizeOutputs(node) // the pair must occupy slots 4-5 FIRST
   let highest = 1
@@ -4476,14 +4512,17 @@ function revealExtraOutputs(node) {
     const match = EXTRA_IMAGE_RE.exec(input?.name || '')
     if (match && input.link != null) highest = Math.max(highest, Number(match[1]))
   }
+  repairResizedOrder(node, highest)
+  for (let n = MAX_IMAGES; n > highest && n >= 2; n--) {
+    const idx = outputIndexByName(node, `${RESIZED_PREFIX}${n}`)
+    if (idx === -1) continue
+    if (isOutputConnected(node.outputs[idx])) break
+    node.removeOutput(idx)
+  }
   for (let n = 2; n <= highest; n++) {
     if (outputIndexByName(node, `${RESIZED_PREFIX}${n}`) === -1) {
       node.addOutput(`${RESIZED_PREFIX}${n}`, 'IMAGE')
     }
-  }
-  for (let n = MAX_IMAGES; n > highest && n >= 2; n--) {
-    const idx = outputIndexByName(node, `${RESIZED_PREFIX}${n}`)
-    if (idx !== -1 && !isOutputConnected(node.outputs[idx])) node.removeOutput(idx)
   }
   resyncSize(node)
 }
@@ -4835,8 +4874,13 @@ export function attach(node) {
         }
       }
       this.properties[WIDGET_LAYOUT_PROP] = WIDGET_LAYOUT_CURRENT
-      convergeExtraImageInputs(this)
-      revealExtraOutputs(this)
+      // Deferred, never inline: LGraph.configure restores floating links
+      // onto the outputs only AFTER node.configure returns, and the resized_N
+      // repair reorders outputs -- run inline it would reorder before those
+      // wires exist and they would land on the wrong output. The saved
+      // outputs array already carries every revealed output, so nothing
+      // needs the grow/trim to have happened synchronously.
+      scheduleImageConverge(this)
     } catch (error) {
       console.warn(PREFIX, 'v0.61.0 post-configure migration failed', error)
     }
@@ -4846,6 +4890,6 @@ export function attach(node) {
   // A FRESH node gets neither configure nor a connection event, so the
   // backend's 13 declared outputs would all stay visible. One deferred
   // converge trims to the base shape; for a reloaded node it coalesces
-  // harmlessly after configure's own converge above.
+  // with the converge onConfigure schedules.
   scheduleImageConverge(node)
 }

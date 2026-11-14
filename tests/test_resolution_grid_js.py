@@ -464,7 +464,7 @@ class TestV0610MultiImageAndLayout:
     def test_reveal_orders_pair_first_and_never_removes_wired(self, source: str) -> None:
         reveal = _function_body(source, "revealExtraOutputs(node)")
         assert reveal.index("ensureOriginalSizeOutputs(node)") < reveal.index("addOutput")
-        assert "!isOutputConnected(node.outputs[idx])" in reveal
+        assert "isOutputConnected(node.outputs[idx])" in reveal  # behaviour: tests/test_resolution_reveal_outputs_js.py
 
 
 class TestCopyFromImageV0630:

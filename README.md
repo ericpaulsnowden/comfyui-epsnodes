@@ -1462,7 +1462,8 @@ dimensions. It replaces a resize node + a reroute + a get-image-size node.
   `image_8`. Every wired image is resized to the same target in one Run,
   each coming out on its own `resized_2` … `resized_8` output (revealed as
   you wire the inputs — sockets and outputs both tidy themselves back up
-  when you unplug). In this mode `resized_image` still carries the first
+  when you unplug, but an output that still has a wire on it stays, along
+  with the ones below it, so nothing ever re-points to a different image). In this mode `resized_image` still carries the first
   image and `width`/`height` report the shared target; the passthrough and
   original-size outputs are single-image concepts, so anything wired to
   them is skipped cleanly for that Run. With `width` or

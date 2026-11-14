@@ -766,6 +766,33 @@ class TestMultiImage:
         # width/height still report the shared target
         assert result[2][0] == 100 and result[3][0] == 50
 
+    def test_ratio_lock_with_multiple_of_gives_every_image_the_reported_size(self) -> None:
+        """Audit 2026-11: the shared box was ratio-locked + rounded once, then
+        each image re-applied the ratio to the ROUNDED width (1024x832 vs the
+        reported 1024x768). Every resized image must equal width x height."""
+        x = _make_image(height=100, width=100)
+        result = _node().resolve(
+            width=1000, height=800, resize_method="stretch", multiple_of=64,
+            ratio="5:4", image=x, image_2=x,
+        )
+        width, height = result[2][0], result[3][0]
+        assert (result[1][0].shape[2], result[1][0].shape[1]) == (width, height)
+        assert (result[6][0].shape[2], result[6][0].shape[1]) == (width, height)
+
+    def test_single_image_ratio_lock_with_multiple_of_is_unchanged(self) -> None:
+        x = _make_image(height=100, width=100)
+        result = _node().resolve(
+            width=1000, height=800, resize_method="stretch", multiple_of=64,
+            ratio="5:4", image=x,
+        )
+        width, height = result[2][0], result[3][0]
+        assert (result[1][0].shape[2], result[1][0].shape[1]) == (width, height)
+        # 5:4 of 1000 is 800, and 800 / 64 = 12.5 snaps half-UP to 13 -> 832,
+        # exactly what resolution.js's conformToRatio (Math.round) previews;
+        # before the 2026-11-13 parity fix Python's banker's round() gave 768
+        # here while the panel showed 832.
+        assert (width, height) == (1024, 832)
+
     def test_gap_slots_block_only_their_own_output(
         self, fake_execution_blocker: type
     ) -> None:
@@ -1215,7 +1242,8 @@ class TestRatioLockIntegration:
             node, width=1000, height=1, resize_method="stretch", ratio="5:4", multiple_of=64
         )
         assert width == nodes_resolution._round_to_multiple(1000, 64) == 1024
-        assert height == nodes_resolution._round_to_multiple(800, 64) == 768
+        # 800 / 64 = 12.5: half-up to 13 multiples (the panel's Math.round rule).
+        assert height == nodes_resolution._round_to_multiple(800, 64) == 832
 
     def test_none_ratio_is_unchanged_behavior(self) -> None:
         image = _make_image(height=100, width=200)

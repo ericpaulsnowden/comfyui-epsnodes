@@ -99,16 +99,16 @@ CONFORM_CASES: list[tuple[int, int, str, int, str, tuple[int, int]]] = [
     # another spelling of the same ratio is the same lock
     (1024, 1, "4x3", 0, "width", (1024, 768)),
     (1024, 1, "4 / 3", 0, "width", (1024, 768)),
-    # EXACT .5 ties: Python's round() takes the EVEN neighbour, so the panel
-    # must too (562.5 -> 562, not Math.round's 563) or the pad shows a number
-    # the backend will not compute from the same width
-    (1000, 1, "16:9", 0, "width", (1000, 562)),
-    (8, 1, "16:9", 0, "width", (8, 4)),
-    (40, 1, "16:9", 0, "width", (40, 22)),
+    # EXACT .5 ties round half UP on both sides (2026-11-13; the panel used to
+    # round half to EVEN to match Python's banker's round(), which read as a
+    # bug to an artist): 562.5 -> 563, and the pad shows what the backend runs
+    (1000, 1, "16:9", 0, "width", (1000, 563)),
+    (8, 1, "16:9", 0, "width", (8, 5)),
+    (40, 1, "16:9", 0, "width", (40, 23)),
     # ...and the same tie when snapping the derived side to multiple_of
-    # (800 / 64 == 12.5 -> 12 multiples = 768, not 13 = 832)
-    (1000, 1, "5:4", 64, "width", (1000, 768)),
-    (160, 1, "1:1", 64, "width", (160, 128)),
+    # (800 / 64 == 12.5 -> 13 multiples = 832)
+    (1000, 1, "5:4", 64, "width", (1000, 832)),
+    (160, 1, "1:1", 64, "width", (160, 192)),
     # a non-tie snap, for contrast
     (1000, 1, "4:5", 64, "width", (1000, 1280)),
 ]
