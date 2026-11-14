@@ -1219,9 +1219,10 @@ class TestChainingIsChanged:
         # token must change too, with the widget value held constant.
         _write_notebook(library_dir, "loras.md", "## A\na\n## B\nb\n")
         before = nodes_notebook._selection_token(context, "loras.md", "A\nB", "", "{}")
-        nodes_notebook._load_notebook_cached.cache_clear() if hasattr(
-            nodes_notebook._load_notebook_cached, "cache_clear"
-        ) else None
+        # The parse cache is keyed by (size, mtime); the swapped file has the
+        # SAME size and, on Windows' coarse clock, the same mtime tick, so
+        # clear it -- this test is about the token, not the cache.
+        nodes_notebook._PARSE_CACHE.clear()
         _write_notebook(library_dir, "loras.md", "## B\nb\n## A\na\n")
         after = nodes_notebook._selection_token(context, "loras.md", "A\nB", "", "{}")
         assert before != after
