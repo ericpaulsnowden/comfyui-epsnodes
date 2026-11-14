@@ -15,7 +15,7 @@ import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from .context import _atomic_write_text
+from .context import AtomicSaveError, _atomic_write_text
 
 
 class MarkdownStoreError(Exception):
@@ -1073,6 +1073,8 @@ def save_notebook(path: Path, parsed: ParsedNotebook, line_ending: str = "\n") -
     try:
         _atomic_write_text(path, text)
         return path.stat().st_mtime
+    except AtomicSaveError as exc:
+        raise NotebookWriteError(str(exc)) from exc  # already names the file
     except OSError as exc:
         raise NotebookWriteError(f"could not write {path}: {exc}") from exc
 
