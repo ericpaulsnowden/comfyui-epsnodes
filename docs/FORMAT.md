@@ -268,6 +268,12 @@ Writers re-emit the file from the parse, with these guarantees:
   the in-memory model is replaced by that re-parse, so an entry shadowed by
   a hand-edited duplicate name becomes addressable the moment its twin is
   deleted rather than on the next reload.
+  The panel follows both: a body it never received (the surviving twin of
+  a deleted duplicate) is cached as UNKNOWN (no `text`, fetched on
+  selection, and read before an inline rename) — never as `''`; and an
+  inline rename adopts the echoed `text`/`description` into the cache and,
+  for the open item, the editor baseline/textarea through the same fold
+  Save uses (`foldStoredBody`), never over typing made since.
 - **Create category** appends a new `# Name` heading at end-of-file (name
   must be unique among categories, non-empty after trimming, no newlines);
   **Set category description** replaces the §3.1 description block under
