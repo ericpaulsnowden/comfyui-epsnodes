@@ -1171,6 +1171,11 @@ function isGraphConfiguring() {
  */
 async function ensureUniqueUuid(node, { allowCollisionMint }) {
   if (nodeClassOf(node) !== CLASS_ID) return
+  // A node that never joined a graph is a litegraph `clone()` ghost (Ctrl+C /
+  // Alt-drag: createNode -> nodeCreated -> attach, configure() copies the
+  // original's uuid, then it is discarded). Minting + POST /clone for it
+  // would copy the whole buffer on disk into an orphan directory.
+  if (!node.graph) return
 
   const widget = getGridUuidWidget(node)
   const propertyUuid = node.properties?.[UUID_PROPERTY_NAME] || ''
@@ -4382,7 +4387,14 @@ function installConfigureRefresh(node) {
       result = originalOnConfigure?.call(this, info)
     } finally {
       if (!isGraphConfiguring()) {
-        void scheduleRefresh(this)
+        // Deferred one tick and skipped for a node still outside a graph: a
+        // real load/paste/undo joins its graph by then (core runs
+        // configure() BEFORE graph.add(), so `graph` is null right here),
+        // a litegraph clone() ghost (Ctrl+C / Alt-drag) never does.
+        const target = this
+        setTimeout(() => {
+          if (target.graph) void scheduleRefresh(target)
+        }, 0)
       }
       // 2026-07-24: every configure pass (load, undo, redo, paste-restore)
       // re-arms the settled-collision sweep below -- the sweep only acts
@@ -4877,6 +4889,9 @@ export function attach(node) {
     // fetches whichever uuid actually settles -- the fresh, possibly-just-
     // cloned one -- not whatever was on the node before dedup ran.
     setTimeout(async () => {
+      // clone() ghost (never joined a graph): no dedup, no refresh -- see
+      // ensureUniqueUuid. A real paste/load joins its graph before this runs.
+      if (!node.graph) return
       try {
         await ensureUniqueUuid(node, { allowCollisionMint })
       } catch (error) {

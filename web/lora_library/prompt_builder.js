@@ -726,13 +726,14 @@ export function attachPromptBuilderPanel(node) {
     // one shared subscription is installed.
     node.__epsPromptBuilderReload = () => resyncAfterExternalWrite(state)
     installExternalWriteSubscription()
-    installPoll(state)
+    installPollWhenInGraph(state)
 
     // Restore-race guard (see file header): deferred one tick, skipped when
     // onConfigure already ran the reload for a workflow-restored node.
     state.attachLoadTimer = setTimeout(() => {
       state.attachLoadTimer = null
       if (state.configureReloaded) return
+      if (!node.graph) return // clone() ghost: never joins a graph, must not fetch
       rescanNotebooks(state, { force: true })
       reloadEntries(state).catch((error) => api.warn('initial prompt builder load failed', error))
     }, 0)
@@ -965,8 +966,10 @@ function wireConfigureReload(state) {
       state.blocks = parseBlocks(state.blocksWidget.value)
       renderRightPane(state)
       rescanNotebooks(state, { force: true })
-      reloadEntries(state).catch((error) =>
-        api.warn('post-configure prompt builder reload failed', error)
+      afterTickIfInGraph(state.node, () =>
+        reloadEntries(state).catch((error) =>
+          api.warn('post-configure prompt builder reload failed', error)
+        )
       )
     } catch (error) {
       api.warn('prompt builder configure reload failed', error)
@@ -1032,6 +1035,41 @@ function installExternalWriteSubscription() {
 // ---------------------------------------------------------------------------
 // Poll (owner spec: "~5 s", change-gated)
 // ---------------------------------------------------------------------------
+
+/** The poll interval and visibilitychange listener are torn down only by
+ * onRemoved, which a litegraph `clone()` ghost (Ctrl+C / Alt-drag: attach
+ * runs, the node never joins a graph) never reaches -- so they are installed
+ * only once the node is in a graph: directly if it already is, else from a
+ * chained onAdded (nodeCreated fires before graph.add). */
+/** Runs *fn* one tick later, only if *node* is in a graph by then (a clone()
+ * ghost never joins one; core runs configure() BEFORE graph.add(), so a
+ * check inside onConfigure itself would also skip real loads). */
+function afterTickIfInGraph(node, fn) {
+  setTimeout(() => {
+    if (node.graph) fn()
+  }, 0)
+}
+
+function installPollWhenInGraph(state) {
+  const node = state.node
+  if (node.graph) {
+    installPoll(state)
+    return
+  }
+  const originalOnAdded = node.onAdded
+  node.onAdded = function (...args) {
+    let result
+    if (typeof originalOnAdded === 'function') {
+      try {
+        result = originalOnAdded.apply(this, args)
+      } catch (error) {
+        api.warn('original node onAdded threw', error)
+      }
+    }
+    if (!state.pollTimer) installPoll(state)
+    return result
+  }
+}
 
 function installPoll(state) {
   state.pollTimer = setInterval(() => {
