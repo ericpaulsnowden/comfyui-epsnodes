@@ -1,6 +1,6 @@
 """Pure-function tests for the shared search matcher
 (``web/lora_library/search.js``, FORMAT.md §7.2) -- the pack's first
-deliberate shared-panel module (docs/ROADMAP-shared-panel-code.md's
+deliberate shared-panel module (docs/plan/ROADMAP-shared-panel-code.md's
 "one implementation, not a fourth copy" milestone). Case-insensitive,
 whitespace-split, every query word AND'd against the haystack -- the
 Notebook's original semantics (v0.53.0, owner ask 2026-08-08), now shared
@@ -46,7 +46,7 @@ def test_search_js_parses() -> None:
 def test_module_is_pure_no_imports_no_dom_no_domain_coupling() -> None:
     """The task brief for this file (2026-09-08): "pure functions, no DOM,
     no node/graph references, no imports of its own beyond nothing" -- the
-    proof-of-concept for docs/ROADMAP-shared-panel-code.md's shared-module
+    proof-of-concept for docs/plan/ROADMAP-shared-panel-code.md's shared-module
     rule has to actually BE the model, not just be documented as one."""
     src = SEARCH_JS.read_text(encoding="utf-8")
     assert "\nimport " not in src and not src.startswith("import ")

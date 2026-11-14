@@ -1506,7 +1506,7 @@ def test_no_import_from_lora_loader_state_controller(source: str) -> None:
     controller.js (whose blueprint it clones by hand) or notebook.js.
     v0.92.0 (shared-panel-code round) adds exactly ONE new cross-import --
     ./search.js, the pack's first deliberate shared-panel module -- which
-    is explicitly sanctioned (docs/ROADMAP-shared-panel-code.md: "the
+    is explicitly sanctioned (docs/plan/ROADMAP-shared-panel-code.md: "the
     no-cross-import folklore is already false") and is not either
     forbidden sibling, so it does not loosen this boundary."""
     assert "from './controller.js'" not in source
@@ -2505,7 +2505,7 @@ class TestGroupDropdownCreateEntryV20260907:
 # --------------- v0.92.0 shared-panel-code round: search went multi-word AND
 
 #: (query, entry name, expected) -- the owner's 2026-09-08 decision closes
-#: docs/ROADMAP-shared-panel-code.md's open product question: this panel's
+#: docs/plan/ROADMAP-shared-panel-code.md's open product question: this panel's
 #: search was the ONE outlier (single-substring-only, so word ORDER
 #: mattered); it now shares notebook.js's multi-word AND matcher via
 #: ./search.js, so word order stops mattering -- the first two cases below

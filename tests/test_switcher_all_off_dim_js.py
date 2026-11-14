@@ -449,7 +449,7 @@ def source() -> str:
 
 
 def test_by_hand_copy_not_an_import_of_image_grid(source: str) -> None:
-    """docs/ROADMAP-shared-panel-code.md: helpers are duplicated per file;
+    """docs/plan/ROADMAP-shared-panel-code.md: helpers are duplicated per file;
     only the renderLink hook is shared (it must wrap exactly once)."""
     assert "from './image_grid.js'" not in source
     assert "import { ensureOwnedLinkColourHook } from './owned_link_colour.js'" in source

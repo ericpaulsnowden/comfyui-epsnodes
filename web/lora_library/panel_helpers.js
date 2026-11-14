@@ -1,5 +1,5 @@
 /**
- * @file Shared DOM/node helpers for every EPS panel (docs/ROADMAP-shared-panel-code.md
+ * @file Shared DOM/node helpers for every EPS panel (docs/plan/ROADMAP-shared-panel-code.md
  * M1 + the `installMinWidth` unification). Before this module `el` was
  * declared 8 times and `installMinWidth` 9 times, one copy per panel, and a
  * fix to one never reached its siblings (the v0.68.1 width-lift fix reached

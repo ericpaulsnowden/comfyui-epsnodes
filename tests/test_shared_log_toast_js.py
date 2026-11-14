@@ -1,6 +1,6 @@
 """Behaviour tests for the shared logger and toast in
 ``web/lora_library/api.js`` (``loggerFor`` and ``showToast``,
-docs/ROADMAP-shared-panel-code.md M3).
+docs/plan/ROADMAP-shared-panel-code.md M3).
 
 Before M3 each eps_image module hand-wrote ``console.warn(PREFIX, ...)`` and 14
 files carried their own copy of the toast helper (4 signature shapes, 3

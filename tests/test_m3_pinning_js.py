@@ -1,5 +1,5 @@
 """Frontend pins for provenance M3 "full pinning" (FORMAT.md §6.1/§6.2/§7.2,
-docs/ROADMAP-run-provenance.md M3; owner 2026-08-18/21: "will the user be
+docs/plan/ROADMAP-run-provenance.md M3; owner 2026-08-18/21: "will the user be
 able to see what the old values are? That would be important", plus a
 one-click clear).
 

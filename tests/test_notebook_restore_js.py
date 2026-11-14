@@ -49,7 +49,7 @@ def source() -> str:
 
 
 def test_search_matcher_is_imported_from_the_shared_module(source: str) -> None:
-    """v0.92.0 (docs/ROADMAP-shared-panel-code.md, owner decision
+    """v0.92.0 (docs/plan/ROADMAP-shared-panel-code.md, owner decision
     2026-09-08: "use Notebook as the model and make them all follow that
     paradigm"): the Notebook's own entryMatchesSearch/searchHaystack/
     searchWords moved to web/lora_library/search.js, imported back here

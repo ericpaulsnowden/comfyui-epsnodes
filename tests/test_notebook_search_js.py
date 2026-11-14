@@ -11,7 +11,7 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SRC = (REPO_ROOT / "web" / "lora_library" / "notebook.js").read_text(encoding="utf-8")
-# v0.92.0 (docs/ROADMAP-shared-panel-code.md's shared-panel-code round, owner
+# v0.92.0 (docs/plan/ROADMAP-shared-panel-code.md's shared-panel-code round, owner
 # decision 2026-09-08: "use Notebook as the model and make them all follow
 # that paradigm"): entryMatchesSearch/searchHaystack/searchWords moved out of
 # notebook.js into this shared module, imported back under their original
