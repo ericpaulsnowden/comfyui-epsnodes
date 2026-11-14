@@ -1,5 +1,5 @@
 """Tests for ``POST /eps_image_grid/add`` (``eps_image/routes_image_grid.py``),
-the M0 deliverable of ``docs/ROADMAP-image-grid-bulk-add.md``: "Write the
+the M0 deliverable of ``docs/plan/ROADMAP-image-grid-bulk-add.md``: "Write the
 first HTTP test for ``POST /eps_image_grid/add`` (the route has none)."
 
 Before this file, ``/add`` had zero HTTP-level coverage. ``tests/
@@ -330,7 +330,7 @@ class TestAddRoutePathTraversalInSubfolder:
 
 
 class TestAddRouteNoDedupeOnReAdd:
-    """``docs/ROADMAP-image-grid-bulk-add.md`` "Risks and invariants" #4:
+    """``docs/plan/ROADMAP-image-grid-bulk-add.md`` "Risks and invariants" #4:
     "No dedupe on disk -- adding the same file twice creates two frames."
     Documented, DELIBERATE behavior (the roadmap explicitly leaves
     deciding whether bulk-add SHOULD dedupe as an open question for a

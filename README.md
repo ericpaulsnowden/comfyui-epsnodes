@@ -1544,7 +1544,7 @@ the readout switches to `Solo m2_i1_t3 — 1 of 24 runs` so you can't
 forget it's on, and a mistyped token fails the queue immediately with a
 real example token to copy (never a silent zero-run "success"). Clear
 the box to run the full set again. This is milestone M1 of the
-provenance roadmap (`docs/ROADMAP-run-provenance.md`); later milestones
+provenance roadmap (`docs/plan/ROADMAP-run-provenance.md`); later milestones
 bake per-image workflows so a dropped file loads pre-soloed.
 
 **Both modes default to `multiply` (v0.66.1)** — images × texts crossed,

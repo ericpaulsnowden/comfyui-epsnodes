@@ -1,6 +1,6 @@
 """Behaviour tests for the shared panel helpers
 (``web/lora_library/panel_helpers.js``: ``el`` and ``installMinWidth``,
-docs/ROADMAP-shared-panel-code.md M1 + the installMinWidth unification).
+docs/plan/ROADMAP-shared-panel-code.md M1 + the installMinWidth unification).
 
 Before that module existed both helpers were hand-copied into 8-9 panels and
 a fix reached only some copies. These tests drive the one implementation under
@@ -149,7 +149,7 @@ def test_install_min_width_tolerates_a_missing_node(probe: dict) -> None:
 
 def test_no_panel_declares_its_own_copy_of_a_shared_helper() -> None:
     """The point of the module: one implementation. A second declaration is
-    the drift this pack kept paying for (docs/ROADMAP-shared-panel-code.md)."""
+    the drift this pack kept paying for (docs/plan/ROADMAP-shared-panel-code.md)."""
     declaration = re.compile(r"^(?:export )?(?:function|const) (el|installMinWidth)\b", re.M)
     offenders = [
         f"{path.relative_to(WEB)}: {m.group(1)}"
