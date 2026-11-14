@@ -719,7 +719,7 @@ export function attachPromptBuilderPanel(node) {
     // one shared subscription is installed.
     node.__epsPromptBuilderReload = () => resyncAfterExternalWrite(state)
     installExternalWriteSubscription()
-    installPoll(state)
+    installPollWhenInGraph(state)
 
     // Restore-race guard (see file header): deferred one tick, skipped when
     // onConfigure already ran the reload for a workflow-restored node.
@@ -1025,6 +1025,32 @@ function installExternalWriteSubscription() {
 // ---------------------------------------------------------------------------
 // Poll (owner spec: "~5 s", change-gated)
 // ---------------------------------------------------------------------------
+
+/** The poll interval and visibilitychange listener are torn down only by
+ * onRemoved, which a litegraph `clone()` ghost (Ctrl+C / Alt-drag: attach
+ * runs, the node never joins a graph) never reaches -- so they are installed
+ * only once the node is in a graph: directly if it already is, else from a
+ * chained onAdded (nodeCreated fires before graph.add). */
+function installPollWhenInGraph(state) {
+  const node = state.node
+  if (node.graph) {
+    installPoll(state)
+    return
+  }
+  const originalOnAdded = node.onAdded
+  node.onAdded = function (...args) {
+    let result
+    if (typeof originalOnAdded === 'function') {
+      try {
+        result = originalOnAdded.apply(this, args)
+      } catch (error) {
+        api.warn('original node onAdded threw', error)
+      }
+    }
+    if (!state.pollTimer) installPoll(state)
+    return result
+  }
+}
 
 function installPoll(state) {
   state.pollTimer = setInterval(() => {
