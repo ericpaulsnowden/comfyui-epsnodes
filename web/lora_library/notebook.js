@@ -6094,9 +6094,18 @@ async function performDeleteCategory(state, { force = false } = {}) {
  */
 function adjustedHeadingsSuffix(data) {
   const n = typeof data?.adjusted_headings === 'number' ? data.adjusted_headings : 0
-  if (n <= 0) return ''
-  const noun = n === 1 ? '1 pasted heading line' : `${n} pasted heading lines`
-  return ` ${noun} demoted (# → ###) so they stay inside this entry.`
+  const fences = typeof data?.closed_fences === 'number' ? data.closed_fences : 0
+  let suffix = ''
+  if (n > 0) {
+    const noun = n === 1 ? '1 pasted heading line' : `${n} pasted heading lines`
+    suffix += ` ${noun} demoted (# → ###) so they stay inside this entry.`
+  }
+  if (fences > 0) {
+    // §3.4 (2026-11-13): an unclosed ``` fence would have swallowed every
+    // entry below this one on the next reload; the server closed it.
+    suffix += ' An unclosed ``` code fence was closed so the entries below stay visible.'
+  }
+  return suffix
 }
 
 async function performSave(state, { force = false } = {}) {

@@ -251,6 +251,23 @@ Writers re-emit the file from the parse, with these guarantees:
   `adjusted_headings` (0 on the ordinary save) and, only when non-zero,
   echoes the STORED `text` so the editor can fold disk truth in; fenced
   heading-looking lines are body text already and are never touched.
+- **Reload safety (2026-11-13).** Fence state is file-wide in the parser,
+  so a body or description with an UNCLOSED ``` fence would turn every
+  heading below it into fenced body text on the next reload — the entries
+  after it would silently disappear. The writer therefore closes such a
+  fence with one appended ``` line (reported as `closed_fences`, 0 or 1,
+  alongside `adjusted_headings`; the stored text is echoed back whenever
+  either is non-zero), normalizes `\r\n`/`\r` in incoming text to `\n`
+  (the file's own line ending is chosen at save time, §3.6), and refuses an
+  entry or category name containing a CR or LF (a name is exactly one
+  heading line — the same rule categories always had, now for entries too).
+  Finally every write re-parses its own serialization and compares: an edit
+  the file cannot carry — today only a hand-edited file whose ``` fence is
+  left open above the insertion point — is REFUSED with a 400 naming the
+  open fence's line, instead of being saved and vanishing on reload; and
+  the in-memory model is replaced by that re-parse, so an entry shadowed by
+  a hand-edited duplicate name becomes addressable the moment its twin is
+  deleted rather than on the next reload.
 - **Create category** appends a new `# Name` heading at end-of-file (name
   must be unique among categories, non-empty after trimming, no newlines);
   **Set category description** replaces the §3.1 description block under
