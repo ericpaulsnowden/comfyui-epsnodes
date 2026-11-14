@@ -2349,10 +2349,20 @@ is the functional core WITHOUT the grid.
   it stay, even above the highest wired `image_N`), because
   `removeOutput` renumbers every later link's `origin_slot` and a hole
   would re-point a consumer at the wrong backend slot; growing appends
-  in order. A disordered or holey set from an older save is repaired
-  on reveal (the deferred converge, after configure resolved the links):
-  the outputs are reordered in place by name and each link's
-  `origin_slot` follows, so a wire on the label `resized_4` stays on it. Semantics: every wired image is resized
+  in order. Saved output NAMES are the record of intent, read from the
+  workflow at load: litegraph restores saved outputs by index onto the
+  canonical list (and ComfyUI normalizes the saved names before any
+  node's `onConfigure` runs), so a pre-fix save whose slot 7 was
+  `resized_4` would load with that wire on the canonical `resized_3`.
+  The extension's `beforeConfigureGraph(graphData)` hook therefore reads
+  the RAW workflow JSON (root and subgraph definitions, settled links and
+  the separately saved `floatingLinks`), and for each wired `resized_N`
+  entry whose saved index differs from the name's index in the node
+  definition records `{linkId → intendedName}` — keyed by LINK id, never
+  node id, because the frontend de-duplicates node ids after the hook;
+  the deferred converge — after grow/trim — walks the node's own outputs
+  and moves each recorded link (settled or floating) onto the output of the saved name (a name that does not exist leaves
+  the link in place with a console warning). Semantics: every wired image is resized
   with the SAME settings — `resized_image` carries `image`'s result,
   `resized_k` carries `image_k`'s; an unwired `image_k` whose
   `resized_k` output exists emits a per-run `[ExecutionBlocker(None)]`

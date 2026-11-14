@@ -193,6 +193,17 @@ app.registerExtension({
     safely('groupBypass.attach', () => groupBypass.attach?.(node))
   },
 
+  /** Raw workflow JSON, before graph.configure: EPS Resolution reads the
+   * saved resized_N output names here (they are normalized away by the time
+   * any node's onConfigure runs). */
+  beforeConfigureGraph(graphData) {
+    safely('resolution.beforeConfigureGraph', () => resolution.beforeConfigureGraph?.(graphData))
+  },
+
+  afterConfigureGraph() {
+    safely('resolution.afterConfigureGraph', () => resolution.afterConfigureGraph?.())
+  },
+
   /**
    * Fires once per node, AFTER a whole saved workflow has finished loading
    * (every node's widgets/properties already restored) — EPS Image Grid's

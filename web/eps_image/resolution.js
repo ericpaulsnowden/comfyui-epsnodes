@@ -4447,49 +4447,116 @@ function convergeExtraImageInputs(node) {
 
 const RESIZED_NAME_RE = /^resized_(\d+)$/
 
-/** Repair a resized_N set saved by a build that could shuffle it (an old
- * trim removed an unwired resized_3 under a wired resized_4, or re-added it
- * at the end): outputs are positional, so the on-node order must be the
- * backend's resized_2..k. The label is the user's intent (a wire on
- * "resized_4" means image_4's result), so the outputs are REORDERED IN
- * PLACE by name -- never removeOutput/addOutput-and-reconnect, because
- * removeOutput disconnects the slot -- and every link riding a moved output
- * (settled in output.links AND floating in output._floatingLinks) gets its
- * origin_slot rewritten to the new index. Missing members up to
- * the highest wired image_N / highest linked resized_N are appended first.
- * Runs only from the deferred converge, i.e. after configure has resolved
- * the links (the v0.16.0 reentrancy lesson). */
-function repairResizedOrder(node, highestWired) {
-  const outputs = node.outputs || []
-  const slots = []
-  let wantThrough = highestWired
-  outputs.forEach((output, idx) => {
-    const match = RESIZED_NAME_RE.exec(output?.name || '')
-    if (!match) return
-    slots.push({ idx, n: Number(match[1]) })
-    if (isOutputConnected(output)) wantThrough = Math.max(wantThrough, Number(match[1]))
-  })
-  const names = slots.map((slot) => slot.n)
-  const contiguous = names.every((n, i) => n === i + 2)
-  if (contiguous && names.length >= wantThrough - 1) return
-  for (let n = 2; n <= wantThrough; n++) {
-    if (!names.includes(n)) node.addOutput(`${RESIZED_PREFIX}${n}`, 'IMAGE')
+/** Saved wire intent, read from the RAW workflow JSON.
+ * ComfyUI's node class rebuilds saved outputs against the node definition
+ * BEFORE litegraph's configure, so by the time onConfigure runs the saved
+ * names are already canonical and a pre-fix save's wire on "resized_4"
+ * (slot 7, after an old trim shifted things) looks like a wire on the
+ * canonical resized_3. The raw names are visible only to the
+ * `beforeConfigureGraph(graphData)` extension hook.
+ *
+ * The intent is keyed by LINK id, never by node id: the frontend
+ * de-duplicates node ids across graphs AFTER this hook runs, so a node id
+ * recorded here may not exist at apply time, while a link id is what the
+ * loaded node's outputs still carry. Settled links and floating wires
+ * (serialized separately, own id space) get one map each. */
+const savedWireIntent = new Map() // settled linkId -> intended output name
+const savedFloatingIntent = new Map() // floating linkId -> intended output name
+
+/** Record intents from one graph scope (root, or a subgraph definition):
+ * *nodes* are its saved nodes, *floatingLinks* its saved floating wires.
+ * Only entries whose saved index differs from the name's canonical index in
+ * the node DEFINITION (never the saved array) are recorded. */
+function recordIntentFromScope(nodes, floatingLinks, canonicalNames) {
+  const misplaced = (savedNode, index) => {
+    const name = savedNode?.outputs?.[index]?.name
+    if (!RESIZED_NAME_RE.test(name || '')) return null
+    const canonical = canonicalNames.indexOf(name)
+    return canonical === -1 || canonical === index ? null : name
   }
-  const tail = node.outputs.filter((output) => RESIZED_NAME_RE.test(output?.name || ''))
-  const first = node.outputs.findIndex((output) => RESIZED_NAME_RE.test(output?.name || ''))
-  tail.sort((x, y) => Number(RESIZED_NAME_RE.exec(x.name)[1]) - Number(RESIZED_NAME_RE.exec(y.name)[1]))
-  node.outputs.splice(first, tail.length, ...tail)
+  const resolutionNodes = new Map()
+  for (const savedNode of nodes || []) {
+    if (savedNode?.type !== NODE_TYPE) continue
+    resolutionNodes.set(savedNode.id, savedNode)
+    ;(savedNode.outputs || []).forEach((saved, index) => {
+      const name = misplaced(savedNode, index)
+      if (name) for (const linkId of saved.links || []) savedWireIntent.set(linkId, name)
+    })
+  }
+  for (const link of floatingLinks || []) {
+    const savedNode = resolutionNodes.get(link?.origin_id)
+    const name = savedNode ? misplaced(savedNode, link.origin_slot) : null
+    if (name) savedFloatingIntent.set(link.id, name)
+  }
+}
+
+/** ComfyUI extension hook, called with the raw graphData before
+ * graph.configure (web/eps_image.js forwards it). */
+export function beforeConfigureGraph(graphData) {
+  savedWireIntent.clear() // drop anything stale from an earlier load
+  savedFloatingIntent.clear()
+  const definition = globalThis.LiteGraph?.registered_node_types?.[NODE_TYPE]
+  const canonicalNames = definition?.nodeData?.output_name
+  if (!Array.isArray(canonicalNames)) return
+  recordIntentFromScope(graphData?.nodes, graphData?.floatingLinks, canonicalNames)
+  for (const subgraph of graphData?.definitions?.subgraphs || []) {
+    recordIntentFromScope(subgraph?.nodes, subgraph?.floatingLinks, canonicalNames)
+  }
+}
+
+/** ComfyUI extension hook after the load: anything not yet applied by a
+ * deferred converge is stale now. The converges queued during configure
+ * fire first (FIFO setTimeout 0), so the clear is itself deferred. */
+export function afterConfigureGraph() {
+  setTimeout(() => {
+    savedWireIntent.clear()
+    savedFloatingIntent.clear()
+  }, 0)
+}
+
+/** Apply the recorded intent (deferred converge, AFTER grow/trim so the
+ * intended output exists once its image_N is wired). Walks THIS node's own
+ * outputs, so it is independent of node-id remapping and of graph scope:
+ * a settled link id (output.links) or floating wire (output._floatingLinks,
+ * the same LLink object graph.floatingLinks holds) found in a map moves to
+ * the output of its saved name -- never removeOutput (it disconnects). An
+ * intended output that does not exist leaves the wire where it is and
+ * warns once per pass. */
+function applySavedOutputIntent(node) {
+  if (!savedWireIntent.size && !savedFloatingIntent.size) return
   const links = node.graph?._links ?? node.graph?.links
-  tail.forEach((output, i) => {
-    for (const id of output.links || []) {
-      const link = links?.get ? links.get(id) : links?.[id]
-      if (link) link.origin_slot = first + i
+  let warned = false
+  const targetFor = (intendedName) => {
+    const target = outputIndexByName(node, intendedName)
+    if (target === -1 && !warned) {
+      warned = true
+      warn(`saved wire on ${intendedName} kept on its slot: wire the matching image input`)
     }
-    // A floating wire (dragged from the output, not yet dropped; saved and
-    // restored by 1.52.7 onto output._floatingLinks) carries its own
-    // origin_slot -- the same LLink object graph.floatingLinks holds.
-    for (const link of output._floatingLinks || []) link.origin_slot = first + i
-  })
+    return target
+  }
+  for (const output of [...(node.outputs || [])]) {
+    for (const linkId of [...(output.links || [])]) {
+      const intendedName = savedWireIntent.get(linkId)
+      if (intendedName === undefined) continue
+      savedWireIntent.delete(linkId)
+      const target = targetFor(intendedName)
+      if (target === -1 || node.outputs[target] === output) continue
+      output.links = output.links.filter((id) => id !== linkId)
+      ;(node.outputs[target].links ??= []).push(linkId)
+      const link = links?.get ? links.get(linkId) : links?.[linkId]
+      if (link) link.origin_slot = target
+    }
+    for (const link of [...(output._floatingLinks || [])]) {
+      const intendedName = savedFloatingIntent.get(link.id)
+      if (intendedName === undefined) continue
+      savedFloatingIntent.delete(link.id)
+      const target = targetFor(intendedName)
+      if (target === -1 || node.outputs[target] === output) continue
+      output._floatingLinks.delete(link)
+      ;(node.outputs[target]._floatingLinks ??= new Set()).add(link)
+      link.origin_slot = target
+    }
+  }
 }
 
 /** Reveal resized_N tail outputs through the highest wired image_N. The
@@ -4506,7 +4573,6 @@ function revealExtraOutputs(node) {
     const match = EXTRA_IMAGE_RE.exec(input?.name || '')
     if (match && input.link != null) highest = Math.max(highest, Number(match[1]))
   }
-  repairResizedOrder(node, highest)
   for (let n = MAX_IMAGES; n > highest && n >= 2; n--) {
     const idx = outputIndexByName(node, `${RESIZED_PREFIX}${n}`)
     if (idx === -1) continue
@@ -4532,6 +4598,7 @@ function scheduleImageConverge(node) {
     try {
       convergeExtraImageInputs(node)
       revealExtraOutputs(node)
+      applySavedOutputIntent(node)
       // v0.101.0: the deferred, coalesced re-check of the scale-mode
       // greying -- runs after every connect/disconnect, configure and
       // fresh attach, once the inputs array has settled (the synchronous
@@ -4868,12 +4935,9 @@ export function attach(node) {
         }
       }
       this.properties[WIDGET_LAYOUT_PROP] = WIDGET_LAYOUT_CURRENT
-      // Deferred, never inline: LGraph.configure restores floating links
-      // onto the outputs only AFTER node.configure returns, and the resized_N
-      // repair reorders outputs -- run inline it would reorder before those
-      // wires exist and they would land on the wrong output. The saved
-      // outputs array already carries every revealed output, so nothing
-      // needs the grow/trim to have happened synchronously.
+      // Deferred, never inline (floating links are restored only after
+      // node.configure returns). Saved wire intent was recorded earlier by
+      // beforeConfigureGraph; the deferred converge applies it.
       scheduleImageConverge(this)
     } catch (error) {
       warn('v0.61.0 post-configure migration failed', error)
