@@ -33,21 +33,26 @@ const body = [
   grab(/const EXTRA_IMAGE_RE = [^\n]*/), grab(/const MAX_IMAGES = [^\n]*/), grab(/const RESIZED_PREFIX = [^\n]*/),
   grab(/function outputIndexByName[\s\S]*?\n}\n/),
   grab(/export function isOutputConnected[\s\S]*?\n}\n/).replace('export ', ''),
-  grab(/const RESIZED_NAME_RE = [^\n]*/), grab(/function repairResizedOrder[\s\S]*?\n}\n/),
+  grab(/const RESIZED_NAME_RE = [^\n]*/), grab(/const NODE_TYPE = [^\n]*/), grab(/const savedWireIntent = [^\n]*/), grab(/function intentKey[\s\S]*?\n}\n/),
+  grab(/function recordIntentFromNodes[\s\S]*?\n}\n/), grab(/export function beforeConfigureGraph[\s\S]*?\n}\n/).replace('export ', ''),
+  grab(/function applySavedOutputIntent[\s\S]*?\n}\n/), grab(/const PREFIX = [^\n]*/),
   grab(/function ensureOriginalSizeOutputs[\s\S]*?\n}\n/), grab(/function revealExtraOutputs[\s\S]*?\n}\n/),
-  'function resyncSize(){}', 'return revealExtraOutputs'
+  'function resyncSize(){}', 'return { revealExtraOutputs, beforeConfigureGraph, applySavedOutputIntent, savedWireIntent }'
 ].join('\n')
-const revealExtraOutputs = new Function(body)()
+const { revealExtraOutputs, beforeConfigureGraph, applySavedOutputIntent, savedWireIntent } = new Function(body)()
 
 const BACKEND = ['image','resized_image','width','height','original_width','original_height',
   'resized_2','resized_3','resized_4','resized_5','resized_6','resized_7','resized_8']
 const BASE = BACKEND.slice(0, 6)
+globalThis.LiteGraph = { registered_node_types: { EPSResolution: { nodeData: { output_name: BACKEND } } } }
 
 function makeNode(resized, wiredImages) {
   const links = new Map()
   const mk = (name) => ({ name, type: 'IMAGE', links: [] })
   const node = {
-    graph: { _links: links },
+    id: 5,
+    graph: { _links: links, isRootGraph: true },
+    graphLinks: links,
     inputs: [{ name: 'image', link: 1 }, ...[2,3,4,5,6,7,8].map((n) => (
       { name: 'image_' + n, link: wiredImages.includes(n) ? 100 + n : null }))],
     outputs: [...BASE, ...resized.map((n) => 'resized_' + n)].map(mk),
@@ -94,30 +99,52 @@ const out = {}
   revealExtraOutputs(node)
   out.heldBelowWired = { reads: node.reads(97), order: node.order() }
 }
-{ // pre-fix saved file: outputs 2,4,3 with a consumer on the label resized_4
-  const node = makeNode([2,4,3], [2,3,4]); node.wire('resized_4', 96)
-  revealExtraOutputs(node)
-  out.repairShuffled = { reads: node.reads(96), order: node.order() }
+// ---- saved-intent restore: a fake whose configure behaves like the real one ----
+// LGraphNode.configure on a fresh node: the constructor built the canonical
+// outputs, saved entries' `links` are applied BY INDEX, names stay canonical,
+// then onConfigure(info) runs; links keep their saved origin_slot.
+function forgedNode(savedResized, nodeId = 5) {
+  const outputs = [...BASE, ...savedResized.map(([name]) => name)].map((name) => ({ name, links: null }))
+  savedResized.forEach(([, ids], i) => { outputs[6 + i].links = ids })
+  return { id: nodeId, type: 'EPSResolution', outputs }
 }
-{ // pre-fix saved file with a hole: 2,4 (consumer on resized_4, image_3/4 wired)
-  const node = makeNode([2,4], [2,3,4]); node.wire('resized_4', 95)
-  revealExtraOutputs(node)
-  out.repairHole = { reads: node.reads(95), order: node.order() }
+function loadSaved(savedResized, linksById, wiredImages, { subgraph = false } = {}) {
+  const saved = forgedNode(savedResized)
+  const graphData = subgraph
+    ? { nodes: [], definitions: { subgraphs: [{ id: 'sg-1', nodes: [saved] }] } }
+    : { nodes: [saved] }
+  beforeConfigureGraph(graphData) // sees the RAW names
+  // ComfyUI normalizes, litegraph applies saved links BY INDEX: names stay canonical
+  const node = makeNode([2,3,4,5,6,7,8], wiredImages)
+  if (subgraph) node.graph.isRootGraph = false, node.graph.id = 'sg-1'
+  saved.outputs.forEach((entry, i) => { if (entry.links) node.outputs[i].links = [...entry.links] })
+  for (const [id, slot] of Object.entries(linksById)) node.graphLinks.set(Number(id), { id: Number(id), origin_slot: slot })
+  return node
 }
-{ // floating wire restored onto the resized_4 output of a saved 2,4,3 set
-  const node = makeNode([2,4,3], [2,3,4])
-  const floating = { id: 1, origin_slot: 7 } // saved slot of resized_4 in the old file
-  node.outputs[7]._floatingLinks = new Set([floating])
-  revealExtraOutputs(node)
-  out.floatingMoved = { name: node.outputs[floating.origin_slot].name, slot: floating.origin_slot }
+function deferredPass(node) { revealExtraOutputs(node); applySavedOutputIntent(node) }
+const warnings = []
+console.warn = (...args) => warnings.push(args.join(' '))
+{ // pre-fix save [resized_2, resized_4], consumer link 10 at slot 7 (saved name resized_4)
+  const node = loadSaved([['resized_2', null], ['resized_4', [10]]], { 10: 7 }, [2, 3, 4])
+  out.intentBefore = node.reads(10) // loads on the canonical resized_3
+  deferredPass(node)
+  out.intentRestored = { reads: node.reads(10), order: node.order(),
+    listedOn: node.outputs.filter((o) => o.links.includes(10)).map((o) => o.name) }
 }
-{ // floating wire on the output that moves DOWN (resized_3, slot 8 -> 7) plus a settled one
-  const node = makeNode([2,4,3], [2,3,4]); node.wire('resized_4', 94)
-  const floating = { id: 2, origin_slot: 8 }
-  node.outputs[8]._floatingLinks = new Set([floating])
-  revealExtraOutputs(node)
-  out.floatingOther = { name: node.outputs[floating.origin_slot].name, slot: floating.origin_slot,
-    settled: node.reads(94) }
+{ // a canonical save is untouched
+  const node = loadSaved([['resized_2', null], ['resized_3', [11]]], { 11: 7 }, [2, 3])
+  deferredPass(node)
+  out.canonical = { reads: node.reads(11), order: node.order(), recorded: savedWireIntent.size }
+}
+{ // the same forged save, node inside a subgraph definition
+  const node = loadSaved([['resized_2', null], ['resized_4', [13]]], { 13: 7 }, [2, 3, 4], { subgraph: true })
+  deferredPass(node)
+  out.subgraph = { reads: node.reads(13) }
+}
+{ // intended output not wired: link stays, one warning
+  const node = loadSaved([['resized_2', null], ['resized_4', [12]]], { 12: 7 }, [2, 3])
+  deferredPass(node)
+  out.unwired = { reads: node.reads(12), warnings: warnings.length }
 }
 process.stdout.write(JSON.stringify(out))
 """
@@ -163,27 +190,23 @@ def test_trim_stops_at_first_wired_output_from_the_top(probe: dict) -> None:
 
 
 
-def test_shuffled_saved_set_is_repaired_keeping_the_wired_label(probe: dict) -> None:
-    got = probe["repairShuffled"]
-    assert got["order"] == ["resized_2", "resized_3", "resized_4"]
+def test_prefix_save_loads_wrong_then_deferred_pass_restores_the_saved_name(probe: dict) -> None:
+    assert probe["intentBefore"] == "resized_3"  # what litegraph's by-index configure gives
+    got = probe["intentRestored"]
     assert got["reads"] == "resized_4"
-
-
-def test_holey_saved_set_is_filled_keeping_the_wired_label(probe: dict) -> None:
-    got = probe["repairHole"]
+    assert got["listedOn"] == ["resized_4"]
     assert got["order"] == ["resized_2", "resized_3", "resized_4"]
-    assert got["reads"] == "resized_4"
 
 
-def test_floating_wire_follows_its_output_when_the_repair_moves_it(probe: dict) -> None:
-    got = probe["floatingMoved"]
-    assert got == {"name": "resized_4", "slot": 8}
+def test_canonical_save_is_untouched(probe: dict) -> None:
+    got = probe["canonical"]
+    assert got["recorded"] == 0 and got["reads"] == "resized_3"
+    assert got["order"] == ["resized_2", "resized_3"]
 
 
-def test_floating_wire_on_the_output_moving_down_keeps_its_label(probe: dict) -> None:
-    got = probe["floatingOther"]
-    assert got["name"] == "resized_3" and got["slot"] == 7
-    assert got["settled"] == "resized_4"
+def test_unwired_intended_output_keeps_the_link_and_warns_once(probe: dict) -> None:
+    got = probe["unwired"]
+    assert got["reads"] == "resized_3" and got["warnings"] == 1
 
 
 def test_configure_defers_the_reveal_so_floating_wires_are_restored_first() -> None:
@@ -198,3 +221,21 @@ def test_configure_defers_the_reveal_so_floating_wires_are_restored_first() -> N
     body = source[start:end]
     assert "scheduleImageConverge(this)" in body
     assert not re.search(r"\brevealExtraOutputs\(|\bconvergeExtraImageInputs\(", body)
+
+
+def test_save_inside_a_subgraph_definition_is_restored_too(probe: dict) -> None:
+    assert probe["subgraph"]["reads"] == "resized_4"
+
+
+def test_deferred_converge_applies_the_intent_after_grow_and_trim() -> None:
+    source = RESOLUTION_JS.read_text(encoding="utf-8")
+    start = source.index("function scheduleImageConverge(node)")
+    body = source[start : source.index("\n}\n", start)]
+    assert body.index("revealExtraOutputs(node)") < body.index("applySavedOutputIntent(node)")
+
+
+def test_extension_forwards_the_raw_graph_hooks_to_resolution() -> None:
+    entry = (REPO_ROOT / "web" / "eps_image.js").read_text(encoding="utf-8")
+    assert "beforeConfigureGraph(graphData)" in entry
+    assert "resolution.beforeConfigureGraph?.(graphData)" in entry
+    assert "resolution.afterConfigureGraph?.()" in entry
