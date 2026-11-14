@@ -62,7 +62,7 @@
  */
 
 import { app } from '../../../scripts/app.js'
-import { walkGraphs, watchGraphHooks } from '../lora_library/api.js'
+import { loggerFor, showToast, walkGraphs, watchGraphHooks } from '../lora_library/api.js'
 import {
   BROADCAST_OUTPUTS,
   KINDS,
@@ -110,6 +110,7 @@ import {
 } from './broadcast_ui.js'
 
 const PREFIX = '[eps_image:broadcast]'
+const { warn } = loggerFor(PREFIX)
 const NODE_TITLE = 'EPS Run Multiplier'
 
 /** Re-exported for the rendering stage (FORMAT.md §6.10 "Broadcast link
@@ -196,16 +197,8 @@ function nodeClassOf(node) {
 }
 
 function toast(node, severity, summaryText, detail, life) {
-  try {
-    app.extensionManager?.toast?.add?.({
-      severity,
-      summary: summaryText || NODE_TITLE,
-      detail,
-      life: life ?? (severity === 'error' ? 8000 : 5000)
-    })
-  } catch (error) {
-    console.warn(PREFIX, 'toast failed', error)
-  }
+  // the ONE toast (lora_library/api.js showToast, M3); errors linger longer here
+  showToast(severity, summaryText || NODE_TITLE, detail, { life, lives: { error: 8000, other: 5000 }, warn })
 }
 
 function redraw(node) {
@@ -262,7 +255,7 @@ export function refreshRow(node) {
     state.summaryEl.textContent = text
     state.summaryEl.title = text
   } catch (error) {
-    console.warn(PREFIX, 'row refresh failed', error)
+    warn('row refresh failed', error)
   }
 }
 
@@ -277,7 +270,7 @@ function ensureNodeFloor(node) {
       redraw(node)
     }
   } catch (error) {
-    console.warn(PREFIX, 'node floor failed', error)
+    warn('node floor failed', error)
   }
 }
 
@@ -414,7 +407,7 @@ function repaintCanvas(node) {
     if (typeof canvas?.setDirty === 'function') canvas.setDirty(true, true)
     else node.graph?.setDirtyCanvas?.(true, true)
   } catch (error) {
-    console.warn(PREFIX, 'repaint failed', error)
+    warn('repaint failed', error)
   }
 }
 
@@ -612,7 +605,7 @@ export function installLegacyCanvasMenuFallback(canvasClass) {
         options.push(...items)
       }
     } catch (error) {
-      console.warn(PREFIX, 'canvas menu item failed', error)
+      warn('canvas menu item failed', error)
     }
     return options
   }
@@ -633,7 +626,7 @@ export function schedulePass() {
     try {
       runPass()
     } catch (error) {
-      console.warn(PREFIX, 'pass failed', error)
+      warn('pass failed', error)
     }
   }, PASS_DEBOUNCE_MS)
 }
@@ -721,7 +714,7 @@ function runPass() {
     try {
       processMultiplier(node)
     } catch (error) {
-      console.warn(PREFIX, 'processing a multiplier failed', error)
+      warn('processing a multiplier failed', error)
     }
   }
 }
@@ -896,7 +889,7 @@ export function afterConfigure() {
   try {
     app.canvas?.setDirty?.(true, true)
   } catch (error) {
-    console.warn(PREFIX, 'repaint failed', error)
+    warn('repaint failed', error)
   }
 }
 
@@ -942,7 +935,7 @@ export function attach(node, readout) {
           schedulePass()
         }
       } catch (error) {
-        console.warn(PREFIX, 'connection hook failed', error)
+        warn('connection hook failed', error)
       }
       return result
     }
@@ -959,7 +952,7 @@ export function attach(node, readout) {
         ensureNodeFloor(this)
         schedulePass()
       } catch (error) {
-        console.warn(PREFIX, 'post-configure failed', error)
+        warn('post-configure failed', error)
       }
       return result
     }
@@ -976,7 +969,7 @@ export function attach(node, readout) {
     ensureNodeFloor(node)
     schedulePass()
   } catch (error) {
-    console.warn(PREFIX, 'broadcast attach failed', error)
+    warn('broadcast attach failed', error)
   }
 }
 

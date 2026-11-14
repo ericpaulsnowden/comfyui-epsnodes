@@ -56,7 +56,7 @@
  */
 
 import { app } from '../../../scripts/app.js'
-import { nodesOfGraph, walkGraphs, walkLiveNodes } from '../lora_library/api.js'
+import { loggerFor, nodesOfGraph, walkGraphs, walkLiveNodes } from '../lora_library/api.js'
 import { inputVerdict } from './bypass.js'
 import {
   MULTIPLIER_CLASS_ID,
@@ -73,6 +73,7 @@ import {
 } from './broadcast_plan.js'
 
 const PREFIX = '[eps_image:broadcast]'
+const { warn } = loggerFor(PREFIX)
 
 // ---------------------------------------------------------------------------
 // Own-change guard: our connects/disconnects fire the same hooks a user's do.
@@ -404,7 +405,7 @@ export function runAsOneUndoStep(fn) {
   try {
     tracker?.captureCanvasState?.()
   } catch (error) {
-    console.warn(PREFIX, 'could not commit pending state before the batch', error)
+    warn('could not commit pending state before the batch', error)
   }
   const canvas = app.canvas
   const transaction =
@@ -417,7 +418,7 @@ export function runAsOneUndoStep(fn) {
       if (transaction) canvas.emitAfterChange()
       else tracker?.captureCanvasState?.()
     } catch (error) {
-      console.warn(PREFIX, 'could not close the undo transaction', error)
+      warn('could not close the undo transaction', error)
     }
   }
 }
@@ -473,7 +474,7 @@ export function broadcastLinkOwners(rootGraph) {
   try {
     owners = hasRecordedWires(rootGraph) ? buildLinkOwners(snapshotFromRoot(rootGraph)) : NO_OWNERS
   } catch (error) {
-    console.warn(PREFIX, 'link index failed', error)
+    warn('link index failed', error)
     owners = NO_OWNERS
   }
   const index = new Map()
@@ -547,7 +548,7 @@ function disconnectSlot(node, slotIndex) {
   try {
     node.disconnectInput(slotIndex)
   } catch (error) {
-    console.warn(PREFIX, 'disconnectInput failed', error)
+    warn('disconnectInput failed', error)
   }
 }
 
@@ -565,7 +566,7 @@ function removeDefinitionInput(subgraph, input) {
     subgraph.removeInput(input)
     return true
   } catch (error) {
-    console.warn(PREFIX, 'removeInput failed', error)
+    warn('removeInput failed', error)
     return false
   }
 }
@@ -636,7 +637,7 @@ function applyOne(rootGraph, mnode, proposal) {
       journal.links.push({ g: step.graph, n: String(step.to.node), i: step.to.input, o: recordOrigin, out: proposal.output })
     }
   } catch (error) {
-    console.warn(PREFIX, 'applying a proposal failed', error)
+    warn('applying a proposal failed', error)
     return fail(error?.message || 'unexpected error')
   }
   return {

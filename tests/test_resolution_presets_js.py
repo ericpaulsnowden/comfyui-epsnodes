@@ -816,6 +816,12 @@ def test_attach_installs_the_shared_external_write_subscription(source: str) -> 
         r" from '\.\./lora_library/api\.js'",
         source,
     )
+    # M3: the same import also carries the shared logger/toast.
+    assert re.search(
+        r"import \{[^}]*\bloggerFor\b[^}]*\bshowToast\b[^}]*\}"
+        r" from '\.\./lora_library/api\.js'",
+        source,
+    )
 
 
 def test_missing_preset_name_stays_selected_with_a_missing_label(source: str) -> None:

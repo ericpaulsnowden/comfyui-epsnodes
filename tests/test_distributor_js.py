@@ -356,14 +356,18 @@ def distributor_api(tmp_path_factory: pytest.TempPathFactory) -> dict:
     helpers_dir = layout / "extensions" / "comfyui-epsnodes" / "lora_library"
     helpers_dir.mkdir(parents=True, exist_ok=True)
     shutil.copyfile(PANEL_HELPERS_JS, helpers_dir / "panel_helpers.js")
+    for name in ("api.js", "version.js"):  # the shared loggerFor/showToast
+        shutil.copyfile(PANEL_HELPERS_JS.parent / name, helpers_dir / name)
 
-    # distributor.js's single import -- `../../../scripts/app.js`, used only
-    # for its toast. Stubbed exactly as tests/test_resolution_grid_js.py does
-    # it, which makes the relative-import DEPTH part of what this test proves:
-    # get it wrong and Node fails to resolve the module at all.
+    # distributor.js's `../../../scripts/app.js` import (canvas lookup), plus
+    # the `scripts/api.js` the real lora_library/api.js imports. Stubbed
+    # exactly as tests/test_resolution_grid_js.py does it, which makes the
+    # relative-import DEPTH part of what this test proves: get it wrong and
+    # Node fails to resolve the module at all.
     scripts = layout / "scripts"
     scripts.mkdir(parents=True, exist_ok=True)
     (scripts / "app.js").write_text("export const app = {}\n", encoding="utf-8")
+    (scripts / "api.js").write_text("export const api = {}\n", encoding="utf-8")
 
     clamp_visible_inputs = [[req, wired] for req, wired, _ in CLAMP_VISIBLE_CASES]
     grow_visible_inputs = [[now, wired] for now, wired, _ in GROW_VISIBLE_CASES]
@@ -1028,13 +1032,13 @@ def test_wired_refusal_path_uses_clamp_visible_count(distributor_source: str) ->
     numerically-tested function above), not a separate ad-hoc comparison --
     so the rule pinned by test_clamp_visible_count_never_hides_a_wired_slot
     is what actually governs the real add/remove path, and a refusal is
-    surfaced both ways (console.warn AND an on-node toast: the property number
+    surfaced both ways (a warn AND an on-node toast: the property number
     visibly snaps back, and a log-only message reads exactly like the silent
     refusal the owner originally reported as a bug)."""
     body = _function_body(distributor_source, APPLY_SIGNATURE)
     assert "clampVisibleCount(stored, wiredMax)" in body
     assert "refused > rangeClamped" in body
-    assert "console.warn(" in body
+    assert "warn(" in body
     assert "toast(node, 'warn'" in body
 
 

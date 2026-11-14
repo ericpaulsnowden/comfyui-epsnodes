@@ -47,7 +47,7 @@
  */
 
 import { app } from '../../../scripts/app.js'
-import { resolveInputSources, resolveSourcesAt, rootGraphOf } from '../lora_library/api.js'
+import { loggerFor, resolveInputSources, resolveSourcesAt, rootGraphOf } from '../lora_library/api.js'
 import { hideValuesWidget, parseValues, slotName } from './number_controller.js'
 import { captureUndoState } from './button_row.js'
 
@@ -58,6 +58,7 @@ import { captureUndoState } from './button_row.js'
 /** FORMAT.md section 6.20 -- frozen once shipped (section 8). */
 export const CLASS_ID = 'EPSGroupBypass'
 const PREFIX = '[eps_image:group_bypass]'
+const { warn } = loggerFor(PREFIX)
 
 export const ENABLED_WIDGET_NAME = 'enabled'
 export const MUTE_WIDGET_NAME = 'mute'
@@ -238,7 +239,7 @@ function setGroupMode(group, mode, keep) {
   try {
     group.recomputeInsideNodes?.()
   } catch (error) {
-    console.warn(PREFIX, 'could not read the group members', error)
+    warn('could not read the group members', error)
   }
   let changed = 0
   for (const member of group.nodes || []) {
@@ -312,7 +313,7 @@ export function refreshAll() {
     try {
       tick(state)
     } catch (error) {
-      console.warn(PREFIX, 'update failed', error)
+      warn('update failed', error)
     }
   }
   if (!states.size && pollTimer) {
@@ -364,7 +365,7 @@ export function attach(node) {
     const groupWidget = findWidget(node, GROUP_WIDGET_NAME)
     const groupIdWidget = findWidget(node, GROUP_ID_WIDGET_NAME)
     if (!enabledWidget || !muteWidget || !groupWidget || !groupIdWidget) {
-      console.warn(PREFIX, 'EPSGroupBypass node is missing a widget; not attached')
+      warn('EPSGroupBypass node is missing a widget; not attached')
       return
     }
     attachedNodes.add(node)
@@ -392,6 +393,6 @@ export function attach(node) {
     states.add(state)
     ensurePoll()
   } catch (error) {
-    console.warn(PREFIX, 'attach failed', error)
+    warn('attach failed', error)
   }
 }

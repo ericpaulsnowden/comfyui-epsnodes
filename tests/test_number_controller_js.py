@@ -1962,6 +1962,11 @@ def number_controller_api(tmp_path_factory: pytest.TempPathFactory) -> dict:
     (scripts / "api.js").write_text("export const api = {}\n", encoding="utf-8")
     shutil.copyfile(NESTED_SUBGRAPH_IO_MJS, layout / "nested_subgraph_io.mjs")
     shutil.copyfile(PANEL_HELPERS_JS, lora_library / "panel_helpers.js")
+    # The REAL logger + toast live in api.js; only the subscription is a no-op,
+    # in the `api.js` stub that re-exports them from the real copy.
+    shutil.copyfile(PANEL_HELPERS_JS.parent / "api.js", lora_library / "api_real.js")
+    shutil.copyfile(PANEL_HELPERS_JS.parent / "version.js", lora_library / "version.js")
+    (scripts / "api.js").write_text("export const api = {}\n", encoding="utf-8")
     (lora_library / "api.js").write_text(
         "export * from './api_real.js'\n"
         "export function subscribeWidgetsChangedExternally(handler) {}\n",
@@ -2864,7 +2869,7 @@ def test_the_nested_branches_live_in_the_shared_helpers_once(source: str) -> Non
     (`isSubgraphOutputLink` / `subgraphOutputSlotOf`) that all three shared
     helpers use, so they can never disagree about what a -20 link is; the
     constant comes from api.js, never a second copy of the number."""
-    assert "import { SUBGRAPH_OUTPUT_ID, subscribeWidgetsChangedExternally } from" in source
+    assert "import { SUBGRAPH_OUTPUT_ID, loggerFor, showToast, subscribeWidgetsChangedExternally } from" in source
     assert "const SUBGRAPH_OUTPUT_ID" not in source
     collect = _function_body(source, "collectOutputTargets(node, idx)")
     assert "subgraphOutputSlotOf(graph, link)" in collect
@@ -3399,7 +3404,7 @@ def test_attach_never_throws(source: str) -> None:
     try/catch -> console.warn."""
     body = _function_body(source, "attach(node)")
     assert "try {" in body
-    assert "console.warn(PREFIX, 'attach failed', error)" in source
+    assert "warn('attach failed', error)" in source
 
 
 def test_sync_node_never_throws(source: str) -> None:

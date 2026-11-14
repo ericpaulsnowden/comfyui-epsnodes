@@ -882,7 +882,7 @@ def test_input_verdict_is_imported_from_bypass_not_copied(source: str) -> None:
 
 def test_the_graph_walkers_are_the_shared_ones_not_copies(source: str) -> None:
     assert (
-        "import { nodesOfGraph, walkGraphs, walkLiveNodes } from '../lora_library/api.js'"
+        "import { loggerFor, nodesOfGraph, walkGraphs, walkLiveNodes } from '../lora_library/api.js'"
         in source
     )
     assert "function walkGraphs" not in source and "function walkLiveNodes" not in source

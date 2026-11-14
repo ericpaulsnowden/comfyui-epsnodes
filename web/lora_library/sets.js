@@ -681,15 +681,11 @@ function findWidgetByName(node, name) {
 
 /** Best-effort toast (cross_sweep.js `toastInfo` idiom); never throws. */
 function toastInfo(summary, detail) {
-  try {
-    if (app.extensionManager?.toast?.add) {
-      app.extensionManager.toast.add({ severity: 'info', summary, detail, life: 5000 })
-      return
-    }
-  } catch (error) {
-    api.warn('toast failed', error)
-  }
-  api.log(`${summary}: ${detail}`)
+  api.showToast('info', summary, detail, {
+    life: 5000,
+    warn: api.warn,
+    fallback: () => api.log(`${summary}: ${detail}`)
+  })
 }
 
 /**

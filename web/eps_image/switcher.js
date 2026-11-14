@@ -292,11 +292,13 @@
  */
 
 import { app } from '../../../scripts/app.js'
+import { loggerFor, showToast } from '../lora_library/api.js'
 import { ensureOwnedLinkColourHook } from './owned_link_colour.js'
 import { normalizeRememberedLinks, reconnectRememberedTargets } from './number_controller.js'
 import { inputVerdict, sameTarget } from './bypass.js'
 
 const PREFIX = '[eps_image:switcher]'
+const { warn } = loggerFor(PREFIX)
 
 /**
  * Registry of every backend class this file's per-node experience attaches
@@ -461,7 +463,7 @@ function readToggles(node) {
     const parsed = JSON.parse(widget.value || '{}')
     return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {}
   } catch (error) {
-    console.warn(PREFIX, 'toggles value is not valid JSON; treating as {}', error)
+    warn('toggles value is not valid JSON; treating as {}', error)
     return {}
   }
 }
@@ -547,8 +549,7 @@ function pruneToggles(node) {
 function hideTogglesWidget(node) {
   const widget = getTogglesWidget(node)
   if (!widget) {
-    console.warn(
-      PREFIX,
+    warn(
       `${nodeClassOf(node)} node is missing its \`toggles\` widget; per-row state will not persist`
     )
     return
@@ -647,7 +648,7 @@ function mirrorSlotTooltip(node, name) {
     if (!first || !first.tooltip) return
     inputs[name] = { ...first, name }
   } catch (error) {
-    console.warn(PREFIX, 'could not mirror the slot tooltip onto', name, error)
+    warn('could not mirror the slot tooltip onto', name, error)
   }
 }
 
@@ -865,16 +866,7 @@ function convergePairOutput(node) {
 }
 
 function toastSwitcher(node, detail) {
-  try {
-    app.extensionManager?.toast?.add?.({
-      severity: 'warn',
-      summary: node.title || pairSpecOf(node)?.title || 'EPS Switcher',
-      detail,
-      life: 4000
-    })
-  } catch (error) {
-    console.warn(PREFIX, 'toast failed', error)
-  }
+  showToast('warn', node.title || pairSpecOf(node)?.title || 'EPS Switcher', detail, { life: 4000, warn })
 }
 
 /**
@@ -899,14 +891,13 @@ function wirePairingGate(node) {
       target.setSize?.([target.size[0], Math.max(target.size[1], target.computeSize()[1])])
       target.graph?.setDirtyCanvas(true, true)
     } catch (error) {
-      console.warn(PREFIX, 'pair visibility failed', error)
+      warn('pair visibility failed', error)
     }
   }
   if (pair.gateWidget) {
     const widget = findWidget(node, pair.gateWidget)
     if (!widget) {
-      console.warn(
-        PREFIX,
+      warn(
         `${nodeClassOf(node)} node is missing its \`${pair.gateWidget}\` widget; ` +
           'partner sockets will not follow it'
       )
@@ -987,7 +978,7 @@ function convergeImageInputs(node) {
     convergePairInputs(node)
     convergePairOutput(node)
   } catch (error) {
-    console.warn(PREFIX, 'pair converge failed', error)
+    warn('pair converge failed', error)
   }
 }
 
@@ -1019,7 +1010,7 @@ function wireImageInputGrowth(node) {
     try {
       convergeImageInputs(target)
     } catch (error) {
-      console.warn(PREFIX, 'convergeImageInputs (deferred) failed', error)
+      warn('convergeImageInputs (deferred) failed', error)
     }
   }
 
@@ -1072,7 +1063,7 @@ function wireImageInputGrowth(node) {
           convergePairInputs(this)
           convergePairOutput(this)
         } catch (error) {
-          console.warn(PREFIX, 'pair re-seat after configure failed', error)
+          warn('pair re-seat after configure failed', error)
         }
       }
       scheduleConverge(this)
@@ -1332,7 +1323,7 @@ function drawRowToggles(node, ctx) {
     try {
       pos = node.getConnectionPos(true, entry.idx)
     } catch (error) {
-      console.warn(PREFIX, 'getConnectionPos failed for', entry.name, error)
+      warn('getConnectionPos failed for', entry.name, error)
       continue
     }
     const inputHitWidth = 20 + displayText(entry.input).length * 7
@@ -1372,7 +1363,7 @@ function wireRowToggleDrawing(node) {
     try {
       drawRowToggles(this, ctx)
     } catch (error) {
-      console.warn(PREFIX, 'drawRowToggles failed', error)
+      warn('drawRowToggles failed', error)
     }
     return result
   }
@@ -1399,7 +1390,7 @@ function wireRowToggleClicks(node) {
     try {
       if (handleRowToggleClick(this, pos)) return true
     } catch (error) {
-      console.warn(PREFIX, 'handleRowToggleClick failed', error)
+      warn('handleRowToggleClick failed', error)
     }
     if (typeof original === 'function') return original.apply(this, arguments)
     return false
@@ -1413,7 +1404,7 @@ function wireRowToggleClicks(node) {
 function addHeaderWidget(node) {
   if (findWidget(node, HEADER_WIDGET_NAME)) return
   if (typeof node.addCustomWidget !== 'function') {
-    console.warn(PREFIX, 'node.addCustomWidget is unavailable; header toggle-all not added')
+    warn('node.addCustomWidget is unavailable; header toggle-all not added')
     return
   }
 
@@ -1489,7 +1480,7 @@ function addHeaderWidget(node) {
   try {
     node.addCustomWidget(widget)
   } catch (error) {
-    console.warn(PREFIX, 'addCustomWidget (header) failed', error)
+    warn('addCustomWidget (header) failed', error)
   }
 }
 
@@ -1620,7 +1611,7 @@ function wireRowRename(node) {
         promptForLabel(this, input, activeCanvas(), e)
       }
     } catch (error) {
-      console.warn(PREFIX, 'onInputDblClick rename failed', error)
+      warn('onInputDblClick rename failed', error)
     }
     return result
   }
@@ -1637,7 +1628,7 @@ function wireRowRename(node) {
         if (entry) promptForLabel(this, entry.input, canvas || activeCanvas(), e)
       }
     } catch (error) {
-      console.warn(PREFIX, 'onDblClick rename failed', error)
+      warn('onDblClick rename failed', error)
     }
     return result
   }
@@ -1751,7 +1742,7 @@ export function reconcileLinkDimming(node, { forceUndim = false } = {}) {
         const resync = target?.[LINK_COLOR_RESYNC_HOOK]
         if (typeof resync === 'function') resync()
       } catch (error) {
-        console.warn(PREFIX, 'link colour resync hook failed', error)
+        warn('link colour resync hook failed', error)
       }
     }
     tracked.delete(id)
@@ -1785,7 +1776,7 @@ function syncLinkDimming(node, where) {
   try {
     reconcileLinkDimming(node)
   } catch (error) {
-    console.warn(PREFIX, `link dim sync (${where}) failed`, error)
+    warn(`link dim sync (${where}) failed`, error)
   }
 }
 
@@ -1872,7 +1863,7 @@ function installLinkDimCleanup(node) {
     try {
       reconcileLinkDimming(this, { forceUndim: true })
     } catch (error) {
-      console.warn(PREFIX, 'link dim cleanup (onRemoved) failed', error)
+      warn('link dim cleanup (onRemoved) failed', error)
     }
     return typeof original === 'function' ? original.apply(this, args) : undefined
   }
@@ -2015,7 +2006,7 @@ function disconnectTarget(target, slotIndex) {
     target.disconnectInput(slotIndex)
     return target.inputs?.[slotIndex]?.link == null
   } catch (error) {
-    console.warn(PREFIX, 'disconnectInput (all-off unplug) failed', error)
+    warn('disconnectInput (all-off unplug) failed', error)
     return false
   }
 }
@@ -2107,7 +2098,7 @@ function syncAllOff(node, where) {
   try {
     reconcileUnplug(node)
   } catch (error) {
-    console.warn(PREFIX, `all-off unplug (${where}) failed`, error)
+    warn(`all-off unplug (${where}) failed`, error)
   }
   syncLinkDimming(node, where)
 }
@@ -2219,6 +2210,6 @@ export function attach(node) {
     installLinkDimCleanup(node)
     reconcileLinkDimming(node)
   } catch (error) {
-    console.warn(PREFIX, 'attach failed', error)
+    warn('attach failed', error)
   }
 }

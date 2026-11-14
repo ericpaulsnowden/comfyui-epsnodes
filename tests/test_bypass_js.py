@@ -1659,6 +1659,7 @@ def probe(tmp_path_factory: pytest.TempPathFactory) -> dict:
         "}\n",
         encoding="utf-8",
     )
+    (scripts / "api.js").write_text("export const api = {}\n", encoding="utf-8")
     lora_library = layout / "extensions" / "comfyui-epsnodes" / "lora_library"
     lora_library.mkdir(parents=True)
     # v1.2.0 nested reach: bypass.js now imports the REAL api.js helpers
@@ -1672,6 +1673,10 @@ def probe(tmp_path_factory: pytest.TempPathFactory) -> dict:
     (scripts / "api.js").write_text("export const api = {}\n", encoding="utf-8")
     shutil.copyfile(NESTED_SUBGRAPH_IO_MJS, layout / "nested_subgraph_io.mjs")
     shutil.copyfile(PANEL_HELPERS_JS, lora_library / "panel_helpers.js")
+    # The REAL logger + toast (a toast the app stub captures is a real one);
+    # only the subscription is replaced, in the `api.js` stub that re-exports them.
+    shutil.copyfile(PANEL_HELPERS_JS.parent / "api.js", lora_library / "api_real.js")
+    shutil.copyfile(PANEL_HELPERS_JS.parent / "version.js", lora_library / "version.js")
     (lora_library / "api.js").write_text(
         "export * from './api_real.js'\n"
         # The real api.js hands every subscriber the flushed `entries`; the

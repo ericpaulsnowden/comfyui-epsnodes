@@ -9,7 +9,6 @@ comfyui-photoshop-bridge's test suite.
 from __future__ import annotations
 
 import os
-import re
 import stat
 import sys
 from pathlib import Path
@@ -212,35 +211,14 @@ _SWITCHER_JS_CLOSURE = (
 
 
 
-_API_IMPORT_RE = re.compile(r"import\s*\{([^}]*)\}\s*from\s*'\.\./lora_library/api\.js'", re.S)
-_API_CONSTANTS = {"SUBGRAPH_OUTPUT_ID": "-20"}
-
-
-def _api_stub_for(module_dir: Path) -> str:
-    """An ES-module stub of ``lora_library/api.js`` exporting every name the
-    `.js` files under *module_dir* import from it (see `install_switcher_js`)."""
-    names: set[str] = set()
-    for js in sorted(module_dir.glob("*.js")):
-        for block in _API_IMPORT_RE.findall(js.read_text(encoding="utf-8")):
-            for raw in block.split(","):
-                name = raw.strip().split(" as ")[0].strip()
-                if name:
-                    names.add(name)
-    lines = []
-    for name in sorted(names):
-        if name.isupper():
-            lines.append(f"export const {name} = {_API_CONSTANTS.get(name, 'null')}\n")
-        else:
-            lines.append(f"export function {name}() {{ return [] }}\n")
-    return "".join(lines)
-
 @pytest.fixture(scope="session")
 def install_switcher_js():
     """A function ``install(layout, app_js=...)`` that copies switcher.js and
     its import closure into ``layout/extensions/comfyui-epsnodes/eps_image``,
-    writes the ``scripts/app.js`` stub (*app_js*), and stubs
-    ``lora_library/api.js`` (``subscribeWidgetsChangedExternally`` plus, on v1, the walkers the closure imports; only the names are
-    imported, and only called from attach paths of other node classes)."""
+    writes the ``scripts/app.js`` stub (*app_js*) and copies the REAL
+    ``lora_library/api.js`` (+ version.js) the closure imports from -- the
+    shared ``loggerFor`` / ``showToast`` must really run, so a toast the
+    probe's *app_js* captures is a real one."""
     import shutil
 
     def install(layout: Path, app_js: str = "export const app = {}\n") -> Path:
@@ -252,17 +230,13 @@ def install_switcher_js():
         lora_library.mkdir(parents=True, exist_ok=True)
         # bypass.js / distributor.js import the shared panel helpers for real.
         shutil.copyfile(_EPS_WEB.parent / "lora_library" / "panel_helpers.js", lora_library / "panel_helpers.js")
-        # The stub exports exactly what the copied files import from
-        # `../lora_library/api.js` -- read from their import statements, so a
-        # branch whose closure imports more names (v1's nested-reach walkers,
-        # describePath, ...) never has to patch this list by hand again
-        # (v1.23.0 shipped with 52 setup errors for exactly that reason).
-        # Functions are no-ops; ALL-CAPS names are constants, with the one
-        # value a test can observe (SUBGRAPH_OUTPUT_ID) mirroring the real one.
-        (lora_library / "api.js").write_text(_api_stub_for(module_dir), encoding="utf-8")
+        for name in ("api.js", "version.js"):
+            shutil.copyfile(_EPS_WEB.parent / "lora_library" / name, lora_library / name)
         scripts = layout / "scripts"
         scripts.mkdir(parents=True, exist_ok=True)
         (scripts / "app.js").write_text(app_js, encoding="utf-8")
+        # api.js imports ComfyUI's `api` singleton; nothing here reads it.
+        (scripts / "api.js").write_text("export const api = {}\n", encoding="utf-8")
         return module_dir
 
     return install

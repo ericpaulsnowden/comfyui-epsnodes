@@ -9,15 +9,74 @@ import { api } from '../../../scripts/api.js'
 
 export { FRONTEND_VERSION } from './version.js'
 
-const PREFIX = '[lora_library]'
-
-export function warn(message, error) {
-  if (error !== undefined) console.warn(PREFIX, message, error)
-  else console.warn(PREFIX, message)
+/**
+ * Prefix-bound console logger (docs/ROADMAP-shared-panel-code.md M3). Before
+ * this, `api.warn` was fixed to `[lora_library]` and every eps_image module
+ * hand-wrote `warn(...)` (161 sites) or its own local copy.
+ * Each module calls `const { warn } = loggerFor(PREFIX)` with its OWN prefix,
+ * so the browser console still attributes a message to the module that
+ * raised it. The prefix is a PARAMETER, not a shared string.
+ * @param {string} prefix - e.g. `[eps_image:bypass]`
+ */
+export function loggerFor(prefix) {
+  return {
+    // `details` is usually one error; 3 switcher/distributor sites pass
+    // extra context values. A trailing `undefined` (a caller's absent error)
+    // is dropped so it never prints a literal "undefined".
+    warn(message, ...details) {
+      while (details.length && details[details.length - 1] === undefined) details.pop()
+      console.warn(prefix, message, ...details)
+    },
+    log(message) {
+      console.log(prefix, message)
+    }
+  }
 }
 
-export function log(message) {
-  console.log(PREFIX, message)
+// The lora_library modules' own logger: `api.warn(...)` / `api.log(...)`.
+export const { warn, log } = loggerFor('[lora_library]')
+
+/** Default toast lifetimes in ms: errors linger, everything else is brief. */
+const TOAST_LIVES = { error: 6000, other: 3000 }
+
+/**
+ * The ONE ComfyUI toast (docs/ROADMAP-shared-panel-code.md M3; replaces 14
+ * hand-copied helpers). Never throws: a toast is a nicety, never the reason
+ * an action fails. Callers keep their own thin wrapper so the SUMMARY source
+ * (node title / fixed string / argument) and call sites stay local.
+ *
+ * Differences between the old copies are parameters:
+ * - `life`: explicit lifetime; else `lives[severity === 'error' ? 'error' : 'other']`.
+ * - `lives`: per-severity defaults (default error 6000 / other 3000; the
+ *   Notebook and Picker pass 8000 / 5000).
+ * - `warn`: a `loggerFor()` warn; when `add()` THROWS it gets
+ *   `warn('toast failed', error)`. Omitted = silent on a throw.
+ * - `fallback`: called when the toast surface is missing (or add threw), for
+ *   callers that want the message visible in the console instead. Omitted =
+ *   silent, which is right where the call site already logs.
+ * @param {string} severity - 'info' | 'success' | 'warn' | 'error'
+ * @param {string} summary
+ * @param {string} [detail]
+ * @param {{life?: number, lives?: {error: number, other: number},
+ *   warn?: (message: string, error?: unknown) => void, fallback?: () => void}} [options]
+ */
+export function showToast(severity, summary, detail, options = {}) {
+  const { life, lives = TOAST_LIVES, warn: warnFailed, fallback } = options
+  try {
+    const toast = app.extensionManager?.toast
+    if (typeof toast?.add === 'function') {
+      toast.add.call(toast, {
+        severity,
+        summary,
+        detail,
+        life: life ?? (severity === 'error' ? lives.error : lives.other)
+      })
+      return
+    }
+  } catch (error) {
+    warnFailed?.('toast failed', error)
+  }
+  fallback?.()
 }
 
 /**

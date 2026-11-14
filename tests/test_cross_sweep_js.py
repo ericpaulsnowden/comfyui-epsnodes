@@ -2725,7 +2725,7 @@ def test_toast_listener_is_wired_once_through_the_api_event(source: str) -> None
     assert "if (countListenerInstalled) return" in body
     assert "countListenerInstalled = true" in body
     assert "api.addEventListener(EVENT_NAME" in body
-    assert "app.extensionManager?.toast?.add" in source
+    assert "showToast('info', summary," in source
 
 
 def test_toast_message_is_the_contract_string(source: str) -> None:

@@ -869,16 +869,19 @@ import {
   comparePathIds,
   graphLink,
   isSubgraphNode,
+  loggerFor,
   pathIdsOfNode,
   resolveInputSources,
   resolveOutputTargets,
   rootGraphOf,
+  showToast,
   walkLiveNodes
 } from '../lora_library/api.js'
 import { ensureOwnedLinkColourHook } from './owned_link_colour.js'
 
 const CLASS_ID = 'EPSImageGrid'
 const PREFIX = '[eps_image:image_grid]'
+const { warn } = loggerFor(PREFIX)
 const NODE_TITLE = 'EPS Image Grid' // FORMAT.md §6.6 display name -- toast summaries only.
 const GRID_UUID_WIDGET_NAME = 'grid_uuid'
 const CLEAR_BUTTON_LABEL = 'Clear'
@@ -980,8 +983,7 @@ function getGridUuidWidget(node) {
 function hideGridUuidWidget(node) {
   const widget = getGridUuidWidget(node)
   if (!widget) {
-    console.warn(
-      PREFIX,
+    warn(
       'EPSImageGrid node is missing its `grid_uuid` widget; identity will not persist'
     )
     return
@@ -1012,8 +1014,7 @@ function getFocusWidget(node) {
 function hideFocusWidget(node) {
   const widget = getFocusWidget(node)
   if (!widget) {
-    console.warn(
-      PREFIX,
+    warn(
       'EPSImageGrid node is missing its `focus` widget; focused-frame emission will not persist'
     )
     return
@@ -1035,7 +1036,7 @@ function generateUuid() {
   // or a non-HTTPS/non-localhost origin) -- FORMAT.md §6.6 names
   // `crypto.randomUUID()` specifically, but a same-shape fallback keeps the
   // node usable rather than throwing outright if it's ever unavailable.
-  console.warn(PREFIX, 'crypto.randomUUID unavailable; using a fallback generator')
+  warn('crypto.randomUUID unavailable; using a fallback generator')
   return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (c) => {
     const r = (Math.random() * 16) | 0
     const v = c === 'x' ? r : (r & 0x3) | 0x8
@@ -1221,8 +1222,7 @@ async function ensureUniqueUuid(node, { allowCollisionMint }) {
   try {
     await postClone(oldUuid, fresh)
   } catch (error) {
-    console.warn(
-      PREFIX,
+    warn(
       'clone-on-collision failed; the duplicate starts with an empty buffer',
       error
     )
@@ -1295,13 +1295,13 @@ function clearNodePreview(node) {
 async function onClearClicked(node) {
   const uuid = currentUuid(node)
   if (!GRID_UUID_RE.test(uuid)) {
-    console.warn(PREFIX, 'Clear clicked with no valid grid_uuid yet; nothing to clear')
+    warn('Clear clicked with no valid grid_uuid yet; nothing to clear')
     return
   }
   try {
     await postClear(uuid)
   } catch (error) {
-    console.warn(PREFIX, 'clear request failed', error)
+    warn('clear request failed', error)
     return
   }
   clearNodePreview(node)
@@ -1509,7 +1509,7 @@ function handleAddButtonClicked(node, openPicker) {
       'The browser refused the file picker: this click reached EPS Image Grid ' +
       'outside its "user activation" window, so input.click() is ignored. ' +
       'Please report this toast -- it pinpoints the bug.'
-    console.warn(PREFIX, message, {
+    warn(message, {
       isSecureContext: typeof window !== 'undefined' ? window.isSecureContext : null,
       userAgent: typeof navigator !== 'undefined' ? navigator.userAgent : null
     })
@@ -1672,7 +1672,7 @@ function installFileInputCleanup(node) {
         }
       }
     } catch (error) {
-      console.warn(PREFIX, 'file-input cleanup failed', error)
+      warn('file-input cleanup failed', error)
     }
     return originalOnRemoved?.apply(this, args)
   }
@@ -2039,7 +2039,7 @@ export function syncCoreOutputStore(node, refs) {
       delete app.nodeOutputs[locator]
     }
   } catch (error) {
-    console.warn(PREFIX, 'syncCoreOutputStore failed', error)
+    warn('syncCoreOutputStore failed', error)
   }
 }
 
@@ -2150,7 +2150,7 @@ function createThumbImage(node, ref, url) {
       img.src = imageUrlForRef(ref, { preview: true, epoch: getBufferGeneration(node) })
       return
     }
-    console.warn(PREFIX, `image failed to load: ${ref.filename}`)
+    warn(`image failed to load: ${ref.filename}`)
   }
   img.src = url
   return img
@@ -2265,7 +2265,7 @@ function installFocusedFullResSwap(node) {
     try {
       ensureFocusedFullRes(this)
     } catch (error) {
-      console.warn(PREFIX, 'focused full-res swap failed', error)
+      warn('focused full-res swap failed', error)
     }
     return typeof original === 'function' ? original.apply(this, args) : undefined
   }
@@ -2413,7 +2413,7 @@ export function captureUndoStep() {
       return true
     }
   } catch (error) {
-    console.warn(PREFIX, 'undo-step capture failed', error)
+    warn('undo-step capture failed', error)
   }
   return false
 }
@@ -2530,7 +2530,7 @@ function installFocusWidgetSync(node) {
       adoptPreservedOutputs(this)
       syncFocusFromView(this)
     } catch (error) {
-      console.warn(PREFIX, 'focus widget sync failed', error)
+      warn('focus widget sync failed', error)
     }
     return typeof original === 'function' ? original.apply(this, args) : undefined
   }
@@ -2684,7 +2684,7 @@ export function reconcileLinkDimming(node, { forceUndim = false } = {}) {
         const resync = target?.[LINK_COLOR_RESYNC_HOOK]
         if (typeof resync === 'function') resync()
       } catch (error) {
-        console.warn(PREFIX, 'link colour resync hook failed', error)
+        warn('link colour resync hook failed', error)
       }
     }
     tracked.delete(id)
@@ -2835,7 +2835,7 @@ function reconcileContinuationDimming(node, shouldDim) {
       const resync = target?.[LINK_COLOR_RESYNC_HOOK]
       if (typeof resync === 'function') resync()
     } catch (error) {
-      console.warn(PREFIX, 'link colour resync hook failed', error)
+      warn('link colour resync hook failed', error)
     }
   }
 
@@ -2871,7 +2871,7 @@ function installModeDimSync(node) {
     try {
       reconcileLinkDimming(node)
     } catch (error) {
-      console.warn(PREFIX, 'link dim sync (mode callback) failed', error)
+      warn('link dim sync (mode callback) failed', error)
     }
     return result
   }
@@ -2897,7 +2897,7 @@ function installLinkDimConnectionsSync(node) {
     try {
       reconcileLinkDimming(this)
     } catch (error) {
-      console.warn(PREFIX, 'link dim sync (onConnectionsChange) failed', error)
+      warn('link dim sync (onConnectionsChange) failed', error)
     }
     return result
   }
@@ -2927,7 +2927,7 @@ function installLinkDimCleanup(node) {
     try {
       reconcileLinkDimming(this, { forceUndim: true })
     } catch (error) {
-      console.warn(PREFIX, 'link dim cleanup (onRemoved) failed', error)
+      warn('link dim cleanup (onRemoved) failed', error)
     }
     return typeof original === 'function' ? original.apply(this, args) : undefined
   }
@@ -3046,7 +3046,7 @@ function notifyBatchResult(node, { noun, added, skipped, failed, cancelled }) {
       return
     }
   } catch (error) {
-    console.warn(PREFIX, 'batch toast failed', error)
+    warn('batch toast failed', error)
   }
   console.info(PREFIX, detail)
 }
@@ -3121,8 +3121,7 @@ async function runAddBatch(
 
   const state = getNodeFileState(node)
   if (state.batch && !state.batch.done) {
-    console.warn(
-      PREFIX,
+    warn(
       'a batch is already in progress for this node; ignoring the new add request until it finishes'
     )
     return { added: 0, skipped: 0, failed: 0, cancelled: false }
@@ -3177,7 +3176,7 @@ async function runAddBatch(
       } catch (error) {
         if (batchState.cancelled) break // an abort() surfaces as a rejection here -- not a real failure.
         failed++
-        console.warn(PREFIX, 'batch add failed for one item', error)
+        warn('batch add failed for one item', error)
       }
 
       if (lastImages && (i + 1) % BATCH_REFRESH_INTERVAL === 0) {
@@ -3365,7 +3364,7 @@ async function addUriListToBuffer(node, dataTransfer) {
     const file = new File([blob], fileName, { type: blob.type })
     return addFilesToBuffer(node, [file])
   } catch (error) {
-    console.warn(PREFIX, 'uri-list drop failed', error)
+    warn('uri-list drop failed', error)
     return false
   }
 }
@@ -3538,20 +3537,11 @@ function notifyClipboard(node, detail) {
   const last = lastClipboardToastAt.get(node) || 0
   if (now - last < CLIPBOARD_TOAST_COOLDOWN_MS) return
   lastClipboardToastAt.set(node, now)
-  try {
-    if (app.extensionManager?.toast?.add) {
-      app.extensionManager.toast.add({
-        severity: 'info',
-        summary: node.title || NODE_TITLE,
-        detail,
-        life: 6000
-      })
-      return
-    }
-  } catch (error) {
-    console.warn(PREFIX, 'toast failed', error)
-  }
-  console.info(PREFIX, detail)
+  showToast('info', node.title || NODE_TITLE, detail, {
+    life: 6000,
+    warn,
+    fallback: () => console.info(PREFIX, detail)
+  })
 }
 
 /**
@@ -3690,7 +3680,7 @@ function installCopyImageMenuItem(node) {
           const url = fullResImageUrl(node, img, ref)
           if (canUseOsClipboardImage()) {
             copyImageToOsClipboard(url).catch((error) => {
-              console.warn(PREFIX, 'OS clipboard image copy failed', error)
+              warn('OS clipboard image copy failed', error)
               notifyClipboard(node, `Copy image failed: ${error?.message || error}`)
             })
           } else {
@@ -3807,7 +3797,7 @@ export function withGridFullResSrcs(node, fn) {
       restore.push({ img, src: img.src })
       img.src = fullSrc
     } catch (error) {
-      console.warn(PREFIX, 'clipspace full-res swap skipped one tile', error)
+      warn('clipspace full-res swap skipped one tile', error)
     }
   }
   try {
@@ -3926,7 +3916,7 @@ async function postRemove(grid_uuid, filename) {
 async function deleteBufferFrame(node, ref) {
   const uuid = currentUuid(node)
   if (!GRID_UUID_RE.test(uuid)) {
-    console.warn(PREFIX, 'delete clicked with no valid grid_uuid yet; nothing to delete')
+    warn('delete clicked with no valid grid_uuid yet; nothing to delete')
     return
   }
   try {
@@ -3937,7 +3927,7 @@ async function deleteBufferFrame(node, ref) {
       node.setDirtyCanvas(true, true)
     }
   } catch (error) {
-    console.warn(PREFIX, 'delete failed', error)
+    warn('delete failed', error)
     notifyClipboard(node, `Couldn't delete "${ref.filename}": ${error?.message || error}`)
   }
 }
@@ -4236,7 +4226,7 @@ async function refreshFromBuffer(node) {
   try {
     const response = await api.fetchApi(`${LIST_ROUTE}?uuid=${encodeURIComponent(uuid)}`)
     if (!response.ok) {
-      console.warn(PREFIX, `refreshFromBuffer: HTTP ${response.status} for uuid ${uuid}`)
+      warn(`refreshFromBuffer: HTTP ${response.status} for uuid ${uuid}`)
       return false
     }
     const data = await response.json()
@@ -4247,7 +4237,7 @@ async function refreshFromBuffer(node) {
     node.setDirtyCanvas(true, true)
     return true // 2026-08-21: `true` = a `/list` was APPLIED (warnIfEmptyAfterRun reads it)
   } catch (error) {
-    console.warn(PREFIX, 'refreshFromBuffer failed', error)
+    warn('refreshFromBuffer failed', error)
     return false
   }
 }
@@ -4412,7 +4402,7 @@ function installConfigureRefresh(node) {
       try {
         reconcileLinkDimming(this)
       } catch (error) {
-        console.warn(PREFIX, 'link dim sync (onConfigure) failed', error)
+        warn('link dim sync (onConfigure) failed', error)
       }
     }
     return result
@@ -4509,7 +4499,7 @@ function scheduleSettledCollisionSweep() {
         }
       }
     } catch (error) {
-      console.warn(PREFIX, 'settled collision sweep failed', error)
+      warn('settled collision sweep failed', error)
     }
   }, 1500)
 }
@@ -4766,7 +4756,7 @@ function installExecutedMerge(node) {
       if (added > 0) setNodeImagesFromRefs(this, refs)
       else syncCoreOutputStore(this, refs)
     } catch (error) {
-      console.warn(PREFIX, 'onExecuted merge failed', error)
+      warn('onExecuted merge failed', error)
     }
     return result
   }
@@ -4895,7 +4885,7 @@ export function attach(node) {
       try {
         await ensureUniqueUuid(node, { allowCollisionMint })
       } catch (error) {
-        console.warn(PREFIX, 'deferred uuid dedup failed', error)
+        warn('deferred uuid dedup failed', error)
       } finally {
         installUuidSerializeGuard(node) // in case the widget appeared late
         scheduleSettledCollisionSweep() // 2026-07-24 -- persisted-duplicate net
@@ -4903,7 +4893,7 @@ export function attach(node) {
       }
     }, 0)
   } catch (error) {
-    console.warn(PREFIX, 'attach failed', error)
+    warn('attach failed', error)
   }
 }
 
@@ -4928,15 +4918,15 @@ export function loadedGraphNode(node) {
     try {
       reconcileLinkDimming(node)
     } catch (error) {
-      console.warn(PREFIX, 'link dim sync (loadedGraphNode) failed', error)
+      warn('link dim sync (loadedGraphNode) failed', error)
     }
     ensureUniqueUuid(node, { allowCollisionMint: false })
-      .catch((error) => console.warn(PREFIX, 'loadedGraphNode dedup failed', error))
+      .catch((error) => warn('loadedGraphNode dedup failed', error))
       .finally(() => {
         scheduleSettledCollisionSweep() // 2026-07-24 -- persisted-duplicate net
         return scheduleRefresh(node)
       })
   } catch (error) {
-    console.warn(PREFIX, 'loadedGraphNode dedup failed', error)
+    warn('loadedGraphNode dedup failed', error)
   }
 }

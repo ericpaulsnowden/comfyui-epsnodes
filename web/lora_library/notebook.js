@@ -7201,7 +7201,7 @@ function setStatus(state, text) {
 }
 
 /**
- * A ComfyUI toast (same idiom as controller.js's `_toast`).
+ * A ComfyUI toast via the shared `api.showToast` (8000/5000 ms lives).
  *
  * 2026-07-27: added because the panel's small status line is too quiet for a
  * REFUSAL. The owner picked a file in Browse..., the node kept the old one,
@@ -7211,21 +7211,11 @@ function setStatus(state, text) {
  * frontend without extensionManager.toast simply logs.
  */
 function toast(severity, summary, detail) {
-  try {
-    const add = app.extensionManager?.toast?.add
-    if (typeof add === 'function') {
-      add.call(app.extensionManager.toast, {
-        severity,
-        summary,
-        detail,
-        life: severity === 'error' ? 8000 : 5000
-      })
-      return
-    }
-  } catch (error) {
-    api.warn('toast failed', error)
-  }
-  api.warn(`${summary}: ${detail}`)
+  api.showToast(severity, summary, detail, {
+    lives: { error: 8000, other: 5000 },
+    warn: api.warn,
+    fallback: () => api.warn(`${summary}: ${detail}`)
+  })
 }
 
 function clearConflict(state) {

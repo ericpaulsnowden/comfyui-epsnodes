@@ -98,8 +98,10 @@
 
 import { app } from '../../../scripts/app.js'
 import { broadcastLinkOwner, broadcastLinkOwners } from './broadcast_graph.js'
+import { loggerFor } from '../lora_library/api.js'
 
 const PREFIX = '[eps_image:broadcast]'
+const { warn } = loggerFor(PREFIX)
 
 /** Alpha of the dim look (FORMAT.md §6.10: "about 0.25"). */
 export const DIM_ALPHA = 0.25
@@ -250,7 +252,7 @@ const warned = new Set()
 function warnOnce(tag, error) {
   if (warned.has(tag)) return
   warned.add(tag)
-  console.warn(PREFIX, `broadcast drawing (${tag}) failed -- the wire is drawn normally`, error)
+  warn(`broadcast drawing (${tag}) failed -- the wire is drawn normally`, error)
 }
 
 function activeCanvas() {
@@ -432,7 +434,7 @@ export function installRenderLinkHook(proto = canvasClass()?.prototype) {
     hooked.add(proto)
     return true
   } catch (error) {
-    console.warn(PREFIX, 'renderLink hook not installed -- broadcast wires will simply be drawn', error)
+    warn('renderLink hook not installed -- broadcast wires will simply be drawn', error)
     return false
   }
 }
@@ -516,7 +518,7 @@ export function ensureDrawHooks() {
     const callback = installSelectionCallback()
     result.selection = methods || callback
   } catch (error) {
-    console.warn(PREFIX, 'draw hooks failed -- broadcast wires will simply be drawn', error)
+    warn('draw hooks failed -- broadcast wires will simply be drawn', error)
   }
   return result
 }
