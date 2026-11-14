@@ -2417,6 +2417,11 @@ def cross_sweep_api(tmp_path_factory: pytest.TempPathFactory) -> dict:
     module_dir = layout / "extensions" / "comfyui-epsnodes" / "eps_image"
     module_dir.mkdir(parents=True)
     shutil.copyfile(CROSS_SWEEP_JS, module_dir / "cross_sweep.js")
+    # its shared logger/toast (`loggerFor`, `showToast`) live in lora_library/api.js
+    helpers_dir = layout / "extensions" / "comfyui-epsnodes" / "lora_library"
+    helpers_dir.mkdir(parents=True)
+    for name in ("api.js", "version.js"):
+        shutil.copyfile(REPO_ROOT / "web" / "lora_library" / name, helpers_dir / name)
 
     # cross_sweep.js's two imports -- `../../../scripts/api.js` and
     # `../../../scripts/app.js` -- stubbed exactly as test_picker_js.py
@@ -2730,7 +2735,7 @@ def test_toast_listener_is_wired_once_through_the_api_event(source: str) -> None
     assert "if (countListenerInstalled) return" in body
     assert "countListenerInstalled = true" in body
     assert "api.addEventListener(EVENT_NAME" in body
-    assert "app.extensionManager?.toast?.add" in source
+    assert "showToast('info', summary," in source
 
 
 def test_toast_message_is_the_contract_string(source: str) -> None:

@@ -323,10 +323,11 @@
  * purely on the frontend; mechanism 4 above) -- it does not
  * assume `eps_image/nodes_distributor.py` exists or is registered, matching
  * how this pack's frontend and backend modules are built independently
- * against a shared, pre-agreed contract. Its ONLY import is ComfyUI's
- * `scripts/app.js`, and solely for `toast()` below -- no canvas lookup, no
- * other app surface -- so a Node probe needs just the one stub
- * (`tests/test_distributor_js.py`, mirroring
+ * against a shared, pre-agreed contract. Its imports are ComfyUI's
+ * `scripts/app.js` (a canvas lookup only), lora_library/api.js (`toast()`
+ * below goes through the shared `showToast`, and `warn` through
+ * `loggerFor`) and panel_helpers.js, so a Node probe stubs `app.js` and
+ * copies those two (`tests/test_distributor_js.py`, mirroring
  * `tests/test_resolution_grid_js.py`'s fixture).
  *
  * Why that import is worth it: the wired-output refusal MUST be visible. A
@@ -340,11 +341,13 @@
  */
 
 import { app } from '../../../scripts/app.js'
+import { loggerFor, showToast } from '../lora_library/api.js'
 import { installMinWidth } from '../lora_library/panel_helpers.js'
 
 /** FORMAT.md section 6.11 -- frozen once shipped. */
 export const CLASS_ID = 'EPSDistributor'
 const PREFIX = '[eps_image:distributor]'
+const { warn } = loggerFor(PREFIX)
 /** Toast summary fallback when a node has no custom title (resolution.js's
  * identical convention). */
 const NODE_TITLE = 'EPS Distributor'
@@ -847,7 +850,7 @@ function promptForOutputLabel(node, output, canvas, event) {
       return
     }
   } catch (error) {
-    console.warn(PREFIX, 'canvas.prompt failed; falling back', error)
+    warn('canvas.prompt failed; falling back', error)
   }
   commit(window.prompt('Output name', current))
 }
@@ -872,20 +875,11 @@ export function isOutputConnected(output) {
   return false
 }
 
-/** resolution.js's `toast` verbatim -- the only reason this file imports
- * `app` (see module docstring). Never throws: a frontend without the toast
- * service still gets the `console.warn` at the call site. */
+/** resolution.js's `toast`, via the shared `showToast`. Never throws: a
+ * frontend without the toast service still gets the `console.warn` at the
+ * call site. */
 function toast(node, severity, detail) {
-  try {
-    app.extensionManager?.toast?.add?.({
-      severity,
-      summary: node.title || NODE_TITLE,
-      detail,
-      life: severity === 'error' ? 6000 : 3000
-    })
-  } catch (error) {
-    console.warn(PREFIX, 'toast failed', error)
-  }
+  showToast(severity, node.title || NODE_TITLE, detail, { warn })
 }
 
 // ---------------------------------------------------------------------------
@@ -1003,8 +997,7 @@ function clearTogglesFor(node, names) {
 function hideTogglesWidget(node) {
   const widget = getTogglesWidget(node)
   if (!widget) {
-    console.warn(
-      PREFIX,
+    warn(
       'EPSDistributor node is missing its `toggles` widget; per-output state will not persist'
     )
     return
@@ -1121,7 +1114,7 @@ function collectLinkTypes(node) {
       }
     }
   } catch (error) {
-    console.warn(PREFIX, 'collectLinkTypes failed', error)
+    warn('collectLinkTypes failed', error)
     return []
   }
   return types
@@ -1210,8 +1203,7 @@ function syncSlotTypes(node) {
       const signature = distinct.join(',')
       if (node.__epsDistributorMixedTypeWarning !== signature) {
         node.__epsDistributorMixedTypeWarning = signature
-        console.warn(
-          PREFIX,
+        warn(
           `EPS Distributor has mismatched wired types (${distinct.join(', ')}); keeping ${type}.`
         )
       }
@@ -1221,7 +1213,7 @@ function syncSlotTypes(node) {
 
     if (changed) node.setDirtyCanvas?.(true, true)
   } catch (error) {
-    console.warn(PREFIX, 'syncSlotTypes failed', error)
+    warn('syncSlotTypes failed', error)
   }
 }
 
@@ -1300,7 +1292,7 @@ function applyVisibleOutputCount(node) {
     const message =
       `${outputName(wiredMax)} is wired -- Outputs can't go below ` +
       `${wiredMax} until it's unwired.`
-    console.warn(PREFIX, message)
+    warn(message)
     toast(node, 'warn', message)
   }
 
@@ -1433,7 +1425,7 @@ function wireOutputGrowth(node) {
       if (desired === outputEntries(target).length) return
       applyVisibleOutputCount(target)
     } catch (error) {
-      console.warn(PREFIX, 'applyVisibleOutputCount (deferred) failed', error)
+      warn('applyVisibleOutputCount (deferred) failed', error)
     }
   }
 
@@ -1601,7 +1593,7 @@ function outputLocalPos(node, idx) {
     }
     return [pos[0] - node.pos[0], pos[1] - node.pos[1]]
   } catch (error) {
-    console.warn(PREFIX, 'could not resolve output position for slot', idx, error)
+    warn('could not resolve output position for slot', idx, error)
     return null
   }
 }
@@ -1682,7 +1674,7 @@ function wireOutputRename(node) {
         promptForOutputLabel(this, output, activeCanvas(), e)
       }
     } catch (error) {
-      console.warn(PREFIX, 'onOutputDblClick rename failed', error)
+      warn('onOutputDblClick rename failed', error)
     }
     return result
   }
@@ -1699,7 +1691,7 @@ function wireOutputRename(node) {
         if (entry) promptForOutputLabel(this, entry.output, canvas || activeCanvas(), e)
       }
     } catch (error) {
-      console.warn(PREFIX, 'onDblClick rename failed', error)
+      warn('onDblClick rename failed', error)
     }
     return result
   }
@@ -1713,7 +1705,7 @@ function wireRowToggleDrawing(node) {
     try {
       drawRowToggles(this, ctx)
     } catch (error) {
-      console.warn(PREFIX, 'drawRowToggles failed', error)
+      warn('drawRowToggles failed', error)
     }
     return result
   }
@@ -1739,7 +1731,7 @@ function wireRowToggleClicks(node) {
     try {
       if (handleRowToggleClick(this, pos)) return true
     } catch (error) {
-      console.warn(PREFIX, 'handleRowToggleClick failed', error)
+      warn('handleRowToggleClick failed', error)
     }
     if (typeof original === 'function') return original.apply(this, arguments)
     return false
@@ -1755,7 +1747,7 @@ function wireRowToggleClicks(node) {
 function addHeaderWidget(node) {
   if (findWidget(node, HEADER_WIDGET_NAME)) return
   if (typeof node.addCustomWidget !== 'function') {
-    console.warn(PREFIX, 'node.addCustomWidget is unavailable; header toggle-all not added')
+    warn('node.addCustomWidget is unavailable; header toggle-all not added')
     return
   }
 
@@ -1821,7 +1813,7 @@ function addHeaderWidget(node) {
   try {
     node.addCustomWidget(widget)
   } catch (error) {
-    console.warn(PREFIX, 'addCustomWidget (header) failed', error)
+    warn('addCustomWidget (header) failed', error)
   }
 }
 
@@ -1877,7 +1869,7 @@ export function attach(node) {
         try {
           applyVisibleOutputCount(this)
         } catch (error) {
-          console.warn(PREFIX, 'applyVisibleOutputCount failed', error)
+          warn('applyVisibleOutputCount failed', error)
         }
       }
       return result
@@ -1930,7 +1922,7 @@ export function attach(node) {
         // necessarily final; this one is the authoritative last word.
         syncSlotTypes(this)
       } catch (error) {
-        console.warn(PREFIX, 'post-configure re-prune failed', error)
+        warn('post-configure re-prune failed', error)
       }
       return result
     }
@@ -1947,6 +1939,6 @@ export function attach(node) {
     // that already ran through applyVisibleOutputCount above.
     syncSlotTypes(node)
   } catch (error) {
-    console.warn(PREFIX, 'attach failed', error)
+    warn('attach failed', error)
   }
 }

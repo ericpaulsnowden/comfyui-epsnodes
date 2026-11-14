@@ -9,6 +9,7 @@
  */
 
 import { app } from '../../scripts/app.js'
+import { loggerFor } from './lora_library/api.js'
 import * as switcher from './eps_image/switcher.js'
 import * as resolution from './eps_image/resolution.js'
 import * as imageGrid from './eps_image/image_grid.js'
@@ -21,6 +22,7 @@ import * as numberController from './eps_image/number_controller.js'
 import * as bypass from './eps_image/bypass.js'
 
 const PREFIX = '[eps_image]'
+const { warn } = loggerFor(PREFIX)
 const REPO_URL = 'https://github.com/ericpaulsnowden/comfyui-epsnodes'
 
 /**
@@ -83,7 +85,7 @@ function warnIfVueNodesMode(node) {
     "ComfyUI's New node design (beta) does not run that drawing yet. " +
     'To use them, turn OFF Settings > Lite Graph > "New node design (beta)" ' +
     '(Comfy.VueNodes.Enabled) and reload. Full support is planned.'
-  console.warn(PREFIX, detail)
+  warn(detail)
   try {
     app.extensionManager?.toast?.add?.({
       severity: 'warn',
@@ -100,10 +102,10 @@ function safely(label, fn) {
   try {
     const result = fn()
     if (result && typeof result.catch === 'function') {
-      result.catch((error) => console.warn(PREFIX, `${label} failed`, error))
+      result.catch((error) => warn(`${label} failed`, error))
     }
   } catch (error) {
-    console.warn(PREFIX, `${label} failed`, error)
+    warn(`${label} failed`, error)
   }
 }
 

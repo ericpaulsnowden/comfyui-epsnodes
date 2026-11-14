@@ -88,7 +88,7 @@
 
 import { api } from '../../../scripts/api.js'
 import { healComboValue, isHealEnabled } from '../lora_library/path_heal.js'
-import { subscribeWidgetsChangedExternally } from '../lora_library/api.js'
+import { loggerFor, subscribeWidgetsChangedExternally } from '../lora_library/api.js'
 import { ensureOwnedLinkColourHook } from './owned_link_colour.js'
 import { el, installMinWidth } from '../lora_library/panel_helpers.js'
 
@@ -98,6 +98,7 @@ export const SELECTION_WIDGET_NAME = 'selection'
 export const ROUTE = '/eps_ckpt/checkpoints'
 
 const PREFIX = '[eps_ckpt]'
+const { warn } = loggerFor(PREFIX)
 const PANEL_WIDGET_NAME = 'eps_ckpt_panel'
 const PANEL_WIDGET_TYPE = 'eps_ckpt_switcher_panel'
 
@@ -322,7 +323,7 @@ export function reconcileLinkDimming(node, { forceUndim = false } = {}) {
         const resync = target?.[LINK_COLOR_RESYNC_HOOK]
         if (typeof resync === 'function') resync()
       } catch (error) {
-        console.warn(PREFIX, 'link colour resync hook failed', error)
+        warn('link colour resync hook failed', error)
       }
     }
     tracked.delete(id)
@@ -353,7 +354,7 @@ function syncLinkDimming(node, where) {
   try {
     reconcileLinkDimming(node)
   } catch (error) {
-    console.warn(PREFIX, `link dim sync (${where}) failed`, error)
+    warn(`link dim sync (${where}) failed`, error)
   }
 }
 
@@ -375,7 +376,7 @@ function installLinkDimHooks(node) {
     try {
       reconcileLinkDimming(this, { forceUndim: true })
     } catch (error) {
-      console.warn(PREFIX, 'link dim cleanup (onRemoved) failed', error)
+      warn('link dim cleanup (onRemoved) failed', error)
     }
     return typeof originalRemoved === 'function' ? originalRemoved.apply(this, args) : undefined
   }
@@ -576,7 +577,7 @@ function renderList(state) {
       // `true` -- Retry must bypass the shared fetch below and hit the
       // server again, not just re-await whatever (possibly stale-failed)
       // promise every other panel is also sharing.
-      loadCheckpoints(state, true).catch((error) => console.warn(PREFIX, 'retry failed', error))
+      loadCheckpoints(state, true).catch((error) => warn('retry failed', error))
     })
     state.listEl.append(el('div', { className: 'epscs-error-row' }, [message, retryBtn]))
     renderCount(state)
@@ -800,7 +801,7 @@ async function loadCheckpoints(state, force = false) {
   } catch (error) {
     if (token !== state.loadToken) return
     state.error = (error && error.message) || 'Failed to load checkpoints'
-    console.warn(PREFIX, 'checkpoint fetch failed', error)
+    warn('checkpoint fetch failed', error)
     renderList(state)
   }
 }
@@ -819,13 +820,13 @@ function wireConfigureReload(state) {
       try {
         result = originalOnConfigure.apply(this, arguments)
       } catch (error) {
-        console.warn(PREFIX, 'original onConfigure threw', error)
+        warn('original onConfigure threw', error)
       }
     }
     try {
       reloadFromWidget(state)
     } catch (error) {
-      console.warn(PREFIX, 'post-configure resync failed', error)
+      warn('post-configure resync failed', error)
     }
     return result
   }
@@ -847,12 +848,12 @@ export function attach(node) {
     if (nodeClassOf(node) !== CLASS_ID) return
     if (attachedNodes.has(node)) return
     if (typeof node.addDOMWidget !== 'function') {
-      console.warn(PREFIX, 'this ComfyUI frontend has no addDOMWidget; checkpoint panel not attached')
+      warn('this ComfyUI frontend has no addDOMWidget; checkpoint panel not attached')
       return
     }
     const widget = findWidget(node, SELECTION_WIDGET_NAME)
     if (!widget) {
-      console.warn(PREFIX, 'EPSCheckpointSwitcher node is missing its `selection` widget; panel not attached')
+      warn('EPSCheckpointSwitcher node is missing its `selection` widget; panel not attached')
       return
     }
     attachedNodes.add(node)
@@ -871,8 +872,8 @@ export function attach(node) {
     node.__epsCkptReload = () => reloadFromWidget(state)
     installExternalWriteSubscription()
 
-    loadCheckpoints(state).catch((error) => console.warn(PREFIX, 'initial checkpoint load failed', error))
+    loadCheckpoints(state).catch((error) => warn('initial checkpoint load failed', error))
   } catch (error) {
-    console.warn(PREFIX, 'attach failed', error)
+    warn('attach failed', error)
   }
 }

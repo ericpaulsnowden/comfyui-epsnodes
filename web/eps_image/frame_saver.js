@@ -336,6 +336,7 @@
 
 import { api } from '../../../scripts/api.js'
 import { app } from '../../../scripts/app.js'
+import { loggerFor, showToast } from '../lora_library/api.js'
 import { el, installMinWidth } from '../lora_library/panel_helpers.js'
 
 /** FORMAT.md §6.7 — frozen once shipped. */
@@ -457,6 +458,7 @@ const STYLE_TAG_ID = 'eps-frame-saver-styles'
 const PICKER_OVERLAY_ID = 'epsfs-picker-overlay'
 
 const PREFIX = '[eps_image:frame_saver]'
+const { warn } = loggerFor(PREFIX)
 
 /** FORMAT.md §6.7 display name -- toast summaries only (`resolution.js`'s
  * identical `NODE_TITLE` convention). */
@@ -467,27 +469,12 @@ const NODE_TITLE = 'EPS Frame Saver'
  * the state BACK up by node, not just check "have we seen this before". */
 const nodeStates = new WeakMap()
 
-function warn(message, error) {
-  if (error !== undefined) console.warn(PREFIX, message, error)
-  else console.warn(PREFIX, message)
-}
-
-/** Best-effort toast via the pack's established `app.extensionManager?.
- * toast?.add?.(...)` convention (`resolution.js`'s `toast()`,
- * `image_grid.js`'s `notifyClipboard()`) -- never throws; a missing toast
+/** Best-effort toast via the shared `showToast` (lora_library/api.js) --
+ * never throws; a missing toast
  * surface on some older/newer frontend build just degrades to silence,
  * this pack's usual fail-soft posture. */
 function toast(node, severity, detail) {
-  try {
-    app.extensionManager?.toast?.add?.({
-      severity,
-      summary: node.title || NODE_TITLE,
-      detail,
-      life: severity === 'error' ? 6000 : 3000
-    })
-  } catch (error) {
-    console.warn(PREFIX, 'toast failed', error)
-  }
+  showToast(severity, node.title || NODE_TITLE, detail, { warn })
 }
 
 // ---------------------------------------------------------------------------

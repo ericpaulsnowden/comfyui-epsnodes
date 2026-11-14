@@ -364,12 +364,12 @@ def test_attach_guards_against_a_double_nodecreated(source: str) -> None:
 
 def test_attach_never_throws(source: str) -> None:
     """The house pattern: every sibling file's attach() wraps its whole body
-    in try/catch + console.warn(PREFIX, ...) so one bad node never blocks
+    in try/catch + warn(...) (the module's `loggerFor(PREFIX)` warn) so one bad node never blocks
     the other extensions' nodeCreated hooks."""
     body = _function_body(source, "attach(node)")
     assert body.strip().startswith("try {")
     assert "} catch (error) {" in body
-    assert "console.warn(PREFIX, 'attach failed', error)" in body
+    assert "warn('attach failed', error)" in body
 
 
 # ---------------------------------------------------- Vue-nodes hide flags
@@ -421,7 +421,7 @@ def test_attach_publishes_the_reload_seam_and_installs_the_subscription(source: 
     assert "subscribeWidgetsChangedExternally((entries) => {" in install
     assert "entry?.node?.__epsCkptReload?.()" in install
     assert (
-        "import { subscribeWidgetsChangedExternally } from '../lora_library/api.js'" in source
+        "import { loggerFor, subscribeWidgetsChangedExternally } from '../lora_library/api.js'" in source
     )
 
 
@@ -527,10 +527,10 @@ def test_fetch_failure_has_an_inline_error_and_a_retry_control(source: str) -> N
 def test_attach_never_throws_out_of_the_initial_load_either(source: str) -> None:
     """`loadCheckpoints` is async and called fire-and-forget from attach() --
     a rejection must still be caught, matching the sibling files'
-    `.catch((error) => console.warn(...))` convention rather than becoming
+    `.catch((error) => warn(...))` convention rather than becoming
     an unhandled promise rejection."""
     body = _function_body(source, "attach(node)")
-    assert "loadCheckpoints(state).catch((error) => console.warn(PREFIX," in body
+    assert "loadCheckpoints(state).catch((error) => warn(" in body
 
 
 # ------------------------------------------------- shared cross-node fetch

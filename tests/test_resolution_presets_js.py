@@ -788,7 +788,8 @@ def test_attach_installs_the_shared_external_write_subscription(source: str) -> 
     # regardless of which widget(s) it wrote (cheap + idempotent either way).
     assert "if (entry?.node?._epsPresets) reconcilePresetsUi(entry.node)" in install
     assert (
-        "import { subscribeWidgetsChangedExternally } from '../lora_library/api.js'" in source
+        "import { loggerFor, showToast, subscribeWidgetsChangedExternally } from '../lora_library/api.js'"
+        in source
     )
 
 

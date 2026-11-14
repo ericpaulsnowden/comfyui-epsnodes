@@ -125,6 +125,7 @@
 
 import { api } from '../../../scripts/api.js'
 import { app } from '../../../scripts/app.js'
+import { loggerFor, showToast } from '../lora_library/api.js'
 
 /** Frozen once shipped -- mirrors the Python node's class id (§6.10/§8). */
 export const CLASS_ID = 'EPSCrossSweep'
@@ -146,6 +147,7 @@ export const EVENT_NAME = 'eps-run-multiplier-count'
 export const LIST_FLAGS_ROUTE = '/eps/list_flags'
 
 const PREFIX = '[eps_image]'
+const { warn } = loggerFor(PREFIX)
 const READOUT_WIDGET_NAME = 'eps_rc_readout'
 const READOUT_WIDGET_TYPE = 'eps_run_count_readout'
 const STYLE_TAG_ID = 'eps-run-count-styles'
@@ -1572,15 +1574,11 @@ export function snapshotFromGraph(graph) {
  * toast?.add?.(...)` convention (image_grid.js `notifyClipboard`) -- never
  * throws, falls back to `console.info` when the toast surface is missing. */
 function toastInfo(summary) {
-  try {
-    if (app.extensionManager?.toast?.add) {
-      app.extensionManager.toast.add({ severity: 'info', summary, life: 8000 })
-      return
-    }
-  } catch (error) {
-    console.warn(PREFIX, 'toast failed', error)
-  }
-  console.info(PREFIX, summary)
+  showToast('info', summary, undefined, {
+    life: 8000,
+    warn,
+    fallback: () => console.info(PREFIX, summary)
+  })
 }
 
 //: Guards init()'s module-scope listener so it is only ever attached once,
@@ -1620,7 +1618,7 @@ function loadListFlags() {
       listFlags = map
       recomputeEveryGraph()
     } catch (error) {
-      console.warn(PREFIX, 'list flags unavailable -- unknown node classes stay unknowable', error)
+      warn('list flags unavailable -- unknown node classes stay unknowable', error)
     }
   })()
   return listFlagsPromise
@@ -1811,7 +1809,7 @@ function wrapWithRecompute(original, state) {
     try {
       maybeRecompute(state)
     } catch (error) {
-      console.warn(PREFIX, 'run-count recompute failed', error)
+      warn('run-count recompute failed', error)
     }
     return result
   }
@@ -1835,7 +1833,7 @@ function scheduleGraphRecompute(graph) {
       try {
         recompute(state)
       } catch (error) {
-        console.warn(PREFIX, 'graph-change recompute failed', error)
+        warn('graph-change recompute failed', error)
       }
     }
   }, 0)
@@ -1893,7 +1891,7 @@ function installGraphNodeWatch(graph) {
       try {
         result = original?.apply(this, args)
       } catch (error) {
-        console.warn(PREFIX, `original ${hook} threw`, error)
+        warn(`original ${hook} threw`, error)
       }
       // The closure's graph, not `this`: a core wrapper that chains to us
       // may call without a receiver.
@@ -1938,7 +1936,7 @@ function wireModeVisibility(node) {
       try {
         applyModeVisibility(this)
       } catch (error) {
-        console.warn(PREFIX, 'mode visibility failed', error)
+        warn('mode visibility failed', error)
       }
     }
     return result
@@ -1957,7 +1955,7 @@ export function attach(node) {
     if (attachedNodes.has(node)) return
     attachedNodes.add(node)
     if (typeof node.addDOMWidget !== 'function') {
-      console.warn(PREFIX, 'this ComfyUI frontend has no addDOMWidget; run-count readout not attached')
+      warn('this ComfyUI frontend has no addDOMWidget; run-count readout not attached')
       return
     }
     injectStyles()
@@ -2049,7 +2047,7 @@ export function attach(node) {
     try {
       recompute(state)
     } catch (error) {
-      console.warn(PREFIX, 'initial run-count estimate failed', error)
+      warn('initial run-count estimate failed', error)
     }
     // ...and once more next tick: at nodeCreated the node has NO id yet
     // (-1, graph.add assigns it after), so the paint above reads "node -1
@@ -2060,10 +2058,10 @@ export function attach(node) {
       try {
         recompute(state)
       } catch (error) {
-        console.warn(PREFIX, 'deferred run-count estimate failed', error)
+        warn('deferred run-count estimate failed', error)
       }
     }, 0)
   } catch (error) {
-    console.warn(PREFIX, 'cross_sweep attach failed', error)
+    warn('cross_sweep attach failed', error)
   }
 }

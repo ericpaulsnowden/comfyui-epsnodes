@@ -275,9 +275,11 @@ ruff check .
 5. Shared-panel caveat: helpers such as `panelScale` and the group/category helpers
    are copied by hand between panels (the roadmap's census counted 119 source comments saying so), and fixes
    have missed siblings (`docs/ROADMAP-shared-panel-code.md`). After fixing a helper, grep `web/` for its name
-   and fix every copy. Already shared: `lora_library/api.js`, `search.js`, `panel_helpers.js` (`el`, `installMinWidth`),
-   `path_heal.js`, `eps_image/owned_link_colour.js`. A test that copies a panel into a served layout must
-   copy every module it imports, `panel_helpers.js` included.
+   and fix every copy. Already shared: `lora_library/api.js` (incl. `loggerFor(prefix)` -- each module binds its own
+   `const { warn } = loggerFor(PREFIX)` -- and `showToast(...)`; do not hand-write `console.warn(PREFIX, ...)` or a
+   `toast.add` helper), `search.js`, `panel_helpers.js` (`el`, `installMinWidth`),
+   `path_heal.js`, `eps_image/owned_link_colour.js` (import-free by test). A test that copies a panel into a served
+   layout must copy every module it imports, `panel_helpers.js`, `api.js` and `version.js` included.
 
 ## 8. Conventions that bite
 

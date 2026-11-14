@@ -76,7 +76,8 @@ def layout(tmp_path_factory: pytest.TempPathFactory) -> Path:
     shutil.copyfile(REPO_ROOT / "web" / "eps_image" / "resolution.js", module_dir / "resolution.js")
     lora_library = root / "extensions" / "comfyui-epsnodes" / "lora_library"
     lora_library.mkdir(parents=True)
-    (lora_library / "api.js").write_text("export function subscribeWidgetsChangedExternally() {}\n", encoding="utf-8")
+    for name in ("api.js", "version.js"):  # the real shared loggerFor/showToast
+        shutil.copyfile(REPO_ROOT / "web" / "lora_library" / name, lora_library / name)
     scripts = root / "scripts"
     scripts.mkdir()
     (scripts / "app.js").write_text(
