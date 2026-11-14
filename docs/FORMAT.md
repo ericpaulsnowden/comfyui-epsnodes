@@ -3064,7 +3064,13 @@ add; single batch-aware IMAGE input; disk-backed, survive-restart, NO cap.
   (`canvas→toBlob('image/png')→ClipboardItem`, the shipped `copyImage`
   pattern) AND to ComfyUI clipspace (populate `node.images`/`imgs`); Ctrl+V
   on the selected node uploads the pasted image (`POST /upload/image`) and
-  appends it (`POST /eps_image_grid/add`).
+  appends it (`POST /eps_image_grid/add`). The `filename` must be ONE plain
+  path component (no separator, drive or UNC prefix, `.`/`..` or NUL, judged
+  with both `ntpath` and `posixpath` on every OS) and the `subfolder` a
+  relative path, and the resolved FULL path must sit under
+  `folder_paths.get_directory_by_type(type)` — a 2026-11-13 audit found that
+  on Windows a drive-qualified `filename` replaced the validated directory,
+  so a LAN caller could copy any image on the host into a readable buffer.
 - **Identity hardening (2026-07-24, owner bug "a copied grid ran with the
   original's buffer"):** (1) the `grid_uuid` widget carries a
   `serializeValue()` returning `currentUuid(node)` (properties-first) — the
@@ -3371,6 +3377,11 @@ single-frame output (NOT a list); "close-enough preview, EXACT on output".
   `/view` exposure-equivalence above); `path` mode keeps its
   unconditional loopback gate, unchanged. Missing `folder_paths` (a
   non-ComfyUI process) ⇒ 400, not a crash; both params at once ⇒ 400.
+  **Containment (2026-11-13 audit):** `get_annotated_filepath` is a plain
+  `os.path.join`, so an ABSOLUTE `input_ref` replaced the input folder
+  outright and, this mode being LAN-reachable, let a peer stream any video
+  on the host; the resolved path must now sit inside core's input, output
+  or temp directory (the same fence core's `/view` applies) ⇒ else 400.
 - **Outputs:** `image` (IMAGE, a single `[1,H,W,C]` float32 0..1),
   `width` (INT), `height` (INT). **NO `OUTPUT_IS_LIST`** — plain single
   outputs (matches `PremiereShotFrame`). Multi-frame = a future sibling node.

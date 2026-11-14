@@ -361,6 +361,10 @@ class TestUploadedInputRefExecution:
             def get_annotated_filepath(name):
                 return str(_SEEDED_CLIPS_DIR / strip_annotation(name))
 
+            @staticmethod
+            def get_input_directory():
+                return str(_SEEDED_CLIPS_DIR)
+
         monkeypatch.setattr(routes_frame_saver, "_FOLDER_PATHS_OVERRIDE", FakeFolderPaths)
         return FakeFolderPaths
 
@@ -453,6 +457,10 @@ class TestUploadedInputRefExecution:
             @staticmethod
             def get_annotated_filepath(name):
                 return str(tmp_path / "notes.txt")
+
+            @staticmethod
+            def get_input_directory():
+                return str(tmp_path)
 
         monkeypatch.setattr(routes_frame_saver, "_FOLDER_PATHS_OVERRIDE", TxtFolderPaths)
         node = EPSFrameSaver()
@@ -994,6 +1002,10 @@ class TestInputRefMode:
             def get_annotated_filepath(name):
                 return str(_SEEDED_CLIPS_DIR / name)
 
+            @staticmethod
+            def get_input_directory():
+                return str(_SEEDED_CLIPS_DIR)
+
         monkeypatch.setattr(routes_frame_saver, "_FOLDER_PATHS_OVERRIDE", FakeFolderPaths)
         return FakeFolderPaths
 
@@ -1030,6 +1042,37 @@ class TestInputRefMode:
         )
         assert response.status == 403
 
+    async def test_absolute_input_ref_outside_comfyui_folders_is_refused(
+        self, client, tmp_path
+    ) -> None:
+        # Audit 2026-11-13: core's get_annotated_filepath is a plain
+        # os.path.join, so an absolute name replaces the input folder; this
+        # route is deliberately LAN-reachable, so it must fence the result.
+        private = tmp_path / "private.mp4"
+        private.write_bytes(b"\x00" * 16)
+
+        class CoreLikeFolderPaths:
+            @staticmethod
+            def exists_annotated_filepath(name):
+                return Path(name).is_file()
+
+            @staticmethod
+            def get_annotated_filepath(name):
+                return str(Path(str(_SEEDED_CLIPS_DIR)) / name)  # join: absolute wins
+
+            @staticmethod
+            def get_input_directory():
+                return str(_SEEDED_CLIPS_DIR)
+
+        import pytest as _pytest
+
+        with _pytest.MonkeyPatch.context() as mp:
+            mp.setattr(routes_frame_saver, "_FOLDER_PATHS_OVERRIDE", CoreLikeFolderPaths)
+            response = await client.get("/eps_frame_saver/probe", params={"input_ref": str(private)})
+        assert response.status == 400
+        assert "inside ComfyUI" in (await response.json())["error"]
+        assert private.read_bytes() == b"\x00" * 16
+
     async def test_unknown_input_ref_is_404_shaped_400(self, client, fake_folder_paths) -> None:
         response = await client.get(
             "/eps_frame_saver/probe", params={"input_ref": "nope.mp4"}, headers=REMOTE_HEADERS
@@ -1048,6 +1091,10 @@ class TestInputRefMode:
             @staticmethod
             def get_annotated_filepath(name):
                 return str(tmp_path / "notes.txt")
+
+            @staticmethod
+            def get_input_directory():
+                return str(tmp_path)
 
         import pytest as _pytest
 
