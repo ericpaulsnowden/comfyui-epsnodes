@@ -1149,7 +1149,8 @@ def test_ghost_rows_are_dimmed_warned_and_star_only(source: str) -> None:
 def test_favorite_toggle_is_optimistic_with_revert_and_toast(source: str) -> None:
     body = _function_body(source, "toggleFavorite(state, file, on)")
     assert "const previous = state.favorites.slice()" in body
-    assert "state.favorites = previous" in body
+    # The revert itself is behaviour-tested in test_library_panel_fixes_js.py
+    # (a failure undoes only its own file, never a snapshot).
     assert "toast('error'," in body
 
 

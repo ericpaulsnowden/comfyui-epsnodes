@@ -2629,7 +2629,14 @@ export function registerControllerNode() {
             const widget = widgetsByName.get(write.name)
             if (!widget) continue
             widget.value = write.value
-            widget.callback?.(write.value, app.canvas, liveNode)
+            // A throwing callback (a third-party widget) must not abort the
+            // loop: later nodes would stay unwritten and no panel would be
+            // told to resync. The value IS written, so it still counts.
+            try {
+              widget.callback?.(write.value, app.canvas, liveNode)
+            } catch (error) {
+              api.warn(`${NODE_TITLE}: widget callback threw for "${write.name}"`, error)
+            }
             writtenNames.push(write.name)
           }
           if (writtenNames.length) {

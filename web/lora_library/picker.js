@@ -1654,8 +1654,9 @@ function patchAfterRecentChange(state) {
 
 /**
  * ★/☆: optimistic flip + POST, revert + toast on failure (§6.13).
- * Token-guarded: a stale response (or a stale failure's revert) after a
- * newer click is dropped rather than clobbering the newer state.
+ * Token-guarded: a stale SUCCESS after a newer click is dropped rather than
+ * clobbering the newer state; every FAILURE toasts and undoes only its
+ * own file.
  * 2026-08-26 while-running round: the flip patches the browser instead of
  * a full renderBrowser() -- see patchFavoriteChange's own header.
  */
@@ -1682,8 +1683,13 @@ async function toggleFavorite(state, file, on) {
       }
     }
   } catch (error) {
-    if (token !== state.favoriteToken) return
-    state.favorites = previous
+    // A FAILURE is always shown and always undone -- but only for ITS OWN
+    // file. Restoring a pre-click snapshot would resurrect a star an older
+    // failure already reverted; the server's next list is authoritative for
+    // everything else.
+    state.favorites = on
+      ? state.favorites.filter((name) => name !== file)
+      : [...state.favorites.filter((name) => name !== file), file]
     patchFavoriteChange(state, file, !on) // revert the icon/row back in place
     api.warn('favorite toggle failed', error)
     toast('error', 'EPS LoRA Picker', `Favorite not saved: ${error?.message || error}`)
@@ -3212,9 +3218,13 @@ async function finishFavoriteDrag(state, drag) {
       renderBrowser(state)
     }
   } catch (error) {
-    if (token !== state.favoriteToken) return
-    state.favorites = previous
-    renderBrowser(state)
+    // Always toast. Undo only if nothing else has touched the list since
+    // this request's optimistic order (a snapshot restore would clobber a
+    // newer click); otherwise the server's next list is authoritative.
+    if (sameStringArray(state.favorites, reordered)) {
+      state.favorites = previous
+      renderBrowser(state)
+    }
     api.warn('favorites reorder failed', error)
     toast('error', 'EPS LoRA Picker', `Order not saved: ${error?.message || error}`)
   }

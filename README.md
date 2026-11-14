@@ -321,6 +321,8 @@ captions).
   including via a tab switch — reopens the same category you had open, with
   your unsaved edit still sitting in the box. Nothing reaches disk until you
   save.
+  Renaming a prompt or category in the list keeps its unsaved edit too —
+  it moves to the new name instead of being dropped.
 - **Selected prompts run in list order (v0.85.0).** The order prompts run
   in — and the `t1`, `t2`, `t3` parts of your filenames — follows the order
   they appear in the notebook, not the order you happened to click them.
@@ -630,6 +632,9 @@ favorites or recently-used anywhere in the ecosystem.
   `lora_picker.json`, in the same shared library folder as your notebooks
   and sets — point the library at a NAS and every machine sees the same
   stars. `＋ Add` is what stamps a lora recent.
+  If a star can't be saved you always get an error toast and that star
+  flips back — only that one star, even when you clicked several in quick
+  succession.
 - **Outputs — Apply LoRA Set's exact five, so it drops in anywhere that
   node does:** `lora_stack` wires straight into the [EPS LoRA
   Iterator](#eps-lora-iterator-shipped) or any stack-consuming node;

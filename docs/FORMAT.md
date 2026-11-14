@@ -594,6 +594,16 @@ mode).** Two separate gaps, both closed:
    sweeping away an untouched category draft sitting in the same `drafts`
    object (§7.9's second-half variant, concretely: this is what it would
    have been without the exemption).
+   **Renames move the draft key** (`renameDraft`, called from
+   `applyRenameResult` before the active name changes): inline-renaming an
+   entry carries its entry-keyed draft to the new name, and renaming a
+   category moves its `categoryDraftKey` entry, in one `drafts` write after
+   flushing any pending debounce — otherwise the entry draft is pruned by
+   `pruneDraftsToSelection` and the category draft lingers under a name the
+   file no longer has.
+   Every `drafts` read/write treats keys as OWN properties only
+   (`hasDraft`, `Object.fromEntries`), because an entry may legitimately be
+   named `__proto__` or `constructor`.
 2. **The open category PANE itself is now a node PROPERTY** (`Open
    category`, `PROP_OPEN_CATEGORY`) **— not just the draft text inside it.**
    Before this, `state.activeCategory` was a plain field on the `state`
