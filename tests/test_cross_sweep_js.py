@@ -2251,6 +2251,80 @@ ALL_OFF_CASES = [
 
 ESTIMATE_CASES += ALL_OFF_CASES
 
+
+def _distributor_into_multiplier(toggles: str, slot: int) -> dict:
+    """An EPSDistributor (list flags known, as the adapter injects them) whose
+    output *slot* feeds the multiplier's `image`, next to one text prompt."""
+    return {
+        "nodes": {
+            "1": {"classType": "LoadImage", "widgets": {}, "inputs": {}},
+            "2": {
+                "classType": "EPSDistributor",
+                "widgets": {"toggles": toggles},
+                "inputs": {"image": _link("1")},
+                "inputIsList": False,
+                "outputIsList": [False] * 16,
+            },
+            "4": _text_source(),
+            "3": {
+                "classType": "EPSCrossSweep",
+                "widgets": {},
+                "inputs": {"image": _link("2", slot), "text": _link("4")},
+            },
+        }
+    }
+
+
+# An EMPTY Checkpoint Switcher on one row of a Model Switcher is skipped like
+# an all-off switcher (backend lazy skip): the other row still runs once.
+ESTIMATE_CASES += [
+    (
+        "empty_checkpoint_switcher_row_is_skipped_not_a_zero_collapse",
+        {
+            "nodes": {
+                "10": _checkpoint_switcher([]),
+                "11": {"classType": "CheckpointLoaderSimple", "widgets": {}, "inputs": {}},
+                "12": {
+                    "classType": "EPSModelSwitcher",
+                    "widgets": {},
+                    "inputs": {"model_1": _link("10", 0), "model_2": _link("11", 0)},
+                },
+                "4": _text_source(),
+                "3": {
+                    "classType": "EPSCrossSweep",
+                    "widgets": {},
+                    "inputs": {"model": _link("12"), "text": _link("4")},
+                },
+            }
+        },
+        "3",
+        {"total": 1, "atLeast": False},
+    ),
+]
+
+# §6.11: a Distributor output toggled OFF emits an ExecutionBlocker, which
+# blocks the multiplier fed by it -- 0 runs, not 1.
+ESTIMATE_CASES += [
+    (
+        "distributor_slot_toggled_off_blocks_the_multiplier",
+        _distributor_into_multiplier('{"out_2": false}', 1),
+        "3",
+        {"total": 0, "atLeast": False},
+    ),
+    (
+        "distributor_other_slot_off_does_not_touch_this_slot",
+        _distributor_into_multiplier('{"out_1": false}', 1),
+        "3",
+        {"total": 1, "atLeast": False},
+    ),
+    (
+        "distributor_slot_on_passes_through",
+        _distributor_into_multiplier("{}", 1),
+        "3",
+        {"total": 1, "atLeast": False},
+    ),
+]
+
 PROBE_JS = """
 import * as m from './extensions/comfyui-epsnodes/eps_image/cross_sweep.js'
 
