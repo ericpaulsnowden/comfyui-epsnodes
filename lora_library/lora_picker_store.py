@@ -40,6 +40,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import time
 from pathlib import Path
 
@@ -250,6 +251,9 @@ def load_state(context: LibraryContext) -> tuple[dict, float | None]:
     try:
         with open(path, encoding="utf-8") as fh:
             raw_text = fh.read()
+            # Same handle as the text (FORMAT.md §3.5): a save landing
+            # after the read must not pair old contents with a new mtime.
+            mtime = os.fstat(fh.fileno()).st_mtime
     except FileNotFoundError:
         return {"favorites": [], "recents": []}, None
     # UnicodeDecodeError included (review 2026-08-09): it is a ValueError,
@@ -260,11 +264,6 @@ def load_state(context: LibraryContext) -> tuple[dict, float | None]:
             "EPSNodes: could not read %s (%s); using empty picker state", path, exc
         )
         return {"favorites": [], "recents": []}, None
-
-    try:
-        mtime = path.stat().st_mtime
-    except OSError:
-        mtime = None
 
     try:
         data = json.loads(raw_text)

@@ -34,56 +34,73 @@ import os
 import threading
 from pathlib import Path
 
-#: One lock per distinct resolved path, created lazily. Never evicted: the
-#: number of distinct notebook/sidecar files a running server ever touches
-#: is small and bounded by what's actually on disk, so trading a few bytes
-#: of never-freed bookkeeping per file for simplicity is the right call --
-#: there is no plausible workload where this dict's size becomes a problem.
+#: One lock per distinct normalized path SPELLING (``realpath`` +
+#: ``normcase``), created lazily. A spelling is only ever added by a
+#: caller that names it, so the dict is bounded by what the server touches.
 _locks: dict[str, threading.Lock] = {}
 
-#: Guards ``_locks`` itself. Two threads racing to create the FIRST lock
-#: for the same key must not each win with a different ``Lock`` object --
-#: that would defeat the whole point of keying by path. This lock is held
-#: only for the couple of dict operations below, never across a caller's
-#: own (potentially slow) transaction.
+#: The same locks, found by file identity ``(st_dev, st_ino)`` -- the only
+#: key that makes ``Loras.md`` and ``loras.md`` one lock on a
+#: case-insensitive volume, where ``os.path.normcase`` does not fold case
+#: (macOS). One entry per lock: an atomic save renames a temp over the file,
+#: which CHANGES its inode, so the entry follows the file (stale inode keys
+#: for the same lock are dropped, see :func:`lock_for`).
+_by_inode: dict[tuple[int, int], threading.Lock] = {}
+
+#: Guards both dicts. Two threads racing to create the FIRST lock for the
+#: same file must not each win with a different ``Lock`` object. Held only
+#: for a few dict operations, never across a caller's own transaction.
 _registry_guard = threading.Lock()
 
 
-def _key_for(path: Path | str) -> str:
-    """The registry key for *path*.
-
-    ``os.path.realpath`` resolves symlinks (and ``..``/``.`` segments) so
-    two different spellings of the same file map to the same lock;
-    ``os.path.normcase`` additionally folds case on the case-insensitive
-    filesystems these packs actually run on (Windows, and macOS's default
-    APFS), so ``Loras.md`` and ``loras.md`` -- the same inode there --
-    serialize against each other too, matching the filesystem's own
-    notion of "the same file" rather than a stricter one that would let
-    two differently-cased requests slip past each other unlocked.
-    """
-    return os.path.normcase(os.path.realpath(str(path)))
+def _identity(resolved: str) -> tuple[int, int] | None:
+    """``(st_dev, st_ino)`` of *resolved*, or ``None`` when the file does not
+    exist (or the filesystem reports no inode, as some Windows network
+    shares do with ``st_ino == 0``)."""
+    try:
+        st = os.stat(resolved)
+    except OSError:
+        return None
+    return (st.st_dev, st.st_ino) if st.st_ino else None
 
 
 def lock_for(path: Path | str) -> threading.Lock:
     """The process-wide :class:`threading.Lock` guarding *path*.
 
-    Creates the lock on first use; every later call for the same
-    (resolved) path returns the SAME object, so ``with lock_for(path):``
-    around a load->check_conflict->mutate->save sequence really does
-    serialize every caller that names this file, however they spell it.
+    Creates the lock on first use. Lookup is by file identity first
+    (``st_dev``/``st_ino``: every spelling of an EXISTING file -- other
+    case on a case-insensitive volume, hard link, symlink -- is one lock),
+    then by the ``realpath``/``normcase`` string, which is what finds the
+    lock while the file is momentarily absent (the gvfs save fallback moves
+    the original aside for an instant) or not yet created.
 
-    ``os.path.realpath`` can be a real filesystem round trip (a NAS mount,
-    a chain of symlinks), so THIS FUNCTION MUST ALWAYS BE CALLED FROM A
-    WORKER THREAD (``asyncio.to_thread``), never directly on the asyncio
-    event loop -- exactly the same discipline ``routes_notebook.py``'s
-    module docstring already documents for ``load_notebook``/
-    ``save_notebook`` themselves. Calling it on the loop would block every
-    other request on the server for as long as the resolve takes.
+    Residual window, accepted: two requests that CREATE the same new file
+    under two differently-cased spellings on a case-insensitive macOS
+    volume have no inode to share yet and can hold different locks; once
+    the file exists every later call converges on one. Likewise a
+    differently-cased spelling arriving exactly while the file is absent
+    mid-save gets a fresh lock. Cross-process safety is still only
+    ``base_mtime`` (FORMAT.md §3.5).
+
+    ``os.path.realpath`` and ``os.stat`` can be real filesystem round trips
+    (a NAS mount, a chain of symlinks), so THIS FUNCTION MUST ALWAYS BE
+    CALLED FROM A WORKER THREAD (``asyncio.to_thread``), never directly on
+    the asyncio event loop -- exactly the same discipline
+    ``routes_notebook.py``'s module docstring documents for
+    ``load_notebook``/``save_notebook`` themselves.
     """
-    key = _key_for(path)
+    resolved = os.path.realpath(str(path))
+    spelling = os.path.normcase(resolved)
+    identity = _identity(resolved)
     with _registry_guard:
-        lock = _locks.get(key)
+        lock = _by_inode.get(identity) if identity else None
+        if lock is None:
+            lock = _locks.get(spelling)
         if lock is None:
             lock = threading.Lock()
-            _locks[key] = lock
+        _locks[spelling] = lock
+        if identity is not None and _by_inode.get(identity) is not lock:
+            for stale in [k for k, v in _by_inode.items() if v is lock]:
+                del _by_inode[stale]
+            _by_inode[identity] = lock
         return lock

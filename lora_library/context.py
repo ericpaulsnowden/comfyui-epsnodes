@@ -481,13 +481,65 @@ class LibraryContext:
         return rel.as_posix()
 
 
+class AtomicSaveError(OSError):
+    """A save failed in a way that left a complete copy of the data on disk
+    under a name other than the target. The message names that file; the
+    temp/backup is deliberately NOT cleaned up (it may be the only copy)."""
+
+
+def _replace_over_existing(tmp_name: str, path: Path, data: bytes) -> None:
+    """Put *tmp_name* at *path* when a plain ``os.replace`` said EEXIST.
+
+    gvfs/FUSE network mounts (owner's Linux box, 2026-08-25:
+    ``/run/user/1000/gvfs/smb-share:...``) reject rename-over-existing even
+    though POSIX rename replaces. A plain rename to a NEW name does work
+    there, so the original is moved aside to a sibling backup first, the
+    temp takes the target's name, and only then is the backup dropped. If
+    the second step fails the original is moved back. At every point at
+    least one complete version (original, or the new one in the temp)
+    exists on disk; the temp is only ever deleted by the caller after the
+    original is known to be back in place. *data* is the new content, for
+    the direct-write last resort.
+    """
+    backup = f"{path}.{os.urandom(4).hex()}.bak"
+    try:
+        os.rename(path, backup)
+    except FileNotFoundError:
+        backup = ""  # the target vanished meanwhile: nothing to protect
+    try:
+        try:
+            os.replace(tmp_name, path)
+        except OSError:
+            # A mount where even a rename to a free name fails: the last
+            # resort is a direct write into the now-free target. The
+            # original is safe in the backup meanwhile.
+            Path(path).write_bytes(data)
+    except OSError as exc:
+        if backup:
+            with contextlib.suppress(OSError):
+                os.unlink(path)  # a partial direct write, if any
+            try:
+                os.rename(backup, path)
+            except OSError as restore_exc:
+                raise AtomicSaveError(
+                    f"could not save {path}: {exc}; the previous version is at "
+                    f"{backup} and the new one at {tmp_name} (restore failed: "
+                    f"{restore_exc})"
+                ) from exc
+        raise
+    if backup:
+        with contextlib.suppress(OSError):
+            os.unlink(backup)
+
+
 def _atomic_write_text(path: Path, text: str) -> None:
     """Write *text* to *path* via a same-directory temp file + ``os.replace``.
 
     Same-directory matters: ``os.replace`` is only atomic within one
     filesystem, and the library may live on a NAS mount distinct from the
     system temp dir. Callers own error handling; a failed write must never
-    leave a half-written target behind.
+    leave a half-written target behind, and never destroy the last complete
+    copy of the data (see :func:`_replace_over_existing`).
     """
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp_name = tempfile.mkstemp(dir=str(path.parent), prefix=path.name + ".", suffix=".tmp")
@@ -497,26 +549,9 @@ def _atomic_write_text(path: Path, text: str) -> None:
         try:
             os.replace(tmp_name, path)
         except FileExistsError:
-        # gvfs/FUSE network mounts (owner's Linux box, 2026-08-25:
-        # /run/user/1000/gvfs/smb-share:...) reject rename-over-existing
-        # with EEXIST even though POSIX rename replaces -- so EVERY save to
-        # an already-existing file on such a mount failed. Fall back to
-        # unlink + replace: a tiny non-atomic window in which the target is
-        # briefly missing, strictly better than the save always failing.
-        # No data is at risk in the window -- the temp file next to the
-        # target already holds the complete new content, and a crash inside
-        # the window leaves that .tmp recoverable in the same directory.
-            with contextlib.suppress(FileNotFoundError):
-                os.unlink(path)
-            try:
-                os.replace(tmp_name, path)
-            except OSError:
-                # The target is unlinked at this point -- if the rename
-                # STILL fails, a direct write is the last resort that
-                # leaves the target present with the full new content
-                # (the outer cleanup would otherwise delete the temp too,
-                # losing both versions).
-                Path(path).write_text(text, encoding="utf-8", newline="")
+            _replace_over_existing(tmp_name, path, text.encode("utf-8"))
+    except AtomicSaveError:
+        raise
     except BaseException:
         with contextlib.suppress(OSError):
             os.unlink(tmp_name)
