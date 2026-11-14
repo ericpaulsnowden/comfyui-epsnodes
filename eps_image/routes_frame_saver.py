@@ -235,6 +235,28 @@ def _validate_video_path(raw: str) -> tuple[Path | None, str | None]:
 _FOLDER_PATHS_OVERRIDE: Any = None
 
 
+def _comfyui_media_roots(folder_paths: Any) -> list[Path]:
+    """The folders an annotated name may resolve into: core's own input /
+    output / temp directories (the `[input]`/`[output]`/`[temp]`
+    annotations). Core's `get_annotated_filepath` is a plain
+    ``os.path.join``, so an ABSOLUTE name replaces the folder outright, and
+    `input_ref` mode is deliberately not loopback-gated (it mirrors core's
+    `/view`) -- without this fence a LAN peer could stream any video on the
+    host by absolute path (audit 2026-11-13). Core's `/view` applies the
+    same containment check; a getter the fake test module lacks is simply
+    not a root."""
+    roots: list[Path] = []
+    for getter in ("get_input_directory", "get_output_directory", "get_temp_directory"):
+        fn = getattr(folder_paths, getter, None)
+        if fn is None:
+            continue
+        try:
+            roots.append(Path(fn()).resolve())
+        except (OSError, TypeError, ValueError):
+            continue
+    return roots
+
+
 def _resolve_input_ref(ref: str) -> tuple[Path | None, str | None]:
     """FORMAT.md §6.7 v0.60.0 `input_ref` mode: resolve an ANNOTATED input
     filename (the exact value core `LoadVideo`'s `file` combo holds) with
@@ -269,6 +291,9 @@ def _resolve_input_ref(ref: str) -> tuple[Path | None, str | None]:
         resolved = Path(folder_paths.get_annotated_filepath(trimmed)).resolve()
     except (OSError, ValueError) as exc:
         return None, f"invalid input_ref ({exc})"
+    roots = _comfyui_media_roots(folder_paths)
+    if not any(resolved == root or root in resolved.parents for root in roots):
+        return None, "input_ref must name a file inside ComfyUI's input, output or temp folder"
     if resolved.suffix.lower() not in VIDEO_EXTENSIONS:
         allowed = ", ".join(VIDEO_EXTENSIONS)
         return None, f"unsupported video extension {resolved.suffix!r} (allowed: {allowed})"
