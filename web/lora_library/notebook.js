@@ -5565,6 +5565,11 @@ function applyRenameResult(state, kind, name, renameTo, data) {
   else renameCategoryDescription(state, name, renameTo)
   syncNotebookCache(state, data)
 
+  // Drafts are keyed by NAME too (entry name, or categoryDraftKey(name)):
+  // move the key before anything below reassigns the active name.
+  if (kind === 'category') renameDraft(state, categoryDraftKey(name), categoryDraftKey(renameTo))
+  else renameDraft(state, name, renameTo)
+
   if (kind === 'category') {
     // Collapse is tracked by NAME, so the key has to move with the rename or
     // a collapsed category springs open (and vice versa); the persisted
@@ -6543,6 +6548,24 @@ function clearDraft(state, name) {
   if (!(name in state.drafts)) return
   const next = { ...state.drafts }
   delete next[name]
+  state.drafts = next
+  syncDraftsWidget(state)
+}
+
+/** Moves *from*'s unsaved draft (if any) to *to* in ONE widget write -- the
+ * rename half of the draft lifecycle. A rename changes the key the draft is
+ * stored under; without this the draft stays under the old name and
+ * pruneDraftsToSelection() (entries) or a later same-named category
+ * (categories) mishandles it. Flushes a pending debounced sync FIRST so the
+ * text moved is what the textarea holds right now, committed while
+ * `state.activeName`/`activeCategory` still name the OLD item. No-op when
+ * there is no draft. */
+function renameDraft(state, from, to) {
+  flushDraftSync(state)
+  if (!(from in state.drafts)) return
+  const next = { ...state.drafts }
+  next[to] = next[from]
+  delete next[from]
   state.drafts = next
   syncDraftsWidget(state)
 }
