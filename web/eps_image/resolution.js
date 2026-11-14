@@ -4185,8 +4185,13 @@ export function attach(node) {
         }
       }
       this.properties[WIDGET_LAYOUT_PROP] = WIDGET_LAYOUT_CURRENT
-      convergeExtraImageInputs(this)
-      revealExtraOutputs(this)
+      // Deferred, never inline: LGraph.configure restores floating links
+      // onto the outputs only AFTER node.configure returns, and the resized_N
+      // repair reorders outputs -- run inline it would reorder before those
+      // wires exist and they would land on the wrong output. The saved
+      // outputs array already carries every revealed output, so nothing
+      // needs the grow/trim to have happened synchronously.
+      scheduleImageConverge(this)
     } catch (error) {
       console.warn(PREFIX, 'v0.61.0 post-configure migration failed', error)
     }
@@ -4196,6 +4201,6 @@ export function attach(node) {
   // A FRESH node gets neither configure nor a connection event, so the
   // backend's 13 declared outputs would all stay visible. One deferred
   // converge trims to the base shape; for a reloaded node it coalesces
-  // harmlessly after configure's own converge above.
+  // with the converge onConfigure schedules.
   scheduleImageConverge(node)
 }

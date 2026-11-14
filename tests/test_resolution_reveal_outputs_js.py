@@ -11,6 +11,7 @@ each link now reads (backend order = RETURN_TYPES order)."""
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -183,3 +184,17 @@ def test_floating_wire_on_the_output_moving_down_keeps_its_label(probe: dict) ->
     got = probe["floatingOther"]
     assert got["name"] == "resized_3" and got["slot"] == 7
     assert got["settled"] == "resized_4"
+
+
+def test_configure_defers_the_reveal_so_floating_wires_are_restored_first() -> None:
+    """LGraph.configure restores floating links only AFTER node.configure
+    returns; the resized_N repair reorders outputs, so the onConfigure hook
+    must not run revealExtraOutputs inline (a wire restored afterwards would
+    land on the output now at its saved slot). Source-level pin: attach()'s
+    onConfigure body schedules the converge and never calls the reveal."""
+    source = RESOLUTION_JS.read_text(encoding="utf-8")
+    start = source.index("const originalOnConfigureV61")
+    end = source.index("scheduleImageConverge(node)\n}", start)
+    body = source[start:end]
+    assert "scheduleImageConverge(this)" in body
+    assert not re.search(r"\brevealExtraOutputs\(|\bconvergeExtraImageInputs\(", body)
