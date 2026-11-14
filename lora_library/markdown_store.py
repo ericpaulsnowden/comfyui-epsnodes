@@ -610,6 +610,7 @@ def upsert_entry(
 
     target = _find_last_block(parsed, category) if category else parsed.blocks[-1]
     if target is None:
+        _require_single_line_name(category, "category")  # the heading it creates
         target = CategoryBlock(name=category, heading_line=f"# {category}")
         parsed.blocks.append(target)
     target.entries.append(new_entry)
@@ -854,6 +855,7 @@ def move_entry(
     category = (category or "").strip()
     dst_block = parsed.blocks[0] if category == "" else _find_last_block(parsed, category)
     if dst_block is None:
+        _require_single_line_name(category, "category")  # the heading it creates
         dst_block = CategoryBlock(name=category, heading_line=f"# {category}")
         parsed.blocks.append(dst_block)
     src_block.entries.remove(entry)

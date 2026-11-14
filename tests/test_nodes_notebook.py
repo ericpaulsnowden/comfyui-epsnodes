@@ -1211,6 +1211,24 @@ class TestChainingIsChanged:
         token_b = cls.IS_CHANGED(file="loras.md", entry="A", text=["one"], separator=" | ")
         assert token_a != token_b
 
+    def test_token_follows_the_file_order_the_run_emits(
+        self, library_dir: Path, context: LibraryContext
+    ) -> None:
+        # The output is emitted in FILE order (v0.85.0); swapping the two
+        # selected entries in the file changes the output, so the cache
+        # token must change too, with the widget value held constant.
+        _write_notebook(library_dir, "loras.md", "## A\na\n## B\nb\n")
+        before = nodes_notebook._selection_token(context, "loras.md", "A\nB", "", "{}")
+        nodes_notebook._load_notebook_cached.cache_clear() if hasattr(
+            nodes_notebook._load_notebook_cached, "cache_clear"
+        ) else None
+        _write_notebook(library_dir, "loras.md", "## B\nb\n## A\na\n")
+        after = nodes_notebook._selection_token(context, "loras.md", "A\nB", "", "{}")
+        assert before != after
+        # ... and the token does not depend on click order, exactly like the output.
+        clicked_other_way = nodes_notebook._selection_token(context, "loras.md", "B\nA", "", "{}")
+        assert clicked_other_way == after
+
     def test_unwired_token_is_byte_identical_to_pre_chaining(
         self, library_dir: Path, context: LibraryContext
     ) -> None:
