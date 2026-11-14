@@ -25,7 +25,7 @@ pytestmark = pytest.mark.skipif(NODE is None, reason="node (JS runtime) not inst
 
 PROBE = r"""
 import fs from 'node:fs'
-const src = fs.readFileSync(process.argv[2], 'utf8')
+const src = fs.readFileSync(process.argv[2], 'utf8').replace(/\r\n/g, '\n') // CRLF checkouts (Windows CI)
 const grab = (re) => { const m = re.exec(src); if (!m) throw new Error('missing ' + re); return m[0] }
 const body = [
   grab(/const ORIGINAL_SIZE_NAMES = [^\n]*/), grab(/const ORIGINAL_SIZE_TYPE = [^\n]*/),
