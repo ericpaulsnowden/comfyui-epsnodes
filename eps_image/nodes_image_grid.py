@@ -105,7 +105,7 @@ from . import image_grid_store as store
 # Canonical prompt-scan pair (v0.51.0, nodes_cross_sweep.py) -- consumers of
 # THIS node found by scanning the API prompt. Same-package import on purpose:
 # one canonical implementation, held in lockstep with the multiplier's guard.
-from .nodes_cross_sweep import _consumed_output_slots, _unwrap_hidden
+from .nodes_cross_sweep import _consumed_output_slots
 from .nodes_switcher import inputs_fed_by_an_all_off_switcher, wired_input_names
 
 logger = logging.getLogger("eps_image")
@@ -143,6 +143,30 @@ DEFAULT_GRID_UUID = ""
 #: today's behavior; a hand-built `/prompt` that omits it degrades the same
 #: way.
 DEFAULT_FOCUS = ""
+
+
+def _unwrap(value: Any, default: Any = None) -> Any:
+    """Undo ``INPUT_IS_LIST``'s one-element wrapping of a widget/hidden
+    input (``["Emit"]`` -> ``"Emit"``); an empty list or ``None`` -> *default*.
+    A bare value (a direct caller, not core) passes through unchanged."""
+    if isinstance(value, (list, tuple)):
+        value = value[0] if value else None
+    return default if value is None else value
+
+
+def _arriving_batches(image: Any) -> list:
+    """The ``[B,H,W,C]`` batches arriving this run, in order.
+
+    ``INPUT_IS_LIST`` hands the node EVERY upstream element at once (a
+    switcher wired into ``image`` outputs one element per enabled row), so
+    ``image`` is a list of batches. ``None`` entries -- a never-resolved lazy
+    input arrives as the placeholder ``(None,)`` -- and a missing image both
+    mean nothing arrived. A bare tensor (a direct caller) is one batch."""
+    if image is None:
+        return []
+    if not isinstance(image, (list, tuple)):
+        return [image]
+    return [batch for batch in image if batch is not None]
 
 
 def _expand_to_frames(image_batch: Any) -> list:
@@ -220,6 +244,11 @@ class EPSImageGrid:
     RETURN_TYPES = ("IMAGE", "INT", "INT")
     RETURN_NAMES = ("image", "width", "height")
     OUTPUT_IS_LIST = (True, True, True)
+    # Every input arrives list-wrapped and run() is called ONCE.
+    # Without this core maps run() over a list wired into `image` (a switcher
+    # with two enabled rows) -- one run per element, so Emit All emitted two
+    # batches instead of one. The list is "all the frames arriving this run".
+    INPUT_IS_LIST = True
     OUTPUT_NODE = True
     OUTPUT_TOOLTIPS = (
         "In Collect mode, the image(s) just fed in. In Collect only mode, "
@@ -359,6 +388,8 @@ class EPSImageGrid:
 
     @classmethod
     def IS_CHANGED(cls, mode: Any = MODE_COLLECT, grid_uuid: Any = "", **_kwargs: Any):
+        mode = _unwrap(mode, MODE_COLLECT)
+        grid_uuid = _unwrap(grid_uuid, "")
         # v0.80.0 (sweep-performance round) -- split by mode:
         #  - Collect APPENDS (a side effect core's cache must never skip):
         #    the NaN always-changed sentinel stays, exactly the module
@@ -393,6 +424,7 @@ class EPSImageGrid:
         (Collect: the §6.6 nothing-to-pass-through warning; Emit / Emit All:
         the buffer, unaffected) instead of being skipped by that switcher's
         blocker (the owner's 2026-11-05 all-off ask)."""
+        prompt, unique_id = _unwrap(prompt), _unwrap(unique_id)
         wired = wired_input_names(prompt, unique_id, ("image",))
         skip = inputs_fed_by_an_all_off_switcher(prompt, unique_id, wired)
         if skip:
@@ -411,7 +443,12 @@ class EPSImageGrid:
         prompt: Any = None,
         unique_id: Any = None,
     ) -> dict[str, Any]:
-        live = _expand_to_frames(image)
+        mode = _unwrap(mode, MODE_COLLECT)
+        grid_uuid = _unwrap(grid_uuid, DEFAULT_GRID_UUID)
+        focus = _unwrap(focus, DEFAULT_FOCUS)
+        prompt, unique_id = _unwrap(prompt), _unwrap(unique_id)
+        batches = _arriving_batches(image)
+        live = [frame for batch in batches for frame in _expand_to_frames(batch)]
         #: Refs THIS run actually appended to disk — the ONLY thing `ui`
         #: ever reports (module docstring point 1). Stays `[]` (and `"ui"`
         #: is therefore omitted below) unless Collect/Collect only mode both
@@ -432,9 +469,7 @@ class EPSImageGrid:
             # appended. Deliberately bypasses the dead-wire warning below
             # entirely -- a blocked Run in THIS mode is never a miswire, it
             # is the mode doing exactly what it says (class docstring).
-            if live:
-                all_refs = store.append_batch(grid_uuid, image)
-                new_refs = all_refs[-len(live) :]
+            new_refs = self._append_arrivals(grid_uuid, batches)
             from comfy_execution.graph import ExecutionBlocker
 
             blocked = [ExecutionBlocker(None)]
@@ -445,7 +480,6 @@ class EPSImageGrid:
 
         if mode == MODE_COLLECT:
             if live:
-                all_refs = store.append_batch(grid_uuid, image)
                 # `append_batch` always returns the WHOLE buffer, in append
                 # order, with a fresh append landing at the tail (tested:
                 # test_image_grid_store.py's
@@ -456,7 +490,7 @@ class EPSImageGrid:
                 # function's own docstring) -- slicing an empty list is
                 # itself a safe `[]`, correctly reporting "nothing
                 # appended" even though `live` still flows through below.
-                new_refs = all_refs[-len(live) :]
+                new_refs = self._append_arrivals(grid_uuid, batches)
             # The tee: input passes through while being recorded. The
             # frames just appended above ARE `live` -- do not also fan out
             # the rest of the buffer here (that's what Emit is for).
@@ -522,9 +556,7 @@ class EPSImageGrid:
             # fixes. Emit mode's empty-buffer skip stays fully silent -- an
             # empty buffer is a normal transient state, not a miswire.
             if mode == MODE_COLLECT and not live:
-                consumed = _consumed_output_slots(
-                    _unwrap_hidden(prompt), _unwrap_hidden(unique_id)
-                )
+                consumed = _consumed_output_slots(prompt, unique_id)
                 if consumed:
                     buffered = len(store.list_refs(grid_uuid))
                     detail = (
@@ -544,7 +576,7 @@ class EPSImageGrid:
 
                         PromptServer.instance.send_sync(
                             "eps-image-grid-collect-skip",
-                            {"node": str(_unwrap_hidden(unique_id)), "detail": detail},
+                            {"node": str(unique_id), "detail": detail},
                         )
                     except Exception:
                         # No live server (tests/direct callers) -- the log
@@ -563,6 +595,23 @@ class EPSImageGrid:
         return out
 
     @staticmethod
+    def _append_arrivals(grid_uuid: str, batches: list) -> list[dict]:
+        """Append every arriving batch to the buffer, in order; the refs of
+        exactly the frames just appended.
+
+        `append_batch` returns the WHOLE buffer with a fresh append at the
+        tail, so each call's own frames are its last `len(batch)` entries
+        (`[]` for an invalid/not-yet-minted `grid_uuid`: slicing it is a safe
+        no-op, that function's own docstring). One call per batch -- the
+        batches may differ in size, so they cannot be concatenated."""
+        new_refs: list[dict] = []
+        for batch in batches:
+            count = int(batch.shape[0])
+            if count:
+                new_refs += store.append_batch(grid_uuid, batch)[-count:]
+        return new_refs
+
+    @staticmethod
     def _warn_resized(resized: int, total: int, batch: Any, unique_id: Any) -> None:
         """Emit All changed some pixels to make the batch: say so, loudly."""
         was, it_was = ("was", "it was") if resized == 1 else ("were", "they were")
@@ -577,7 +626,7 @@ class EPSImageGrid:
 
             PromptServer.instance.send_sync(
                 "eps-image-grid-batch-resized",
-                {"node": str(_unwrap_hidden(unique_id)), "detail": detail},
+                {"node": str(_unwrap(unique_id)), "detail": detail},
             )
         except Exception:
             # No live server (tests/direct callers) -- the log line above

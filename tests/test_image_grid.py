@@ -91,6 +91,32 @@ def _node() -> EPSImageGrid:
     return EPSImageGrid()
 
 
+def _wrap(kwargs: dict) -> dict:
+    """The way core calls an ``INPUT_IS_LIST`` node: EVERY input a list --
+    ``image`` already one element per upstream batch (a bare tensor is one
+    element, ``None`` is the lazy placeholder ``(None,)``), every other
+    input a one-element list."""
+    out = {}
+    for name, value in kwargs.items():
+        if name == "image":
+            out[name] = (None,) if value is None else list(value) if isinstance(value, list) else [value]
+        else:
+            out[name] = [value]
+    return out
+
+
+def _run(node: EPSImageGrid, **kwargs):
+    return node.run(**_wrap(kwargs))
+
+
+def _is_changed(**kwargs):
+    return EPSImageGrid.IS_CHANGED(**_wrap(kwargs))
+
+
+def _lazy(node: EPSImageGrid, **kwargs):
+    return node.check_lazy_status(**_wrap(kwargs))
+
+
 # --------------------------------------------------------- class shape / spec
 
 
@@ -189,12 +215,12 @@ class TestIsChanged:
     def test_returns_nan_with_no_args(self) -> None:
         # No args = the Collect default: appends are a side effect the
         # cache must never skip.
-        assert math.isnan(EPSImageGrid.IS_CHANGED())
+        assert math.isnan(_is_changed())
 
     def test_collect_two_calls_are_never_equal(self) -> None:
         # NaN != NaN, so ComfyUI's cache can never see two Collect
         # IS_CHANGED results as "the same".
-        assert EPSImageGrid.IS_CHANGED(mode="Collect") != EPSImageGrid.IS_CHANGED(
+        assert _is_changed(mode="Collect") != _is_changed(
             mode="Collect"
         )
 
@@ -202,8 +228,8 @@ class TestIsChanged:
         # v0.98.0: Collect only appends exactly like Collect -- the same
         # side-effect-must-never-be-cached-away rationale applies, and
         # `mode not in _EMIT_MODES` already covers it without a dedicated branch.
-        assert math.isnan(EPSImageGrid.IS_CHANGED(mode="Collect only"))
-        assert EPSImageGrid.IS_CHANGED(mode="Collect only") != EPSImageGrid.IS_CHANGED(
+        assert math.isnan(_is_changed(mode="Collect only"))
+        assert _is_changed(mode="Collect only") != _is_changed(
             mode="Collect only"
         )
 
@@ -211,10 +237,10 @@ class TestIsChanged:
         # v0.80.0: Emit is side-effect-free, so an UNCHANGED buffer must
         # cross-prompt-cache -- the token is the manifest state, stable
         # across calls, and it flips when the buffer changes.
-        token1 = EPSImageGrid.IS_CHANGED(
+        token1 = _is_changed(
             mode="Emit", image=None, grid_uuid=VALID_UUID, focus="0001.png"
         )
-        token2 = EPSImageGrid.IS_CHANGED(
+        token2 = _is_changed(
             mode="Emit", image=None, grid_uuid=VALID_UUID, focus="0001.png"
         )
         assert isinstance(token1, str) and token1.startswith("emit:")
@@ -223,15 +249,15 @@ class TestIsChanged:
     def test_emit_token_flips_when_the_buffer_changes(self, fake_folder_paths: Path) -> None:
         import torch
 
-        before = EPSImageGrid.IS_CHANGED(mode="Emit", grid_uuid=VALID_UUID)
+        before = _is_changed(mode="Emit", grid_uuid=VALID_UUID)
         store.append_batch(VALID_UUID, torch.zeros((1, 4, 4, 3)))
-        after = EPSImageGrid.IS_CHANGED(mode="Emit", grid_uuid=VALID_UUID)
+        after = _is_changed(mode="Emit", grid_uuid=VALID_UUID)
         assert before != after
         # unchanged buffer -> stable again
-        assert EPSImageGrid.IS_CHANGED(mode="Emit", grid_uuid=VALID_UUID) == after
+        assert _is_changed(mode="Emit", grid_uuid=VALID_UUID) == after
 
     def test_emit_with_a_bogus_uuid_still_returns_a_string(self) -> None:
-        token = EPSImageGrid.IS_CHANGED(mode="Emit", grid_uuid="../nope")
+        token = _is_changed(mode="Emit", grid_uuid="../nope")
         assert isinstance(token, str)
         assert "no-buffer" in token
 
@@ -250,7 +276,7 @@ class TestCollectMode:
         self, fake_folder_paths: Path
     ) -> None:
         node = _node()
-        result = node.run(mode="Collect", image=_make_batch(2), grid_uuid=VALID_UUID)
+        result = _run(node, mode="Collect", image=_make_batch(2), grid_uuid=VALID_UUID)
         images, widths, heights = result["result"]
         assert len(images) == 2
         assert len(widths) == 2
@@ -261,8 +287,8 @@ class TestCollectMode:
         self, fake_folder_paths: Path
     ) -> None:
         node = _node()
-        node.run(mode="Collect", image=_make_batch(2), grid_uuid=VALID_UUID)
-        result = node.run(mode="Collect", image=_make_batch(1), grid_uuid=VALID_UUID)
+        _run(node, mode="Collect", image=_make_batch(2), grid_uuid=VALID_UUID)
+        result = _run(node, mode="Collect", image=_make_batch(1), grid_uuid=VALID_UUID)
         images, _widths, _heights = result["result"]
         assert len(images) == 1  # THIS run's frame only -- the tee, not a fan-out
         assert len(store.list_refs(VALID_UUID)) == 3  # buffer still grew to 3
@@ -271,7 +297,7 @@ class TestCollectMode:
         self, fake_folder_paths: Path
     ) -> None:
         node = _node()
-        result = node.run(mode="Collect", image=_make_batch(5), grid_uuid=VALID_UUID)
+        result = _run(node, mode="Collect", image=_make_batch(5), grid_uuid=VALID_UUID)
         images, _widths, _heights = result["result"]
         assert len(images) == 5
         assert len(store.list_refs(VALID_UUID)) == 5
@@ -282,7 +308,7 @@ class TestCollectMode:
         # Nothing wired -> nothing to pass through -- Collect never falls
         # back to fanning out the (here, empty) buffer.
         node = _node()
-        result = node.run(mode="Collect", image=None, grid_uuid=VALID_UUID)
+        result = _run(node, mode="Collect", image=None, grid_uuid=VALID_UUID)
         images, widths, heights = result["result"]
         for lst in (images, widths, heights):
             assert len(lst) == 1
@@ -292,8 +318,8 @@ class TestCollectMode:
         self, fake_folder_paths: Path, fake_execution_blocker: type
     ) -> None:
         node = _node()
-        node.run(mode="Collect", image=_make_batch(2), grid_uuid=VALID_UUID)
-        result = node.run(mode="Collect", image=None, grid_uuid=VALID_UUID)
+        _run(node, mode="Collect", image=_make_batch(2), grid_uuid=VALID_UUID)
+        result = _run(node, mode="Collect", image=None, grid_uuid=VALID_UUID)
         # Nothing wired this run -> nothing to pass through, EVEN THOUGH the
         # buffer already holds 2 -- Collect never fans the buffer out.
         images, widths, heights = result["result"]
@@ -340,8 +366,8 @@ class TestCollectMode:
         of the grid skips) and a warning event tells the browser why."""
         sent = self._fake_prompt_server(monkeypatch)
         node = _node()
-        node.run(mode="Collect", image=_make_batch(2), grid_uuid=VALID_UUID)
-        result = node.run(
+        _run(node, mode="Collect", image=_make_batch(2), grid_uuid=VALID_UUID)
+        result = _run(node,
             mode="Collect", image=None, grid_uuid=VALID_UUID,
             prompt=self._prompt_consuming_me(), unique_id="3",
         )
@@ -359,7 +385,7 @@ class TestCollectMode:
     ) -> None:
         sent = self._fake_prompt_server(monkeypatch)
         node = _node()
-        result = node.run(
+        result = _run(node,
             mode="Collect", image=None, grid_uuid=VALID_UUID,
             prompt={"5": {"class_type": "X", "inputs": {}}}, unique_id="3",
         )
@@ -371,7 +397,7 @@ class TestCollectMode:
         self, fake_folder_paths: Path, fake_execution_blocker: type
     ) -> None:
         node = _node()
-        result = node.run(
+        result = _run(node,
             mode="Collect", image=None, grid_uuid=VALID_UUID,
             prompt={"5": {"class_type": "X", "inputs": {}}}, unique_id="3",
         )
@@ -383,7 +409,7 @@ class TestCollectMode:
     ) -> None:
         # An empty buffer in Emit is a normal transient state, not a miswire.
         node = _node()
-        result = node.run(
+        result = _run(node,
             mode="Emit", image=None, grid_uuid=VALID_UUID,
             prompt=self._prompt_consuming_me(), unique_id="3",
         )
@@ -393,7 +419,7 @@ class TestCollectMode:
     def test_emitted_tensors_are_batch_of_one_each(self, fake_folder_paths: Path) -> None:
         node = _node()
         batch = _make_batch(2, height=8, width=10)
-        result = node.run(mode="Collect", image=batch, grid_uuid=VALID_UUID)
+        result = _run(node, mode="Collect", image=batch, grid_uuid=VALID_UUID)
         images, widths, heights = result["result"]
         for image in images:
             assert image.shape == (1, 8, 10, 3)
@@ -409,7 +435,7 @@ class TestCollectMode:
         # directly.
         node = _node()
         batch = _make_batch(3)
-        result = node.run(mode="Collect", image=batch, grid_uuid=VALID_UUID)
+        result = _run(node, mode="Collect", image=batch, grid_uuid=VALID_UUID)
         images, _widths, _heights = result["result"]
         for i, image in enumerate(images):
             assert torch.equal(image, batch[i : i + 1])
@@ -428,7 +454,7 @@ class TestCollectOnlyMode:
         self, fake_folder_paths: Path, fake_execution_blocker: type
     ) -> None:
         node = _node()
-        result = node.run(mode="Collect only", image=_make_batch(2), grid_uuid=VALID_UUID)
+        result = _run(node, mode="Collect only", image=_make_batch(2), grid_uuid=VALID_UUID)
         images, widths, heights = result["result"]
         for lst in (images, widths, heights):
             assert len(lst) == 1
@@ -439,7 +465,7 @@ class TestCollectOnlyMode:
         self, fake_folder_paths: Path, fake_execution_blocker: type
     ) -> None:
         node = _node()
-        result = node.run(mode="Collect only", image=_make_batch(5), grid_uuid=VALID_UUID)
+        result = _run(node, mode="Collect only", image=_make_batch(5), grid_uuid=VALID_UUID)
         for lst in result["result"]:
             assert len(lst) == 1
             assert isinstance(lst[0], fake_execution_blocker)
@@ -449,8 +475,8 @@ class TestCollectOnlyMode:
         self, fake_folder_paths: Path, fake_execution_blocker: type
     ) -> None:
         node = _node()
-        node.run(mode="Collect only", image=_make_batch(2), grid_uuid=VALID_UUID)
-        result = node.run(mode="Collect only", image=_make_batch(1), grid_uuid=VALID_UUID)
+        _run(node, mode="Collect only", image=_make_batch(2), grid_uuid=VALID_UUID)
+        result = _run(node, mode="Collect only", image=_make_batch(1), grid_uuid=VALID_UUID)
         whole_buffer = store.list_refs(VALID_UUID)
         assert len(whole_buffer) == 3
         assert result["ui"]["images"] == whole_buffer[-1:]  # the delta, same as Collect
@@ -459,7 +485,7 @@ class TestCollectOnlyMode:
         self, fake_folder_paths: Path, fake_execution_blocker: type
     ) -> None:
         node = _node()
-        result = node.run(mode="Collect only", image=None, grid_uuid=VALID_UUID)
+        result = _run(node, mode="Collect only", image=None, grid_uuid=VALID_UUID)
         for lst in result["result"]:
             assert len(lst) == 1
             assert isinstance(lst[0], fake_execution_blocker)
@@ -470,8 +496,8 @@ class TestCollectOnlyMode:
         self, fake_folder_paths: Path, fake_execution_blocker: type
     ) -> None:
         node = _node()
-        node.run(mode="Collect only", image=_make_batch(2), grid_uuid=VALID_UUID)
-        result = node.run(mode="Collect only", image=None, grid_uuid=VALID_UUID)
+        _run(node, mode="Collect only", image=_make_batch(2), grid_uuid=VALID_UUID)
+        result = _run(node, mode="Collect only", image=None, grid_uuid=VALID_UUID)
         for lst in result["result"]:
             assert isinstance(lst[0], fake_execution_blocker)
         assert "ui" not in result
@@ -486,7 +512,7 @@ class TestCollectOnlyMode:
         # mode, so there is nothing to warn about, consumer or not.
         sent = TestCollectMode._fake_prompt_server(monkeypatch)
         node = _node()
-        result = node.run(
+        result = _run(node,
             mode="Collect only", image=None, grid_uuid=VALID_UUID,
             prompt=TestCollectMode._prompt_consuming_me(), unique_id="3",
         )
@@ -498,7 +524,7 @@ class TestCollectOnlyMode:
         self, fake_folder_paths: Path, fake_execution_blocker: type
     ) -> None:
         node = _node()
-        result = node.run(mode="Collect only", image=_make_batch(2), grid_uuid="not valid!")
+        result = _run(node, mode="Collect only", image=_make_batch(2), grid_uuid="not valid!")
         for lst in result["result"]:
             assert isinstance(lst[0], fake_execution_blocker)
         assert "ui" not in result
@@ -507,7 +533,7 @@ class TestCollectOnlyMode:
         self, fake_folder_paths: Path, fake_execution_blocker: type
     ) -> None:
         node = _node()
-        result = node.run(
+        result = _run(node,
             mode="Collect only", image=_make_batch(2), grid_uuid=VALID_UUID, focus="0001.png"
         )
         for lst in result["result"]:
@@ -520,7 +546,7 @@ class TestCollectOnlyMode:
         # Confirms the append is the real per-frame expansion (same as
         # Collect), even though nothing of it is ever returned downstream.
         node = _node()
-        node.run(
+        _run(node,
             mode="Collect only",
             image=_make_batch(3, height=8, width=10),
             grid_uuid=VALID_UUID,
@@ -535,9 +561,9 @@ class TestCollectOnlyMode:
         # in run() -- this pins that plain Collect/Emit still behave
         # exactly as before once that branch exists.
         node = _node()
-        collect_result = node.run(mode="Collect", image=_make_batch(2), grid_uuid=VALID_UUID)
+        collect_result = _run(node, mode="Collect", image=_make_batch(2), grid_uuid=VALID_UUID)
         assert len(collect_result["result"][0]) == 2
-        emit_result = node.run(mode="Emit", grid_uuid=VALID_UUID)
+        emit_result = _run(node, mode="Emit", grid_uuid=VALID_UUID)
         assert len(emit_result["result"][0]) == 2
 
 
@@ -548,41 +574,41 @@ class TestEmitMode:
 
     def test_emits_the_whole_buffer_without_appending(self, fake_folder_paths: Path) -> None:
         node = _node()
-        node.run(mode="Collect", image=_make_batch(3), grid_uuid=VALID_UUID)
+        _run(node, mode="Collect", image=_make_batch(3), grid_uuid=VALID_UUID)
 
-        result = node.run(mode="Emit", grid_uuid=VALID_UUID)
+        result = _run(node, mode="Emit", grid_uuid=VALID_UUID)
         images, widths, heights = result["result"]
         assert len(images) == 3
         assert len(widths) == len(heights) == 3
 
         # Confirm a plain Emit (nothing wired) is idempotent -- a second one
         # sees the same 3, not 3+3.
-        again = node.run(mode="Emit", grid_uuid=VALID_UUID)
+        again = _run(node, mode="Emit", grid_uuid=VALID_UUID)
         assert len(again["result"][0]) == 3
 
     def test_wired_image_flows_through_appended_at_the_end_owners_10_plus_1(
         self, fake_folder_paths: Path
     ) -> None:
         node = _node()
-        node.run(mode="Collect", image=_make_batch(10), grid_uuid=VALID_UUID)
+        _run(node, mode="Collect", image=_make_batch(10), grid_uuid=VALID_UUID)
 
-        result = node.run(mode="Emit", image=_make_batch(1), grid_uuid=VALID_UUID)
+        result = _run(node, mode="Emit", image=_make_batch(1), grid_uuid=VALID_UUID)
         images, widths, heights = result["result"]
         assert len(images) == 11
         assert len(widths) == len(heights) == 11
 
         # And it truly was NOT appended to the buffer -- a follow-up Emit
         # (nothing wired) still sees exactly the original 10.
-        again = node.run(mode="Emit", grid_uuid=VALID_UUID)
+        again = _run(node, mode="Emit", grid_uuid=VALID_UUID)
         assert len(again["result"][0]) == 10
 
     def test_buffer_frames_come_before_the_wired_frame_in_order(
         self, fake_folder_paths: Path
     ) -> None:
         node = _node()
-        node.run(mode="Collect", image=_make_batch(2), grid_uuid=VALID_UUID)  # default 4x6
+        _run(node, mode="Collect", image=_make_batch(2), grid_uuid=VALID_UUID)  # default 4x6
         wired = _make_batch(1, height=5, width=7)  # distinct shape to identify it
-        result = node.run(mode="Emit", image=wired, grid_uuid=VALID_UUID)
+        result = _run(node, mode="Emit", image=wired, grid_uuid=VALID_UUID)
         _images, widths, heights = result["result"]
         # First two are the buffered pair (4x6 each), last is the newly-
         # wired frame (5x7) -- chronological first, live newest last.
@@ -591,17 +617,17 @@ class TestEmitMode:
 
     def test_emit_with_wired_image_never_appends_it(self, fake_folder_paths: Path) -> None:
         node = _node()
-        node.run(mode="Emit", image=_make_batch(2), grid_uuid=VALID_UUID)
+        _run(node, mode="Emit", image=_make_batch(2), grid_uuid=VALID_UUID)
         # Nothing was ever collected -- a subsequent Collect run should add
         # exactly 2 (from THIS call), not see any leftover from the Emit call.
-        node.run(mode="Collect", image=_make_batch(2), grid_uuid=VALID_UUID)
+        _run(node, mode="Collect", image=_make_batch(2), grid_uuid=VALID_UUID)
         assert len(store.list_refs(VALID_UUID)) == 2
 
     def test_emit_with_empty_buffer_and_something_wired_emits_just_the_wired_frames(
         self, fake_folder_paths: Path
     ) -> None:
         node = _node()
-        result = node.run(mode="Emit", image=_make_batch(2), grid_uuid=VALID_UUID)
+        result = _run(node, mode="Emit", image=_make_batch(2), grid_uuid=VALID_UUID)
         images, _widths, _heights = result["result"]
         assert len(images) == 2  # buffer(0) + live(2)
 
@@ -618,11 +644,11 @@ class TestFocusedEmit:
         self, fake_folder_paths: Path
     ) -> None:
         node = _node()
-        node.run(mode="Collect", image=_make_batch(5), grid_uuid=VALID_UUID)
+        _run(node, mode="Collect", image=_make_batch(5), grid_uuid=VALID_UUID)
         [target] = [
             r["filename"] for r in store.list_refs(VALID_UUID) if r["filename"] == "0003.png"
         ]
-        result = node.run(mode="Emit", grid_uuid=VALID_UUID, focus=target)
+        result = _run(node, mode="Emit", grid_uuid=VALID_UUID, focus=target)
         images, widths, heights = result["result"]
         assert len(images) == 1
         assert len(widths) == 1
@@ -633,10 +659,10 @@ class TestFocusedEmit:
     ) -> None:
         # Distinct sizes per frame so the emitted one can be identified.
         node = _node()
-        node.run(mode="Collect", image=_make_batch(1, height=4, width=4), grid_uuid=VALID_UUID)
-        node.run(mode="Collect", image=_make_batch(1, height=9, width=5), grid_uuid=VALID_UUID)
-        node.run(mode="Collect", image=_make_batch(1, height=2, width=7), grid_uuid=VALID_UUID)
-        result = node.run(mode="Emit", grid_uuid=VALID_UUID, focus="0002.png")
+        _run(node, mode="Collect", image=_make_batch(1, height=4, width=4), grid_uuid=VALID_UUID)
+        _run(node, mode="Collect", image=_make_batch(1, height=9, width=5), grid_uuid=VALID_UUID)
+        _run(node, mode="Collect", image=_make_batch(1, height=2, width=7), grid_uuid=VALID_UUID)
+        result = _run(node, mode="Emit", grid_uuid=VALID_UUID, focus="0002.png")
         images, widths, heights = result["result"]
         assert widths == [5]
         assert heights == [9]
@@ -649,8 +675,8 @@ class TestFocusedEmit:
         # whatever's currently wired (contrast the unfocused "10 + 1 -> 11"
         # rule in TestEmitMode above).
         node = _node()
-        node.run(mode="Collect", image=_make_batch(3), grid_uuid=VALID_UUID)
-        result = node.run(
+        _run(node, mode="Collect", image=_make_batch(3), grid_uuid=VALID_UUID)
+        result = _run(node,
             mode="Emit", image=_make_batch(1), grid_uuid=VALID_UUID, focus="0002.png"
         )
         images, widths, heights = result["result"]
@@ -660,9 +686,9 @@ class TestFocusedEmit:
         self, fake_folder_paths: Path, caplog: pytest.LogCaptureFixture
     ) -> None:
         node = _node()
-        node.run(mode="Collect", image=_make_batch(3), grid_uuid=VALID_UUID)
+        _run(node, mode="Collect", image=_make_batch(3), grid_uuid=VALID_UUID)
         with caplog.at_level("WARNING", logger="eps_image"):
-            result = node.run(mode="Emit", grid_uuid=VALID_UUID, focus="9999.png")
+            result = _run(node, mode="Emit", grid_uuid=VALID_UUID, focus="9999.png")
         images, widths, heights = result["result"]
         assert len(images) == 3  # degraded to the whole buffer, not a crash
         assert len(widths) == len(heights) == 3
@@ -675,8 +701,8 @@ class TestFocusedEmit:
         # The degrade falls all the way back to ordinary unfocused Emit --
         # including its own "buffer + wired" tail, not just the buffer.
         node = _node()
-        node.run(mode="Collect", image=_make_batch(2), grid_uuid=VALID_UUID)
-        result = node.run(
+        _run(node, mode="Collect", image=_make_batch(2), grid_uuid=VALID_UUID)
+        result = _run(node,
             mode="Emit", image=_make_batch(1), grid_uuid=VALID_UUID, focus="not-a-real-frame.png"
         )
         images, _widths, _heights = result["result"]
@@ -688,7 +714,7 @@ class TestFocusedEmit:
         # The degrade path re-enters the SAME empty-buffer safety net Emit
         # already has -- never a new crash surface.
         node = _node()
-        result = node.run(mode="Emit", grid_uuid=VALID_UUID, focus="0001.png")
+        result = _run(node, mode="Emit", grid_uuid=VALID_UUID, focus="0001.png")
         images, widths, heights = result["result"]
         for lst in (images, widths, heights):
             assert len(lst) == 1
@@ -698,9 +724,9 @@ class TestFocusedEmit:
         self, fake_folder_paths: Path
     ) -> None:
         node = _node()
-        node.run(mode="Collect", image=_make_batch(3), grid_uuid=VALID_UUID)
-        explicit_default = node.run(mode="Emit", grid_uuid=VALID_UUID, focus="")
-        omitted = node.run(mode="Emit", grid_uuid=VALID_UUID)
+        _run(node, mode="Collect", image=_make_batch(3), grid_uuid=VALID_UUID)
+        explicit_default = _run(node, mode="Emit", grid_uuid=VALID_UUID, focus="")
+        omitted = _run(node, mode="Emit", grid_uuid=VALID_UUID)
         assert len(explicit_default["result"][0]) == 3
         assert len(omitted["result"][0]) == 3
 
@@ -708,7 +734,7 @@ class TestFocusedEmit:
         node = _node()
         # A stray/leftover focus value must not affect Collect's tee at all
         # -- not even to trigger the stale-focus warning path.
-        result = node.run(
+        result = _run(node,
             mode="Collect", image=_make_batch(2), grid_uuid=VALID_UUID, focus="0001.png"
         )
         images, _widths, _heights = result["result"]
@@ -720,7 +746,7 @@ class TestFocusedEmit:
     ) -> None:
         node = _node()
         with caplog.at_level("WARNING", logger="eps_image"):
-            node.run(
+            _run(node,
                 mode="Collect", image=_make_batch(1), grid_uuid=VALID_UUID, focus="9999.png"
             )
         assert not any("9999.png" in record.message for record in caplog.records)
@@ -731,8 +757,8 @@ class TestFocusedEmit:
         # DEFAULT_FOCUS ("") covers a hand-built /prompt that omits `focus`
         # entirely -- same rationale as DEFAULT_GRID_UUID.
         node = _node()
-        node.run(mode="Collect", image=_make_batch(2), grid_uuid=VALID_UUID)
-        result = node.run(mode="Emit", grid_uuid=VALID_UUID)
+        _run(node, mode="Collect", image=_make_batch(2), grid_uuid=VALID_UUID)
+        result = _run(node, mode="Emit", grid_uuid=VALID_UUID)
         assert len(result["result"][0]) == 2
 
 
@@ -748,15 +774,15 @@ class TestUiReporting:
         self, fake_folder_paths: Path
     ) -> None:
         node = _node()
-        result = node.run(mode="Collect", image=_make_batch(2), grid_uuid=VALID_UUID)
+        result = _run(node, mode="Collect", image=_make_batch(2), grid_uuid=VALID_UUID)
         assert result["ui"]["images"] == store.list_refs(VALID_UUID)  # buffer WAS empty
 
     def test_collect_second_run_ui_images_is_only_the_delta_not_the_whole_buffer(
         self, fake_folder_paths: Path
     ) -> None:
         node = _node()
-        node.run(mode="Collect", image=_make_batch(2), grid_uuid=VALID_UUID)
-        result = node.run(mode="Collect", image=_make_batch(1), grid_uuid=VALID_UUID)
+        _run(node, mode="Collect", image=_make_batch(2), grid_uuid=VALID_UUID)
+        result = _run(node, mode="Collect", image=_make_batch(1), grid_uuid=VALID_UUID)
         whole_buffer = store.list_refs(VALID_UUID)
         assert len(whole_buffer) == 3
         assert len(result["ui"]["images"]) == 1  # NOT 3 -- this is the fix
@@ -766,8 +792,8 @@ class TestUiReporting:
         self, fake_folder_paths: Path
     ) -> None:
         node = _node()
-        node.run(mode="Collect", image=_make_batch(2), grid_uuid=VALID_UUID)
-        result = node.run(mode="Collect", image=_make_batch(3), grid_uuid=VALID_UUID)
+        _run(node, mode="Collect", image=_make_batch(2), grid_uuid=VALID_UUID)
+        result = _run(node, mode="Collect", image=_make_batch(3), grid_uuid=VALID_UUID)
         assert len(result["ui"]["images"]) == 3
         assert result["ui"]["images"] == store.list_refs(VALID_UUID)[-3:]
 
@@ -775,8 +801,8 @@ class TestUiReporting:
         self, fake_folder_paths: Path, fake_execution_blocker: type
     ) -> None:
         node = _node()
-        node.run(mode="Collect", image=_make_batch(2), grid_uuid=VALID_UUID)
-        result = node.run(mode="Collect", image=None, grid_uuid=VALID_UUID)
+        _run(node, mode="Collect", image=_make_batch(2), grid_uuid=VALID_UUID)
+        result = _run(node, mode="Collect", image=None, grid_uuid=VALID_UUID)
         assert "ui" not in result
 
     def test_collect_with_invalid_grid_uuid_omits_ui_even_though_it_still_passes_through(
@@ -786,49 +812,49 @@ class TestUiReporting:
         # no-op) -- ui must therefore be omitted -- even though the wired
         # image still flows through downstream (module docstring point 2).
         node = _node()
-        result = node.run(mode="Collect", image=_make_batch(2), grid_uuid="not valid!")
+        result = _run(node, mode="Collect", image=_make_batch(2), grid_uuid="not valid!")
         assert "ui" not in result
         assert len(result["result"][0]) == 2  # still flows through
 
     def test_emit_never_reports_ui_even_with_a_full_buffer(self, fake_folder_paths: Path) -> None:
         node = _node()
-        node.run(mode="Collect", image=_make_batch(3), grid_uuid=VALID_UUID)
-        result = node.run(mode="Emit", grid_uuid=VALID_UUID)
+        _run(node, mode="Collect", image=_make_batch(3), grid_uuid=VALID_UUID)
+        result = _run(node, mode="Emit", grid_uuid=VALID_UUID)
         assert "ui" not in result
 
     def test_emit_never_reports_ui_with_something_wired_either(
         self, fake_folder_paths: Path
     ) -> None:
         node = _node()
-        node.run(mode="Collect", image=_make_batch(3), grid_uuid=VALID_UUID)
-        result = node.run(mode="Emit", image=_make_batch(1), grid_uuid=VALID_UUID)
+        _run(node, mode="Collect", image=_make_batch(3), grid_uuid=VALID_UUID)
+        result = _run(node, mode="Emit", image=_make_batch(1), grid_uuid=VALID_UUID)
         assert "ui" not in result
 
     def test_empty_buffer_safety_path_never_reports_ui(
         self, fake_folder_paths: Path, fake_execution_blocker: type
     ) -> None:
         node = _node()
-        result = node.run(mode="Emit", image=None, grid_uuid=VALID_UUID)
+        result = _run(node, mode="Emit", image=None, grid_uuid=VALID_UUID)
         assert "ui" not in result
 
 
 class TestOutputIsListShape:
     def test_three_lists_are_always_equal_length_collect(self, fake_folder_paths: Path) -> None:
         node = _node()
-        result = node.run(mode="Collect", image=_make_batch(4), grid_uuid=VALID_UUID)
+        result = _run(node, mode="Collect", image=_make_batch(4), grid_uuid=VALID_UUID)
         images, widths, heights = result["result"]
         assert len(images) == len(widths) == len(heights) == 4
 
     def test_three_lists_are_always_equal_length_emit(self, fake_folder_paths: Path) -> None:
         node = _node()
-        node.run(mode="Collect", image=_make_batch(4), grid_uuid=VALID_UUID)
-        result = node.run(mode="Emit", image=_make_batch(2), grid_uuid=VALID_UUID)
+        _run(node, mode="Collect", image=_make_batch(4), grid_uuid=VALID_UUID)
+        result = _run(node, mode="Emit", image=_make_batch(2), grid_uuid=VALID_UUID)
         images, widths, heights = result["result"]
         assert len(images) == len(widths) == len(heights) == 6
 
     def test_result_is_a_three_tuple(self, fake_folder_paths: Path) -> None:
         node = _node()
-        result = node.run(mode="Collect", image=_make_batch(1), grid_uuid=VALID_UUID)
+        result = _run(node, mode="Collect", image=_make_batch(1), grid_uuid=VALID_UUID)
         assert isinstance(result["result"], tuple)
         assert len(result["result"]) == 3
 
@@ -838,20 +864,20 @@ class TestReturnShape:
         self, fake_folder_paths: Path
     ) -> None:
         node = _node()
-        result = node.run(mode="Collect", image=_make_batch(1), grid_uuid=VALID_UUID)
+        result = _run(node, mode="Collect", image=_make_batch(1), grid_uuid=VALID_UUID)
         assert set(result.keys()) == {"ui", "result"}
 
     def test_emit_has_result_key_only_never_ui(self, fake_folder_paths: Path) -> None:
         node = _node()
-        node.run(mode="Collect", image=_make_batch(1), grid_uuid=VALID_UUID)
-        result = node.run(mode="Emit", grid_uuid=VALID_UUID)
+        _run(node, mode="Collect", image=_make_batch(1), grid_uuid=VALID_UUID)
+        result = _run(node, mode="Emit", grid_uuid=VALID_UUID)
         assert set(result.keys()) == {"result"}
 
     def test_collect_with_nothing_new_has_result_key_only(
         self, fake_folder_paths: Path, fake_execution_blocker: type
     ) -> None:
         node = _node()
-        result = node.run(mode="Collect", image=None, grid_uuid=VALID_UUID)
+        result = _run(node, mode="Collect", image=None, grid_uuid=VALID_UUID)
         assert set(result.keys()) == {"result"}
 
 
@@ -867,7 +893,7 @@ class TestEmptyBufferSafety:
         self, fake_folder_paths: Path, fake_execution_blocker: type
     ) -> None:
         node = _node()
-        result = node.run(mode="Emit", image=None, grid_uuid=VALID_UUID)
+        result = _run(node, mode="Emit", image=None, grid_uuid=VALID_UUID)
         images, widths, heights = result["result"]
         for lst in (images, widths, heights):
             assert len(lst) == 1
@@ -881,7 +907,7 @@ class TestEmptyBufferSafety:
         # bare `[]`) -- now the key itself is omitted whenever nothing was
         # appended, Emit included (module docstring point 1).
         node = _node()
-        result = node.run(mode="Emit", image=None, grid_uuid=VALID_UUID)
+        result = _run(node, mode="Emit", image=None, grid_uuid=VALID_UUID)
         assert "ui" not in result
 
     def test_default_missing_grid_uuid_with_nothing_wired_is_blocked(
@@ -891,7 +917,7 @@ class TestEmptyBufferSafety:
         # node's declared defaults ("" and None) -- nothing wired, nothing
         # buffered (can't be -- "" is invalid) -> the safe blocker triple.
         node = _node()
-        result = node.run(mode="Collect")
+        result = _run(node, mode="Collect")
         images, _widths, _heights = result["result"]
         assert len(images) == 1
         assert isinstance(images[0], fake_execution_blocker)
@@ -904,7 +930,7 @@ class TestEmptyBufferSafety:
         # "block the passthrough" (contrast the OLD contract, which blocked
         # this case entirely).
         node = _node()
-        result = node.run(mode="Collect", image=_make_batch(2))
+        result = _run(node, mode="Collect", image=_make_batch(2))
         images, widths, heights = result["result"]
         assert len(images) == 2
         assert len(widths) == 2
@@ -922,7 +948,7 @@ class TestEmptyBufferSafety:
             pytest.skip("comfy_execution is already importable in this environment")
         node = _node()
         with pytest.raises(ModuleNotFoundError):
-            node.run(mode="Emit", image=None, grid_uuid=VALID_UUID)
+            _run(node, mode="Emit", image=None, grid_uuid=VALID_UUID)
 
 
 # --------------------------------------------------------------- no ComfyUI import
@@ -1097,7 +1123,7 @@ class TestEmitAllMode:
     def test_buffer_comes_out_as_one_batch_in_order(self, fake_folder_paths: Path) -> None:
         batch = _make_batch(3)
         store.append_batch(VALID_UUID, batch)
-        result = _node().run(mode="Emit All", grid_uuid=VALID_UUID)
+        result = _run(_node(), mode="Emit All", grid_uuid=VALID_UUID)
         images, widths, heights = result["result"]
         assert len(images) == 1
         assert images[0].shape == (3, 4, 6, 3)
@@ -1108,7 +1134,7 @@ class TestEmitAllMode:
     def test_wired_image_lands_at_the_end_of_the_batch(self, fake_folder_paths: Path) -> None:
         store.append_batch(VALID_UUID, _make_batch(2))
         live = torch.ones((1, 4, 6, 3))
-        result = _node().run(mode="Emit All", image=live, grid_uuid=VALID_UUID)
+        result = _run(_node(), mode="Emit All", image=live, grid_uuid=VALID_UUID)
         images = result["result"][0]
         assert len(images) == 1
         assert images[0].shape[0] == 3
@@ -1116,13 +1142,13 @@ class TestEmitAllMode:
 
     def test_never_appends_and_never_reports_ui(self, fake_folder_paths: Path) -> None:
         store.append_batch(VALID_UUID, _make_batch(2))
-        result = _node().run(mode="Emit All", image=_make_batch(1), grid_uuid=VALID_UUID)
+        result = _run(_node(), mode="Emit All", image=_make_batch(1), grid_uuid=VALID_UUID)
         assert len(store.list_refs(VALID_UUID)) == 2
         assert "ui" not in result
 
     def test_focus_is_ignored(self, fake_folder_paths: Path) -> None:
         refs = store.append_batch(VALID_UUID, _make_batch(3))
-        result = _node().run(
+        result = _run(_node(),
             mode="Emit All", grid_uuid=VALID_UUID, focus=refs[1]["filename"]
         )
         assert result["result"][0][0].shape[0] == 3
@@ -1130,7 +1156,7 @@ class TestEmitAllMode:
     def test_empty_buffer_nothing_wired_blocks_silently(
         self, fake_folder_paths: Path, fake_execution_blocker: type
     ) -> None:
-        result = _node().run(mode="Emit All", grid_uuid=VALID_UUID)
+        result = _run(_node(), mode="Emit All", grid_uuid=VALID_UUID)
         for lst in result["result"]:
             assert len(lst) == 1
             assert isinstance(lst[0], fake_execution_blocker)
@@ -1144,7 +1170,7 @@ class TestEmitAllMode:
         store.append_batch(VALID_UUID, _make_batch(2, height=4, width=6))
         store.append_batch(VALID_UUID, _make_batch(1, height=8, width=8))
         with caplog.at_level("WARNING", logger="eps_image"):
-            result = _node().run(mode="Emit All", grid_uuid=VALID_UUID)
+            result = _run(_node(), mode="Emit All", grid_uuid=VALID_UUID)
         images, widths, heights = result["result"]
         assert images[0].shape == (3, 4, 6, 3)
         assert (widths, heights) == ([6], [4])
@@ -1158,22 +1184,22 @@ class TestEmitAllMode:
         # No fake_common_upscale here: `import comfy.utils` would raise.
         store.append_batch(VALID_UUID, _make_batch(2))
         with caplog.at_level("WARNING", logger="eps_image"):
-            _node().run(mode="Emit All", grid_uuid=VALID_UUID)
+            _run(_node(), mode="Emit All", grid_uuid=VALID_UUID)
         assert "different size" not in caplog.text
 
     def test_missing_alpha_pads_to_the_widest_frame(self, fake_folder_paths: Path) -> None:
         store.append_batch(VALID_UUID, _make_batch(1))
         live = torch.zeros((1, 4, 6, 4))
-        images = _node().run(mode="Emit All", image=live, grid_uuid=VALID_UUID)["result"][0]
+        images = _run(_node(), mode="Emit All", image=live, grid_uuid=VALID_UUID)["result"][0]
         assert images[0].shape == (2, 4, 6, 4)
         assert torch.equal(images[0][0, :, :, 3], torch.ones((4, 6)))
 
     def test_is_changed_is_the_buffer_token(self, fake_folder_paths: Path) -> None:
-        first = EPSImageGrid.IS_CHANGED(mode="Emit All", grid_uuid=VALID_UUID)
+        first = _is_changed(mode="Emit All", grid_uuid=VALID_UUID)
         assert isinstance(first, str)
-        assert first == EPSImageGrid.IS_CHANGED(mode="Emit All", grid_uuid=VALID_UUID)
+        assert first == _is_changed(mode="Emit All", grid_uuid=VALID_UUID)
         store.append_batch(VALID_UUID, _make_batch(1))
-        assert first != EPSImageGrid.IS_CHANGED(mode="Emit All", grid_uuid=VALID_UUID)
+        assert first != _is_changed(mode="Emit All", grid_uuid=VALID_UUID)
 
 
 # ------------------------------------------------ lazy image (2026-11-05)
@@ -1191,8 +1217,85 @@ class TestLazyImageSkipsAnAllOffSwitcher:
             "6": {"class_type": "EPSImageGrid", "inputs": {"image": ["3", 0], "mode": "Collect"}},
         }
         node = EPSImageGrid()
-        assert node.check_lazy_status(prompt=prompt, unique_id="6") == []
+        assert _lazy(node, prompt=prompt, unique_id="6") == []
         prompt["3"]["inputs"]["toggles"] = "{}"
-        assert node.check_lazy_status(prompt=prompt, unique_id="6") == ["image"]
+        assert _lazy(node, prompt=prompt, unique_id="6") == ["image"]
         prompt["6"]["inputs"].pop("image")
-        assert node.check_lazy_status(prompt=prompt, unique_id="6") == []
+        assert _lazy(node, prompt=prompt, unique_id="6") == []
+
+
+# ----------------------------- a LIST wired into `image` (switcher, 2+ rows)
+
+
+def _frame(value: float, height: int = 4, width: int = 6) -> torch.Tensor:
+    return torch.full((1, height, width, 3), value)
+
+
+class TestImageListArrivesInOneRun:
+    """A switcher with two enabled rows hands the grid a LIST of images.
+    The node is INPUT_IS_LIST, so core calls run() once with the whole list;
+    it must not behave as one run per element."""
+
+    def test_node_declares_input_is_list(self) -> None:
+        assert EPSImageGrid.INPUT_IS_LIST is True
+
+    @pytest.mark.usefixtures("fake_folder_paths")
+    def test_emit_all_sends_one_batch_buffer_then_arrivals(self) -> None:
+        a, b, c = _frame(0.2), _frame(0.6), _frame(0.8)
+        store.append_batch(VALID_UUID, a)
+        result = _run(_node(), mode="Emit All", image=[b, c], grid_uuid=VALID_UUID)["result"]
+        images, widths, heights = result
+        assert len(images) == 1
+        assert images[0].shape[0] == 3
+        assert [round(float(images[0][i, 0, 0, 0]), 3) for i in range(3)] == [0.2, 0.6, 0.8]
+        assert (widths, heights) == ([6], [4])
+
+    @pytest.mark.usefixtures("fake_folder_paths")
+    def test_emit_sends_buffer_then_arrivals_once(self) -> None:
+        store.append_batch(VALID_UUID, _frame(0.2))
+        images = _run(
+            _node(), mode="Emit", image=[_frame(0.6), _frame(0.8)], grid_uuid=VALID_UUID
+        )["result"][0]
+        assert [round(float(t[0, 0, 0, 0]), 3) for t in images] == [0.2, 0.6, 0.8]
+
+    @pytest.mark.usefixtures("fake_folder_paths")
+    def test_collect_buffers_every_element_in_order_and_reports_them(self) -> None:
+        store.append_batch(VALID_UUID, _frame(0.2))
+        result = _run(
+            _node(), mode="Collect", image=[_frame(0.6), _frame(0.8)], grid_uuid=VALID_UUID
+        )
+        assert [round(float(t[0, 0, 0, 0]), 3) for t in result["result"][0]] == [0.6, 0.8]
+        assert [r["filename"] for r in result["ui"]["images"]] == ["0002.png", "0003.png"]
+        assert len(store.list_refs(VALID_UUID)) == 3
+
+    @pytest.mark.usefixtures("fake_folder_paths")
+    def test_collect_only_buffers_every_element_and_blocks(
+        self, fake_execution_blocker: type
+    ) -> None:
+        result = _run(
+            _node(), mode="Collect only", image=[_frame(0.6), _frame(0.8)], grid_uuid=VALID_UUID
+        )
+        assert len(store.list_refs(VALID_UUID)) == 2
+        assert len(result["ui"]["images"]) == 2
+        assert all(isinstance(o[0], fake_execution_blocker) for o in result["result"])
+
+    @pytest.mark.usefixtures("fake_folder_paths")
+    def test_elements_may_be_multi_frame_batches_of_different_sizes(self) -> None:
+        batches = [_make_batch(2, height=4, width=6), _make_batch(1, height=5, width=3)]
+        result = _run(_node(), mode="Collect", image=batches, grid_uuid=VALID_UUID)
+        assert len(result["result"][0]) == 3
+        assert result["result"][1] == [6, 6, 3]
+        assert len(result["ui"]["images"]) == 3
+
+    @pytest.mark.usefixtures("fake_folder_paths")
+    def test_lazy_placeholder_is_the_same_as_nothing_wired(self) -> None:
+        store.append_batch(VALID_UUID, _frame(0.2))
+        # core's never-resolved lazy input: (None,) -- _wrap(image=None) builds it
+        result = _run(_node(), mode="Emit All", image=None, grid_uuid=VALID_UUID)["result"]
+        assert len(result[0]) == 1 and result[0][0].shape[0] == 1
+
+    @pytest.mark.usefixtures("fake_folder_paths")
+    def test_is_changed_unwraps_the_list_wrapped_widgets(self) -> None:
+        assert math.isnan(_is_changed(mode="Collect", grid_uuid=VALID_UUID))
+        token = _is_changed(mode="Emit All", grid_uuid=VALID_UUID)
+        assert token == f"emit:{store.buffer_token(VALID_UUID)}"
