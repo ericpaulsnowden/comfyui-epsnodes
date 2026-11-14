@@ -786,8 +786,11 @@ class TestMultiImage:
         )
         width, height = result[2][0], result[3][0]
         assert (result[1][0].shape[2], result[1][0].shape[1]) == (width, height)
-        # the pre-fix single-image answer, pinned so the refactor cannot move it
-        assert (width, height) == (1024, 768)
+        # 5:4 of 1000 is 800, and 800 / 64 = 12.5 snaps half-UP to 13 -> 832,
+        # exactly what resolution.js's conformToRatio (Math.round) previews;
+        # before the 2026-11-13 parity fix Python's banker's round() gave 768
+        # here while the panel showed 832.
+        assert (width, height) == (1024, 832)
 
     def test_gap_slots_block_only_their_own_output(
         self, fake_execution_blocker: type
@@ -1110,7 +1113,8 @@ class TestRatioLockIntegration:
             node, width=1000, height=1, resize_method="stretch", ratio="5:4", multiple_of=64
         )
         assert width == nodes_resolution._round_to_multiple(1000, 64) == 1024
-        assert height == nodes_resolution._round_to_multiple(800, 64) == 768
+        # 800 / 64 = 12.5: half-up to 13 multiples (the panel's Math.round rule).
+        assert height == nodes_resolution._round_to_multiple(800, 64) == 832
 
     def test_none_ratio_is_unchanged_behavior(self) -> None:
         image = _make_image(height=100, width=200)
