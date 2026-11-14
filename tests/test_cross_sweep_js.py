@@ -2302,6 +2302,38 @@ ESTIMATE_CASES += [
     ),
 ]
 
+def _empty_ckpt_row_snapshot(selection: str) -> dict:
+    snap = ESTIMATE_CASES[-1][1]  # the empty-Checkpoint-Switcher graph above
+    snap = json.loads(json.dumps(snap))
+    snap["nodes"]["10"]["widgets"]["selection"] = selection
+    return snap
+
+
+# The backend skips ONLY a literal array with no string entry
+# (`_checkpoint_switcher_is_statically_all_off`); a malformed or non-array
+# selection is requested, its blocker blocks the whole Model Switcher.
+ESTIMATE_CASES += [
+    (f"malformed_checkpoint_selection_{label}_still_blocks_the_consumer",
+     _empty_ckpt_row_snapshot(sel), "3", {"total": 0, "atLeast": False})
+    for label, sel in (("object", "{}"), ("truncated", "{"), ("null", "null"))
+]
+
+_WIRED_TOGGLES = _distributor_into_multiplier('{"out_2": false}', 1)
+_WIRED_TOGGLES["nodes"]["6"] = {
+    "classType": "PrimitiveStringMultiline",
+    "widgets": {"value": "{}"},
+    "inputs": {},
+}
+_WIRED_TOGGLES["nodes"]["2"]["inputs"]["toggles"] = _link("6")
+ESTIMATE_CASES += [
+    (
+        "distributor_with_wired_toggles_is_not_a_confident_zero",
+        _WIRED_TOGGLES,
+        "3",
+        {"total": 1, "atLeast": False},
+    ),
+]
+
 # §6.11: a Distributor output toggled OFF emits an ExecutionBlocker, which
 # blocks the multiplier fed by it -- 0 runs, not 1.
 ESTIMATE_CASES += [
