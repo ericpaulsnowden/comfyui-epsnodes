@@ -274,10 +274,8 @@
  * `hideTogglesWidget` -- and, per the `getWidgetOnPos` finding above, that
  * same flag is what guarantees the widget has no leftover hit area either.
  *
- * **Width floor**: `installMinWidth` below is a self-contained copy of the
- * same additive `onResize`-wrap pattern `eps_image/frame_saver.js` uses
- * (own guard flag, own constant -- each module in this pack keeps its own
- * copy rather than sharing one), per the v0.30.3 "no hard-coded pixel
+ * **Width floor**: `installMinWidth` is the shared panel_helpers.js
+ * additive `onResize` wrap (own constant here), per the v0.30.3 "no hard-coded pixel
  * widths for text" house rule (FORMAT.md section 7.2). `MIN_NODE_WIDTH` here
  * reuses switcher.js's own validated `200` rather than re-deriving new
  * pixel math: the two files' widest drawn text is the same shape (a
@@ -342,6 +340,7 @@
  */
 
 import { app } from '../../../scripts/app.js'
+import { installMinWidth } from '../lora_library/panel_helpers.js'
 
 /** FORMAT.md section 6.11 -- frozen once shipped. */
 export const CLASS_ID = 'EPSDistributor'
@@ -1823,29 +1822,6 @@ function addHeaderWidget(node) {
     node.addCustomWidget(widget)
   } catch (error) {
     console.warn(PREFIX, 'addCustomWidget (header) failed', error)
-  }
-}
-
-// ---------------------------------------------------------------------------
-// Node width floor -- frame_saver.js's installMinWidth, self-contained copy
-// (own guard flag; see module docstring's "Width floor" section for
-// MIN_NODE_WIDTH)
-// ---------------------------------------------------------------------------
-
-function installMinWidth(node, minWidth) {
-  if (!node || node.__epsDistributorMinWidthInstalled) return
-  node.__epsDistributorMinWidthInstalled = true
-  const originalOnResize = node.onResize
-  node.onResize = function (size) {
-    if (size && size[0] < minWidth) size[0] = minWidth
-    return originalOnResize?.call(this, size)
-  }
-  // v0.68.1 (2026-08-21): `node.size` is a Proxy over a typed-array view
-  // (never an Array) on this frontend, so the old `Array.isArray` guard
-  // silently skipped this lift; setSize() runs `_sizeUpdated` + the wrap.
-  if (node.size && node.size[0] < minWidth) {
-    if (typeof node.setSize === 'function') node.setSize([minWidth, node.size[1]])
-    else node.size[0] = minWidth
   }
 }
 

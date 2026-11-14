@@ -56,6 +56,7 @@ FRAME_SAVER_JS = REPO_ROOT / "web" / "eps_image" / "frame_saver.js"
 # the served layout below like test_resolution_*_js.py's identical fixture.
 API_JS = REPO_ROOT / "web" / "lora_library" / "api.js"
 VERSION_JS = REPO_ROOT / "web" / "lora_library" / "version.js"
+PANEL_HELPERS_JS = REPO_ROOT / "web" / "lora_library" / "panel_helpers.js"
 ROUTES_FRAME_SAVER_PY = REPO_ROOT / "eps_image" / "routes_frame_saver.py"
 
 NODE = shutil.which("node")
@@ -209,6 +210,9 @@ def paste_api(tmp_path_factory: pytest.TempPathFactory) -> dict:
     lora_dir.mkdir(parents=True)
     shutil.copyfile(API_JS, lora_dir / "api.js")
     shutil.copyfile(VERSION_JS, lora_dir / "version.js")
+    helpers_dir = layout / "extensions" / "comfyui-epsnodes" / "lora_library"
+    helpers_dir.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(PANEL_HELPERS_JS, helpers_dir / "panel_helpers.js")
 
     cases = {
         "quotes": [text for text, _ in QUOTE_CASES],
@@ -731,20 +735,6 @@ class TestV0681ResyncIsChangeGuarded:
         state = _function_body(frame_saver_source, "createState(node, pathWidget, frameWidget)")
         assert "sourceKey: null" in state
         assert "restoring: false" in state
-
-
-def test_width_floor_lifts_through_set_size_not_a_dead_is_array_guard(
-    frame_saver_source: str,
-) -> None:
-    """v0.68.1: `LGraphNode.size` is a Proxy over a typed-array view on the
-    installed frontend (1.48.7), never an Array, so installMinWidth's old
-    `Array.isArray(node.size)` lift never ran (FORMAT.md §7.2's "lifts the
-    CURRENT width" half); only the onResize wrap ever floored anything. The
-    lift goes through setSize() (litegraph's `_sizeUpdated` + onResize)."""
-    assert "Array.isArray(node.size)" not in frame_saver_source
-    body = _function_body(frame_saver_source, "installMinWidth(node, minWidth)")
-    assert "if (node.size && node.size[0] < minWidth)" in body
-    assert "node.setSize([minWidth, node.size[1]])" in body
 
 
 # --------------------------------------------------------------------------

@@ -334,12 +334,8 @@
  * `serialize:false`/`serializeValue: () => undefined`/`getMinHeight`-only
  * shape, so the panel fills the node and never collapses to a sliver,
  * exactly per Notebook's own verified citation for that mechanism — not
- * re-derived here, just reused); `el()` below is a hand-copied twin of
- * Notebook's own tiny DOM-builder helper (this file had zero DOM-
- * construction code before today — nothing to import, so it's copied, same
- * "duplicated by hand, no cross-module coupling" convention as every other
- * shared-shape constant/helper in this file, e.g. `APPLY_SET_WIDGET_NAME`
- * above); `injectControllerStyles()`/`STATE_PANE_CSS_TEXT` is Notebook's
+ * re-derived here, just reused); `el()` is the shared panel_helpers.js
+ * DOM-builder; `injectControllerStyles()`/`STATE_PANE_CSS_TEXT` is Notebook's
  * `injectStyles()`/`CSS_TEXT` twin, under a DISTINCT `<style>` tag id and an
  * `llsc-` class prefix (vs. Notebook's `llnb-`) so the two style sheets
  * never collide in the shared `document.head`.
@@ -795,6 +791,7 @@ import * as api from './api.js'
 import { pickServerFolder } from './notebook.js'
 import { setLibraryDir } from './settings.js'
 import { entryMatchesSearch, searchHaystack, searchWords } from './search.js'
+import { el, installMinWidth } from './panel_helpers.js'
 
 // ---------------------------------------------------------------- constants
 
@@ -2357,29 +2354,6 @@ const MIN_STATE_PANE_HEIGHT = 140
  * a name. `installMinWidth` only ever GROWS a node to this floor. */
 const MIN_STATE_PANE_WIDTH = 300
 
-/** Twin of notebook.js's installMinWidth (same rationale, same additive
- * wrap-and-call-through shape; each web module stays self-contained). */
-function installMinWidth(node, minWidth) {
-  if (!node || node.__epsMinWidthInstalled) return
-  node.__epsMinWidthInstalled = true
-  const originalOnResize = node.onResize
-  node.onResize = function (size) {
-    if (size && size[0] < minWidth) size[0] = minWidth
-    return originalOnResize?.call(this, size)
-  }
-  // v0.68.1 / ported here 2026-09-08: `node.size` is a PROXY over a typed
-  // array, so the `Array.isArray(node.size)` guard this replaced was always
-  // false -- a node created narrower than `minWidth` never had its width
-  // lifted at all (only the `onResize` wrap above protected LATER resizes).
-  // The fix reached five of this helper's nine copies in v0.68.1 and missed
-  // the four biggest panels for months; see docs/ROADMAP-shared-panel-code.md
-  // M0, and grep `web/` for this helper before touching it again. Lift
-  // through `setSize` so litegraph's own size mirror runs.
-  if (node.size && node.size[0] < minWidth && typeof node.setSize === 'function') {
-    node.setSize([minWidth, node.size[1]])
-  }
-}
-
 const STATE_PANE_STYLE_TAG_ID = 'lora-library-controller-styles'
 let controllerStylesInjected = false
 
@@ -2631,33 +2605,6 @@ function injectControllerStyles() {
   style.id = STATE_PANE_STYLE_TAG_ID
   style.textContent = STATE_PANE_CSS_TEXT
   document.head.appendChild(style)
-}
-
-/**
- * Tiny DOM builder, hand-copied from `web/lora_library/notebook.js`'s own
- * `el()` — this file had zero DOM-construction code before the 2026-07-21
- * two-pane redesign, so there was nothing to import; same "duplicated by
- * hand, no cross-module coupling" convention as every other shared-shape
- * constant/helper in this file (e.g. `APPLY_SET_WIDGET_NAME` above).
- * @param {string} tag
- * @param {{className?: string, text?: string, attrs?: Record<string,string>}} [options]
- * @param {(Node|string)[]} [children]
- * @returns {HTMLElement}
- */
-function el(tag, options = {}, children = []) {
-  const node = document.createElement(tag)
-  if (options.className) node.className = options.className
-  if (options.text !== undefined) node.textContent = options.text
-  if (options.attrs) {
-    for (const [key, value] of Object.entries(options.attrs)) {
-      node.setAttribute(key, value)
-    }
-  }
-  for (const child of children) {
-    if (child == null) continue
-    node.append(child instanceof Node ? child : document.createTextNode(String(child)))
-  }
-  return node
 }
 
 /**

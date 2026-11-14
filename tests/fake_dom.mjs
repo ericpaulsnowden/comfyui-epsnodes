@@ -6,16 +6,23 @@
 // attached on the element they act on, plus `document` (capture) listeners
 // which `fireDocument()` delivers.
 
-export class FakeText {
+/** The common base, published as `globalThis.Node` by installFakeDom() for the
+ * shared `el()` (lora_library/panel_helpers.js), which tells elements from text
+ * with `instanceof Node`. */
+export class FakeNode {}
+
+export class FakeText extends FakeNode {
   constructor(text) {
+    super()
     this.nodeType = 3
     this.textContent = String(text)
     this.parentNode = null
   }
 }
 
-export class FakeEl {
+export class FakeEl extends FakeNode {
   constructor(tag) {
+    super()
     this.tag = tag
     this.children = []
     this.parentNode = null
@@ -42,8 +49,14 @@ export class FakeEl {
     this.children = []
     this._text = String(value)
   }
-  setAttribute(name, value) { this.attrs[name] = String(value) }
+  setAttribute(name, value) {
+    this.attrs[name] = String(value)
+    if (name === 'title' || name === 'id') this[name] = String(value) // reflected, as in a real DOM
+  }
   getAttribute(name) { return this.attrs[name] ?? null }
+  append(...children) {
+    for (const child of children) this.appendChild(typeof child === 'string' ? new FakeText(child) : child)
+  }
   appendChild(child) {
     if (child.parentNode) child.parentNode.children = child.parentNode.children.filter((c) => c !== child)
     child.parentNode = this
@@ -87,6 +100,7 @@ export function installFakeDom() {
     }
   }
   globalThis.document = document
+  globalThis.Node = FakeNode
   globalThis.window = { innerWidth: 1200, innerHeight: 800 }
   return { document, head, body }
 }

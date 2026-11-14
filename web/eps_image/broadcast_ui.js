@@ -26,6 +26,7 @@
  * No polling, no timers: everything here is event driven.
  */
 
+import { el } from '../lora_library/panel_helpers.js'
 import {
   BROADCAST_OUTPUTS,
   KINDS,
@@ -245,20 +246,22 @@ function injectStyles() {
 // DOM helpers
 // ---------------------------------------------------------------------------
 
-function el(tag, props = {}, children = []) {
-  const node = document.createElement(tag)
-  for (const [key, value] of Object.entries(props)) {
+/** Attribute-map form of the shared `attrEl()` (lora_library/panel_helpers.js):
+ * `{ class, text, title, 'aria-*', on<event>: fn, ... }` -- every other key is an
+ * attribute (`true` -> present and empty; undefined/null/false -> skipped);
+ * `children` may be one child or a list, `false`/null children are skipped. */
+function attrEl(tag, props = {}, children = []) {
+  const { class: className, text, ...rest } = props
+  const attrs = {}
+  const handlers = []
+  for (const [key, value] of Object.entries(rest)) {
     if (value === undefined || value === null || value === false) continue
-    if (key === 'class') node.className = value
-    else if (key === 'text') node.textContent = value
-    else if (key === 'title') node.title = value
-    else if (key.startsWith('on') && typeof value === 'function') node.addEventListener(key.slice(2), value)
-    else node.setAttribute(key, value === true ? '' : String(value))
+    if (key.startsWith('on') && typeof value === 'function') handlers.push([key.slice(2), value])
+    else attrs[key] = value === true ? '' : String(value)
   }
-  for (const child of Array.isArray(children) ? children : [children]) {
-    if (child === null || child === undefined || child === false) continue
-    node.appendChild(typeof child === 'string' ? document.createTextNode(child) : child)
-  }
+  const kids = (Array.isArray(children) ? children : [children]).filter((child) => child !== false)
+  const node = el(tag, { className, text, attrs }, kids)
+  for (const [event, handler] of handlers) node.addEventListener(event, handler)
   return node
 }
 
@@ -290,8 +293,8 @@ function installModalKeys(onEscape) {
  */
 export function buildBroadcastRow({ onWire, onMore }) {
   injectStyles()
-  const summaryEl = el('span', { class: 'eps-bc-summary' })
-  const wireBtn = el('button', {
+  const summaryEl = attrEl('span', { class: 'eps-bc-summary' })
+  const wireBtn = attrEl('button', {
     class: 'eps-bc-btn',
     type: 'button',
     text: 'Wire now',
@@ -301,7 +304,7 @@ export function buildBroadcastRow({ onWire, onMore }) {
       onWire()
     }
   })
-  const moreBtn = el('button', {
+  const moreBtn = attrEl('button', {
     class: 'eps-bc-btn',
     type: 'button',
     text: '⋯',
@@ -312,8 +315,8 @@ export function buildBroadcastRow({ onWire, onMore }) {
       onMore(moreBtn)
     }
   })
-  const rowEl = el('div', { class: 'eps-bc-row' }, [
-    el('span', { class: 'eps-bc-label', text: '📡 Broadcast' }),
+  const rowEl = attrEl('div', { class: 'eps-bc-row' }, [
+    attrEl('span', { class: 'eps-bc-label', text: '📡 Broadcast' }),
     summaryEl,
     wireBtn,
     moreBtn
@@ -364,51 +367,51 @@ export function openPopover(options) {
   const removeKeys = installModalKeys(() => close())
 
   const checks = options.outputs.map((out) => {
-    const box = el('input', { type: 'checkbox' })
+    const box = attrEl('input', { type: 'checkbox' })
     box.checked = out.enabled && (!out.gated || out.settingOn)
     box.disabled = out.gated && !out.settingOn
     box.addEventListener('change', () => options.onToggleOutput(out.name, box.checked))
     const badge = out.gated && !out.settingOn
-      ? el('span', { class: 'eps-bc-badge', text: 'needs setting', title: 'Settings › EPSNodes › Run Multiplier broadcast' })
-      : el('span', { class: out.live ? 'eps-bc-badge' : 'eps-bc-badge dead', text: out.live ? 'live' : 'not live', title: out.live ? '' : 'Wire the matching multiplier input first' })
-    return el('label', { class: 'eps-bc-check' }, [box, out.name, badge])
+      ? attrEl('span', { class: 'eps-bc-badge', text: 'needs setting', title: 'Settings › EPSNodes › Run Multiplier broadcast' })
+      : attrEl('span', { class: out.live ? 'eps-bc-badge' : 'eps-bc-badge dead', text: out.live ? 'live' : 'not live', title: out.live ? '' : 'Wire the matching multiplier input first' })
+    return attrEl('label', { class: 'eps-bc-check' }, [box, out.name, badge])
   })
 
-  const keepBox = el('input', { type: 'checkbox' })
+  const keepBox = attrEl('input', { type: 'checkbox' })
   keepBox.checked = options.keep
   keepBox.addEventListener('change', () => options.onToggleKeep(keepBox.checked))
 
   /** A labelled `<select>` (look / reach). The value is assigned AFTER the
    * options are in, so the right one shows as chosen. */
   const choiceField = (label, choices, current, onChange, ariaLabel) => {
-    const select = el(
+    const select = attrEl(
       'select',
       { class: 'eps-bc-select', 'aria-label': ariaLabel },
-      choices.map(([value, text]) => el('option', { value, text }))
+      choices.map(([value, text]) => attrEl('option', { value, text }))
     )
     select.value = current
     select.addEventListener('change', () => onChange(select.value))
-    return el('label', { class: 'eps-bc-field' }, [el('span', { text: label }), select])
+    return attrEl('label', { class: 'eps-bc-field' }, [attrEl('span', { text: label }), select])
   }
 
   // `data-capture-wheel`: the popover now has enough rows to scroll on a short
   // window, and a wheel over it must scroll it, not zoom the canvas behind.
-  const pop = el('div', { class: 'eps-bc-pop', role: 'dialog', 'aria-label': 'Broadcast options', tabindex: '-1', 'data-capture-wheel': 'true' }, [
-    el('h3', { text: 'Broadcast these outputs' }),
+  const pop = attrEl('div', { class: 'eps-bc-pop', role: 'dialog', 'aria-label': 'Broadcast options', tabindex: '-1', 'data-capture-wheel': 'true' }, [
+    attrEl('h3', { text: 'Broadcast these outputs' }),
     ...checks,
-    el('div', { class: 'eps-bc-hint', text: 'text, image, mask and label only connect to inputs with exactly the same name, and only when the ComfyUI setting is on (Settings › EPSNodes).' }),
-    el('div', { class: 'eps-bc-sep' }),
-    el('label', { class: 'eps-bc-check' }, [keepBox, 'Keep wired']),
-    el('div', { class: 'eps-bc-hint', text: 'New and pasted nodes get wired as you add them. A wire you unplug stays unplugged.' }),
-    el('div', { class: 'eps-bc-sep' }),
+    attrEl('div', { class: 'eps-bc-hint', text: 'text, image, mask and label only connect to inputs with exactly the same name, and only when the ComfyUI setting is on (Settings › EPSNodes).' }),
+    attrEl('div', { class: 'eps-bc-sep' }),
+    attrEl('label', { class: 'eps-bc-check' }, [keepBox, 'Keep wired']),
+    attrEl('div', { class: 'eps-bc-hint', text: 'New and pasted nodes get wired as you add them. A wire you unplug stays unplugged.' }),
+    attrEl('div', { class: 'eps-bc-sep' }),
     choiceField('Wires', LOOK_CHOICES, options.look || 'tucked', (value) => options.onSetLook?.(value), 'How broadcast wires are drawn'),
-    el('div', { class: 'eps-bc-hint', text: 'Tucked hides broadcast wires (a 📡 stub marks each fed input) until you select this multiplier or a node it feeds. Right-click the canvas → “Broadcast: show all wires” shows every one. Dim draws them faintly.' }),
+    attrEl('div', { class: 'eps-bc-hint', text: 'Tucked hides broadcast wires (a 📡 stub marks each fed input) until you select this multiplier or a node it feeds. Right-click the canvas → “Broadcast: show all wires” shows every one. Dim draws them faintly.' }),
     choiceField('Reach', SCOPE_CHOICES, options.scope || 'graph', (value) => options.onSetScope?.(value), 'Which nodes broadcast may feed'),
-    el('div', { class: 'eps-bc-hint', text: '“Only my group” feeds just the nodes inside a group that contains this multiplier. Wires already made stay; Wire now previews what would be added.' }),
-    el('div', { class: 'eps-bc-sep' }),
-    el('div', { class: 'eps-bc-actions' }, [
-      el('button', { class: 'eps-bc-btn', type: 'button', text: 'Wire now…', onclick: () => { close(); options.onWire() } }),
-      el('button', { class: 'eps-bc-btn', type: 'button', text: 'Remove broadcast wires', onclick: () => { close(); options.onRemove() } })
+    attrEl('div', { class: 'eps-bc-hint', text: '“Only my group” feeds just the nodes inside a group that contains this multiplier. Wires already made stay; Wire now previews what would be added.' }),
+    attrEl('div', { class: 'eps-bc-sep' }),
+    attrEl('div', { class: 'eps-bc-actions' }, [
+      attrEl('button', { class: 'eps-bc-btn', type: 'button', text: 'Wire now…', onclick: () => { close(); options.onWire() } }),
+      attrEl('button', { class: 'eps-bc-btn', type: 'button', text: 'Remove broadcast wires', onclick: () => { close(); options.onRemove() } })
     ])
   ])
   document.body.appendChild(pop)
@@ -455,7 +458,7 @@ function proposalRow(proposal, box) {
   const nested = []
   if (proposal.kind === KINDS.EXISTING) {
     nested.push(
-      el('span', {
+      attrEl('span', {
         class: 'nested',
         text: `through the subgraph's existing "${proposal.inputName}" input → ${summariseReaches(proposal)}`
       })
@@ -463,7 +466,7 @@ function proposalRow(proposal, box) {
   } else if (proposal.kind === KINDS.NEW) {
     const names = (proposal.definitions || []).map((d) => `“${d.name || d.id}”`).join(', ')
     nested.push(
-      el('span', {
+      attrEl('span', {
         class: 'warn',
         text: proposal.reuse
           ? `uses the "${proposal.inputName}" input broadcast added to subgraph ${names} → ${summariseReaches(proposal)}`
@@ -475,7 +478,7 @@ function proposalRow(proposal, box) {
     proposal.kind === KINDS.DIRECT
       ? `${proposal.targetTitle || 'node'} #${proposal.targetPathId} — ${proposal.inputName}`
       : `${proposal.targetTitle || 'subgraph'} #${proposal.targetPathId}`
-  return el('label', { class: 'eps-bc-item', title: describeProposal(proposal) }, [box, el('span', {}, [head, ...nested])])
+  return attrEl('label', { class: 'eps-bc-item', title: describeProposal(proposal) }, [box, attrEl('span', {}, [head, ...nested])])
 }
 
 function summariseReaches(proposal) {
@@ -503,14 +506,14 @@ export function openPreviewDialog(options) {
   const boxes = new Map() // key -> checkbox
   const grouped = groupSkips(plan.skips)
 
-  const connectBtn = el('button', { class: 'eps-bc-btn primary', type: 'button' })
+  const connectBtn = attrEl('button', { class: 'eps-bc-btn primary', type: 'button' })
   const refresh = () => {
     const outcome = selectionOutcome(plan, ticked)
     connectBtn.textContent = outcome.toApply.length ? `Connect ${outcome.toApply.length}` : 'Nothing to connect'
     connectBtn.disabled = outcome.toApply.length === 0 && outcome.leaveAlone.length === 0
   }
   const makeBox = (key, on) => {
-    const box = el('input', { type: 'checkbox' })
+    const box = attrEl('input', { type: 'checkbox' })
     box.checked = on
     box.addEventListener('change', () => {
       if (box.checked) ticked.add(key)
@@ -521,13 +524,13 @@ export function openPreviewDialog(options) {
     return box
   }
 
-  const body = el('div', { class: 'eps-bc-body', tabindex: '0', 'data-capture-wheel': 'true' })
-  if (plan.error) body.appendChild(el('p', { class: 'eps-bc-note', text: plan.error }))
+  const body = attrEl('div', { class: 'eps-bc-body', tabindex: '0', 'data-capture-wheel': 'true' })
+  if (plan.error) body.appendChild(attrEl('p', { class: 'eps-bc-note', text: plan.error }))
   const reach = reachNote(plan.scope)
-  if (reach) body.appendChild(el('p', { class: 'eps-bc-note', text: reach }))
+  if (reach) body.appendChild(attrEl('p', { class: 'eps-bc-note', text: reach }))
 
   for (const group of groupByOutput(plan.proposals)) {
-    const groupBox = el('input', { type: 'checkbox' })
+    const groupBox = attrEl('input', { type: 'checkbox' })
     groupBox.checked = true
     groupBox.addEventListener('change', () => {
       for (const proposal of group.items) {
@@ -539,8 +542,8 @@ export function openPreviewDialog(options) {
       refresh()
     })
     body.appendChild(
-      el('div', { class: 'eps-bc-group' }, [
-        el('div', { class: 'eps-bc-group-head' }, [
+      attrEl('div', { class: 'eps-bc-group' }, [
+        attrEl('div', { class: 'eps-bc-group-head' }, [
           groupBox,
           `${group.output} → ${group.items.length} ${group.items.length === 1 ? 'input' : 'inputs'}`
         ]),
@@ -549,15 +552,15 @@ export function openPreviewDialog(options) {
     )
   }
   if (plan.proposals.length === 0 && !plan.error) {
-    body.appendChild(el('p', { class: 'eps-bc-note', text: 'Nothing to connect right now. See "Not connected" below for why.' }))
+    body.appendChild(attrEl('p', { class: 'eps-bc-note', text: 'Nothing to connect right now. See "Not connected" below for why.' }))
   }
 
   if (plan.conflicts.length) {
     body.appendChild(
-      el('div', { class: 'eps-bc-group' }, [
-        el('div', { class: 'eps-bc-group-head', text: `Conflicts (${plan.conflicts.length}) — not connected` }),
+      attrEl('div', { class: 'eps-bc-group' }, [
+        attrEl('div', { class: 'eps-bc-group-head', text: `Conflicts (${plan.conflicts.length}) — not connected` }),
         ...plan.conflicts.map((c) =>
-          el('div', { class: 'eps-bc-note', text: `${c.output} → ${c.targetTitle || 'node'} #${c.targetPathId} (${c.inputName}): ${c.reason}` })
+          attrEl('div', { class: 'eps-bc-note', text: `${c.output} → ${c.targetTitle || 'node'} #${c.targetPathId} (${c.inputName}): ${c.reason}` })
         )
       ])
     )
@@ -565,8 +568,8 @@ export function openPreviewDialog(options) {
 
   if (grouped.leftAlone.length) {
     body.appendChild(
-      el('div', { class: 'eps-bc-group' }, [
-        el('div', { class: 'eps-bc-group-head', text: `Left alone (${grouped.leftAlone.length}) — tick to include again` }),
+      attrEl('div', { class: 'eps-bc-group' }, [
+        attrEl('div', { class: 'eps-bc-group-head', text: `Left alone (${grouped.leftAlone.length}) — tick to include again` }),
         ...grouped.leftAlone.map((skip) => proposalRow(skip.proposal, makeBox(skip.key, false)))
       ])
     )
@@ -574,17 +577,17 @@ export function openPreviewDialog(options) {
 
   const skippedBits = []
   for (const note of grouped.notes) {
-    skippedBits.push(el('div', { class: 'eps-bc-note', text: note.output ? `${note.output}: ${note.reason}` : note.reason }))
+    skippedBits.push(attrEl('div', { class: 'eps-bc-note', text: note.output ? `${note.output}: ${note.reason}` : note.reason }))
   }
   for (const group of grouped.groups) {
     skippedBits.push(
-      el('details', { class: 'eps-bc-skipped' }, [
-        el('summary', { text: `${group.label} (${group.items.length})` }),
-        el(
+      attrEl('details', { class: 'eps-bc-skipped' }, [
+        attrEl('summary', { text: `${group.label} (${group.items.length})` }),
+        attrEl(
           'ul',
           {},
           group.items.map((skip) =>
-            el('li', {
+            attrEl('li', {
               text: skip.targetPathId
                 ? `${skip.output || ''} → ${skip.targetTitle || 'node'} #${skip.targetPathId}${skip.inputName ? ` (${skip.inputName})` : ''} — ${skip.reason}`
                 : `${skip.output || ''}: ${skip.reason}`
@@ -595,7 +598,7 @@ export function openPreviewDialog(options) {
     )
   }
   if (skippedBits.length) {
-    body.appendChild(el('div', { class: 'eps-bc-group' }, [el('div', { class: 'eps-bc-group-head', text: 'Not connected' }), ...skippedBits]))
+    body.appendChild(attrEl('div', { class: 'eps-bc-group' }, [attrEl('div', { class: 'eps-bc-group-head', text: 'Not connected' }), ...skippedBits]))
   }
 
   const setAll = (on) => {
@@ -608,24 +611,24 @@ export function openPreviewDialog(options) {
     refresh()
   }
 
-  const dialog = el('div', { class: 'eps-bc-dialog', role: 'dialog', 'aria-modal': 'true', 'aria-label': options.title, tabindex: '-1' }, [
-    el('h2', { text: options.title }),
-    el('p', {
+  const dialog = attrEl('div', { class: 'eps-bc-dialog', role: 'dialog', 'aria-modal': 'true', 'aria-label': options.title, tabindex: '-1' }, [
+    attrEl('h2', { text: options.title }),
+    attrEl('p', {
       class: 'eps-bc-lead',
       text:
         'These are REAL wires. Untick anything you don’t want — it is remembered as “leave alone”. ' +
         'One Ctrl+Z undoes the whole batch.'
     }),
     body,
-    el('div', { class: 'eps-bc-footer' }, [
-      el('button', { class: 'eps-bc-btn', type: 'button', text: 'Select all', onclick: () => setAll(true) }),
-      el('button', { class: 'eps-bc-btn', type: 'button', text: 'None', onclick: () => setAll(false) }),
-      el('span', { class: 'spacer' }),
-      el('button', { class: 'eps-bc-btn', type: 'button', text: 'Cancel', onclick: () => close() }),
+    attrEl('div', { class: 'eps-bc-footer' }, [
+      attrEl('button', { class: 'eps-bc-btn', type: 'button', text: 'Select all', onclick: () => setAll(true) }),
+      attrEl('button', { class: 'eps-bc-btn', type: 'button', text: 'None', onclick: () => setAll(false) }),
+      attrEl('span', { class: 'spacer' }),
+      attrEl('button', { class: 'eps-bc-btn', type: 'button', text: 'Cancel', onclick: () => close() }),
       connectBtn
     ])
   ])
-  const overlay = el('div', { class: 'eps-bc-overlay' }, [dialog])
+  const overlay = attrEl('div', { class: 'eps-bc-overlay' }, [dialog])
   overlay.addEventListener('pointerdown', (event) => {
     if (event.target === overlay) close()
   })

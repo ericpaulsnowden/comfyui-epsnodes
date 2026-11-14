@@ -6261,6 +6261,9 @@ five copies (`picker`, `checkpoint_switcher`, `frame_saver`,
 `notebook`, `controller`, `universal_controller`, `prompt_builder`, i.e.
 the four biggest panels -- where it shipped broken until a 2026-09-08
 duplication census found it. NOT found by a user; found by going looking.
+(Since 2026-11-13 there is ONE copy, `web/lora_library/panel_helpers.js`,
+with the direct-write fallback for a node without `setSize` and one guard
+flag, `__epsMinWidthInstalled`; every panel imports it by its bare name.)
 
 This is the pack's hand-duplication convention leaking a fix for the third
 time (see also `_flushPendingNameEdit`, fixed in `controller.js` for v0.90.0
@@ -6543,8 +6546,9 @@ Class id `EPSBypass` (FROZEN, §8), category `EPSNodes/Utilities`.
   this pack's duplicated-helper fixes have missed siblings three times).
   `bypass.js` imports number_controller.js's `collectOutputTargets`,
   `disconnectAllTargets`, `reconnectRememberedTargets`,
-  `normalizeRememberedLinks`, `hideValuesWidget`, `installMinWidth`,
-  `isOutputConnected`, and distributor.js's `resolveAdoptedType`,
+  `normalizeRememberedLinks`, `hideValuesWidget`,
+  `isOutputConnected`, `installMinWidth` (from `lora_library/panel_helpers.js`
+  since 2026-11-13), and distributor.js's `resolveAdoptedType`,
   `LINK_COLOR_OWNER_KEY`, `LINK_COLOR_RESYNC_HOOK` — all under their existing
   bare names (those files gained `export` and a comment naming `bypass.js`;
   no behaviour changed). Only the trivial `nodeClassOf`/`findWidget`/

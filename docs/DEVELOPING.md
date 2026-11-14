@@ -117,7 +117,7 @@ through `safely(label, fn)`, so one broken panel cannot block the rest. Neither 
 | `eps_image/*_store.py`, `routes_*.py`, `frame_saver_video.py` | grid buffer, size presets, video decode; routes and metadata feeds | §5, §6.5 to §6.7, §6.10, §6.16 |
 | `eps_audit/` | node-pack audit | §9 |
 | `web/lora_library.js`, `web/eps_image.js` | extension entry points | §7, §7.8 |
-| `web/lora_library/*.js`, `web/eps_image/*.js` | panels; shared `api.js`, `search.js`, `path_heal.js`, `settings.js`, `owned_link_colour.js` | §7.2, §7.3, §7.5, §7.6, §7.9 |
+| `web/lora_library/*.js`, `web/eps_image/*.js` | panels; shared `api.js`, `search.js`, `panel_helpers.js`, `path_heal.js`, `settings.js`, `owned_link_colour.js` | §7.2, §7.3, §7.5, §7.6, §7.9 |
 
 ## 4. State and storage
 
@@ -272,11 +272,12 @@ ruff check .
    Handle both orders of the restore race; never let a late response overwrite a field being typed in (§7.5).
    In Vue mode `onDrawForeground` / `onMouseDown` never run, and window-level listeners must be capture-phase
    (§7.5).
-5. Shared-panel caveat: helpers such as `el`, `installMinWidth`, `panelScale` and the group/category helpers
+5. Shared-panel caveat: helpers such as `panelScale` and the group/category helpers
    are copied by hand between panels (the roadmap's census counted 119 source comments saying so), and fixes
    have missed siblings (`docs/ROADMAP-shared-panel-code.md`). After fixing a helper, grep `web/` for its name
-   and fix every copy. Already shared: `lora_library/api.js`, `search.js`, `path_heal.js`,
-   `eps_image/owned_link_colour.js`.
+   and fix every copy. Already shared: `lora_library/api.js`, `search.js`, `panel_helpers.js` (`el`, `installMinWidth`),
+   `path_heal.js`, `eps_image/owned_link_colour.js`. A test that copies a panel into a served layout must
+   copy every module it imports, `panel_helpers.js` included.
 
 ## 8. Conventions that bite
 

@@ -931,6 +931,7 @@ PATH_HEAL_JS = REPO_ROOT / "web" / "lora_library" / "path_heal.js"
 # import the shared search matcher -- must ride along too, or the served
 # layout can't resolve either module's import under Node.
 SEARCH_JS = REPO_ROOT / "web" / "lora_library" / "search.js"
+PANEL_HELPERS_JS = REPO_ROOT / "web" / "lora_library" / "panel_helpers.js"
 
 STATES_LOC_PROBE_JS = """
 import * as c from './extensions/comfyui-epsnodes/lora_library/controller.js'
@@ -1047,7 +1048,7 @@ def controller_api(tmp_path_factory: pytest.TempPathFactory) -> dict:
     module_dir = layout / "extensions" / "comfyui-epsnodes" / "lora_library"
     module_dir.mkdir(parents=True)
     js_files = (
-        CONTROLLER_JS, API_JS, VERSION_JS, NOTEBOOK_JS, SETTINGS_JS, PATH_HEAL_JS, SEARCH_JS
+        CONTROLLER_JS, API_JS, VERSION_JS, NOTEBOOK_JS, SETTINGS_JS, PATH_HEAL_JS, SEARCH_JS, PANEL_HELPERS_JS
     )
     for src in js_files:
         shutil.copyfile(src, module_dir / src.name)

@@ -53,6 +53,7 @@ DISTRIBUTOR_JS = WEB / "eps_image" / "distributor.js"
 #: SubgraphInput, modelled on lib/litegraph/src/subgraph/*) -- shared with
 #: tests/test_number_controller_js.py.
 NESTED_SUBGRAPH_IO_MJS = Path(__file__).resolve().parent / "nested_subgraph_io.mjs"
+PANEL_HELPERS_JS = WEB / "lora_library" / "panel_helpers.js"
 
 NODE = shutil.which("node")
 
@@ -1670,6 +1671,7 @@ def probe(tmp_path_factory: pytest.TempPathFactory) -> dict:
     shutil.copyfile(WEB / "lora_library" / "version.js", lora_library / "version.js")
     (scripts / "api.js").write_text("export const api = {}\n", encoding="utf-8")
     shutil.copyfile(NESTED_SUBGRAPH_IO_MJS, layout / "nested_subgraph_io.mjs")
+    shutil.copyfile(PANEL_HELPERS_JS, lora_library / "panel_helpers.js")
     (lora_library / "api.js").write_text(
         "export * from './api_real.js'\n"
         # The real api.js hands every subscriber the flushed `entries`; the
@@ -2527,7 +2529,6 @@ def test_shared_helpers_are_imported_not_copied(source: str) -> None:
         "reconnectRememberedTargets",
         "normalizeRememberedLinks",
         "hideValuesWidget",
-        "installMinWidth",
         "isOutputConnected",
         # v1.2.0 nested reach: the subgraph-output detection is shared too,
         # so the guard and the unplug can never disagree about what a -20
@@ -2555,11 +2556,12 @@ def test_shared_helpers_are_imported_not_copied(source: str) -> None:
     assert "SUBGRAPH_OUTPUT_ID" not in source.split("*/", 1)[1], (
         "the -20 constant comes from api.js (via number_controller.js's helpers)"
     )
+    assert "import { installMinWidth } from '../lora_library/panel_helpers.js'" in source
     dist_import = re.search(r"import \{([^}]*)\} from './distributor\.js'", source)
     assert dist_import, "bypass.js must import from distributor.js"
     dist_names = {n.strip() for n in dist_import.group(1).split(",") if n.strip()}
     assert dist_names >= {"resolveAdoptedType", "LINK_COLOR_OWNER_KEY", "LINK_COLOR_RESYNC_HOOK"}
-    for name in (*imported, *dist_names):
+    for name in (*imported, *dist_names, "installMinWidth"):
         assert not re.search(rf"^(export )?(function|const) {name}\b", source, re.M), (
             f"{name} is imported AND redeclared in bypass.js"
         )
@@ -2575,7 +2577,6 @@ def test_the_shared_exports_exist_and_name_this_file(source: str) -> None:
         "disconnectAllTargets(node, idx)",
         "reconnectRememberedTargets(node, idx, remembered)",
         "hideValuesWidget(node, widget)",
-        "installMinWidth(node, minWidth)",
         "normalizeRememberedLinks(raw)",
     ):
         assert f"export function {name} {{" in nc, name

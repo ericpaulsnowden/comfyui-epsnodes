@@ -219,6 +219,9 @@ def probe(tmp_path_factory: pytest.TempPathFactory) -> dict:
     lora_library.mkdir(parents=True)
     for name in ("api.js", "version.js"):
         shutil.copyfile(WEB.parent / "lora_library" / name, lora_library / name)
+    helpers_dir = layout / "extensions" / "comfyui-epsnodes" / "lora_library"
+    helpers_dir.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(WEB.parent / "lora_library" / "panel_helpers.js", helpers_dir / "panel_helpers.js")
     scripts = layout / "scripts"
     scripts.mkdir()
     (scripts / "app.js").write_text(

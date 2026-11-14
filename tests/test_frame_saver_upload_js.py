@@ -38,6 +38,7 @@ FRAME_SAVER_JS = REPO_ROOT / "web" / "eps_image" / "frame_saver.js"
 # the served layout below like test_resolution_*_js.py's identical fixture.
 API_JS = REPO_ROOT / "web" / "lora_library" / "api.js"
 VERSION_JS = REPO_ROOT / "web" / "lora_library" / "version.js"
+PANEL_HELPERS_JS = REPO_ROOT / "web" / "lora_library" / "panel_helpers.js"
 
 NODE = shutil.which("node")
 
@@ -118,6 +119,9 @@ def upload_api(tmp_path_factory: pytest.TempPathFactory) -> dict:
     lora_dir.mkdir(parents=True)
     shutil.copyfile(API_JS, lora_dir / "api.js")
     shutil.copyfile(VERSION_JS, lora_dir / "version.js")
+    helpers_dir = layout / "extensions" / "comfyui-epsnodes" / "lora_library"
+    helpers_dir.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(PANEL_HELPERS_JS, helpers_dir / "panel_helpers.js")
 
     probe = layout / "probe.mjs"
     probe.write_text(

@@ -40,6 +40,7 @@ VERSION_JS = WEB / "lora_library" / "version.js"
 # resolve notebook.js's import under Node (prompt_builder.js itself does
 # not use search.js; its own filterEntries() is untouched by this round).
 SEARCH_JS = WEB / "lora_library" / "search.js"
+PANEL_HELPERS_JS = WEB / "lora_library" / "panel_helpers.js"
 LORA_LIBRARY_JS = REPO_ROOT / "web" / "lora_library.js"
 
 NODE = shutil.which("node")
@@ -94,6 +95,7 @@ def test_only_the_three_documented_imports(source: str) -> None:
         "import { notebookCacheGet, notebookCacheSet, isUnchangedResponse, "
         "parseCollapsedSections, toggleCollapsedSection, isSectionCollapsed } "
         "from './notebook.js'",
+        "import { el, installMinWidth } from './panel_helpers.js'",
     ]
 
 
@@ -307,7 +309,7 @@ def probe_api(tmp_path_factory: pytest.TempPathFactory) -> dict:
     layout = tmp_path_factory.mktemp("web_root")
     module_dir = layout / "extensions" / "comfyui-epsnodes" / "lora_library"
     module_dir.mkdir(parents=True)
-    for src in (PROMPT_BUILDER_JS, NOTEBOOK_JS, API_JS, VERSION_JS, SEARCH_JS):
+    for src in (PROMPT_BUILDER_JS, NOTEBOOK_JS, API_JS, VERSION_JS, SEARCH_JS, PANEL_HELPERS_JS):
         shutil.copyfile(src, module_dir / src.name)
     scripts = layout / "scripts"
     scripts.mkdir(parents=True, exist_ok=True)

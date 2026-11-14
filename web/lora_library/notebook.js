@@ -463,12 +463,13 @@
  * `isUnchangedResponse`) are exported for tests/test_notebook_restore_js.py.
  *
  * Vanilla ES modules, no build step — DOM nodes are built with
- * `document.createElement` (see the local `el()` helper) rather than any
+ * `document.createElement` (see panel_helpers.js `el()`) rather than any
  * templating, matching this pack's other frontend modules.
  */
 
 import * as api from './api.js'
 import { entryMatchesSearch, searchHaystack, searchWords } from './search.js'
+import { el, installMinWidth } from './panel_helpers.js'
 
 /** FORMAT.md §6.1 — frozen once shipped. */
 const NODE_CLASS = 'LoraLibraryNotebook'
@@ -546,39 +547,9 @@ const MIN_WIDGET_HEIGHT = 180
  *
  * 320 = the 40% list column at a readable width plus an editor pane wide
  * enough for a line of prompt text, with margin for a wider font. Enforced
- * in `installMinWidth` below, which only ever GROWS a node to the floor.
+ * in `installMinWidth` (panel_helpers.js), which only ever GROWS a node to the floor.
  */
 const MIN_WIDGET_WIDTH = 320
-
-/**
- * Stops *node* from being sized below *minWidth* (see MIN_WIDGET_WIDTH).
- *
- * Wraps `onResize` the same way this pack's other per-node installers wrap
- * their hooks (guard flag + call-through), and also lifts the CURRENT width,
- * so a saved workflow that was already too narrow opens correctly rather
- * than waiting for the user to nudge the node. Purely additive: a node at or
- * above the floor is untouched, and the floor never shrinks anything.
- */
-function installMinWidth(node, minWidth) {
-  if (!node || node.__epsMinWidthInstalled) return
-  node.__epsMinWidthInstalled = true
-  const originalOnResize = node.onResize
-  node.onResize = function (size) {
-    if (size && size[0] < minWidth) size[0] = minWidth
-    return originalOnResize?.call(this, size)
-  }
-  // v0.68.1 / ported here 2026-09-08: `node.size` is a PROXY over a typed
-  // array, so the `Array.isArray(node.size)` guard this replaced was always
-  // false -- a node created narrower than `minWidth` never had its width
-  // lifted at all (only the `onResize` wrap above protected LATER resizes).
-  // The fix reached five of this helper's nine copies in v0.68.1 and missed
-  // the four biggest panels for months; see docs/ROADMAP-shared-panel-code.md
-  // M0, and grep `web/` for this helper before touching it again. Lift
-  // through `setSize` so litegraph's own size mirror runs.
-  if (node.size && node.size[0] < minWidth && typeof node.setSize === 'function') {
-    node.setSize([minWidth, node.size[1]])
-  }
-}
 
 /**
  * Finding 6 (2026-08-26 responsiveness round, api.js's opt-in
@@ -1229,28 +1200,6 @@ function injectStyles() {
 // ---------------------------------------------------------------------------
 // Tiny DOM builder — this pack is vanilla JS with no templating engine.
 // ---------------------------------------------------------------------------
-
-/**
- * @param {string} tag
- * @param {{className?: string, text?: string, attrs?: Record<string,string>}} [options]
- * @param {(Node|string)[]} [children]
- * @returns {HTMLElement}
- */
-function el(tag, options = {}, children = []) {
-  const node = document.createElement(tag)
-  if (options.className) node.className = options.className
-  if (options.text !== undefined) node.textContent = options.text
-  if (options.attrs) {
-    for (const [key, value] of Object.entries(options.attrs)) {
-      node.setAttribute(key, value)
-    }
-  }
-  for (const child of children) {
-    if (child == null) continue
-    node.append(child instanceof Node ? child : document.createTextNode(String(child)))
-  }
-  return node
-}
 
 // ---------------------------------------------------------------------------
 // Node / widget lookups

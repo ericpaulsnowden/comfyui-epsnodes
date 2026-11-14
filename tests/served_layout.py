@@ -38,7 +38,7 @@ CROSS_SWEEP_MODULES = (
 )
 
 #: The lora_library modules those reach.
-LORA_LIBRARY_MODULES = ("api.js", "version.js")
+LORA_LIBRARY_MODULES = ("api.js", "version.js", "panel_helpers.js")
 
 DEFAULT_APP_STUB = (
     "export const app = {\n"

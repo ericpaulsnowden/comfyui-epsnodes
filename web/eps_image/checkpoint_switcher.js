@@ -90,6 +90,7 @@ import { api } from '../../../scripts/api.js'
 import { healComboValue, isHealEnabled } from '../lora_library/path_heal.js'
 import { subscribeWidgetsChangedExternally } from '../lora_library/api.js'
 import { ensureOwnedLinkColourHook } from './owned_link_colour.js'
+import { el, installMinWidth } from '../lora_library/panel_helpers.js'
 
 /** Frozen once shipped -- mirrors the Python node's class id. */
 export const CLASS_ID = 'EPSCheckpointSwitcher'
@@ -106,8 +107,8 @@ const PANEL_WIDGET_TYPE = 'eps_ckpt_switcher_panel'
 const MIN_WIDGET_HEIGHT = 150
 
 /** ~320px floor (task brief) -- same Linux-font-overflow rationale as every
- * DOM-widget node in this pack (FORMAT.md §7.2); self-contained per module
- * like distributor.js's own installMinWidth copy (own guard flag). */
+ * DOM-widget node in this pack (FORMAT.md §7.2); enforced by the shared
+ * panel_helpers.js `installMinWidth`. */
 const MIN_NODE_WIDTH = 320
 
 const STYLE_TAG_ID = 'eps-ckpt-switcher-styles'
@@ -191,23 +192,6 @@ export function resolveSelectionSpelling(selection, checkpoints) {
   return spelling
 }
 
-// --- Tiny DOM builder (identical helper to every sibling web/eps_image/*.js
-// and web/lora_library/notebook.js file). ---
-
-function el(tag, options = {}, children = []) {
-  const node = document.createElement(tag)
-  if (options.className) node.className = options.className
-  if (options.text !== undefined) node.textContent = options.text
-  if (options.attrs) {
-    for (const [key, value] of Object.entries(options.attrs)) node.setAttribute(key, value)
-  }
-  for (const child of children) {
-    if (child == null) continue
-    node.append(child instanceof Node ? child : document.createTextNode(String(child)))
-  }
-  return node
-}
-
 // --- Styles -- one injected <style> tag, guarded against duplicate
 // injection; reuses this pack's established theme-variable fallbacks. ---
 
@@ -255,26 +239,6 @@ function nodeClassOf(node) {
 
 function findWidget(node, name) {
   return node.widgets?.find((w) => w && w.name === name)
-}
-
-// --- Node width floor -- self-contained copy, own guard flag (see
-// distributor.js's identical-shape installMinWidth for the house pattern). ---
-
-function installMinWidth(node, minWidth) {
-  if (!node || node.__epsCkptMinWidthInstalled) return
-  node.__epsCkptMinWidthInstalled = true
-  const originalOnResize = node.onResize
-  node.onResize = function (size) {
-    if (size && size[0] < minWidth) size[0] = minWidth
-    return originalOnResize?.call(this, size)
-  }
-  // v0.68.1 (2026-08-21): `node.size` is a Proxy over a typed-array view
-  // (never an Array) on this frontend, so the old `Array.isArray` guard
-  // silently skipped this lift; setSize() runs `_sizeUpdated` + the wrap.
-  if (node.size && node.size[0] < minWidth) {
-    if (typeof node.setSize === 'function') node.setSize([minWidth, node.size[1]])
-    else node.size[0] = minWidth
-  }
 }
 
 // --- Empty selection -> dim every outgoing wire (file header). A BY-HAND

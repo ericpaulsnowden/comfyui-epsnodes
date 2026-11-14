@@ -250,6 +250,8 @@ def install_switcher_js():
             shutil.copyfile(_EPS_WEB / name, module_dir / name)
         lora_library = layout / "extensions" / "comfyui-epsnodes" / "lora_library"
         lora_library.mkdir(parents=True, exist_ok=True)
+        # bypass.js / distributor.js import the shared panel helpers for real.
+        shutil.copyfile(_EPS_WEB.parent / "lora_library" / "panel_helpers.js", lora_library / "panel_helpers.js")
         # The stub exports exactly what the copied files import from
         # `../lora_library/api.js` -- read from their import statements, so a
         # branch whose closure imports more names (v1's nested-reach walkers,

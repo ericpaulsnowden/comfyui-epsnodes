@@ -346,6 +346,7 @@
 
 import { app } from '../../../scripts/app.js'
 import { SUBGRAPH_OUTPUT_ID, subscribeWidgetsChangedExternally } from '../lora_library/api.js'
+import { el, installMinWidth } from '../lora_library/panel_helpers.js'
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -920,33 +921,6 @@ function toast(node, severity, detail) {
     })
   } catch (error) {
     console.warn(PREFIX, 'toast failed', error)
-  }
-}
-
-// --- Node width floor -- self-contained copy, own guard flag (distributor.js's
-// identical-shape installMinWidth is the house pattern). ---
-//
-// EXPORTED (v0.99.0) so `bypass.js` (EPS Bypass, FORMAT.md section 6.18)
-// imports it rather than growing a tenth hand copy -- see ROADMAP-shared-
-// panel-code.md M0 for what that drift already cost. The guard flag name
-// below is number-controller-flavoured but is only ever a flag on the NODE
-// INSTANCE, so it is harmless on a Bypass node. A fix here reaches
-// bypass.js by construction; bypass.js is this function's second caller.
-export function installMinWidth(node, minWidth) {
-  if (!node || node.__epsNumberControllerMinWidthInstalled) return
-  node.__epsNumberControllerMinWidthInstalled = true
-  const originalOnResize = node.onResize
-  node.onResize = function (size) {
-    if (size && size[0] < minWidth) size[0] = minWidth
-    return originalOnResize?.call(this, size)
-  }
-  // `node.size` is a Proxy over a typed-array view (never an Array) on this
-  // frontend -- distributor.js's v0.68.1 fix, ported verbatim. setSize()
-  // runs litegraph's `_sizeUpdated` (the Vue layout mirror) and the
-  // onResize wrap.
-  if (node.size && node.size[0] < minWidth) {
-    if (typeof node.setSize === 'function') node.setSize([minWidth, node.size[1]])
-    else node.size[0] = minWidth
   }
 }
 
@@ -1684,22 +1658,6 @@ function injectStyles() {
   style.id = STYLE_TAG_ID
   style.textContent = CSS_TEXT
   document.head.appendChild(style)
-}
-
-/** Small DOM-builder, distributor.js's/checkpoint_switcher.js's identical
- * `el()` helper -- each module keeps its own copy. */
-function el(tag, options = {}, children = []) {
-  const node = document.createElement(tag)
-  if (options.className) node.className = options.className
-  if (options.text !== undefined) node.textContent = options.text
-  if (options.attrs) {
-    for (const [key, value] of Object.entries(options.attrs)) node.setAttribute(key, value)
-  }
-  for (const child of children) {
-    if (child == null) continue
-    node.append(child instanceof Node ? child : document.createTextNode(String(child)))
-  }
-  return node
 }
 
 function tooltipForType(jsonType) {

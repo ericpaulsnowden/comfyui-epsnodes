@@ -82,6 +82,8 @@ NUMBER_CONTROLLER_JS = WEB / "eps_image" / "number_controller.js"
 #: Fake Subgraph slots (SubgraphOutput.connect/disconnect, SubgraphInput) shared
 #: with tests/test_bypass_js.py -- see the file's own header.
 NESTED_SUBGRAPH_IO_MJS = Path(__file__).resolve().parent / "nested_subgraph_io.mjs"
+NUMBER_CONTROLLER_JS = REPO_ROOT / "web" / "eps_image" / "number_controller.js"
+PANEL_HELPERS_JS = REPO_ROOT / "web" / "lora_library" / "panel_helpers.js"
 
 NODE = shutil.which("node")
 
@@ -1959,6 +1961,7 @@ def number_controller_api(tmp_path_factory: pytest.TempPathFactory) -> dict:
     shutil.copyfile(WEB / "lora_library" / "version.js", lora_library / "version.js")
     (scripts / "api.js").write_text("export const api = {}\n", encoding="utf-8")
     shutil.copyfile(NESTED_SUBGRAPH_IO_MJS, layout / "nested_subgraph_io.mjs")
+    shutil.copyfile(PANEL_HELPERS_JS, lora_library / "panel_helpers.js")
     (lora_library / "api.js").write_text(
         "export * from './api_real.js'\n"
         "export function subscribeWidgetsChangedExternally(handler) {}\n",
@@ -3353,19 +3356,6 @@ def test_hidden_widget_sets_both_flags(source: str) -> None:
     assert "widget.hidden = true" in body
     assert "widget.options = " in body
     assert "hidden: true" in body
-
-
-def test_min_width_uses_set_size_not_a_dead_array_guard(source: str) -> None:
-    """v0.68.1 lesson (distributor.js's own pin): `node.size` is a Proxy,
-    never an Array -- the lift must go through setSize()."""
-    assert "Array.isArray(node.size)" not in source
-    body = _function_body(source, "installMinWidth(node, minWidth)")
-    assert "if (node.size && node.size[0] < minWidth)" in body
-    assert "node.setSize([minWidth, node.size[1]])" in body
-
-
-def test_min_width_guard_flag_is_namespaced(source: str) -> None:
-    assert "__epsNumberControllerMinWidthInstalled" in source
 
 
 def test_attach_dom_widget_reports_no_get_max_height(source: str) -> None:

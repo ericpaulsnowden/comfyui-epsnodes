@@ -5,7 +5,7 @@ The pack's ES modules import ComfyUI's ``scripts/api.js`` / ``scripts/app.js``
 by RELATIVE path, so a probe only resolves them inside a tmp dir that mirrors
 the served directory depth (``tests/test_lora_walk_js.py``'s technique). This
 helper builds that layout once per call: the requested real modules are
-byte-copied (never edited), ``lora_library/api.js`` + ``version.js`` are
+byte-copied (never edited), ``lora_library/api.js`` + ``version.js`` + ``panel_helpers.js`` are
 always present (nearly everything imports them), and ``nested_graph.mjs`` --
 the shared fake nested litegraph -- sits next to the probe.
 """
@@ -52,7 +52,7 @@ def build_layout(
         (ext / sub).mkdir(parents=True, exist_ok=True)
         for name in names:
             shutil.copyfile(WEB / sub / name, ext / sub / name)
-    for name in ("api.js", "version.js"):
+    for name in ("api.js", "version.js", "panel_helpers.js"):
         shutil.copyfile(WEB / "lora_library" / name, ext / "lora_library" / name)
     scripts = root / "scripts"
     scripts.mkdir(parents=True, exist_ok=True)

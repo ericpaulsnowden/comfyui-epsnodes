@@ -38,6 +38,7 @@ VERSION_JS = WEB / "lora_library" / "version.js"
 # matcher from here too -- must ride along or the served layout can't
 # resolve notebook.js's import under Node.
 SEARCH_JS = WEB / "lora_library" / "search.js"
+PANEL_HELPERS_JS = WEB / "lora_library" / "panel_helpers.js"
 NODE = shutil.which("node")
 
 SRC = NOTEBOOK_JS.read_text(encoding="utf-8")
@@ -95,7 +96,7 @@ def wording(tmp_path_factory: pytest.TempPathFactory) -> dict:
     layout = tmp_path_factory.mktemp("web_root")
     module_dir = layout / "extensions" / "comfyui-epsnodes" / "lora_library"
     module_dir.mkdir(parents=True)
-    for src in (NOTEBOOK_JS, API_JS, VERSION_JS, SEARCH_JS):
+    for src in (NOTEBOOK_JS, API_JS, VERSION_JS, SEARCH_JS, PANEL_HELPERS_JS):
         shutil.copyfile(src, module_dir / src.name)
     scripts = layout / "scripts"
     scripts.mkdir(parents=True, exist_ok=True)
