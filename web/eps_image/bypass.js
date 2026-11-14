@@ -106,11 +106,11 @@
 
 import { app } from '../../../scripts/app.js'
 import { subscribeWidgetsChangedExternally } from '../lora_library/api.js'
+import { installMinWidth } from '../lora_library/panel_helpers.js'
 import {
   collectOutputTargets,
   disconnectAllTargets,
   hideValuesWidget,
-  installMinWidth,
   isOutputConnected,
   normalizeRememberedLinks,
   reconnectRememberedTargets

@@ -57,6 +57,7 @@ LORA_CONTROLLER_JS = REPO_ROOT / "web" / "lora_library" / "controller.js"
 # matcher (see test_no_import_from_lora_loader_state_controller below --
 # ./search.js is explicitly the ONE new cross-import this boundary allows).
 SEARCH_JS = REPO_ROOT / "web" / "lora_library" / "search.js"
+PANEL_HELPERS_JS = REPO_ROOT / "web" / "lora_library" / "panel_helpers.js"
 
 NODE = shutil.which("node")
 
@@ -593,6 +594,7 @@ def controller_api(tmp_path_factory: pytest.TempPathFactory) -> dict:
     shutil.copyfile(API_JS, module_dir / "api.js")
     shutil.copyfile(VERSION_JS, module_dir / "version.js")
     shutil.copyfile(SEARCH_JS, module_dir / "search.js")
+    shutil.copyfile(PANEL_HELPERS_JS, module_dir / "panel_helpers.js")
 
     scripts = layout / "scripts"
     scripts.mkdir(parents=True, exist_ok=True)

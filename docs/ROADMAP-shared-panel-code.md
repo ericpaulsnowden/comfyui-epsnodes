@@ -83,7 +83,8 @@ So the barrier is habit, not architecture.
 *Update (v0.99.0):* `web/eps_image/bypass.js` adds the first
 `eps_image` -> `eps_image` imports: its unplug/replug helpers
 (`collectOutputTargets`, `disconnectAllTargets`, `reconnectRememberedTargets`,
-`hideValuesWidget`, `installMinWidth`) come from `number_controller.js`, and
+`hideValuesWidget`) come from `number_controller.js` (`installMinWidth` from
+the shared `panel_helpers.js` since 2026-11-13), and
 its adopted-type rule and link-colour convention (`resolveAdoptedType`,
 `LINK_COLOR_OWNER_KEY`, `LINK_COLOR_RESYNC_HOOK`) from `distributor.js`
 (FORMAT.md section 6.18), all under their existing bare names. Each of those
@@ -114,7 +115,7 @@ any refactoring.
 `Array.isArray` is false), and that all four panels now lift a
 too-narrow restored width. All nine copies agree again.
 
-### M1 — `web/lora_library/dom_helpers.js`: `el()`
+### M1 — `web/lora_library/panel_helpers.js`: `el()` and `installMinWidth()` — **SHIPPED 2026-11-13**
 
 `el(tag, options, children)` is declared **8 times, byte-identical** apart
 from brace style: `controller.js`, `universal_controller.js`, `picker.js`,
@@ -128,6 +129,24 @@ package boundary — which is the argument that a shared home works for both.
 - Size: delete ~8 × 12 lines, add one ~15-line module + 8 import lines.
 - Risk: lowest in the whole plan.
 - Test cost: minimal — few pins reference `el`'s declaration.
+
+*Shipped 2026-11-13 (branch `refactor/shared-panel-helpers`, on v0.110.8),
+together with the `installMinWidth` unification (the nine copies, two
+variants, nine guard-flag names). The module is `panel_helpers.js`, not
+`dom_helpers.js`, because it holds one node helper as well as the DOM one.
+Final counts: `el` 8 declarations -> 1; `installMinWidth` 9 declarations -> 1
+(the eps_image superset form -- the direct `node.size[0]` write when
+`setSize` is missing -- and ONE guard flag, `__epsMinWidthInstalled`; no node
+class carries two panels, and `frame_saver.js`'s two calls on one node use
+the same floor). 10 files import the helpers under their existing bare names
+(`el`: 8, `installMinWidth`: 9 declaring files + `bypass.js`, which now
+imports it from the shared module instead of `number_controller.js`);
+`web/` loses 391 lines and gains 24 plus the 69-line module. All 278 `el(`
+call sites and every call-site test pin were left byte-identical; only 6
+declaration pins were removed (their behaviour is now tested once in
+`tests/test_panel_helpers_js.py`, which also fails if a panel declares its
+own copy again). 14 test files that copy modules into a served layout (and
+`conftest.py`'s `install_switcher_js`) copy `panel_helpers.js` too.*
 
 ### M2 — `chainHook()`: the biggest number in the census
 

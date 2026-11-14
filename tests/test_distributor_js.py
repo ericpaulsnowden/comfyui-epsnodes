@@ -42,6 +42,7 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DISTRIBUTOR_JS = REPO_ROOT / "web" / "eps_image" / "distributor.js"
+PANEL_HELPERS_JS = REPO_ROOT / "web" / "lora_library" / "panel_helpers.js"
 
 NODE = shutil.which("node")
 
@@ -352,6 +353,9 @@ def distributor_api(tmp_path_factory: pytest.TempPathFactory) -> dict:
     module_dir = layout / "extensions" / "comfyui-epsnodes" / "eps_image"
     module_dir.mkdir(parents=True)
     shutil.copyfile(DISTRIBUTOR_JS, module_dir / "distributor.js")
+    helpers_dir = layout / "extensions" / "comfyui-epsnodes" / "lora_library"
+    helpers_dir.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(PANEL_HELPERS_JS, helpers_dir / "panel_helpers.js")
 
     # distributor.js's single import -- `../../../scripts/app.js`, used only
     # for its toast. Stubbed exactly as tests/test_resolution_grid_js.py does
@@ -1084,29 +1088,7 @@ def test_toggle_all_operates_over_every_visible_output_not_just_wired(
         assert "filter" not in body
 
 
-def test_min_width_guard_flag_present(distributor_source: str) -> None:
-    """installMinWidth's own guard flag (frame_saver.js's identical
-    self-contained-copy shape) -- namespaced to this module so it can never
-    collide with another eps_image/*.js file's copy on the same node."""
-    assert "__epsDistributorMinWidthInstalled" in distributor_source
-
-
 # ------------------------------------------------------------ v0.68.1 pins
-
-
-def test_width_floor_lifts_through_set_size_not_a_dead_is_array_guard(
-    distributor_source: str,
-) -> None:
-    """v0.68.1: on the installed frontend (1.48.7) `LGraphNode.size` is a
-    Proxy over a typed-array view, never an Array, so the old
-    `Array.isArray(node.size)` test in installMinWidth was always false and
-    the lift-the-current-width half of FORMAT.md §7.2's floor never ran.
-    The lift now goes through setSize() (which runs litegraph's
-    `_sizeUpdated` Vue-layout mirror AND the onResize wrap)."""
-    assert "Array.isArray(node.size)" not in distributor_source
-    body = _function_body(distributor_source, "installMinWidth(node, minWidth)")
-    assert "if (node.size && node.size[0] < minWidth)" in body
-    assert "node.setSize([minWidth, node.size[1]])" in body
 
 
 def test_draw_paths_parse_toggles_once_per_pass(distributor_source: str) -> None:

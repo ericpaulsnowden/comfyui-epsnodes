@@ -47,6 +47,7 @@ ENTRY_JS = REPO_ROOT / "web" / "lora_library.js"
 # matcher (loraMatchesSearch's implementation) from here -- must ride along
 # or the served layout can't resolve picker.js's import under Node.
 SEARCH_JS = REPO_ROOT / "web" / "lora_library" / "search.js"
+PANEL_HELPERS_JS = REPO_ROOT / "web" / "lora_library" / "panel_helpers.js"
 
 NODE = shutil.which("node")
 
@@ -589,6 +590,7 @@ def picker_api(tmp_path_factory: pytest.TempPathFactory) -> dict:
     shutil.copyfile(BRIDGE_JS, module_dir / "pll_bridge.js")
     shutil.copyfile(DASIWA_JS, module_dir / "dasiwa_bridge.js")
     shutil.copyfile(SEARCH_JS, module_dir / "search.js")
+    shutil.copyfile(PANEL_HELPERS_JS, module_dir / "panel_helpers.js")
 
     scripts = layout / "scripts"
     scripts.mkdir(parents=True, exist_ok=True)
@@ -1392,6 +1394,7 @@ def m3_api(tmp_path_factory: pytest.TempPathFactory) -> dict:
     shutil.copyfile(BRIDGE_JS, module_dir / "pll_bridge.js")
     shutil.copyfile(DASIWA_JS, module_dir / "dasiwa_bridge.js")
     shutil.copyfile(SEARCH_JS, module_dir / "search.js")
+    shutil.copyfile(PANEL_HELPERS_JS, module_dir / "panel_helpers.js")
 
     scripts = layout / "scripts"
     scripts.mkdir(parents=True, exist_ok=True)
@@ -2784,12 +2787,10 @@ class TestFixedHeightRound20260822:
             """Every setSize THIS file issues after the resize watch exists goes
             through `programmaticSetSize` (the `.setSize(` inside it), so the
             watch can tell growth/floor calls from the user's corner drag. The
-            ONE other raw call is `installMinWidth`'s width lift, which runs
-            BEFORE `installManualResizeWatch` is installed (v0.73.0: the old
-            `Array.isArray(node.size)` guard there was dead) -- pinned as such."""
-            assert source.count(".setSize(") == 2, "a raw node.setSize call escaped the flag"
-            width_lift = "node.setSize([minWidth, node.size[1]])"
-            assert width_lift in _function_body(source, "installMinWidth(node, minWidth)")
+            width lift of `installMinWidth` (now the shared panel_helpers.js
+            copy, so not counted here) runs BEFORE `installManualResizeWatch`
+            is installed -- the call-site order is pinned below."""
+            assert source.count(".setSize(") == 1, "a raw node.setSize call escaped the flag"
             attach = _function_body(source, "attachDomWidget(state)")
             assert attach.index("installMinWidth(state.node, MIN_NODE_WIDTH)") < attach.index(
                 "installManualResizeWatch(state)"
@@ -3092,9 +3093,10 @@ class TestSplitDividerRoundM5:
             "installSplitResizeObserver(state)",
         ):
             assert ".setSize(" not in _function_body(source, fn), fn
-        # the module-wide raw-setSize count (installMinWidth's width lift +
-        # programmaticSetSize's own call) is therefore unchanged by this round
-        assert source.count(".setSize(") == 2
+        # the module-wide raw-setSize count (programmaticSetSize's own call;
+        # installMinWidth's width lift lives in panel_helpers.js) is
+        # therefore unchanged by this round
+        assert source.count(".setSize(") == 1
 
     # -- reapplies on a node resize (ResizeObserver) ---------------------------
 

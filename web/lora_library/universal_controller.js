@@ -111,6 +111,7 @@
 import { app } from '../../../scripts/app.js'
 import * as api from './api.js'
 import { entryMatchesSearch, searchHaystack, searchWords } from './search.js'
+import { el, installMinWidth } from './panel_helpers.js'
 
 // ---------------------------------------------------------------- constants
 
@@ -1035,51 +1036,10 @@ function announceStatesChanged() {
 
 // ---------------------------------------------------------------- DOM helpers
 
-/** Tiny DOM builder -- controller.js's `el()` duplicated by hand (this
- * pack's convention for small, exactly-shared, zero-import helpers). */
-function el(tag, options = {}, children = []) {
-  const node = document.createElement(tag)
-  if (options.className) node.className = options.className
-  if (options.text !== undefined) node.textContent = options.text
-  if (options.attrs) {
-    for (const [key, value] of Object.entries(options.attrs)) node.setAttribute(key, value)
-  }
-  for (const child of children) {
-    if (child == null) continue
-    node.append(child instanceof Node ? child : document.createTextNode(String(child)))
-  }
-  return node
-}
-
 const MIN_PANE_WIDTH = 320
 const MIN_PANE_HEIGHT = 200
 const PANE_WIDGET_NAME = 'universal_states'
 const PANE_WIDGET_TYPE = 'eps_universal_state_panel'
-
-/** controller.js's `installMinWidth()` duplicated by hand -- an additive,
- * guard-flagged `onResize` clamp so this node can never be dragged (or
- * restored from a saved workflow) narrower than its two-pane layout can
- * render (FORMAT.md §7.2 width-floor convention). */
-function installMinWidth(node, minWidth) {
-  if (!node || node.__epsUscMinWidthInstalled) return
-  node.__epsUscMinWidthInstalled = true
-  const originalOnResize = node.onResize
-  node.onResize = function (size) {
-    if (size && size[0] < minWidth) size[0] = minWidth
-    return originalOnResize?.call(this, size)
-  }
-  // v0.68.1 / ported here 2026-09-08: `node.size` is a PROXY over a typed
-  // array, so the guard this replaced (an isArray check) was always false --
-  // a node created narrower than `minWidth` never had its width lifted at
-  // all (only the `onResize` wrap above protected LATER resizes). The fix
-  // reached five of this helper's nine copies in v0.68.1 and missed the four
-  // biggest panels for months; see docs/ROADMAP-shared-panel-code.md M0, and
-  // grep `web/` for this helper before touching it again. Lift through
-  // `setSize` so litegraph's own size mirror runs.
-  if (node.size && node.size[0] < minWidth && typeof node.setSize === 'function') {
-    node.setSize([minWidth, node.size[1]])
-  }
-}
 
 const PANE_STYLE_TAG_ID = 'eps-universal-controller-styles'
 let controllerStylesInjected = false

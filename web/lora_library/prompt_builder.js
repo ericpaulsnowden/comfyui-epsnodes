@@ -90,14 +90,15 @@
  * events over a DOM widget are already never seen by the canvas underneath
  * it — DOM siblings, not descendants — this is belt-and-suspenders).
  *
- * Vanilla ES modules, no build step, no templating — `el()` mirrors every
- * other module in this pack.
+ * Vanilla ES modules, no build step, no templating — `el()` is the pack's shared
+ * panel_helpers.js builder.
  */
 
 import { app } from '../../../scripts/app.js'
 import * as api from './api.js'
 import { walkLiveNodes } from './api.js'
 import { notebookCacheGet, notebookCacheSet, isUnchangedResponse, parseCollapsedSections, toggleCollapsedSection, isSectionCollapsed } from './notebook.js'
+import { el, installMinWidth } from './panel_helpers.js'
 
 /** FORMAT.md — frozen once shipped. */
 export const CLASS_ID = 'EPSPromptBuilder'
@@ -424,28 +425,6 @@ export function groupEntriesByCategory(entries) {
 // ---------------------------------------------------------------------------
 // Tiny DOM builder — matches every other module in this pack.
 // ---------------------------------------------------------------------------
-
-/**
- * @param {string} tag
- * @param {{className?: string, text?: string, attrs?: Record<string,string>}} [options]
- * @param {(Node|string)[]} [children]
- * @returns {HTMLElement}
- */
-function el(tag, options = {}, children = []) {
-  const node = document.createElement(tag)
-  if (options.className) node.className = options.className
-  if (options.text !== undefined) node.textContent = options.text
-  if (options.attrs) {
-    for (const [key, value] of Object.entries(options.attrs)) {
-      node.setAttribute(key, value)
-    }
-  }
-  for (const child of children) {
-    if (child == null) continue
-    node.append(child instanceof Node ? child : document.createTextNode(String(child)))
-  }
-  return node
-}
 
 // ---------------------------------------------------------------------------
 // Styles — one injected <style> tag, guarded so re-registration never
@@ -851,29 +830,6 @@ function attachDomWidget(node, rootEl) {
   domWidget.serialize = false
   domWidget.serializeValue = () => undefined
   return domWidget
-}
-
-/** notebook.js's installMinWidth(), unchanged technique: only ever GROWS a
- * node up to the floor, never shrinks one already wider. */
-function installMinWidth(node, minWidth) {
-  if (!node || node.__epsPromptBuilderMinWidthInstalled) return
-  node.__epsPromptBuilderMinWidthInstalled = true
-  const originalOnResize = node.onResize
-  node.onResize = function (size) {
-    if (size && size[0] < minWidth) size[0] = minWidth
-    return originalOnResize?.call(this, size)
-  }
-  // v0.68.1 / ported here 2026-09-08: `node.size` is a PROXY over a typed
-  // array, so the guard this replaced (an isArray check) was always false --
-  // a node created narrower than `minWidth` never had its width lifted at
-  // all (only the `onResize` wrap above protected LATER resizes). The fix
-  // reached five of this helper's nine copies in v0.68.1 and missed the four
-  // biggest panels for months; see docs/ROADMAP-shared-panel-code.md M0, and
-  // grep `web/` for this helper before touching it again. Lift through
-  // `setSize` so litegraph's own size mirror runs.
-  if (node.size && node.size[0] < minWidth && typeof node.setSize === 'function') {
-    node.setSize([minWidth, node.size[1]])
-  }
 }
 
 /** Both hide flags — canvas reads `widget.hidden`, Vue nodes read
