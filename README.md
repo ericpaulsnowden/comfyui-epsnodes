@@ -1365,6 +1365,11 @@ times to gather images, then send the whole set through a workflow at once.
   without actually unplugging anything (an image input can't fall back to
   a typed-in value the way a number can). Switch back to Collect or Emit
   and the wires return to normal and downstream runs again.
+- **Wire a switcher (or any list of images) straight in:** the grid takes
+  the whole list as the images arriving in ONE run. Collect records all of
+  them, Emit sends the buffer then all of them, and Emit All sends the
+  buffer plus all of them as a single batch (buffer `A` + switcher rows
+  `B`, `C` → one batch `A, B, C`, the rest of the workflow runs once).
 - **Emit All (v0.104.0):** sends the same images as Emit, but **all at once
   as one batch**, so the rest of the workflow runs once instead of once per
   image. Use it for a node that wants the whole set together, like a video

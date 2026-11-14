@@ -2385,6 +2385,21 @@ is the functional core WITHOUT the grid.
 
 ## §6.6 `EPSImageGrid` (display: "EPS Image Grid") — accumulate + fan out
 
+**A list wired into `image` arrives as ONE run (INPUT_IS_LIST).**
+A switcher outputs one element per enabled row, so a switcher with images
+B and C enabled hands the grid the list `[B, C]`. The node declares
+`INPUT_IS_LIST = True`: core calls `run()` once with every input
+list-wrapped (widgets as one-element lists, undone by name with `_unwrap`)
+and `image` as the list of arriving batches. Those are "the frames arriving
+this run", in order: Collect / Collect only append every one (the `ui`
+refs list all of them); Emit sends the buffer then all of them; Emit All
+stacks the buffer then all of them into ONE batch (buffer `[A]` + `[B, C]`
+→ one `[A, B, C]`). Without `INPUT_IS_LIST` core mapped `run()` per element,
+so Emit All emitted one batch per element and the downstream ran twice. The
+lazy placeholder `(None,)` and a missing image both mean "nothing arrived".
+`OUTPUT_IS_LIST` is unchanged, as is `IS_CHANGED` (it unwraps `mode` /
+`grid_uuid`). The §6.10 estimator already counts Emit All as exactly 1.
+
 **"Emit All" — a fourth `mode` value (v0.104.0, owner ask: "sends out all
 of the images at once vs one at a time").** Appended last in `MODES`, the
 same pure addition as Collect only below. `run()` reads what an unfocused
