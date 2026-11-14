@@ -6469,11 +6469,8 @@ export function parseDraftsWidgetValue(raw) {
     return {}
   }
   if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return {}
-  const out = {}
-  for (const [name, text] of Object.entries(parsed)) {
-    if (typeof text === 'string') out[name] = text
-  }
-  return out
+  // fromEntries: own keys even for a `__proto__` entry name.
+  return Object.fromEntries(Object.entries(parsed).filter(([, text]) => typeof text === 'string'))
 }
 
 /**
@@ -6532,11 +6529,17 @@ function syncDraftsWidget(state) {
   updateSelectionHint(state)
 }
 
+/** Own-property test: draft keys are user entry names, so `in` / bare
+ * indexing would see inherited members (`__proto__`, `constructor`). */
+function hasDraft(state, name) {
+  return Object.prototype.hasOwnProperty.call(state.drafts, name)
+}
+
 /** Records *text* as *name*'s unsaved draft. No-op (no widget write, no
  * repaint) when the value is already exactly this -- mirrors
  * syncEntryWidget's equal-value guard. */
 function setDraft(state, name, text) {
-  if (state.drafts[name] === text) return
+  if (hasDraft(state, name) && state.drafts[name] === text) return
   state.drafts = { ...state.drafts, [name]: text }
   syncDraftsWidget(state)
 }
@@ -6545,7 +6548,7 @@ function setDraft(state, name, text) {
  * debounce, flush, and prune below) call this unconditionally rather than
  * checking first, so the no-op guard is what keeps that cheap. */
 function clearDraft(state, name) {
-  if (!(name in state.drafts)) return
+  if (!hasDraft(state, name)) return
   const next = { ...state.drafts }
   delete next[name]
   state.drafts = next
@@ -6562,11 +6565,12 @@ function clearDraft(state, name) {
  * there is no draft. */
 function renameDraft(state, from, to) {
   flushDraftSync(state)
-  if (!(from in state.drafts)) return
-  const next = { ...state.drafts }
-  next[to] = next[from]
-  delete next[from]
-  state.drafts = next
+  if (!hasDraft(state, from)) return
+  // fromEntries creates OWN keys; `next[to] = ...` would hit the inherited
+  // `__proto__` setter for an entry of that (valid) name.
+  state.drafts = Object.fromEntries(
+    Object.entries(state.drafts).map(([key, text]) => [key === from ? to : key, text])
+  )
   syncDraftsWidget(state)
 }
 
@@ -6582,18 +6586,18 @@ function renameDraft(state, from, to) {
 function pruneDraftsToSelection(state) {
   const keep = new Set(state.selection)
   let changed = false
-  const next = {}
+  const kept = []
   for (const [name, text] of Object.entries(state.drafts)) {
     // Category drafts (v0.87.4, CATEGORY_DRAFT_PREFIX) live in a keyspace
     // this ENTRY-selection prune has no business touching -- an entry
     // click/ctrl-click/delete/move must never sweep away an unsaved
     // category description sitting untouched in the same `drafts` object.
     // They are pruned on their own terms elsewhere (save, delete-category).
-    if (name.startsWith(CATEGORY_DRAFT_PREFIX) || keep.has(name)) next[name] = text
+    if (name.startsWith(CATEGORY_DRAFT_PREFIX) || keep.has(name)) kept.push([name, text])
     else changed = true
   }
   if (changed) {
-    state.drafts = next
+    state.drafts = Object.fromEntries(kept)
     syncDraftsWidget(state)
   }
 }

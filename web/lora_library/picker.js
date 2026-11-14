@@ -1655,8 +1655,8 @@ function patchAfterRecentChange(state) {
 /**
  * ★/☆: optimistic flip + POST, revert + toast on failure (§6.13).
  * Token-guarded: a stale SUCCESS after a newer click is dropped rather than
- * clobbering the newer state; a stale FAILURE is never dropped -- it toasts
- * and undoes only its own file.
+ * clobbering the newer state; every FAILURE toasts and undoes only its
+ * own file.
  * 2026-08-26 while-running round: the flip patches the browser instead of
  * a full renderBrowser() -- see patchFavoriteChange's own header.
  */
@@ -1683,17 +1683,13 @@ async function toggleFavorite(state, file, on) {
       }
     }
   } catch (error) {
-    // A FAILURE is always shown and always undone. The token only decides
-    // how much to undo: the latest click restores the whole pre-click list;
-    // a superseded one undoes just its own file, since restoring `previous`
-    // would also wipe the newer click's optimistic flip.
-    if (token === state.favoriteToken) {
-      state.favorites = previous
-    } else {
-      state.favorites = on
-        ? state.favorites.filter((name) => name !== file)
-        : [...state.favorites.filter((name) => name !== file), file]
-    }
+    // A FAILURE is always shown and always undone -- but only for ITS OWN
+    // file. Restoring a pre-click snapshot would resurrect a star an older
+    // failure already reverted; the server's next list is authoritative for
+    // everything else.
+    state.favorites = on
+      ? state.favorites.filter((name) => name !== file)
+      : [...state.favorites.filter((name) => name !== file), file]
     patchFavoriteChange(state, file, !on) // revert the icon/row back in place
     api.warn('favorite toggle failed', error)
     toast('error', 'EPS LoRA Picker', `Favorite not saved: ${error?.message || error}`)
@@ -3222,9 +3218,10 @@ async function finishFavoriteDrag(state, drag) {
       renderBrowser(state)
     }
   } catch (error) {
-    // Always toast; only the latest request restores its snapshot (a
-    // superseded one would clobber the newer optimistic state).
-    if (token === state.favoriteToken) {
+    // Always toast. Undo only if nothing else has touched the list since
+    // this request's optimistic order (a snapshot restore would clobber a
+    // newer click); otherwise the server's next list is authoritative.
+    if (sameStringArray(state.favorites, reordered)) {
       state.favorites = previous
       renderBrowser(state)
     }

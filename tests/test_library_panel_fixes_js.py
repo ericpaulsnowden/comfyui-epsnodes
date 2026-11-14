@@ -203,6 +203,35 @@ process.stdout.write(JSON.stringify({ persisted: state.draftsWidget.value, activ
     assert out == {"persisted": "{}", "active": "B"}
 
 
+def test_a_draft_survives_a_rename_to_the_name___proto__(notebook_layout: Path) -> None:
+    """`__proto__` is a valid entry name; a plain `obj[to] = ...` would hit the
+    inherited setter and the delete that follows would destroy the draft."""
+    out = _run(
+        notebook_layout,
+        _NOTEBOOK_STATE
+        + """
+state.textarea.value = 'UNSAVED EDIT'
+m.commitDraftForActiveEntry(state)
+state.entries = [{ name: '__proto__' }, { name: 'Z' }]
+m.applyRenameResult(state, 'entry', 'A', '__proto__', { entries: state.entries, mtime: 2 })
+const first = state.draftsWidget.value
+// ...and the rest of the lifecycle keeps working with that key
+state.textarea.value = 'second'
+m.commitDraftForActiveEntry(state)
+const edited = state.draftsWidget.value
+const parsed = m.parseDraftsWidgetValue(first)
+m.setSelection(state, ['Z'], 'Z')
+process.stdout.write(JSON.stringify({
+  first, edited, parsedOwn: Object.keys(parsed), afterDeselect: state.draftsWidget.value
+}))
+""",
+    )
+    assert json.loads(out["first"]) == {"__proto__": "UNSAVED EDIT"}
+    assert json.loads(out["edited"]) == {"__proto__": "second"}
+    assert out["parsedOwn"] == ["__proto__"]
+    assert out["afterDeselect"] == "{}"  # pruned once no longer selected
+
+
 _FAV_PROBE = """
 const resp = (ok, body) => ({ ok, status: ok ? 200 : 500, json: async () => body })
 const pending = []
@@ -286,6 +315,28 @@ process.stdout.write(JSON.stringify({ final: state.favorites, toasts: globalThis
 """,
     )
     assert out == {"final": ["x.safetensors"], "toasts": 1}
+
+
+def test_two_failed_stars_in_a_row_leave_neither_starred(picker_layout: Path) -> None:
+    """A's failure reverts A; B's later failure must not restore B's pre-click
+    snapshot (which still held A's optimistic star)."""
+    out = _run(
+        picker_layout,
+        _FAV_PROBE
+        + """
+const a = m.toggleFavorite(state, 'a.safetensors', true)
+const b = m.toggleFavorite(state, 'b.safetensors', true)
+pending[0].res(resp(false, { error: 'a failed' }))
+await a
+const mid = state.favorites.slice()
+pending[1].res(resp(false, { error: 'b failed' }))
+await b
+process.stdout.write(JSON.stringify({
+  mid, final: state.favorites, toasts: globalThis.__toasts.map((t) => t.severity)
+}))
+""",
+    )
+    assert out == {"mid": ["b.safetensors"], "final": [], "toasts": ["error", "error"]}
 
 
 # ------------------------------------------------- universal _writeApplyPlan
