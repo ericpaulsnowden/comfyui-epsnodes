@@ -295,6 +295,8 @@ def register(context: LibraryContext, routes: web.RouteTableDef) -> None:
             state, mtime = await asyncio.to_thread(store.toggle_favorite, context, file, on)
         except store.PickerStoreError as exc:
             return error_response(400, str(exc))
+        except OSError as exc:  # failed save: names the file and the cause
+            return error_response(500, str(exc))
         return web.json_response({"ok": True, "favorites": state["favorites"], "mtime": mtime})
 
     @routes.post("/lora_library/picker/recent")
@@ -314,6 +316,8 @@ def register(context: LibraryContext, routes: web.RouteTableDef) -> None:
             state, mtime = await asyncio.to_thread(store.record_recents, context, files)
         except store.PickerStoreError as exc:
             return error_response(400, str(exc))
+        except OSError as exc:  # failed save: names the file and the cause
+            return error_response(500, str(exc))
         return web.json_response({"ok": True, "recents": state["recents"], "mtime": mtime})
 
     @routes.post("/lora_library/picker/clear_recents")
@@ -324,6 +328,8 @@ def register(context: LibraryContext, routes: web.RouteTableDef) -> None:
             state, mtime = await asyncio.to_thread(store.clear_recents, context)
         except store.PickerStoreError as exc:
             return error_response(400, str(exc))
+        except OSError as exc:  # failed save: names the file and the cause
+            return error_response(500, str(exc))
         return web.json_response({"ok": True, "recents": state["recents"], "mtime": mtime})
 
     @routes.get("/lora_library/picker/preview")
@@ -398,6 +404,8 @@ def register(context: LibraryContext, routes: web.RouteTableDef) -> None:
             state, mtime = await asyncio.to_thread(store.reorder_favorites, context, files)
         except store.PickerStoreError as exc:
             return error_response(400, str(exc))
+        except OSError as exc:  # failed save: names the file and the cause
+            return error_response(500, str(exc))
         return web.json_response({"ok": True, "favorites": state["favorites"], "mtime": mtime})
 
 

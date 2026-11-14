@@ -326,13 +326,16 @@ and a later edit would pass the check and overwrite that save.
 State / config loaders `stat` BEFORE they read and key a cache on it, which
 fails safe: a newer file just re-reads.)
 
-**A failed save is a JSON 5xx.** A notebook save that fails at the OS level
-(read-only share → `PermissionError`, full disk, disconnected mount) answers
-`500 {"error": "could not write <path>: <OS error>"}` and leaves the file as
-it was — `markdown_store.NotebookWriteError`, raised by `save_notebook`; the
-six mutating routes map any `MarkdownStoreError` to its `status` (400 for
-validation, 500 for this). Same shape and status as the layout-sidecar routes'
-`could not write the … layout`.
+**A failed save is a JSON 5xx.** Every save goes through
+`context._atomic_write_text`, which turns any `OSError` (read-only share →
+`PermissionError`, full disk, disconnected mount) into `AtomicSaveError`
+with the message `could not write <path>: <OS error>` and leaves the target
+as it was. The routes that save answer `500 {"error": <that message>}`:
+the six notebook mutations (via `markdown_store.NotebookWriteError`, which
+the routes map by `status`: 400 validation, 500 write), `POST /set`,
+`POST /universal_state`, the two layout sidecars, the four picker writes
+(§6.13) and the two resolution-preset writes (§6.5). Deleting a set or
+Universal State file is not a save and is not covered.
 
 **Within one server, each mutation is one locked transaction (v0.107.0; 2026-09-13
 release review #3).** The check above only compares mtimes. Every

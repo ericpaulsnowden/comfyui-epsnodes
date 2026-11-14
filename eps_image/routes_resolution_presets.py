@@ -148,6 +148,8 @@ def register(context: store.LibraryContext, routes: web.RouteTableDef) -> None:
             return web.json_response({"error": str(exc), "mtime": exc.current_mtime}, status=409)
         except store.PresetStoreError as exc:
             return error_response(400, str(exc))
+        except OSError as exc:  # failed save: names the file and the cause
+            return error_response(500, str(exc))
 
         return web.json_response({"ok": True, "presets": presets, "mtime": new_mtime})
 
@@ -178,6 +180,8 @@ def register(context: store.LibraryContext, routes: web.RouteTableDef) -> None:
             return error_response(404, str(exc))
         except store.PresetStoreError as exc:
             return error_response(400, str(exc))
+        except OSError as exc:  # failed save: names the file and the cause
+            return error_response(500, str(exc))
 
         return web.json_response({"ok": True, "presets": presets, "mtime": new_mtime})
 

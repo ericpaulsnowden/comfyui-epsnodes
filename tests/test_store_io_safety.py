@@ -332,3 +332,147 @@ async def test_failed_notebook_save_is_a_json_5xx_naming_file_and_cause(
     assert "loras.md" in payload["error"]
     assert "Permission denied" in payload["error"]
     assert notebook.read_text(encoding="utf-8") == SEED
+
+
+# ------------------------- routes: every other store's failed save is JSON 5xx
+
+
+def _read_only_writer(path, text):
+    raise PermissionError(13, "Permission denied", str(path))
+
+
+async def _assert_json_500_and_untouched(resp, target: Path, before: bytes) -> None:
+    assert resp.status == 500
+    payload = await resp.json()
+    assert target.name in payload["error"]
+    assert "Permission denied" in payload["error"]
+    assert target.read_bytes() == before
+
+
+async def test_failed_set_save_is_a_json_500(
+    context: LibraryContext, aiohttp_client, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from lora_library import sets_store
+
+    client = await aiohttp_client(_app(context))
+    created = await client.post("/lora_library/set", json={"set": {"name": "Zed", "loras": []}})
+    slug = (await created.json())["slug"]
+    target = sets_store.set_path(context, slug)
+    before = target.read_bytes()
+    monkeypatch.setattr(sets_store, "_atomic_write_text", _read_only_writer)
+
+    resp = await client.post(
+        "/lora_library/set", json={"slug": slug, "set": {"name": "Zed2", "loras": []}}
+    )
+
+    await _assert_json_500_and_untouched(resp, target, before)
+
+
+async def test_failed_universal_state_save_is_a_json_500(
+    context: LibraryContext, aiohttp_client, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from lora_library import universal_states_store as ustore
+    from lora_library.routes_universal_states import build_routes as build_state_routes
+
+    app = web.Application()
+    app.add_routes(build_state_routes(context))
+    client = await aiohttp_client(app)
+    created = await client.post(
+        "/lora_library/universal_state", json={"state": {"name": "Zed", "nodes": []}}
+    )
+    slug = (await created.json())["slug"]
+    target = ustore.state_path(context, slug)
+    before = target.read_bytes()
+    monkeypatch.setattr(ustore, "_atomic_write_text", _read_only_writer)
+
+    resp = await client.post(
+        "/lora_library/universal_state",
+        json={"slug": slug, "state": {"name": "Zed2", "nodes": []}},
+    )
+
+    await _assert_json_500_and_untouched(resp, target, before)
+
+
+@pytest.mark.parametrize(
+    ("url", "body"),
+    [
+        ("/lora_library/picker/favorite", {"file": "a.safetensors", "on": True}),
+        ("/lora_library/picker/recent", {"files": ["a.safetensors"]}),
+        ("/lora_library/picker/clear_recents", {}),
+        ("/lora_library/picker/favorites_order", {"files": ["a.safetensors"]}),
+    ],
+)
+async def test_failed_picker_save_is_a_json_500(
+    context: LibraryContext,
+    aiohttp_client,
+    monkeypatch: pytest.MonkeyPatch,
+    url: str,
+    body: dict,
+) -> None:
+    target = lora_picker_store.picker_path(context)
+    target.write_text(
+        json.dumps({"format": 1, "favorites": ["b.safetensors"], "recents": []}),
+        encoding="utf-8",
+    )
+    before = target.read_bytes()
+    client = await aiohttp_client(_app(context))
+    monkeypatch.setattr(lora_picker_store, "_atomic_write_text", _read_only_writer)
+
+    resp = await client.post(url, json=body)
+
+    await _assert_json_500_and_untouched(resp, target, before)
+
+
+@pytest.mark.parametrize("route", ["save", "delete"])
+async def test_failed_resolution_preset_save_is_a_json_500(
+    context: LibraryContext,
+    aiohttp_client,
+    monkeypatch: pytest.MonkeyPatch,
+    route: str,
+) -> None:
+    from eps_image import resolution_presets_store as pstore
+    from eps_image.routes_resolution_presets import build_routes as build_preset_routes
+
+    values = {
+        "width": 512,
+        "height": 768,
+        "resize_method": "stretch",
+        "interpolation": "bilinear",
+        "multiple_of": 64,
+    }
+    app = web.Application()
+    app.add_routes(build_preset_routes(context))
+    client = await aiohttp_client(app)
+    await client.post("/eps_resolution/presets/save", json={"name": "A", "values": values})
+    target = pstore.presets_path(context)
+    before = target.read_bytes()
+    monkeypatch.setattr(pstore, "_atomic_write_text", _read_only_writer)
+
+    body = {"name": "B", "values": values} if route == "save" else {"name": "A"}
+    resp = await client.post(f"/eps_resolution/presets/{route}", json=body)
+
+    await _assert_json_500_and_untouched(resp, target, before)
+
+
+def _app(context: LibraryContext) -> web.Application:
+    app = web.Application()
+    app.add_routes(build_routes(context))
+    return app
+
+
+def test_any_oserror_from_a_save_names_the_target_and_leaves_no_temp(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = tmp_path / "notes.md"
+    target.write_text("old", encoding="utf-8")
+
+    def broken(src, dst):
+        raise OSError("share went away")
+
+    monkeypatch.setattr(os, "replace", broken)
+
+    with pytest.raises(OSError, match=r"notes\.md.*share went away"):
+        context_module._atomic_write_text(target, "new")
+
+    assert [p.name for p in tmp_path.iterdir()] == ["notes.md"]
+    assert target.read_text(encoding="utf-8") == "old"

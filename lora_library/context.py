@@ -482,9 +482,11 @@ class LibraryContext:
 
 
 class AtomicSaveError(OSError):
-    """A save failed in a way that left a complete copy of the data on disk
-    under a name other than the target. The message names that file; the
-    temp/backup is deliberately NOT cleaned up (it may be the only copy)."""
+    """``_atomic_write_text`` failed. The message always names the target
+    and the OS error (``could not write <path>: <error>``), so a route can
+    surface ``str(exc)`` verbatim. When the message also names ``.bak`` /
+    ``.tmp`` files, those hold the only complete copies and are
+    deliberately NOT cleaned up."""
 
 
 def _replace_over_existing(tmp_name: str, path: Path, data: bytes) -> None:
@@ -541,9 +543,12 @@ def _atomic_write_text(path: Path, text: str) -> None:
     leave a half-written target behind, and never destroy the last complete
     copy of the data (see :func:`_replace_over_existing`).
     """
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp_name = tempfile.mkstemp(dir=str(path.parent), prefix=path.name + ".", suffix=".tmp")
+    tmp_name = ""
     try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fd, tmp_name = tempfile.mkstemp(
+            dir=str(path.parent), prefix=path.name + ".", suffix=".tmp"
+        )
         with os.fdopen(fd, "w", encoding="utf-8", newline="") as fh:
             fh.write(text)
         try:
@@ -552,7 +557,11 @@ def _atomic_write_text(path: Path, text: str) -> None:
             _replace_over_existing(tmp_name, path, text.encode("utf-8"))
     except AtomicSaveError:
         raise
-    except BaseException:
-        with contextlib.suppress(OSError):
-            os.unlink(tmp_name)
+    except BaseException as exc:
+        if tmp_name:
+            with contextlib.suppress(OSError):
+                os.unlink(tmp_name)
+        if isinstance(exc, OSError):
+            # One message shape for every route that surfaces a failed save.
+            raise AtomicSaveError(f"could not write {path}: {exc}") from exc
         raise
