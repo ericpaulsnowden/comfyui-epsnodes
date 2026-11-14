@@ -37,6 +37,7 @@ const body = [
   grab(/function recordIntentFromScope[\s\S]*?\n}\n/), grab(/export function beforeConfigureGraph[\s\S]*?\n}\n/).replace('export ', ''),
   grab(/function applySavedOutputIntent[\s\S]*?\n}\n/), grab(/const PREFIX = [^\n]*/),
   grab(/function ensureOriginalSizeOutputs[\s\S]*?\n}\n/), grab(/function revealExtraOutputs[\s\S]*?\n}\n/),
+  'const warn = (...args) => console.warn(...args) // resolution.js logs through loggerFor(PREFIX).warn (M3); the probe spies console.warn',
   'function resyncSize(){}', 'return { revealExtraOutputs, beforeConfigureGraph, applySavedOutputIntent, savedWireIntent, savedFloatingIntent }'
 ].join('\n')
 const { revealExtraOutputs, beforeConfigureGraph, applySavedOutputIntent, savedWireIntent, savedFloatingIntent } = new Function(body)()
