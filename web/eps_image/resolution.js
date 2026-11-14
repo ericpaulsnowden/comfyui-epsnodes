@@ -3943,7 +3943,7 @@ function applySavedOutputIntent(node) {
     const target = outputIndexByName(node, intendedName)
     if (target === -1 && !warned) {
       warned = true
-      console.warn(PREFIX, `saved wire on ${intendedName} kept on its slot: wire the matching image input`)
+      warn(`saved wire on ${intendedName} kept on its slot: wire the matching image input`)
     }
     return target
   }
