@@ -168,22 +168,44 @@ available.
 - Note: it also gives one place to enforce FORMAT §7.9's "chain, never
   replace" law, which is currently 63 independent chances to get wrong.
 
-### M3 — `toast()`
+### M3 — one toast and one prefix-parameterised logger — **SHIPPED 2026-11-13**
 
-Nine files, **four shapes**, ~90% overlapping: class-method
-`_toast(severity, summary, detail, life)` (×2), free `toast(severity,
-summary, detail)` (×2), free `toast(node, severity, detail)` (×4), and
-`save_image.js`'s minimal `toast(severity, detail)` which silently swallows
-errors.
+The census found **14 toast helpers in 13 files** (four signature shapes) and
+**162 hand-written `console.warn(PREFIX, …)` sites** in `web/eps_image/*.js`
+and `web/eps_image.js`, plus `frame_saver.js`'s private `warn()` copy (22
+callers). Every difference was a parameter, so `web/lora_library/api.js` now
+owns both:
 
-Every difference is parameterisable: where the summary comes from, the
-default life, and the fallback log. Fold into `api.js`.
+- `loggerFor(prefix)` returns `{ warn(message, ...details), log(message) }`
+  with the exact `console.warn(prefix, message, …)` shape the old helpers
+  used (a trailing `undefined` is dropped). `api.warn` / `api.log` are the
+  `[lora_library]` instance. Each eps_image module keeps its own `PREFIX`
+  string and does `const { warn } = loggerFor(PREFIX)`, so the console still
+  attributes every message to the module that raised it
+  (`tests/test_shared_log_toast_js.py` pins the 11 prefixes).
+- `showToast(severity, summary, detail, { life, lives, warn, fallback })`:
+  `lives` = per-severity defaults (6000 error / 3000 other; Notebook and
+  Picker pass 8000 / 5000), `life` = explicit override, `warn` = where a
+  THROWING `toast.add` is reported, `fallback` = what to do when the toast
+  surface is missing. Each file's helper (`toast`, `_toast`, `toastSwitcher`,
+  `toastInfo`, `notifyClipboard` with its debounce) is now a thin wrapper that
+  keeps its summary source (node title / fixed string / argument), so every
+  CALL SITE and its test pin stayed byte-identical.
+- Kept silent where it was silent: a missing toast surface in
+  `save_image.js`, `controller.js` and `universal_controller.js` (and the five
+  node-first helpers, whose call sites already log). A THROWING `toast.add`
+  in those three used to be swallowed by an empty `catch`; it now warns.
+- Left alone on purpose: the 10 inline one-off `toast.add` sites (different
+  lives, inline severities) and `owned_link_colour.js`, which a test pins as
+  import-free, so it keeps its 2 `console.warn(PREFIX, …)`.
 
-- Related, same milestone: **114 `console.warn(PREFIX, …)` call sites** in
-  `web/eps_image/*` hand-roll what `api.js`'s `warn()` already does, just
-  with a hardcoded prefix. Parameterise the prefix and both sides share one
-  function. Keep the distinct prefix *strings* — they are what let the
-  browser console attribute a warning to a node.
+Net: `web/` 17 files, 50 lines fewer, and the toast/log behaviour now has one test home. Test side: `conftest.py`'s
+`install_switcher_js` now copies the REAL `api.js` (+ `version.js`) instead of
+generating a stub, and 9 test files that copy eps_image modules into a served
+layout copy `api.js` + `version.js` too (bypass and number_controller keep
+their subscription stubs and re-export the real `loggerFor` / `showToast`).
+Declaration pins on the toast bodies were rewritten to the shared module;
+`console.warn(PREFIX, …)` text pins became `warn(…)`.
 
 ### M4 — The group-system helpers (care required)
 

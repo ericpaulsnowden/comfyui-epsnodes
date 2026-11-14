@@ -259,7 +259,7 @@
  */
 
 import { app } from '../../../scripts/app.js'
-import { subscribeWidgetsChangedExternally } from '../lora_library/api.js'
+import { loggerFor, showToast, subscribeWidgetsChangedExternally } from '../lora_library/api.js'
 import { el, installMinWidth } from '../lora_library/panel_helpers.js'
 
 // ---------------------------------------------------------------------------
@@ -268,6 +268,7 @@ import { el, installMinWidth } from '../lora_library/panel_helpers.js'
 
 export const CLASS_ID = 'EPSNumberController'
 const PREFIX = '[eps_image:number_controller]'
+const { warn } = loggerFor(PREFIX)
 const NODE_TITLE = 'EPS Number Controller'
 
 /** The one real, serialized widget (module docstring). */
@@ -678,16 +679,7 @@ export function isOutputConnected(output) {
  * `app` (module docstring). Never throws: a frontend without the toast
  * service still gets the `console.warn` at the call site. */
 function toast(node, severity, detail) {
-  try {
-    app.extensionManager?.toast?.add?.({
-      severity,
-      summary: node.title || NODE_TITLE,
-      detail,
-      life: severity === 'error' ? 6000 : 3000
-    })
-  } catch (error) {
-    console.warn(PREFIX, 'toast failed', error)
-  }
+  showToast(severity, node.title || NODE_TITLE, detail, { warn })
 }
 
 /**
@@ -790,7 +782,7 @@ function collectSlotLinkTypes(node, idx) {
       }
     }
   } catch (error) {
-    console.warn(PREFIX, 'collectSlotLinkTypes failed', error)
+    warn('collectSlotLinkTypes failed', error)
     return []
   }
   return types
@@ -834,7 +826,7 @@ export function collectOutputTargets(node, idx) {
       }
     }
   } catch (error) {
-    console.warn(PREFIX, 'collectOutputTargets failed', error)
+    warn('collectOutputTargets failed', error)
   }
   return targets
 }
@@ -862,7 +854,7 @@ export function disconnectAllTargets(node, idx) {
       target.disconnectInput(link.target_slot)
     }
   } catch (error) {
-    console.warn(PREFIX, 'disconnectAllTargets failed', error)
+    warn('disconnectAllTargets failed', error)
   }
 }
 
@@ -891,7 +883,7 @@ export function reconnectRememberedTargets(node, idx, remembered) {
       node.connect(idx, target, targetSlot)
     }
   } catch (error) {
-    console.warn(PREFIX, 'reconnectRememberedTargets failed', error)
+    warn('reconnectRememberedTargets failed', error)
   }
 }
 
@@ -1181,8 +1173,7 @@ function reconcileNode(state) {
       const signature = distinct.join(',')
       if (mixedWarnings[key] !== signature) {
         mixedWarnings[key] = signature
-        console.warn(
-          PREFIX,
+        warn(
           `${key} has mismatched wired types (${distinct.join(', ')}); keeping ${type}.`
         )
       }
@@ -1265,7 +1256,7 @@ function syncNode(state) {
     reconcileNode(state)
     renderRows(state)
   } catch (error) {
-    console.warn(PREFIX, 'syncNode failed', error)
+    warn('syncNode failed', error)
   }
 }
 
@@ -1680,7 +1671,7 @@ function wireRowSync(state) {
       if (desiredRowCount(state) !== outputEntries(target).length) applyVisibleRowCount(state)
       renderRows(state)
     } catch (error) {
-      console.warn(PREFIX, 'deferred sync failed', error)
+      warn('deferred sync failed', error)
     }
   }
 
@@ -1765,13 +1756,12 @@ export function attach(node) {
     if (nodeClassOf(node) !== CLASS_ID) return
     if (attachedNodes.has(node)) return
     if (typeof node.addDOMWidget !== 'function') {
-      console.warn(PREFIX, 'this ComfyUI frontend has no addDOMWidget; number controller panel not attached')
+      warn('this ComfyUI frontend has no addDOMWidget; number controller panel not attached')
       return
     }
     const widget = findWidget(node, VALUES_WIDGET_NAME)
     if (!widget) {
-      console.warn(
-        PREFIX,
+      warn(
         'EPSNumberController node is missing its `values` widget; panel not attached'
       )
       return
@@ -1820,7 +1810,7 @@ export function attach(node) {
         state.lastRowCount = null
         syncNode(state)
       } catch (error) {
-        console.warn(PREFIX, 'post-configure sync failed', error)
+        warn('post-configure sync failed', error)
       }
       return result
     }
@@ -1832,6 +1822,6 @@ export function attach(node) {
     // strictly after this.
     syncNode(state)
   } catch (error) {
-    console.warn(PREFIX, 'attach failed', error)
+    warn('attach failed', error)
   }
 }

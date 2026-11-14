@@ -32,10 +32,11 @@
  */
 
 import { app } from '../../../scripts/app.js'
-import { walkLiveNodes } from '../lora_library/api.js'
+import { loggerFor, showToast, walkLiveNodes } from '../lora_library/api.js'
 import { ensureOwnedLinkColourHook } from './owned_link_colour.js'
 
 const PREFIX = '[EPSNodes save_image]'
+const { warn } = loggerFor(PREFIX)
 const MULTIPLIER_CLASS = 'EPSCrossSweep'
 const SOLO_WIDGET = 'solo_run'
 
@@ -67,11 +68,7 @@ function soloWidgetOf(node) {
 }
 
 function toast(severity, detail) {
-  try {
-    app.extensionManager?.toast?.add?.({ severity, summary: 'EPS Save Image', detail, life: 6000 })
-  } catch {
-    // toast is a nicety
-  }
+  showToast(severity, 'EPS Save Image', detail, { life: 6000, warn })
 }
 
 /**
@@ -109,7 +106,7 @@ function applyFilenameSolo(file) {
     try {
       widget.callback?.(token)
     } catch (error) {
-      console.warn(PREFIX, 'solo_run callback threw', error)
+      warn('solo_run callback threw', error)
     }
     node.graph?.setDirtyCanvas(true, true)
     toast('info', `Soloed the Run Multiplier to ${token} (read from the file name). Clear solo_run to run the whole set.`)
@@ -131,7 +128,7 @@ export function init() {
     try {
       applyFilenameSolo(file)
     } catch (error) {
-      console.warn(PREFIX, 'filename solo fallback failed', error)
+      warn('filename solo fallback failed', error)
     }
     return result
   }
@@ -249,7 +246,7 @@ export function reconcileLinkDimming(node, { forceUndim = false } = {}) {
         const resync = target?.[LINK_COLOR_RESYNC_HOOK]
         if (typeof resync === 'function') resync()
       } catch (error) {
-        console.warn(PREFIX, 'link colour resync hook failed', error)
+        warn('link colour resync hook failed', error)
       }
     }
     tracked.delete(id)
@@ -293,7 +290,7 @@ function installImageOutputDimSync(node) {
     try {
       reconcileLinkDimming(node)
     } catch (error) {
-      console.warn(PREFIX, 'link dim sync (image_output callback) failed', error)
+      warn('link dim sync (image_output callback) failed', error)
     }
     return result
   }
@@ -313,7 +310,7 @@ function installLinkDimConnectionsSync(node) {
     try {
       reconcileLinkDimming(this)
     } catch (error) {
-      console.warn(PREFIX, 'link dim sync (onConnectionsChange) failed', error)
+      warn('link dim sync (onConnectionsChange) failed', error)
     }
     return result
   }
@@ -332,7 +329,7 @@ function installLinkDimCleanup(node) {
     try {
       reconcileLinkDimming(this, { forceUndim: true })
     } catch (error) {
-      console.warn(PREFIX, 'link dim cleanup (onRemoved) failed', error)
+      warn('link dim cleanup (onRemoved) failed', error)
     }
     return typeof original === 'function' ? original.apply(this, args) : undefined
   }
@@ -385,7 +382,7 @@ function installConfigureSync(node) {
       }
       reconcileLinkDimming(this)
     } catch (error) {
-      console.warn(PREFIX, 'post-configure sync failed', error)
+      warn('post-configure sync failed', error)
     }
     return result
   }
@@ -408,6 +405,6 @@ export function attach(node) {
     installConfigureSync(node)
     reconcileLinkDimming(node)
   } catch (error) {
-    console.warn(PREFIX, 'attach failed', error)
+    warn('attach failed', error)
   }
 }

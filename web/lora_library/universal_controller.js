@@ -1771,16 +1771,9 @@ export function registerControllerNode() {
       }
 
       _toast(severity, summary, detail, life) {
-        try {
-          app.extensionManager?.toast?.add?.({
-            severity,
-            summary,
-            detail,
-            life: life ?? (severity === 'error' ? 6000 : 3000)
-          })
-        } catch {
-          // Toast is a nicety; never let it be the reason an action "fails".
-        }
+        // A toast is a nicety; never let it be the reason an action "fails".
+        // Missing toast surface stays silent (as before); a throw now warns.
+        api.showToast(severity, summary, detail, { life, warn: api.warn })
       }
 
       // -------------------------------------------------------- States page

@@ -222,11 +222,12 @@
 
 import { app } from '../../../scripts/app.js'
 import { api } from '../../../scripts/api.js'
-import { subscribeWidgetsChangedExternally } from '../lora_library/api.js'
+import { loggerFor, showToast, subscribeWidgetsChangedExternally } from '../lora_library/api.js'
 
 const NODE_TYPE = 'EPSResolution'
 const NODE_TITLE = 'EPS Resolution'
 const PREFIX = '[eps_image/resolution]'
+const { warn } = loggerFor(PREFIX)
 
 const PROP_SHOW_PASSTHROUGH = 'Show passthrough image'
 const PROP_SHOW_ORIGINAL_SIZE = 'Show original size'
@@ -275,16 +276,7 @@ export function isOutputConnected(output) {
 }
 
 function toast(node, severity, detail) {
-  try {
-    app.extensionManager?.toast?.add?.({
-      severity,
-      summary: node.title || NODE_TITLE,
-      detail,
-      life: severity === 'error' ? 6000 : 3000
-    })
-  } catch (error) {
-    console.warn(PREFIX, 'toast failed', error)
-  }
+  showToast(severity, node.title || NODE_TITLE, detail, { warn })
 }
 
 /** Recompute layout after an outputs-array change: grow the width to fit if
@@ -702,7 +694,7 @@ function upstreamNodeAt(node, slotIndex) {
   try {
     return node.getInputNode(slotIndex) || null
   } catch (error) {
-    console.warn(PREFIX, 'getInputNode failed during the incoming-size walk', error)
+    warn('getInputNode failed during the incoming-size walk', error)
     return null
   }
 }
@@ -1093,7 +1085,7 @@ function setWidgetValue(widget, value) {
   try {
     widget.callback?.(value)
   } catch (error) {
-    console.warn(PREFIX, 'width/height widget callback threw', error)
+    warn('width/height widget callback threw', error)
   }
 }
 
@@ -1514,7 +1506,7 @@ function paintGrid(node) {
     ctx.clearRect(0, 0, cssW, cssH)
     drawGrid(node, ctx, cssW)
   } catch (error) {
-    console.warn(PREFIX, 'grid draw failed', error)
+    warn('grid draw failed', error)
   }
 }
 
@@ -1663,7 +1655,7 @@ function attachSizeGrid(node) {
     injectGridStyles()
 
     if (typeof node.addDOMWidget !== 'function') {
-      console.warn(PREFIX, 'this ComfyUI frontend has no addDOMWidget; size grid not attached')
+      warn('this ComfyUI frontend has no addDOMWidget; size grid not attached')
       return
     }
 
@@ -1768,7 +1760,7 @@ function attachSizeGrid(node) {
           applyWidthDrivenNodeSize(node)
           renderGrid(node)
         } catch (error) {
-          console.warn(PREFIX, 'connection-change grid refresh failed', error)
+          warn('connection-change grid refresh failed', error)
         }
       }
       return result
@@ -1845,12 +1837,12 @@ function attachSizeGrid(node) {
       try {
         node._epsGrid?.resizeObserver?.disconnect()
       } catch (error) {
-        console.warn(PREFIX, 'grid resize-observer disconnect failed', error)
+        warn('grid resize-observer disconnect failed', error)
       }
       try {
         node._epsGrid?.cancelDrag?.()
       } catch (error) {
-        console.warn(PREFIX, 'grid drag cleanup failed', error)
+        warn('grid drag cleanup failed', error)
       }
       try {
         // The source-size probe (2026-07-29) is the only timer this widget
@@ -1860,7 +1852,7 @@ function attachSizeGrid(node) {
           node._epsGrid.sourceProbe = null
         }
       } catch (error) {
-        console.warn(PREFIX, 'source-probe cleanup failed', error)
+        warn('source-probe cleanup failed', error)
       }
       try {
         // ...and the coalesced repaint's pending frame (v0.68.1).
@@ -1869,12 +1861,12 @@ function attachSizeGrid(node) {
           node._epsGrid.renderRaf = null
         }
       } catch (error) {
-        console.warn(PREFIX, 'grid repaint-frame cleanup failed', error)
+        warn('grid repaint-frame cleanup failed', error)
       }
       return originalOnRemoved?.apply(this, args)
     }
   } catch (error) {
-    console.warn(PREFIX, 'size grid setup failed; typed width/height fields remain usable', error)
+    warn('size grid setup failed; typed width/height fields remain usable', error)
   }
 }
 
@@ -2427,7 +2419,7 @@ async function loadPresets(node) {
     reconcilePresetsUi(node) // race-safe reconcile -- see file header
   } catch (error) {
     if (token !== state.loadToken) return
-    console.warn(PREFIX, 'preset fetch failed', error)
+    warn('preset fetch failed', error)
     toast(node, 'error', `Could not load presets: ${(error && error.message) || error}`)
   }
 }
@@ -2464,13 +2456,13 @@ function promptPresetName(node, prefill, onCommit, event) {
       return
     }
   } catch (error) {
-    console.warn(PREFIX, 'canvas.prompt failed; falling back', error)
+    warn('canvas.prompt failed; falling back', error)
   }
   try {
     commit(window.prompt('Preset name', prefill || ''))
     return
   } catch (error) {
-    console.warn(PREFIX, 'window.prompt unavailable; using the built-in dialog', error)
+    warn('window.prompt unavailable; using the built-in dialog', error)
   }
   // Last resort, owned entirely by this file so Save can NEVER be a silent
   // no-op: a minimal DOM dialog over the canvas.
@@ -2521,7 +2513,7 @@ function promptPresetNameFallback(node, prefill, commit) {
     input.focus()
     input.select()
   } catch (error) {
-    console.warn(PREFIX, 'built-in preset-name dialog failed', error)
+    warn('built-in preset-name dialog failed', error)
     toast(node, 'error', 'Could not open the preset-name dialog.')
   }
 }
@@ -2641,7 +2633,7 @@ async function performSave(node, name) {
     commitSelection(node, [name]) // saved preset becomes active + selected (req. 3)
     toast(node, 'success', `Saved preset "${name}".`)
   } catch (error) {
-    console.warn(PREFIX, 'preset save failed', error)
+    warn('preset save failed', error)
     toast(node, 'error', `Could not save preset: ${(error && error.message) || error}`)
   } finally {
     endPresetAction(node, state, state.saveBtn, originalLabel)
@@ -2686,7 +2678,7 @@ async function performDelete(node) {
     commitSelection(node, state.selection.filter((entry) => entry !== active))
     toast(node, 'success', `Deleted preset "${active}".`)
   } catch (error) {
-    console.warn(PREFIX, 'preset delete failed', error)
+    warn('preset delete failed', error)
     toast(node, 'error', `Could not delete preset: ${(error && error.message) || error}`)
   } finally {
     endPresetAction(node, state, state.deleteBtn, originalLabel)
@@ -2904,7 +2896,7 @@ function attachPresetsUi(node) {
   try {
     const widget = widgetByName(node, PRESETS_WIDGET_NAME)
     if (!widget) {
-      console.warn(PREFIX, 'EPSResolution node is missing its `presets` widget; preset UI not attached')
+      warn('EPSResolution node is missing its `presets` widget; preset UI not attached')
       return
     }
     hidePresetsWidget(widget)
@@ -2956,7 +2948,7 @@ function attachPresetsUi(node) {
         try {
           reconcilePresetsUi(this)
         } catch (error) {
-          console.warn(PREFIX, 'preset post-configure resync failed', error)
+          warn('preset post-configure resync failed', error)
         }
       }
       return result
@@ -2967,9 +2959,9 @@ function attachPresetsUi(node) {
     // `node._epsPresets`, which `attachPresetsUi` just stamped above.
     installExternalWriteSubscription()
 
-    loadPresets(node).catch((error) => console.warn(PREFIX, 'initial preset load failed', error))
+    loadPresets(node).catch((error) => warn('initial preset load failed', error))
   } catch (error) {
-    console.warn(PREFIX, 'preset UI setup failed', error)
+    warn('preset UI setup failed', error)
   }
 }
 
@@ -3188,7 +3180,7 @@ function wireRatioLock(node) {
           if (conformed.height !== h) setWidgetValue(widgetByName(this, 'height'), conformed.height)
         })
       } catch (error) {
-        console.warn(PREFIX, 'ratio-lock post-configure reconcile failed', error)
+        warn('ratio-lock post-configure reconcile failed', error)
       }
     }
     return result
@@ -3440,7 +3432,7 @@ function wireMultipleOfLock(node) {
         applyMultipleOfWidgetStep(this)
         resnapCurrentSizeToMultipleOf(this)
       } catch (error) {
-        console.warn(PREFIX, 'multiple_of post-configure reconcile failed', error)
+        warn('multiple_of post-configure reconcile failed', error)
       }
     }
     return result
@@ -3779,7 +3771,7 @@ function wireScaleMultiplier(node) {
       return result
     }
   } else {
-    console.warn(PREFIX, 'EPSResolution node is missing its `scale_multiplier` widget; scale-mode greying not wired')
+    warn('EPSResolution node is missing its `scale_multiplier` widget; scale-mode greying not wired')
   }
 
   const originalOnConnectionsChange = node.onConnectionsChange
@@ -3791,7 +3783,7 @@ function wireScaleMultiplier(node) {
       try {
         applyScaleMultiplierState(this)
       } catch (error) {
-        console.warn(PREFIX, 'scale-mode connection refresh failed', error)
+        warn('scale-mode connection refresh failed', error)
       }
     }
     return result
@@ -3806,7 +3798,7 @@ function wireScaleMultiplier(node) {
       try {
         applyScaleMultiplierState(this)
       } catch (error) {
-        console.warn(PREFIX, 'scale-mode post-configure refresh failed', error)
+        warn('scale-mode post-configure refresh failed', error)
       }
     }
     return result
@@ -3960,7 +3952,7 @@ function scheduleImageConverge(node) {
       // that can never see a half-updated link).
       applyScaleMultiplierState(node)
     } catch (error) {
-      console.warn(PREFIX, 'image-input converge failed', error)
+      warn('image-input converge failed', error)
     }
   }, 0)
 }
@@ -4080,7 +4072,7 @@ function attachCopyFromImage(node) {
         info.widgets_values = values.filter((_, i) => i in values)
       }
     } catch (error) {
-      console.warn(PREFIX, 'widgets_values compaction failed', error)
+      warn('widgets_values compaction failed', error)
     }
     return result
   }
@@ -4157,7 +4149,7 @@ export function attach(node) {
       try {
         result = originalOnConnectionsChange.apply(this, args)
       } catch (error) {
-        console.warn(PREFIX, 'original onConnectionsChange threw', error)
+        warn('original onConnectionsChange threw', error)
       }
     }
     scheduleImageConverge(this)
@@ -4193,7 +4185,7 @@ export function attach(node) {
       // needs the grow/trim to have happened synchronously.
       scheduleImageConverge(this)
     } catch (error) {
-      console.warn(PREFIX, 'v0.61.0 post-configure migration failed', error)
+      warn('v0.61.0 post-configure migration failed', error)
     }
     return result
   }

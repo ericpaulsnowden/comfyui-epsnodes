@@ -105,7 +105,7 @@
  */
 
 import { app } from '../../../scripts/app.js'
-import { subscribeWidgetsChangedExternally } from '../lora_library/api.js'
+import { loggerFor, showToast, subscribeWidgetsChangedExternally } from '../lora_library/api.js'
 import { installMinWidth } from '../lora_library/panel_helpers.js'
 import {
   collectOutputTargets,
@@ -128,6 +128,7 @@ import {
 /** FORMAT.md section 6.18 -- frozen once shipped (section 8). */
 export const CLASS_ID = 'EPSBypass'
 const PREFIX = '[eps_image:bypass]'
+const { warn } = loggerFor(PREFIX)
 const NODE_TITLE = 'EPS Bypass'
 
 /** The visible BOOLEAN widget -- FIRST in `widgets_values` (section 8). */
@@ -331,16 +332,7 @@ function linkById(graph, linkId) {
 }
 
 function toast(node, severity, detail, life) {
-  try {
-    app.extensionManager?.toast?.add?.({
-      severity,
-      summary: node.title || NODE_TITLE,
-      detail,
-      life: life ?? (severity === 'error' ? 6000 : 3000)
-    })
-  } catch (error) {
-    console.warn(PREFIX, 'toast failed', error)
-  }
+  showToast(severity, node.title || NODE_TITLE, detail, { life, warn })
 }
 
 /** `app.configuringGraph` -- true for exactly the duration of a whole-graph
@@ -457,7 +449,7 @@ function collectLinkTypes(node) {
       }
     }
   } catch (error) {
-    console.warn(PREFIX, 'collectLinkTypes failed', error)
+    warn('collectLinkTypes failed', error)
     return []
   }
   return types
@@ -528,7 +520,7 @@ function syncTypes(node) {
       const signature = distinct.join(',')
       if (node.__epsBypassMixedWarning !== signature) {
         node.__epsBypassMixedWarning = signature
-        console.warn(PREFIX, `EPS Bypass has mismatched wired types (${distinct.join(', ')}); keeping ${type}.`)
+        warn(`EPS Bypass has mismatched wired types (${distinct.join(', ')}); keeping ${type}.`)
       }
     } else {
       node.__epsBypassMixedWarning = null
@@ -536,7 +528,7 @@ function syncTypes(node) {
 
     if (changed) node.setDirtyCanvas?.(true, true)
   } catch (error) {
-    console.warn(PREFIX, 'syncTypes failed', error)
+    warn('syncTypes failed', error)
   }
 }
 
@@ -563,7 +555,7 @@ function refuseOff(state, blockers) {
   const { node, enabledWidget } = state
   enabledWidget.value = true
   const message = refusalMessage(blockers)
-  console.warn(PREFIX, message)
+  warn(message)
   toast(node, 'warn', message, REFUSAL_TOAST_MS)
   const token = ++state.refusalToken
   setTimeout(() => {
@@ -702,7 +694,7 @@ function wireToggle(state) {
     try {
       onEnabledChanged(state)
     } catch (error) {
-      console.warn(PREFIX, 'toggle handler failed', error)
+      warn('toggle handler failed', error)
     }
     return result
   }
@@ -745,7 +737,7 @@ function wireConnectionSync(state) {
       if (reenable) autoReenableIfWiredWhileOff(state)
       settle(state)
     } catch (error) {
-      console.warn(PREFIX, 'deferred sync failed', error)
+      warn('deferred sync failed', error)
     }
   }
 
@@ -805,7 +797,7 @@ export function attach(node) {
     const enabledWidget = findWidget(node, ENABLED_WIDGET_NAME)
     const linksWidget = findWidget(node, LINKS_WIDGET_NAME)
     if (!enabledWidget || !linksWidget) {
-      console.warn(PREFIX, 'EPSBypass node is missing its `enabled`/`links` widgets; not attached')
+      warn('EPSBypass node is missing its `enabled`/`links` widgets; not attached')
       return
     }
     attachedNodes.add(node)
@@ -836,7 +828,7 @@ export function attach(node) {
         settle(state)
         schedule(false)
       } catch (error) {
-        console.warn(PREFIX, 'post-configure settle failed', error)
+        warn('post-configure settle failed', error)
       }
       return result
     }
@@ -844,6 +836,6 @@ export function attach(node) {
     // A fresh node: seed the `any` labels.
     settle(state)
   } catch (error) {
-    console.warn(PREFIX, 'attach failed', error)
+    warn('attach failed', error)
   }
 }

@@ -1025,10 +1025,16 @@ def probe(tmp_path_factory: pytest.TempPathFactory) -> dict:
         "}\n",
         encoding="utf-8",
     )
+    (scripts / "api.js").write_text("export const api = {}\n", encoding="utf-8")
     lora_library = layout / "extensions" / "comfyui-epsnodes" / "lora_library"
     lora_library.mkdir(parents=True)
     shutil.copyfile(PANEL_HELPERS_JS, lora_library / "panel_helpers.js")
+    # The REAL logger + toast (a toast the app stub captures is a real one);
+    # only the subscription is replaced, in the `api.js` stub that re-exports them.
+    shutil.copyfile(PANEL_HELPERS_JS.parent / "api.js", lora_library / "api_real.js")
+    shutil.copyfile(PANEL_HELPERS_JS.parent / "version.js", lora_library / "version.js")
     (lora_library / "api.js").write_text(
+        "export { loggerFor, showToast } from './api_real.js'\n"
         # The real api.js hands every subscriber the flushed `entries`; the
         # probe delivers them straight to the (single, module-guarded) handler.
         "export function subscribeWidgetsChangedExternally(handler) {\n"

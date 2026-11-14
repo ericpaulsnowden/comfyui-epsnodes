@@ -1312,7 +1312,8 @@ def test_library_folder_pick_posts_drops_the_cache_and_toasts(controller_source:
     ) in controller_source
     # `_toast` grew an optional life for the long sentence; the defaults hold
     toast = _method_body(controller_source, "_toast(severity, summary, detail, life)")
-    assert "life: life ?? (severity === 'error' ? 6000 : 3000)" in toast
+    # (the 6000/3000 defaults live once, in api.js `showToast`)
+    assert "api.showToast(severity, summary, detail, { life, warn: api.warn })" in toast
     # settings.js's half: the dialog's POST, reused -- serverValue FIRST so
     # the mirrored setting value never re-POSTs through onLibraryDirChanged
     settings = SETTINGS_JS.read_text(encoding="utf-8")

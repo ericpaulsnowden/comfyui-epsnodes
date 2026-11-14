@@ -204,6 +204,8 @@ def paste_api(tmp_path_factory: pytest.TempPathFactory) -> dict:
     helpers_dir = layout / "extensions" / "comfyui-epsnodes" / "lora_library"
     helpers_dir.mkdir(parents=True, exist_ok=True)
     shutil.copyfile(PANEL_HELPERS_JS, helpers_dir / "panel_helpers.js")
+    for name in ("api.js", "version.js"):  # the shared loggerFor/showToast
+        shutil.copyfile(PANEL_HELPERS_JS.parent / name, helpers_dir / name)
 
     cases = {
         "quotes": [text for text, _ in QUOTE_CASES],

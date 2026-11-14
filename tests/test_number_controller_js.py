@@ -1029,8 +1029,15 @@ def number_controller_api(tmp_path_factory: pytest.TempPathFactory) -> dict:
     lora_library = layout / "extensions" / "comfyui-epsnodes" / "lora_library"
     lora_library.mkdir(parents=True, exist_ok=True)
     shutil.copyfile(PANEL_HELPERS_JS, lora_library / "panel_helpers.js")
+    # The REAL logger + toast live in api.js; only the subscription is a no-op,
+    # in the `api.js` stub that re-exports them from the real copy.
+    shutil.copyfile(PANEL_HELPERS_JS.parent / "api.js", lora_library / "api_real.js")
+    shutil.copyfile(PANEL_HELPERS_JS.parent / "version.js", lora_library / "version.js")
+    (scripts / "api.js").write_text("export const api = {}\n", encoding="utf-8")
     (lora_library / "api.js").write_text(
-        "export function subscribeWidgetsChangedExternally(handler) {}\n", encoding="utf-8"
+        "export { loggerFor, showToast } from './api_real.js'\n"
+        "export function subscribeWidgetsChangedExternally(handler) {}\n",
+        encoding="utf-8",
     )
 
     probe = layout / "probe.mjs"
@@ -1958,7 +1965,7 @@ def test_attach_never_throws(source: str) -> None:
     try/catch -> console.warn."""
     body = _function_body(source, "attach(node)")
     assert "try {" in body
-    assert "console.warn(PREFIX, 'attach failed', error)" in source
+    assert "warn('attach failed', error)" in source
 
 
 def test_sync_node_never_throws(source: str) -> None:
