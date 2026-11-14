@@ -1999,8 +1999,13 @@ clears a preset, picking a preset never clears the lock.
 `nodes_resolution.py`'s `parse_ratio`/`conform_to_ratio` are the contract
 for API callers who never load the panel (`"none"` default keeps every old
 payload byte-identical); `resolution.js` mirrors the rule as a separate
-implementation (documented `Math.round` vs banker's-rounding divergence of
-≤1 px at exact `.5` ties).
+implementation, and the two agree bit for bit: both round `.5` ties
+half-UP (`round_half_up` / `Math.round`). Until 2026-11-13 the Python
+side used banker's `round()`, a divergence once documented as "≤1 px" —
+but the `multiple_of` snap amplified it (1000 wide at 16:9 previewed 563
+and produced 562; 800 at a multiple of 64 previewed 832 and produced 768),
+so a differential test now runs the same cases through both
+(`tests/test_resolution_parity_js.py`).
 
 **Pass-through incoming-size walk (v0.87.0, owner report 2026-08-28: "if
 an image is plugged into a switcher, and then into a resolution node, the

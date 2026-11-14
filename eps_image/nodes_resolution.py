@@ -190,7 +190,10 @@ def _round_to_multiple(value: int, multiple_of: int) -> int:
     """
     if multiple_of <= 0 or value <= 0:
         return value
-    rounded = int(round(value / multiple_of) * multiple_of)
+    # Half-up, never Python's banker's round(): resolution.js's
+    # roundToMultipleOf uses Math.round, and the panel's preview and the
+    # node's output must agree on ties (40 -> 48 at multiple 16, not 32).
+    rounded = round_half_up(value / multiple_of) * multiple_of
     return max(multiple_of, rounded)
 
 
@@ -365,14 +368,18 @@ def conform_to_ratio(
     if parsed is None:
         return width, height
     ratio_w, ratio_h = parsed
+    # Half-up on the .5 tie, like resolution.js's Math.round -- Python's
+    # round() is banker's rounding, which made the panel show 563 for a
+    # 1000-wide 16:9 image while the node produced 562 (parity fuzz
+    # 2026-11-13; tests/test_resolution_parity_js.py pins both sides).
     if anchor == "height":
         if height <= 0:
             return width, height
-        derived_w = max(1, round(height * ratio_w / ratio_h))
+        derived_w = max(1, round_half_up(height * ratio_w / ratio_h))
         return _round_to_multiple(derived_w, multiple_of), height
     if width <= 0:
         return width, height
-    derived_h = max(1, round(width * ratio_h / ratio_w))
+    derived_h = max(1, round_half_up(width * ratio_h / ratio_w))
     return width, _round_to_multiple(derived_h, multiple_of)
 
 
