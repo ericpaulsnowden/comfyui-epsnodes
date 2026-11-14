@@ -3,7 +3,7 @@ sure all of the nodes that can control other nodes also looks into nested
 nodes"; FORMAT.md §7.10).
 
 This pack has repeatedly shipped fixes that missed hand-copied siblings
-(``docs/ROADMAP-shared-panel-code.md``), and "root-only" is exactly that bug
+(``docs/plan/ROADMAP-shared-panel-code.md``), and "root-only" is exactly that bug
 class: a node that finds OTHER nodes with ``app.graph._nodes`` or watches only
 its own graph works at the top level and silently does nothing inside a
 subgraph. The behavioural tests live next to each node; THIS file is the
