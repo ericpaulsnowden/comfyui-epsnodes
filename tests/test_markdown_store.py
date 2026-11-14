@@ -1320,6 +1320,14 @@ class TestSingleLineNames:
             ms.upsert_entry(parsed, "a", "text", rename_to="b\rc")
         assert [e["name"] for e in ms.list_entries(parsed)] == ["a"]
 
+    def test_implicit_category_creation_validates_the_name_too(self):
+        parsed = ms.parse("## a\ntext\n")
+        with pytest.raises(ms.InvalidEntryNameError, match="newlines"):
+            ms.upsert_entry(parsed, "b", "text", category="x\n## y")
+        with pytest.raises(ms.InvalidEntryNameError, match="newlines"):
+            ms.move_entry(parsed, "a", category="x\n## y")
+        assert ms.list_categories(parsed) == []
+
     def test_category_name_with_a_carriage_return_is_refused(self):
         parsed = ms.parse("")
         with pytest.raises(ms.InvalidEntryNameError, match="newlines"):
