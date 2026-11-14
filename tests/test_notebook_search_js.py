@@ -126,7 +126,7 @@ def test_mutations_keep_the_search_corpus_current() -> None:
     assert "for (const name of names) forgetEntryText(state, name)" in _body(
         "performDeleteRun(state, names, { force = false } = {})"
     )
-    assert "if (kind === 'entry') renameEntryText(state, name, renameTo)" in _body(
+    assert "renameEntryText(state, name, renameTo)" in _body(
         "applyRenameResult(state, kind, name, renameTo, data)"
     )
 
