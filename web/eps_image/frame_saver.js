@@ -1256,11 +1256,11 @@ function buildControlStrip(state) {
   // ...) never fires pointerup/pointercancel/pointerleave on the button --
   // without this, the repeat interval would keep stepping a node the user
   // can no longer see or interact with. One listener covers all four
-  // buttons; removed by wireNodeCleanup's onRemoved wrap.
+  // buttons; registered by installGlobalListeners (once the node is in a
+  // graph) and removed by wireNodeCleanup's onRemoved wrap.
   state.windowBlurHandler = () => {
     for (const stop of state.stepRepeaters) stop()
   }
-  window.addEventListener('blur', state.windowBlurHandler)
 
   // Order (owner ask 2026-07-26 + the conventional transport layout every
   // video tool uses): jump-to-start, then the two REVERSE steps, play/pause
@@ -2648,6 +2648,44 @@ function installPastePathHandler(state) {
   document.addEventListener('paste', state.pasteHandler, true)
 }
 
+/** Registers the window-blur and document-paste listeners, once, and only
+ * for a node that is in a graph: a litegraph `clone()` ghost (Ctrl+C /
+ * Alt-drag) runs attach() but never joins a graph and never gets onRemoved,
+ * so listeners registered for it would leak for the page's life. Real nodes
+ * reach this from the chained onAdded (nodeCreated precedes graph.add) or,
+ * when already in a graph at attach(), directly. */
+function installGlobalListeners(state) {
+  if (state.globalListenersInstalled) return
+  state.globalListenersInstalled = true
+  window.addEventListener('blur', state.windowBlurHandler)
+  installPastePathHandler(state)
+}
+
+function wireGlobalListenersOnAdded(state) {
+  const node = state.node
+  if (node.graph) {
+    installGlobalListeners(state)
+    return
+  }
+  const originalOnAdded = node.onAdded
+  node.onAdded = function (...args) {
+    let result
+    if (typeof originalOnAdded === 'function') {
+      try {
+        result = originalOnAdded.apply(this, args)
+      } catch (error) {
+        warn('original node onAdded threw', error)
+      }
+    }
+    try {
+      installGlobalListeners(state)
+    } catch (error) {
+      warn('global listener install failed', error)
+    }
+    return result
+  }
+}
+
 /** Removes the paste listener (same capture flag -- removal must match
  * registration). Called from wireNodeCleanup's onRemoved wrap, so a
  * deleted node never leaks a document-level listener. */
@@ -2800,9 +2838,9 @@ export function attach(node) {
       return result
     }
     // After wireNodeCleanup on purpose: the removal wrap exists before the
-    // document listener does, so there is no window where a torn-down node
-    // could leak it.
-    installPastePathHandler(state)
+    // window/document listeners do, so there is no window where a torn-down
+    // node could leak them.
+    wireGlobalListenersOnAdded(state)
     // Owner report 2026-09-10: dropping a video file onto the node uploads
     // it -- the same startUpload() the Upload button uses (file header).
     installVideoDragAndDrop(state)
