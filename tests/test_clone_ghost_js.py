@@ -101,6 +101,23 @@ ghostB.widgets[0].value = UUID
 await sleep(60)
 out.ghostConfigureOrder = { clones: postedClones().length, totalCalls: calls.length, uuid: ghostB.properties.uuid }
 
+// ---- grid: ghost run through onConfigure (configure path) ----
+calls.length = 0
+const ghostC = makeGridNode(12, UUID)
+grid.attach(ghostC)
+ghostC.onConfigure({})
+await sleep(60)
+out.ghostOnConfigure = { totalCalls: calls.length }
+
+// ---- grid: a real node configured BEFORE graph.add (real load order) ----
+calls.length = 0
+const loaded = makeGridNode(13, '')
+grid.attach(loaded)
+loaded.onConfigure({})
+join(loaded, graph)
+await sleep(60)
+out.loadOrderConfigure = { lists: calls.filter((c) => String(c[0]).includes('/list')).length }
+
 // ---- grid: a real paste joins the graph before the deferred pass ----
 calls.length = 0
 const pasted = makeGridNode(10, UUID)
@@ -161,6 +178,26 @@ saver.attach(preS)
 const preAttached = snap()
 preS.onRemoved?.()
 out.saverPreAttached = { attached: preAttached, afterRemove: snap() }
+
+// configure path: a saver with a restored video path
+await sleep(60) // let earlier in-graph nodes' deferred work land first
+calls.length = 0
+const ghostSC = makeSaverNode()
+saver.attach(ghostSC)
+ghostSC.widgets[0].value = '/videos/a.mp4'
+ghostSC.onConfigure?.({})
+await sleep(40)
+out.saverGhostConfigure = { totalCalls: calls.length }
+
+calls.length = 0
+const realSC = makeSaverNode()
+saver.attach(realSC)
+realSC.widgets[0].value = '/videos/a.mp4'
+realSC.onConfigure?.({})   // before graph.add, like a real load
+realSC.graph = makeGraph()
+realSC.onAdded?.(realSC.graph)
+await sleep(40)
+out.saverRealConfigure = { totalCalls: calls.length, probes: calls.filter((c) => String(c[0]).includes('/probe')).length }
 
 out.attachFailures = attachFailures
 process.stdout.write('\nRESULT:' + JSON.stringify(out))
@@ -227,6 +264,22 @@ def test_grid_real_paste_still_mints_a_uuid_and_clones_the_buffer(probe: dict) -
     assert got["body"]["to"] == got["uuid"] != UUID
 
 
+def test_grid_ghost_on_configure_makes_no_server_call(probe: dict) -> None:
+    assert probe["ghostOnConfigure"]["totalCalls"] == 0
+
+
+def test_grid_real_load_order_configure_still_refreshes_in_graph(probe: dict) -> None:
+    assert probe["loadOrderConfigure"]["lists"] >= 1
+
+
+def test_frame_saver_ghost_on_configure_makes_no_server_call(probe: dict) -> None:
+    assert probe["saverGhostConfigure"]["totalCalls"] == 0
+
+
+def test_frame_saver_real_configure_before_add_still_probes(probe: dict) -> None:
+    assert probe["saverRealConfigure"]["probes"] >= 1
+
+
 def test_grid_new_node_in_graph_mints_without_cloning(probe: dict) -> None:
     got = probe["fresh"]
     assert got["clones"] == 0
@@ -283,6 +336,7 @@ const makeNode = () => ({
   addWidget(type, name, v, cb, opts) { const w = { type, name, value: v, callback: cb, options: opts || {} }; this.widgets.push(w); return w },
   setDirtyCanvas() {}, size: [300, 300], setSize() {}, computeSize: () => [300, 300],
 })
+const { calls } = await import('./scripts/api.js')
 const out = {}
 const warns = []
 console.warn = (...a) => warns.push(a.join(' '))
@@ -299,6 +353,23 @@ real.onAdded?.({})
 const added = events.splice(0)
 real.onRemoved()
 out.real = { before, added, removed: events.splice(0), live }
+calls.length = 0
+const ghostC = makeNode()
+pb.attachPromptBuilderPanel(ghostC)
+ghostC.widgets[0].value = 'notes.md'
+ghostC.onConfigure?.({})
+await new Promise((r) => setTimeout(r, 40))
+out.ghostConfigure = { calls: calls.length }
+calls.length = 0
+const realC = makeNode()
+pb.attachPromptBuilderPanel(realC)
+realC.widgets[0].value = 'notes.md'
+realC.onConfigure?.({})
+realC.graph = {}
+realC.onAdded?.({})
+await new Promise((r) => setTimeout(r, 40))
+out.realConfigure = { notebookFetches: calls.filter((u) => String(u).includes('notebook')).length }
+realC.onRemoved()
 out.warns = warns.filter((w) => w.includes('attachPromptBuilderPanel failed'))
 process.stdout.write('\nRESULT:' + JSON.stringify(out))
 process.exit(0)
@@ -316,7 +387,8 @@ def pb_probe(tmp_path_factory: pytest.TempPathFactory) -> dict:
     scripts.mkdir()
     (scripts / "app.js").write_text("export const app = {}\n", encoding="utf-8")
     (scripts / "api.js").write_text(
-        "export const api = { apiURL: (p) => p, fetchApi: async () => ({ ok: true, json: async () => ({}) }),"
+        "export const calls = []\n"
+        "export const api = { apiURL: (p) => p, fetchApi: async (u) => { calls.push(u); return { ok: true, json: async () => ({}) } },"
         " addEventListener() {} }\n",
         encoding="utf-8",
     )
@@ -344,3 +416,11 @@ def test_prompt_builder_polls_once_added_and_stops_on_remove(pb_probe: dict) -> 
     assert got["added"] == ["interval+", "doc+visibilitychange"]
     assert got["removed"] == ["interval-", "doc-visibilitychange"]
     assert got["live"] == 0
+
+
+def test_prompt_builder_ghost_on_configure_makes_no_server_call(pb_probe: dict) -> None:
+    assert pb_probe["ghostConfigure"] == {"calls": 0}
+
+
+def test_prompt_builder_real_configure_before_add_still_loads_the_notebook(pb_probe: dict) -> None:
+    assert pb_probe["realConfigure"]["notebookFetches"] >= 1
