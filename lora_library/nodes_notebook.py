@@ -299,7 +299,10 @@ def _selection_token(
         return f"missing:{path}"
     draft_map = parse_drafts(drafts)
     digest = hashlib.sha1(str(path).encode("utf-8", "replace"))
-    for name in _selected_names(entry):
+    # Hash in the order the run EMITS (resolve_selection's file order), not
+    # click order: reordering two selected entries in the file changes the
+    # output, so it must change the token too (audit 2026-11-13).
+    for name in sorted(_selected_names(entry), key=_file_order_key(parsed)):
         found = markdown_store.get_entry(parsed, name)
         if found is None:
             text: Any = "\x00<missing>"
@@ -426,6 +429,15 @@ def parse_drafts(raw: Any) -> dict[str, str]:
             continue
         out[name] = text
     return out
+
+
+def _file_order_key(parsed: markdown_store.ParsedNotebook):
+    """Sort key placing entry names in FILE order (unknown names last, in
+    their given order) -- the one definition of "the order a run emits",
+    shared by :func:`resolve_selection` and :func:`_selection_token` so the
+    cache token can never disagree with the output it stands for."""
+    order = {item["name"]: index for index, item in enumerate(markdown_store.list_entries(parsed))}
+    return lambda name: order.get(name, len(order))
 
 
 def _selected_names(entry: str) -> list[str]:
@@ -568,14 +580,8 @@ def resolve_selection(
     # too: the widget keeps whatever it holds, the OUTPUT is canonical.
     # Stable sort, so a duplicated name keeps its relative order, and
     # unknown names cannot reach here (the missing check above raises).
-    order = {
-        item["name"]: index
-        for index, item in enumerate(markdown_store.list_entries(parsed))
-    }
-    ranked = sorted(
-        zip(result_names, texts, strict=True),
-        key=lambda pair: order.get(pair[0], len(order)),
-    )
+    by_name = _file_order_key(parsed)
+    ranked = sorted(zip(result_names, texts, strict=True), key=lambda pair: by_name(pair[0]))
     result_names = [name for name, _text in ranked]
     texts = [text for _name, text in ranked]
 

@@ -499,8 +499,9 @@ def register(context: LibraryContext, routes: web.RouteTableDef) -> None:
             "categories": categories,
             # §3.4 demote-don't-refuse (v0.48.1) -- see post_notebook_entry.
             "adjusted_headings": result["adjusted_headings"],
+            "closed_fences": result["closed_fences"],
         }
-        if result["adjusted_headings"]:
+        if result["adjusted_headings"] or result["closed_fences"]:
             response["description"] = result["description"]
         return web.json_response(response)
 
@@ -576,8 +577,11 @@ def register(context: LibraryContext, routes: web.RouteTableDef) -> None:
             # lines were demoted to keep the file format safe -- 0 for the
             # overwhelming majority of saves.
             "adjusted_headings": result["adjusted_headings"],
+            # §3.4 (2026-11-13): 1 when the body's unclosed ``` fence was
+            # closed so the entries below it keep reading as entries.
+            "closed_fences": result["closed_fences"],
         }
-        if result["adjusted_headings"]:
+        if result["adjusted_headings"] or result["closed_fences"]:
             # Only when something changed: the STORED text, so the editor
             # can fold disk truth in rather than silently diverging from
             # the file until the next reload.

@@ -2840,10 +2840,15 @@ function syncNotebookCache(state, data) {
     file: state.resolvedFile ?? prev?.payload?.file ?? null,
     exists: state.exists,
     mtime,
-    entries: (state.entries || []).map((entry) => ({
-      ...entry,
-      text: state.entryTextByName[entry.name] ?? ''
-    })),
+    // An entry whose body this panel never received (e.g. the surviving
+    // twin of a deleted duplicate name) carries NO `text` -- never '' -- so
+    // a cached paint leaves it unknown and it is fetched on selection.
+    entries: (state.entries || []).map((entry) => {
+      const { text: _stale, ...rest } = entry
+      return hasCachedEntryText(state, entry.name)
+        ? { ...rest, text: state.entryTextByName[entry.name] }
+        : rest
+    }),
     categories: Array.isArray(state.categories) ? state.categories : [],
     // Finding 5 (2026-08-26 responsiveness round): rides along so a cached
     // paint (reloadNow()'s instant repaint from THIS session's own cache)
@@ -2875,6 +2880,18 @@ function noteFileMtime(state, mtime) {
 /** The panel now knows *name*'s body: keep the search corpus (and thereby
  * the next cached paint) current -- also makes "searchable after Save" true
  * without waiting for the next full load. */
+/** Folds the body the server STORED for what we sent (*sent*) into the
+ * editor: the textarea is replaced only while it still shows exactly what
+ * was sent (never over typing since), and the saved baseline becomes disk
+ * truth either way. Returns the stored text (*sent* when none came back).
+ * Shared by performSave and the inline-rename path. */
+function foldStoredBody(state, sent, stored) {
+  const storedText = typeof stored === 'string' ? stored : sent
+  if (storedText !== sent && state.textarea.value === sent) state.textarea.value = storedText
+  state.lastSavedText = storedText
+  return storedText
+}
+
 function noteEntryText(state, name, text) {
   if (typeof name !== 'string' || !name) return
   const body = typeof text === 'string' ? text : ''
@@ -2889,9 +2906,10 @@ function forgetEntryText(state, name) {
 
 function renameEntryText(state, from, to) {
   if (from === to) return
+  const known = hasCachedEntryText(state, from)
   const body = state.entryTextByName[from]
   forgetEntryText(state, from)
-  noteEntryText(state, to, body)
+  if (known) noteEntryText(state, to, body)
 }
 
 /** Whether `name`'s body is already known from the last include_text=1 load
@@ -2920,9 +2938,10 @@ function forgetCategoryDescription(state, name) {
 
 function renameCategoryDescription(state, from, to) {
   if (from === to) return
+  const known = hasCachedCategoryDescription(state, from)
   const description = state.categoryDescriptionByName[from]
   forgetCategoryDescription(state, from)
-  noteCategoryDescription(state, to, description)
+  if (known) noteCategoryDescription(state, to, description)
 }
 
 /** hasCachedEntryText()'s category-mode sibling. */
@@ -3042,8 +3061,11 @@ async function applyNotebookPayload(state, file, data) {
   // §7.2 search corpus: body text per entry (include_text=1 above). Built
   // fresh on every successful load, so search always reflects disk truth
   // as of the panel's own last refresh.
+  // An entry without a string `text` stays UNKNOWN (no key), never ''.
   state.entryTextByName = Object.fromEntries(
-    state.entries.map((entry) => [entry.name, typeof entry.text === 'string' ? entry.text : ''])
+    state.entries
+      .filter((entry) => typeof entry.text === 'string')
+      .map((entry) => [entry.name, entry.text])
   )
   buildSearchCorpus(state) // v0.68.1: lowercase once per load, not per keystroke
   // Finding 5 (2026-08-26 responsiveness round): category descriptions ride
@@ -5540,10 +5562,15 @@ async function commitInlineRename(state) {
  * reasoning performSave()'s one-request Save path already established.
  */
 async function renameEntryRequest(state, name, renameTo, force) {
+  // Unknown body (never received, e.g. a surviving duplicate): read it first
+  // -- sending '' would overwrite the entry's real text.
+  const text = hasCachedEntryText(state, name)
+    ? state.entryTextByName[name]
+    : ((await fetchEntry(state, name)).text ?? '')
   const body = {
     file: state.file,
     name,
-    text: state.entryTextByName[name] ?? '',
+    text,
     rename_to: renameTo
   }
   if (!force && typeof state.paintedMtime === 'number') body.base_mtime = state.paintedMtime
@@ -5554,10 +5581,13 @@ async function renameEntryRequest(state, name, renameTo, force) {
  * is `description` rather than `text`, read from the finding-5 cache
  * (`state.categoryDescriptionByName`) instead of a GET. */
 async function renameCategoryRequest(state, name, renameTo, force) {
+  const description = hasCachedCategoryDescription(state, name)
+    ? state.categoryDescriptionByName[name]
+    : ((await fetchCategory(state, name)).description ?? '')
   const body = {
     file: state.file,
     name,
-    description: state.categoryDescriptionByName[name] ?? '',
+    description,
     rename_to: renameTo
   }
   if (!force && typeof state.paintedMtime === 'number') body.base_mtime = state.paintedMtime
@@ -5579,8 +5609,27 @@ function applyRenameResult(state, kind, name, renameTo, data) {
   // Session cache (file header): the body/description travels with the
   // renamed entry/category (finding 5, 2026-08-26 responsiveness round adds
   // the category half -- see noteCategoryDescription()'s call sites).
-  if (kind === 'entry') renameEntryText(state, name, renameTo)
-  else renameCategoryDescription(state, name, renameTo)
+  // The server echoes the STORED `text`/`description` whenever it changed
+  // what we sent (demoted headings, closed fence): adopt it into the cache,
+  // and -- for the open item -- the editor baseline/textarea via the same
+  // fold performSave uses.
+  const isActive = kind === 'entry' ? state.activeName === name : state.activeCategory === name
+  const stored = kind === 'entry' ? data?.text : data?.description
+  if (kind === 'entry') {
+    const sent = state.entryTextByName[name]
+    renameEntryText(state, name, renameTo)
+    if (typeof stored === 'string') {
+      noteEntryText(state, renameTo, stored)
+      if (isActive && typeof sent === 'string') foldStoredBody(state, sent, stored)
+    }
+  } else {
+    const sent = state.categoryDescriptionByName[name]
+    renameCategoryDescription(state, name, renameTo)
+    if (typeof stored === 'string') {
+      noteCategoryDescription(state, renameTo, stored)
+      if (isActive && typeof sent === 'string') foldStoredBody(state, sent, stored)
+    }
+  }
   syncNotebookCache(state, data)
 
   // Drafts are keyed by NAME too (entry name, or categoryDraftKey(name)):
@@ -6112,9 +6161,18 @@ async function performDeleteCategory(state, { force = false } = {}) {
  */
 function adjustedHeadingsSuffix(data) {
   const n = typeof data?.adjusted_headings === 'number' ? data.adjusted_headings : 0
-  if (n <= 0) return ''
-  const noun = n === 1 ? '1 pasted heading line' : `${n} pasted heading lines`
-  return ` ${noun} demoted (# → ###) so they stay inside this entry.`
+  const fences = typeof data?.closed_fences === 'number' ? data.closed_fences : 0
+  let suffix = ''
+  if (n > 0) {
+    const noun = n === 1 ? '1 pasted heading line' : `${n} pasted heading lines`
+    suffix += ` ${noun} demoted (# → ###) so they stay inside this entry.`
+  }
+  if (fences > 0) {
+    // §3.4 (2026-11-13): an unclosed ``` fence would have swallowed every
+    // entry below this one on the next reload; the server closed it.
+    suffix += ' An unclosed ``` code fence was closed so the entries below stay visible.'
+  }
+  return suffix
 }
 
 async function performSave(state, { force = false } = {}) {
@@ -6212,11 +6270,7 @@ async function performSave(state, { force = false } = {}) {
     // only while it still shows exactly what was sent. The baseline below
     // becomes disk truth EITHER way, so mid-flight typing stays flagged
     // dirty (vs the sent-value baseline it would otherwise match).
-    const storedText = typeof data.text === 'string' ? data.text : text
-    if (storedText !== text && state.textarea.value === text) {
-      state.textarea.value = storedText
-    }
-    state.lastSavedText = storedText
+    const storedText = foldStoredBody(state, text, data.text)
     if (renameTo) {
       const nextSelection = state.selection.map((n) => (n === name ? renameTo : n))
       setSelection(state, nextSelection, renameTo) // also re-renders the list

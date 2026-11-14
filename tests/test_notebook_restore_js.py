@@ -220,12 +220,14 @@ def test_inline_rename_is_rename_only_and_never_writes_the_body(source: str) -> 
     guarantee, one request instead of two."""
     block = source.split("async function renameEntryRequest(", 1)[1]
     block = block.split("\n/**", 1)[0]
-    assert "state.entryTextByName[name] ?? ''" in block, "must read the entry's own cached text"
+    assert "state.entryTextByName[name]" in block, "must read the entry's own cached text"
     assert "state.textarea" not in block, "the textarea must never be the source"
-    assert "fetchEntry" not in block, "finding 2: no GET before the rename POST"
+    # finding 2: no GET when the body is cached; an UNKNOWN body is read, never sent as ''
+    assert "hasCachedEntryText(state, name)" in block
+    assert "?? ''" not in block.split("const body", 1)[0].split("hasCachedEntryText", 1)[0]
     cat = source.split("async function renameCategoryRequest(", 1)[1].split("\n/**", 1)[0]
-    assert "state.categoryDescriptionByName[name] ?? ''" in cat
-    assert "fetchCategory" not in cat, "finding 2: no GET before the rename POST"
+    assert "state.categoryDescriptionByName[name]" in cat
+    assert "hasCachedCategoryDescription(state, name)" in cat
 
 
 def test_inline_rename_conflict_retry_actually_drops_the_stale_mtime(source: str) -> None:
@@ -1018,7 +1020,9 @@ def test_every_successful_load_and_mutating_response_updates_the_cache(source: s
     assert "const file = state.file" in sync
     assert "const mtime = typeof data?.mtime === 'number' ? data.mtime : null" in sync
     assert "notebookCacheSet(file, payload, mtime)" in sync
-    assert "text: state.entryTextByName[entry.name] ?? ''" in sync
+    # an entry whose body was never received stays unknown (no `text`), never ''
+    assert "text: state.entryTextByName[entry.name]" in sync
+    assert "hasCachedEntryText(state, entry.name)" in sync
     assert "if (typeof file !== 'string' || !file || state.loadError) return" in sync
 
 
@@ -1360,12 +1364,12 @@ def test_finding2_rename_reads_the_cache_not_a_fresh_get(source: str) -> None:
     # Companion to test_inline_rename_is_rename_only_and_never_writes_the_body
     # above -- pinned here as its own finding: one request, not two.
     entry_req = _body(source, "renameEntryRequest(state, name, renameTo, force)")
-    assert "state.entryTextByName[name] ?? ''" in entry_req
-    assert "fetchEntry" not in entry_req
+    assert "state.entryTextByName[name]" in entry_req
+    assert "hasCachedEntryText(state, name)" in entry_req
     assert "state.paintedMtime === 'number'" in entry_req
     cat_req = _body(source, "renameCategoryRequest(state, name, renameTo, force)")
-    assert "state.categoryDescriptionByName[name] ?? ''" in cat_req
-    assert "fetchCategory" not in cat_req
+    assert "state.categoryDescriptionByName[name]" in cat_req
+    assert "hasCachedCategoryDescription(state, name)" in cat_req
 
 
 def test_finding3_move_is_optimistic_before_the_request(source: str) -> None:
