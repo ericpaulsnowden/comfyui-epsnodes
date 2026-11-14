@@ -610,6 +610,27 @@ class TestResolveUploadedPath:
     def test_rejects_an_absolute_subfolder(self, fake_folder_paths: Path, subfolder: str) -> None:
         assert store._resolve_uploaded_path("x.png", subfolder, "input") is None
 
+    def test_a_symlink_inside_the_folder_cannot_point_outside_it(
+        self, fake_folder_paths: Path, fake_input_dir: Path, tmp_path: Path
+    ) -> None:
+        # Review 2026-11-13: abspath leaves symlinks alone, so a link placed
+        # inside the input folder (or a linked subfolder) reached any file on
+        # the host with an ordinary-looking name.
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        (outside / "private.png").write_bytes(b"\x89PNG")
+        try:
+            (fake_input_dir / "escape.png").symlink_to(outside / "private.png")
+            (fake_input_dir / "linked").symlink_to(outside, target_is_directory=True)
+        except (OSError, NotImplementedError):
+            pytest.skip("symlinks not available here")
+        assert store._resolve_uploaded_path("escape.png", "", "input") is None
+        assert store._resolve_uploaded_path("private.png", "linked", "input") is None
+        # A link that stays INSIDE the folder is fine.
+        (fake_input_dir / "real.png").write_bytes(b"\x89PNG")
+        (fake_input_dir / "alias.png").symlink_to(fake_input_dir / "real.png")
+        assert store._resolve_uploaded_path("alias.png", "", "input") == (fake_input_dir / "real.png").resolve()
+
     def test_full_path_is_fenced_even_when_the_pieces_look_plain(
         self, fake_folder_paths: Path, fake_input_dir: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:

@@ -496,15 +496,19 @@ def _resolve_uploaded_path(filename: str, subfolder: str, source_type: str) -> P
     # at the directory let a LAN caller copy any image on the host into a
     # readable grid buffer (audit 2026-11-13). `_is_plain_filename` already
     # refuses such names; this is the second, independent fence.
-    base_abs = os.path.abspath(base)
-    full_abs = os.path.abspath(os.path.join(base_abs, subfolder, filename))
+    # realpath, not abspath: a symlink (or Windows junction) INSIDE the
+    # allowed folder pointing outside it would pass a syntactic check with an
+    # ordinary-looking name (review 2026-11-13); both sides are canonicalized
+    # so a base that is itself a link (an input folder on a NAS) still works.
+    base_real = os.path.realpath(base)
+    full_real = os.path.realpath(os.path.join(base_real, subfolder, filename))
     try:
-        common = os.path.commonpath((full_abs, base_abs))
+        common = os.path.commonpath((full_real, base_real))
     except ValueError:  # different drives on Windows: nothing in common
         return None
-    if os.path.normcase(common) != os.path.normcase(base_abs):
+    if os.path.normcase(common) != os.path.normcase(base_real):
         return None
-    return Path(full_abs)
+    return Path(full_real)
 
 
 def _is_plain_subfolder(subfolder: str) -> bool:
