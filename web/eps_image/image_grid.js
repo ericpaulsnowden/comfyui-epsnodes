@@ -4071,7 +4071,14 @@ function installConfigureRefresh(node) {
       result = originalOnConfigure?.call(this, info)
     } finally {
       if (!isGraphConfiguring()) {
-        void scheduleRefresh(this)
+        // Deferred one tick and skipped for a node still outside a graph: a
+        // real load/paste/undo joins its graph by then (core runs
+        // configure() BEFORE graph.add(), so `graph` is null right here),
+        // a litegraph clone() ghost (Ctrl+C / Alt-drag) never does.
+        const target = this
+        setTimeout(() => {
+          if (target.graph) void scheduleRefresh(target)
+        }, 0)
       }
       // 2026-07-24: every configure pass (load, undo, redo, paste-restore)
       // re-arms the settled-collision sweep below -- the sweep only acts

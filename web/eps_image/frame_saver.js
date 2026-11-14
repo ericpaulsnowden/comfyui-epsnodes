@@ -2648,6 +2648,17 @@ function installPastePathHandler(state) {
   document.addEventListener('paste', state.pasteHandler, true)
 }
 
+/** Runs *fn* one tick later, and only if *node* is in a graph by then. Server
+ * work started from attach()/onConfigure must not run for a litegraph
+ * `clone()` ghost (Ctrl+C / Alt-drag), which never joins a graph. A one-tick
+ * defer is needed because core runs node.configure() BEFORE graph.add(), so
+ * `node.graph` is still null inside onConfigure for real nodes too. */
+function afterTickIfInGraph(node, fn) {
+  setTimeout(() => {
+    if (node.graph) fn()
+  }, 0)
+}
+
 /** Registers the window-blur and document-paste listeners, once, and only
  * for a node that is in a graph: a litegraph `clone()` ghost (Ctrl+C /
  * Alt-drag) runs attach() but never joins a graph and never gets onRemoved,
@@ -2769,11 +2780,13 @@ function wireConfigureResync(state) {
   node.onConfigure = function (...args) {
     const result =
       typeof originalOnConfigure === 'function' ? originalOnConfigure.apply(this, args) : undefined
-    try {
-      fullResync(state)
-    } catch (error) {
-      warn('post-configure resync failed', error)
-    }
+    afterTickIfInGraph(node, () => {
+      try {
+        fullResync(state)
+      } catch (error) {
+        warn('post-configure resync failed', error)
+      }
+    })
     return result
   }
 }
@@ -2846,19 +2859,19 @@ export function attach(node) {
     installVideoDragAndDrop(state)
     // Warm the upload-limit cache so the first Upload/drop rarely waits
     // on it (never rejects; the result is unused here).
-    fetchServerUploadLimitBytes()
-
-    refreshGating(state).catch((error) => warn('initial config load failed', error))
-
-    // Deferred one tick -- see file header's "Post-configure() resync"
-    // section for exactly why this can't run synchronously here.
-    setTimeout(() => {
+    // Deferred one tick and graph-gated (afterTickIfInGraph): a clone()
+    // ghost must not touch the server.
+    afterTickIfInGraph(node, () => {
+      fetchServerUploadLimitBytes()
+      refreshGating(state).catch((error) => warn('initial config load failed', error))
+      // See file header's "Post-configure() resync" section for why the
+      // initial resync can't run synchronously here.
       try {
         fullResync(state)
       } catch (error) {
         warn('deferred initial resync failed', error)
       }
-    }, 0)
+    })
   } catch (error) {
     warn('attach failed', error)
   }
