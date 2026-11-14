@@ -3295,7 +3295,7 @@ def test_reconnect_attempts_are_forgotten_not_retried_forever(source: str) -> No
     the checkbox, would silently reconnect itself again on the very next
     sync pass, since applyEnabledStateToWiring runs on every one of them."""
     apply_body = _function_body(source, "applyEnabledStateToWiring(state)")
-    assert "writeSlotField(node, entry.n, { links: undefined })" in apply_body
+    assert "links: undefined" in apply_body
     setrow_body = _function_body(source, "setRowEnabled(state, n, checked)")
     assert "links: undefined" in setrow_body
     reenable_body = _function_body(source, "autoReenableNewlyWiredRows(state)")

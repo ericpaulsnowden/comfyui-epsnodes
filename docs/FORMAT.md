@@ -1838,13 +1838,17 @@ per-input toggle + toggle-all header + N-enabled→N-runs fan-out.
   (a row on, Toggle All, a state Apply, a row re-wired) the memory is
   replayed through `reconnectRememberedTargets` -- per item fail-soft: a
   vanished node, a renamed input, a socket now taken is skipped -- and
-  cleared. Unplugging happens only on the transitions the USER drives
-  (toggle changes, an input-side wiring change that makes the node all-off)
-  plus ONE deferred settled pass after `configure` (a workflow saved before
-  this version with optional targets still wired -- it is marked modified
-  on load; the pass waits out a half-restored `toggles` and
-  `app.configuringGraph`); a link landing on an OUTPUT while already all-off
-  stays, dimmed, until the next toggle-off. Nothing wired at all: no unplug,
+  cleared. The pass is LEVEL-triggered (`reconcileUnplug` re-derives from
+  `toggles` + wiring + memory): it runs on toggle changes, on an input-side
+  wiring change, and on a deferred settled pass after EVERY `configure`
+  (load, undo, redo, tab switch, paste) -- the load-time tidy is deliberate:
+  a workflow saved before this version with optional targets still wired must
+  run, and is marked modified on load; the pass waits out a half-restored
+  `toggles` and `app.configuringGraph`. A link landing on an OUTPUT while already all-off
+  stays, dimmed, until the next reconcile (a toggle, an input-side wiring
+  change, or the settled pass after a load / undo / redo / tab switch / paste),
+  which unplugs and remembers it like any other target; it comes back when a
+  row is toggled on. Nothing wired at all: no unplug,
   no replug, memory kept. The whole pass runs under a
   `node.__epsSwitcherRewiring` re-entrancy flag (its own disconnect/connect
   calls fire `onConnectionsChange`). A `masks` / `models_low` tail removed
@@ -4730,6 +4734,14 @@ hand-bypassing groups. Roadmap: `research/roadmap-eps-distributor.md`.
   three SaveImage branches): all-on saves 3; `out_2` off saves exactly the
   other 2; two off saves exactly 1; ALL off reports `success` with nothing
   saved; `{"out_2": null}` stays enabled.
+- **§6.10 estimator.** A consumed output toggled off (`toggles` `{"out_N":
+  false}`; the key is the fixed `out_N` whatever the socket is renamed to)
+  carries an `ExecutionBlocker`, which blocks its consumer outright, so
+  `sourceCount` returns the known-blocked `{count: 0, atLeast: false}` for it
+  (a multiplier fed by it reads 0 runs); an enabled slot falls through to the
+  generic mapped-node rule. Unlike an all-off switcher this is NOT a lazy skip:
+  the Distributor still runs and the multiplier's lazy input receives the
+  blocker, so the multiplier is skipped whole, matching the 0.
 
 
 **`Outputs` is a FLOOR, not a record (v0.89.0, owner: "if you remove items
@@ -5919,13 +5931,24 @@ seed-style randomize, and step/scrub.
   the count is frozen at registration. Raising it later is safe (new slots
   append); LOWERING it would orphan wires in every saved workflow. One hidden
   required STRING widget `values` holds everything as a JSON object keyed
-  `num_N` → `{name, value, type, enabled?, links?}` where `type` is `"INT"`,
+  `num_N` → `{name, value, type, enabled?, owner?, links?}` where `type` is `"INT"`,
   `"FLOAT"`, `"BOOLEAN"` (2026-10-25) or `"*"` (unwired) (`links` items are
   `{node, input}`; `node: -20` names the owning subgraph's own output node,
   v1.2.0).
   `RETURN_NAMES` is
   class-level and therefore generic — the FRONTEND sets each socket's `.label`
   from the row's own name.
+- **`links` memory is owner-stamped (§6.18 / §6.4 convention).** A row's
+  `links` (the consumers an unticked row unplugged) live in `values`, which a
+  paste copies verbatim; `owner` is the writing node's id, and
+  `ownedRememberedLinks` ignores memory whose `owner` differs from this node's
+  id (compared as strings) — otherwise ticking the pasted copy ON would wire it
+  into the ORIGINAL's consumers and the original would later find them taken
+  and forget its memory. Migration: memory with no `owner` (saved before the
+  stamp) is adopted by the first node that reads it, and `reconcileNode`
+  (every sync pass) re-writes it with that node's id; `owner` is written only
+  alongside non-empty `links` and cleared with them. The backend never reads
+  either field.
 - **Per-slot type adoption**, unlike §6.11 Distributor's one-type-for-the-whole-node
   (it tees a single input; this node has no input, so each row is independent).
   Wire row 1 to `steps` and row 2 to `cfg` and they become INT and FLOAT

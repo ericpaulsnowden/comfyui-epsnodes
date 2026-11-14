@@ -266,11 +266,14 @@
  * exempt classes keep their wire (and the dim). Unlike Bypass there is no
  * refusal: a switcher may always go all-off. The moment it is not all-off
  * (a row on, Toggle All, `toggles` written or wired) the memory is
- * replayed once, per item fail-soft, and cleared. Unplugging happens only
- * on TRANSITIONS the user drives (a toggle change, an input-side wiring
- * change, the settled post-configure pass): an output wire dragged onto an
- * already all-off switcher stays where it was dropped, dimmed, and is
- * unplugged by the next toggle-off. Nothing wired at all ->
+ * replayed once, per item fail-soft, and cleared. The decision is LEVEL
+ * triggered (`reconcileUnplug` re-derives it from the current state), and it
+ * runs on a toggle change, an input-side wiring change, and the settled
+ * post-configure pass (a load, undo/redo, tab switch or paste -- the load
+ * pass is deliberate: a workflow saved all-off before v0.110.0 must run).
+ * An output wire dragged onto an already all-off switcher stays where it was
+ * dropped, dimmed, until the next of those passes -- then it is unplugged,
+ * remembered, and comes back when a row is toggled on. Nothing wired at all ->
  * nothing happens (a fresh switcher keeps the output wire just dragged
  * in). Never rewired mid-restore: the restore loop is guarded and
  * `onConfigure` schedules one settled pass. Triggers, order (unplug/replug
@@ -1827,8 +1830,9 @@ function installLinkDimConnectionsSync(node) {
     if (type === LINK_SLOT_OUTPUT && isConnected) {
       // An OUTPUT link landing: the user just dragged it here. Never pull it
       // out from under the cursor -- only dim it (the backend blocker makes
-      // it inert). It becomes an unplug candidate on the next transition
-      // INTO all-off (a toggle-off), not now.
+      // it inert). It becomes an unplug candidate on the next reconcile
+      // (a toggle, an input-side wiring change, or a settled load / undo /
+      // redo / tab-switch / paste pass), not now.
       if (!this.__epsSwitcherRewiring) syncLinkDimming(this, 'output link landed')
     } else {
       syncAllOff(this, 'onConnectionsChange')

@@ -26,7 +26,9 @@
  * `distributor.js`'s `toggles` widget uses, kept minimal on purpose. Two
  * MORE fields, both owner ask (below): `enabled` (bool, default/absent =
  * `true`) and `links` (array of `{"node": <id>, "input": "<name>"}`, the
- * remembered fan-out targets a disabled row detached). The backend never
+ * remembered fan-out targets a disabled row detached) plus `owner` (the id
+ * of the node that wrote `links`; a paste's copy ignores foreign memory --
+ * `ownedRememberedLinks`). The backend never
  * reads either -- `_coerce_slot` only ever looks at `value`/`type` -- so no
  * backend change was needed to add them; the §6.16 state registry's
  * `json_object` kind already covers arbitrary extra keys, which is exactly
@@ -540,6 +542,29 @@ export function normalizeRememberedLinks(raw) {
     out.push({ node: nodeId, input })
   }
   return out
+}
+
+/**
+ * The remembered links of one row's stored *entry* that belong to *node*.
+ * The memory rides in the `values` widget, which a paste copies verbatim, so
+ * it carries the id of the node that wrote it (`owner`, a sibling of
+ * `links` in the row entry) and a node whose id differs ignores it -- the
+ * same rule as bypass.js's `parseMemory` and switcher.js's
+ * `parseUnplugMemory` (ids compared as strings). Without it a pasted copy,
+ * ticked on, wires itself into the ORIGINAL's consumers and the original
+ * later finds them taken and forgets its memory. MIGRATION: memory saved
+ * before the stamp existed has no `owner`; it is adopted by the first node
+ * that reads it (`reconcileNode`, which runs on every sync pass, re-writes it
+ * with that node's id), so the node that saved it keeps working. Exported
+ * for tests.
+ */
+export function ownedRememberedLinks(entry, node) {
+  const links = normalizeRememberedLinks(entry?.links)
+  if (links.length === 0) return links
+  const owner = entry.owner
+  if (owner == null) return links
+  if (node?.id == null || String(owner) !== String(node.id)) return []
+  return links
 }
 
 /**
@@ -1362,9 +1387,9 @@ function applyEnabledStateToWiring(state) {
     if (!storedEnabled && entry.wired) {
       const remembered = collectOutputTargets(node, entry.idx)
       disconnectAllTargets(node, entry.idx)
-      writeSlotField(node, entry.n, { enabled: false, links: remembered })
+      writeSlotField(node, entry.n, { enabled: false, owner: node.id, links: remembered })
     } else if (storedEnabled && !entry.wired) {
-      const remembered = normalizeRememberedLinks(stored?.links)
+      const remembered = ownedRememberedLinks(stored, node)
       if (remembered.length > 0) {
         reconnectRememberedTargets(node, entry.idx, remembered)
         // ONE attempt, then forget the memory regardless of outcome
@@ -1374,7 +1399,7 @@ function applyEnabledStateToWiring(state) {
         // itself again on the very next syncNode pass -- this function
         // runs on EVERY pass, including a plain keystroke anywhere in the
         // panel, not just right after a re-enable.
-        writeSlotField(node, entry.n, { links: undefined })
+        writeSlotField(node, entry.n, { owner: undefined, links: undefined })
       }
     }
   }
@@ -1487,7 +1512,7 @@ function reconcileNode(state) {
     const rawValue = existing?.value
     const value = typeof rawValue === 'number' && Number.isFinite(rawValue) ? rawValue : 0
     const enabled = isRowEnabled(existing)
-    const rememberedLinks = normalizeRememberedLinks(existing?.links)
+    const rememberedLinks = ownedRememberedLinks(existing, node)
 
     if (entry.wired || slotCarriesContent({ name, value, enabled })) {
       const nextEntry = { name, value, type: jsonType }
@@ -1495,7 +1520,10 @@ function reconcileNode(state) {
       // real information, so an ordinary never-disabled row's JSON stays
       // exactly the shape it was before this feature existed.
       if (!enabled) nextEntry.enabled = false
-      if (rememberedLinks.length > 0) nextEntry.links = rememberedLinks
+      if (rememberedLinks.length > 0) {
+        nextEntry.owner = node.id
+        nextEntry.links = rememberedLinks
+      }
       nextMap[key] = nextEntry
     }
 
@@ -1595,12 +1623,12 @@ function setRowEnabled(state, n, checked) {
   if (!entry) return
   if (checked) {
     const map = state.widget ? parseValues(state.widget.value) : {}
-    const remembered = normalizeRememberedLinks(map[slotName(n)]?.links)
+    const remembered = ownedRememberedLinks(map[slotName(n)], node)
     reconnectRememberedTargets(node, entry.idx, remembered)
-    writeSlotField(node, n, { enabled: true, links: undefined })
+    writeSlotField(node, n, { enabled: true, owner: undefined, links: undefined })
   } else {
     const remembered = collectOutputTargets(node, entry.idx)
-    writeSlotField(node, n, { enabled: false, links: remembered })
+    writeSlotField(node, n, { enabled: false, owner: node.id, links: remembered })
     disconnectAllTargets(node, entry.idx)
   }
   syncNode(state)
@@ -2031,7 +2059,7 @@ function autoReenableNewlyWiredRows(state) {
       // reconnect to a stale target the next time this row is unplugged
       // by hand (applyEnabledStateToWiring's identical "one attempt, then
       // forget" reasoning).
-      map[entry.name] = { ...stored, enabled: true, links: undefined }
+      map[entry.name] = { ...stored, enabled: true, owner: undefined, links: undefined }
       changed = true
     }
   }

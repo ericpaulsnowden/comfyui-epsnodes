@@ -673,13 +673,33 @@ function switcherIsStaticallyAllOff(snapshot, node) {
 function sourceIsStaticallyEmpty(snapshot, node) {
   if (!node) return false
   if (SWITCHER_PREFIXES[node.classType]) return switcherIsStaticallyAllOff(snapshot, node)
-  if (node.classType === 'EPSCheckpointSwitcher') {
-    if (node.inputs?.selection) return false // wired, not a literal widget value
-    const raw = node.widgets?.selection
-    if (raw !== undefined && raw !== null && typeof raw !== 'string') return false
-    return checkpointSelectionCount(raw) === 0
-  }
+  if (node.classType === 'EPSCheckpointSwitcher') return checkpointSwitcherIsStaticallyEmpty(node)
   return false
+}
+
+/**
+ * nodes_switcher.py `_checkpoint_switcher_is_statically_all_off` mirrored
+ * EXACTLY: the `selection` must be a LITERAL JSON array (absent = the
+ * default `[]`, blank = empty) holding no non-empty string. A wired,
+ * non-string, malformed or non-array selection is NOT provably empty (the
+ * backend requests the input and the consumer receives the node's
+ * ExecutionBlocker), unlike `checkpointSelectionCount`, which degrades
+ * those to 0 for the node's own emitted length.
+ * @param {{widgets?: object, inputs?: object}} node @returns {boolean}
+ */
+function checkpointSwitcherIsStaticallyEmpty(node) {
+  if (node.inputs?.selection) return false // wired, not a literal widget value
+  let raw = node.widgets?.selection
+  if (raw === undefined || raw === null) raw = '[]'
+  if (typeof raw !== 'string') return false
+  let parsed
+  try {
+    parsed = raw.trim() === '' ? [] : JSON.parse(raw)
+  } catch {
+    return false
+  }
+  if (!Array.isArray(parsed)) return false
+  return !parsed.some((entry) => typeof entry === 'string' && entry !== '')
 }
 
 /** The six Run Multiplier inputs the backend declares LAZY (§6.10,
@@ -839,7 +859,7 @@ function sourceCount(snapshot, link, path) {
       if (inner.error) return { count: 1, atLeast: true, srcId: id, error: inner.error }
       if (inner.count === 0 && !inner.atLeast) {
         const direct = resolveSource(snapshot, slotLink)
-        if (direct?.node && switcherIsStaticallyAllOff(snapshot, direct.node)) {
+        if (direct?.node && sourceIsStaticallyEmpty(snapshot, direct.node)) {
           continue // check_lazy_status's lazy skip: never requested, never blocks
         }
         return { count: 0, atLeast: false, srcId: id }
@@ -1159,6 +1179,22 @@ function sourceCount(snapshot, link, path) {
     const scaleMode = resolutionScaleModeActive(node.widgets?.scale_multiplier, liveInputs)
     const presets = scaleMode ? 1 : Math.max(1, resolutionPresetCount(node.widgets?.presets))
     return { count: mapLen * presets, atLeast, srcId: id }
+  }
+  // §6.11 EPSDistributor: a slot toggled OFF (`toggles` `{"out_N": false}`,
+  // absent = on -- nodes_distributor.py `_enabled_slots`) emits an
+  // ExecutionBlocker for that output, which blocks its consumer outright
+  // like any known-blocked source. The toggle key is the fixed backend
+  // name `out_N` whatever the socket is renamed to (renames are labels
+  // only). An ON slot falls through to the generic mapped-node rule below
+  // (the image input's count passes straight through).
+  // A `toggles` input supplied by a LINK overrides the widget value, so the
+  // toggle is unknowable from here: no confident zero (same rule as
+  // `switcherIsStaticallyAllOff`), fall through to the pass-through.
+  if (type === 'EPSDistributor' && !node.inputs?.toggles) {
+    const key = `out_${(resolved.slot ?? 0) + 1}`
+    if (parseToggles(node.widgets?.toggles)[key] === false) {
+      return { count: 0, atLeast: false, srcId: id }
+    }
   }
   // v0.68.0: ANY class whose list flags the adapter injected (from
   // `GET /eps/list_flags`) gets core's exact rule -- no allow-list needed

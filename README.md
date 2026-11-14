@@ -915,7 +915,8 @@ several models/VAEs in one queue".
   wires plug themselves back in. Wires into *required* inputs stay and turn
   grey: that node can't run without its image, so it is skipped silently,
   as before. A wire you drag from an all-off switcher stays where you put it
-  (grey) until the next time you turn the last row off. A workflow saved
+  (grey) until the next toggle, load, undo/redo or tab switch, which takes it
+  off like the others (it comes back when you turn a row on). A workflow saved
   all-off with such wires before this version is tidied once on load, which
   marks it modified.
 - **A toggled-off branch never runs at all.** Wire three Load Checkpoint
@@ -1030,6 +1031,13 @@ save and recall the whole set at once — which is the point of it.
   the wires are readable and so saved states match up across your PC, Mac and
   the Linux box by name rather than by position. There is always one blank row
   waiting at the bottom, and the node grows as you fill it, up to sixteen.
+
+- **Copy and paste is safe.** When you untick a row, the node remembers which
+  sockets it was plugged into so ticking it again can plug them back. That
+  memory is stamped with the node that made it, so a pasted copy ignores the
+  original's and can never grab its wires. A workflow saved before this
+  stamp existed keeps working: the first node to open it takes the memory
+  over and stamps it.
 
 - **A socket becomes the right kind of number by itself.** Rows start untyped.
   Plug one into `steps` and it sends a whole number; plug another into `cfg`
@@ -1635,6 +1643,11 @@ all reach across subgraph boundaries.
   counts as not wired: the multiplier runs with the axes it does have (a
   text-only sweep, say) instead of being skipped along with everything
   after it. The run-count readout counts the same way.
+
+- **A switched-off Distributor output counts as zero runs.** Wire one of an
+  EPS Distributor's outputs into this node and untick that output: the
+  Distributor sends nothing down it, so this node is skipped, and the
+  run-count readout now says 0 instead of 1.
 
 - **Dropping a saved image runs first time.** An image saved by EPS Save
   Image carries the exact run that made it, and the workflow inside it is
