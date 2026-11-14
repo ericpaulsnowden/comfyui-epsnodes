@@ -139,6 +139,46 @@ def test_unrestorable_original_keeps_both_copies_and_names_them(
         assert name in str(excinfo.value)
 
 
+def test_target_vanishing_mid_save_keeps_the_complete_temp_and_names_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, writer
+) -> None:
+    """Nothing to restore (the target vanished before the backup rename) AND
+    the replace and the direct write both fail with a partial write: the temp
+    is the only complete copy, so it must survive and be named."""
+    write, read = writer
+    target = tmp_path / "notes.md"
+    target.write_text("old", encoding="utf-8")
+    calls = []
+
+    def replace(src, dst):
+        calls.append(src)
+        if len(calls) == 1:
+            raise FileExistsError(17, "File exists", str(dst))
+        raise OSError("NAS disconnected")
+
+    def rename_after_target_vanished(src, dst):
+        os.unlink(src)
+        raise FileNotFoundError(2, "No such file", str(src))
+
+    def partial_write(self, data, *args, **kwargs):
+        real_open = open
+        with real_open(self, "wb") as fh:
+            fh.write(data[:1])
+        raise OSError("NAS disconnected")
+
+    monkeypatch.setattr(os, "replace", replace)
+    monkeypatch.setattr(os, "rename", rename_after_target_vanished)
+    monkeypatch.setattr(Path, "write_bytes", partial_write)
+
+    with pytest.raises(OSError) as excinfo:
+        write(target, "new")
+
+    assert not target.exists()  # no partial target left behind
+    survivors = {p.name: read(p) for p in tmp_path.iterdir()}
+    assert list(survivors.values()) == ["new"]
+    assert next(iter(survivors)) in str(excinfo.value)
+
+
 # ------------------------------------------------- load: contents == mtime
 
 
@@ -278,6 +318,27 @@ def test_lock_taken_before_the_file_existed_is_the_one_used_after(tmp_path: Path
     target.write_text("a", encoding="utf-8")
 
     assert path_locks.lock_for(target) is before
+
+
+def test_new_case_spelling_after_an_inode_change_shares_the_queued_lock(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review finding: a save swaps the inode; a spelling never seen before
+    must still land on the lock another request is queued on, on ANY
+    filesystem (case-sensitive ones over-serialize, which is safe)."""
+    identities = {"now": (1, 100)}
+    monkeypatch.setattr(path_locks, "_identity", lambda resolved: identities["now"])
+    monkeypatch.setattr(os.path, "realpath", lambda p: str(p))  # keep the spelling
+
+    first = path_locks.lock_for(tmp_path / "Loras.md")
+    first.acquire()
+    try:
+        identities["now"] = (1, 200)  # the atomic save replaced the file
+        second = path_locks.lock_for(tmp_path / "loras.md")
+        assert second is first
+        assert second.acquire(blocking=False) is False
+    finally:
+        first.release()
 
 
 def test_hard_links_share_a_lock(tmp_path: Path) -> None:

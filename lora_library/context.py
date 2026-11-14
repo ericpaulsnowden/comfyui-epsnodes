@@ -517,17 +517,21 @@ def _replace_over_existing(tmp_name: str, path: Path, data: bytes) -> None:
             # original is safe in the backup meanwhile.
             Path(path).write_bytes(data)
     except OSError as exc:
-        if backup:
-            with contextlib.suppress(OSError):
-                os.unlink(path)  # a partial direct write, if any
-            try:
-                os.rename(backup, path)
-            except OSError as restore_exc:
-                raise AtomicSaveError(
-                    f"could not save {path}: {exc}; the previous version is at "
-                    f"{backup} and the new one at {tmp_name} (restore failed: "
-                    f"{restore_exc})"
-                ) from exc
+        with contextlib.suppress(OSError):
+            os.unlink(path)  # a partial direct write, if any
+        if not backup:
+            # No original to fall back on: the temp is the only complete copy.
+            raise AtomicSaveError(
+                f"could not save {path}: {exc}; the new version is complete at {tmp_name}"
+            ) from exc
+        try:
+            os.rename(backup, path)
+        except OSError as restore_exc:
+            raise AtomicSaveError(
+                f"could not save {path}: {exc}; the previous version is at "
+                f"{backup} and the new one at {tmp_name} (restore failed: "
+                f"{restore_exc})"
+            ) from exc
         raise
     if backup:
         with contextlib.suppress(OSError):

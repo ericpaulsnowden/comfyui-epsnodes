@@ -94,7 +94,10 @@ the fallback unlinked the original and direct-wrote on failure; a share
 dropping mid-save could lose both versions.) If even the move-back fails,
 neither file is deleted and the raised `AtomicSaveError` (an `OSError`) names
 the `.bak` and `.tmp` paths that hold the two complete copies. At every
-point at least one complete version is on disk. Ordinary filesystems never
+point at least one complete version is on disk. Same rule when the target
+vanished before the backup rename (nothing to restore): a partial direct
+write is removed and `AtomicSaveError` names the temp holding the complete
+new content, which is kept. Ordinary filesystems never
 enter the fallback; the single `os.replace` is unchanged there.
 
 **Library on a NAS (v0.74.0, 2026-08-22).** Every read of this folder may
@@ -351,9 +354,12 @@ touched different entries.
   exists, else by the `realpath` + `normcase` string, and it is resolved in
   the worker because a NAS `realpath` can block. Identity is what makes
   `Loras.md` and `loras.md` one lock on a case-insensitive macOS volume
-  (`normcase` folds case on Windows only). Residual window: two requests
-  CREATING the same new file under differently-cased spellings have no inode
-  yet and can hold different locks; later calls converge.
+  (`normcase` folds case on Windows only). The string fallback is
+  case-folded on every OS: on a case-sensitive volume two differently-cased
+  names are different files that merely share a lock (over-serializing is the
+  safe side). It must not depend on the inode, which an atomic save changes.
+  Residual window: a hard link or Unicode-normalization variant of a file
+  that does not exist yet.
 - **The effect.** A request that overlaps another now gets an honest 409 (its
   base really is stale by then) and the panel's Reload/Overwrite banner.
   Each request re-reads the file under the lock, so even where a

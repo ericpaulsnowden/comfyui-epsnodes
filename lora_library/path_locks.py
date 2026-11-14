@@ -34,9 +34,15 @@ import os
 import threading
 from pathlib import Path
 
-#: One lock per distinct normalized path SPELLING (``realpath`` +
-#: ``normcase``), created lazily. A spelling is only ever added by a
-#: caller that names it, so the dict is bounded by what the server touches.
+#: One lock per CASE-FOLDED path spelling (``realpath`` + ``normcase`` +
+#: ``casefold``, on every OS), created lazily. Case must not matter here:
+#: on macOS/Windows differently-cased names are the same file and MUST
+#: share a lock; on a case-sensitive volume they are different files that
+#: merely share a lock, which only over-serializes and is always safe. The
+#: spelling key cannot depend on the inode, which an atomic save changes
+#: under a lookup that has not seen the new one yet. A spelling is only
+#: added by a caller that names it, so the dict is bounded by what the
+#: server touches.
 _locks: dict[str, threading.Lock] = {}
 
 #: The same locks, found by file identity ``(st_dev, st_ino)`` -- the only
@@ -74,12 +80,12 @@ def lock_for(path: Path | str) -> threading.Lock:
     lock while the file is momentarily absent (the gvfs save fallback moves
     the original aside for an instant) or not yet created.
 
-    Residual window, accepted: two requests that CREATE the same new file
-    under two differently-cased spellings on a case-insensitive macOS
-    volume have no inode to share yet and can hold different locks; once
-    the file exists every later call converges on one. Likewise a
-    differently-cased spelling arriving exactly while the file is absent
-    mid-save gets a fresh lock. Cross-process safety is still only
+    Case never matters to the spelling key (see ``_locks``), so a save that
+    swaps the inode, a file that is absent mid-save, or a file not yet
+    created cannot give two spellings of one name two locks. The inode map
+    adds hard links and Unicode-normalization variants (APFS) on top.
+    Residual window, accepted: a hard link or a normalization variant of a
+    file that does not exist yet. Cross-process safety is still only
     ``base_mtime`` (FORMAT.md §3.5).
 
     ``os.path.realpath`` and ``os.stat`` can be real filesystem round trips
@@ -90,7 +96,7 @@ def lock_for(path: Path | str) -> threading.Lock:
     ``load_notebook``/``save_notebook`` themselves.
     """
     resolved = os.path.realpath(str(path))
-    spelling = os.path.normcase(resolved)
+    spelling = os.path.normcase(resolved).casefold()
     identity = _identity(resolved)
     with _registry_guard:
         lock = _by_inode.get(identity) if identity else None
