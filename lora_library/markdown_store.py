@@ -9,6 +9,8 @@ importable-without-ComfyUI seam as ``context.py``/``sets_store.py``.
 
 from __future__ import annotations
 
+import copy
+import functools
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -73,6 +75,19 @@ class ConflictError(MarkdownStoreError):
         self.current_mtime = current_mtime
 
 
+class UnrepresentableEditError(MarkdownStoreError):
+    """The edit went through in memory but the FILE cannot carry it: re-parsing
+    the notebook's own serialization would not give back the same entries
+    and categories (FORMAT.md §3.4's "the file is the truth"). Today that
+    only happens when a hand-edited file leaves a ``` code fence open above
+    the edit, so a heading written below it reads back as fenced body text
+    and the new entry would vanish on the next reload. Refused (the route
+    answers 400 with this message) instead of saved — an edit that "worked"
+    and then disappears is the one outcome the store must never produce.
+    Raised by :func:`_mutator`'s reconcile step, which rolls the model back
+    to its pre-edit state first."""
+
+
 # ------------------------------------------------------------------- model
 
 @dataclass
@@ -116,6 +131,13 @@ class ParsedNotebook:
 
 # ----------------------------------------------------------- line classification
 
+def _is_fence_line(line: str) -> bool:
+    """The one definition of "this line toggles fence state", shared by
+    :func:`parse`, :func:`demote_unrepresentable_headings` and the §3.4
+    write-time transform (:func:`_normalize_body_text`)."""
+    return line.strip().startswith("```")
+
+
 def _heading_level(line: str) -> int:
     """1 for an H1 line, 2 for an H2 line, else 0 — this grammar's whole
     notion of "heading" (H3+ are body text, FORMAT.md §3.1). A line counts
@@ -151,7 +173,7 @@ def _iter_lines_with_heading_level(text: str):
     for line_no, line in enumerate(text.splitlines(), start=1):
         level = 0 if in_fence else _heading_level(line)
         yield line_no, line, level
-        if line.strip().startswith("```"):
+        if _is_fence_line(line):
             in_fence = not in_fence
 
 
@@ -286,7 +308,7 @@ def demote_unrepresentable_headings(text: str) -> tuple[str, int]:
             line = line[:indent] + "##" + line[indent:]
             adjusted += 1
         out_lines.append(line)
-        if line.strip().startswith("```"):
+        if _is_fence_line(line):
             in_fence = not in_fence
     return "\n".join(out_lines), adjusted
 
@@ -366,6 +388,140 @@ def get_category_description(parsed: ParsedNotebook, name: str) -> str | None:
 
 # ------------------------------------------------------------------ mutation
 
+def _require_single_line_name(name: str, what: str) -> None:
+    """FORMAT.md §3.2: an entry or category name is exactly one heading line
+    — non-empty after trimming and free of CR/LF (``str.splitlines`` treats
+    a lone ``\\r`` as a line break too, so it is refused alongside ``\\n``;
+    a name that split on reload would turn into a heading plus a stray body
+    line). *what* is "entry" or "category", for the message."""
+    if not name:
+        raise InvalidEntryNameError(f"{what} name must not be empty — FORMAT.md §3.2")
+    if "\n" in name or "\r" in name:
+        raise InvalidEntryNameError(f"{what} name must not contain newlines — FORMAT.md §3.2")
+
+
+def _normalize_body_text(text: str) -> tuple[str, int, int]:
+    """The §3.4 write-time transform EVERY stored body and description goes
+    through — one place, so an entry body and a category description can
+    never disagree about what the file can hold. Returns ``(text,
+    adjusted_headings, closed_fences)``.
+
+    1. ``\\r\\n``/``\\r`` become ``\\n``: the file's line ending is chosen at
+       save time (§3.6), and :func:`parse` splits on any of them, so a body
+       that carried its own ``\\r`` would read back differently from how it
+       was stored.
+    2. Heading-looking lines are demoted (:func:`demote_unrepresentable_headings`).
+    3. An UNCLOSED code fence is closed with one appended ``` line. Fence
+       state is file-wide in :func:`parse`, so a body with an odd number of
+       fence lines would swallow every heading below it on the next reload —
+       the entries after it would silently disappear. Closing it keeps the
+       user's text verbatim and the rest of the notebook visible; the count
+       rides back to the route like the heading count does, so the editor
+       can say what landed on disk.
+    """
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    text, adjusted_headings = demote_unrepresentable_headings(text)
+    closed_fences = 0
+    if sum(1 for line in text.split("\n") if _is_fence_line(line)) % 2:
+        text = f"{text}\n```"
+        closed_fences = 1
+    return text, adjusted_headings, closed_fences
+
+
+def _open_fence_line(lines: list[str]) -> int | None:
+    """1-based line number of the fence still open at the end of *lines*, or
+    ``None`` when every fence is closed."""
+    opened_at: int | None = None
+    for line_no, line in enumerate(lines, start=1):
+        if _is_fence_line(line):
+            opened_at = None if opened_at is not None else line_no
+    return opened_at
+
+
+def _snapshot(parsed: ParsedNotebook) -> tuple[dict[str, tuple[str, str]], list[tuple[str, str]]]:
+    """What a reader can observe: ``{entry name: (category, text)}`` for
+    every addressable entry, and ``[(category name, description), ...]`` in
+    file order."""
+    entries = {
+        entry.name: (block.name, entry_text(entry))
+        for block in parsed.blocks
+        for entry in block.entries
+        if entry.addressable
+    }
+    categories = [
+        (block.name, _trimmed_text(block.preamble))
+        for block in parsed.blocks
+        if block.heading_line is not None
+    ]
+    return entries, categories
+
+
+def _reconcile(parsed: ParsedNotebook, what: str) -> None:
+    """Make *parsed* equal what the next load will read, or refuse the edit.
+
+    The model's own serialization is re-parsed and compared with the model:
+    anything the model holds that the reparse lacks means the file cannot
+    carry the edit (today: a hand-edited ``` fence left open above it — see
+    :class:`UnrepresentableEditError`), so the edit is refused instead of
+    vanishing on reload. Otherwise the reparsed blocks REPLACE the model's:
+    that is how an entry shadowed by a duplicate name becomes addressable
+    the moment its twin is removed, and how ``problems`` stays current.
+    Callers hold no ``Entry``/``CategoryBlock`` references across a mutation
+    (the routes serialize straight after), so swapping the blocks is safe.
+    Found by a round-trip fuzz (2026-11-13) that compared each mutated model
+    with its reparse.
+    """
+    lines = serialize(parsed)
+    reparsed = parse("\n".join(lines))
+    entries_before, categories_before = _snapshot(parsed)
+    entries_after, categories_after = _snapshot(reparsed)
+    lost = [name for name, seen in entries_before.items() if entries_after.get(name) != seen]
+    if lost or categories_before != categories_after:
+        fence_line = _open_fence_line(lines)
+        where = (
+            f"an unclosed ``` code fence opened at line {fence_line} swallows everything below it"
+            if fence_line is not None
+            else "the notebook text does not read back the way it was written"
+        )
+        affected = ", ".join(repr(name) for name in lost[:5]) or "the category headings"
+        raise UnrepresentableEditError(
+            f"{what} would not survive a reload ({affected} affected): {where} — "
+            "fix the fence in the notebook file, then retry — FORMAT.md §3.4"
+        )
+    parsed.blocks = reparsed.blocks
+    parsed.problems = reparsed.problems
+
+
+def _mutator(verb: str):
+    """Decorator for every function that mutates a :class:`ParsedNotebook`:
+    snapshot, mutate, then :func:`_reconcile` — and on refusal put the
+    pre-edit blocks back, so a refused edit leaves the model exactly as it
+    was. One place for the §3.4 "the file is the truth" rule instead of a
+    call at the end of eight functions. A mutator that returns ``False``
+    (``remove_entry`` found nothing) changed nothing and skips the step.
+    *verb* plus the mutator's ``name`` argument make the error's subject,
+    e.g. ``saving entry 'Portraits'``."""
+
+    def decorate(fn):
+        @functools.wraps(fn)
+        def wrapper(parsed: ParsedNotebook, name, *args, **kwargs):
+            before = copy.deepcopy(parsed.blocks)
+            result = fn(parsed, name, *args, **kwargs)
+            if result is False:
+                return result
+            try:
+                _reconcile(parsed, f"{verb} {(name or '').strip()!r}")
+            except UnrepresentableEditError:
+                parsed.blocks = before
+                raise
+            return result
+
+        return wrapper
+
+    return decorate
+
+
+@_mutator("saving entry")
 def upsert_entry(
     parsed: ParsedNotebook,
     name: str,
@@ -414,13 +570,14 @@ def upsert_entry(
     # demote_unrepresentable_headings' docstring for the owner ask and why
     # two levels. The stored text + count ride back in the return dict so
     # the route can tell the editor what actually landed on disk.
-    text, adjusted_headings = demote_unrepresentable_headings(text)
+    text, adjusted_headings, closed_fences = _normalize_body_text(text)
     body_lines = text.split("\n")
 
     existing = _find_addressable(parsed, name) if name else None
     if existing is not None:
         block, entry = existing
         if rename_to and rename_to != name:
+            _require_single_line_name(rename_to, "entry")
             if _find_addressable(parsed, rename_to) is not None:
                 raise NameCollisionError(
                     f"an entry named {rename_to!r} already exists — FORMAT.md §3.2"
@@ -433,10 +590,10 @@ def upsert_entry(
             "category": block.name,
             "text": text,
             "adjusted_headings": adjusted_headings,
+            "closed_fences": closed_fences,
         }
 
-    if not name:
-        raise InvalidEntryNameError("entry name must not be empty — FORMAT.md §3.2")
+    _require_single_line_name(name, "entry")
 
     new_entry = Entry(name=name, heading_line=f"## {name}", body=body_lines, addressable=True)
     after_target = _find_addressable(parsed, after) if after else None
@@ -448,6 +605,7 @@ def upsert_entry(
             "category": after_block.name,
             "text": text,
             "adjusted_headings": adjusted_headings,
+            "closed_fences": closed_fences,
         }
 
     target = _find_last_block(parsed, category) if category else parsed.blocks[-1]
@@ -460,9 +618,11 @@ def upsert_entry(
         "category": target.name,
         "text": text,
         "adjusted_headings": adjusted_headings,
+        "closed_fences": closed_fences,
     }
 
 
+@_mutator("removing entry")
 def remove_entry(parsed: ParsedNotebook, name: str) -> bool:
     """Delete the addressable entry *name*. ``True`` if one was removed.
 
@@ -478,6 +638,7 @@ def remove_entry(parsed: ParsedNotebook, name: str) -> bool:
     return True
 
 
+@_mutator("creating category")
 def create_category(
     parsed: ParsedNotebook,
     name: str,
@@ -523,17 +684,12 @@ def create_category(
     already names a category.
     """
     name = (name or "").strip()
-    if not name:
-        raise InvalidEntryNameError("category name must not be empty — FORMAT.md §3.2")
-    if "\n" in name:
-        raise InvalidEntryNameError("category name must not contain newlines — FORMAT.md §3.2")
+    _require_single_line_name(name, "category")
     if any(block.heading_line is not None and block.name == name for block in parsed.blocks):
         raise NameCollisionError(f"a category named {name!r} already exists — FORMAT.md §3.4")
 
-    description = description or ""
-    # Same §3.4 demote-don't-refuse transform as upsert_entry — see
-    # demote_unrepresentable_headings.
-    description, adjusted_headings = demote_unrepresentable_headings(description)
+    # Same §3.4 write-time transform as upsert_entry — see _normalize_body_text.
+    description, adjusted_headings, closed_fences = _normalize_body_text(description or "")
 
     block = CategoryBlock(
         name=name, heading_line=f"# {name}", preamble=description.split("\n") if description else []
@@ -557,9 +713,11 @@ def create_category(
         "name": name,
         "description": _trimmed_text(block.preamble),
         "adjusted_headings": adjusted_headings,
+        "closed_fences": closed_fences,
     }
 
 
+@_mutator("describing category")
 def set_category_description(parsed: ParsedNotebook, name: str, description: str) -> dict:
     """Replace the FORMAT.md §3.1 description block under the category
     *name* — the UPDATE-ONLY primitive behind §3.4's "Set category
@@ -574,10 +732,8 @@ def set_category_description(parsed: ParsedNotebook, name: str, description: str
     Raises :class:`CategoryNotFoundError` if no category named *name*
     exists.
     """
-    description = description or ""
-    # Same §3.4 demote-don't-refuse transform as upsert_entry — see
-    # demote_unrepresentable_headings.
-    description, adjusted_headings = demote_unrepresentable_headings(description)
+    # Same §3.4 write-time transform as upsert_entry — see _normalize_body_text.
+    description, adjusted_headings, closed_fences = _normalize_body_text(description or "")
 
     name = (name or "").strip()
     block = _find_last_block(parsed, name) if name else None
@@ -591,9 +747,11 @@ def set_category_description(parsed: ParsedNotebook, name: str, description: str
         "name": name,
         "description": _trimmed_text(block.preamble),
         "adjusted_headings": adjusted_headings,
+        "closed_fences": closed_fences,
     }
 
 
+@_mutator("renaming category")
 def set_category_name(parsed: ParsedNotebook, name: str, new_name: str) -> dict:
     """Rename category *name*'s heading to *new_name* — the RENAME-ONLY
     primitive behind FORMAT.md §3.4/§5's category ``rename_to`` (a third
@@ -621,10 +779,7 @@ def set_category_name(parsed: ParsedNotebook, name: str, new_name: str) -> dict:
         raise CategoryNotFoundError(f"no such category {name!r} — FORMAT.md §3.2")
 
     new_name = (new_name or "").strip()
-    if not new_name:
-        raise InvalidEntryNameError("category name must not be empty — FORMAT.md §3.2")
-    if "\n" in new_name:
-        raise InvalidEntryNameError("category name must not contain newlines — FORMAT.md §3.2")
+    _require_single_line_name(new_name, "category")
     if new_name != name and any(
         b.heading_line is not None and b.name == new_name for b in parsed.blocks
     ):
@@ -635,6 +790,7 @@ def set_category_name(parsed: ParsedNotebook, name: str, new_name: str) -> dict:
     return {"name": new_name, "description": _trimmed_text(block.preamble)}
 
 
+@_mutator("moving entry")
 def move_entry(
     parsed: ParsedNotebook,
     name: str,
@@ -705,6 +861,7 @@ def move_entry(
     return {"name": entry.name, "category": dst_block.name}
 
 
+@_mutator("moving category")
 def move_category(
     parsed: ParsedNotebook,
     name: str,
@@ -772,6 +929,7 @@ def move_category(
     return {"name": name}
 
 
+@_mutator("deleting category")
 def delete_category(parsed: ParsedNotebook, name: str) -> dict:
     """Delete category *name*'s ``#`` heading, MERGING what it held into the
     block above it — FORMAT.md §3.4 Delete category, the primitive behind

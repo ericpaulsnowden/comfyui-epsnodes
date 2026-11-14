@@ -241,7 +241,11 @@ captions).
   `### Title`) so they stay inside your entry, the status line tells you
   how many were adjusted, and the editor shows exactly what was stored.
   `###`-and-deeper headings, and anything inside a code fence, were
-  always fine and are untouched.
+  always fine and are untouched. An unclosed ``` code fence is closed for
+  you (the status line says so) — left open, it would have hidden every
+  entry below it on the next reload — and an edit that could not survive a
+  reload (a hand-edited file with a fence left open above it) is refused
+  with a message naming the line, never saved and lost.
 - **Renaming, two ways** (whichever you reach for first):
   - **Double-click the name** — in the list, on a prompt or a category
     header — and type over it. Enter saves, Esc cancels, clicking away

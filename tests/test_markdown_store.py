@@ -202,6 +202,7 @@ class TestUpsertCreate:
             "category": "",
             "text": "hello",
             "adjusted_headings": 0,
+            "closed_fences": 0,
         }
         assert ms.list_entries(parsed) == [{"name": "New Entry", "category": ""}]
         assert ms.get_entry(parsed, "New Entry")["text"] == "hello"
@@ -381,6 +382,7 @@ class TestUpsertRename:
             "category": "Cat A",
             "text": "new body",
             "adjusted_headings": 0,
+            "closed_fences": 0,
         }
         assert ms.get_entry(parsed, "Old Name") is None
         assert ms.get_entry(parsed, "New Name")["text"] == "new body"
@@ -489,7 +491,7 @@ class TestCreateCategory:
     def test_create_into_empty_file_with_no_description(self) -> None:
         parsed = ms.parse("")
         result = ms.create_category(parsed, "Styles")
-        assert result == {"name": "Styles", "description": "", "adjusted_headings": 0}
+        assert result == {"name": "Styles", "description": "", "adjusted_headings": 0, "closed_fences": 0}
         assert ms.list_categories(parsed) == ["Styles"]
         assert ms.get_category_description(parsed, "Styles") == ""
         assert ms.serialize(parsed) == ["# Styles"]
@@ -501,6 +503,7 @@ class TestCreateCategory:
             "name": "Styles",
             "description": "Prose about styles.",
             "adjusted_headings": 0,
+            "closed_fences": 0,
         }
         assert ms.get_category_description(parsed, "Styles") == "Prose about styles."
         assert ms.serialize(parsed) == ["# Styles", "Prose about styles."]
@@ -613,7 +616,7 @@ class TestSetCategoryDescription:
     def test_replace_description_on_a_bare_heading(self) -> None:
         parsed = ms.parse("# Cat A\n## E1\nB1\n")
         result = ms.set_category_description(parsed, "Cat A", "New prose.")
-        assert result == {"name": "Cat A", "description": "New prose.", "adjusted_headings": 0}
+        assert result == {"name": "Cat A", "description": "New prose.", "adjusted_headings": 0, "closed_fences": 0}
         assert ms.get_category_description(parsed, "Cat A") == "New prose."
         assert ms.list_entries(parsed) == [{"name": "E1", "category": "Cat A"}]
 
@@ -1297,3 +1300,146 @@ class TestResolveNotebookFileRejectsUriValues:
         # No false positives: relative names, POSIX absolutes, and a UNC-style
         # double-slash path (no scheme, so no "://") all pass through as before.
         assert isinstance(context.resolve_notebook_file(value), Path)
+
+
+# ---------------------------------------------------------------------------
+# §3.4 reload safety (2026-11-13): found by a round-trip fuzz that compared
+# every mutated model with the parse of its own serialization.
+
+
+class TestSingleLineNames:
+    def test_entry_name_with_a_newline_is_refused_on_create(self):
+        parsed = ms.parse("")
+        with pytest.raises(ms.InvalidEntryNameError, match="newlines"):
+            ms.upsert_entry(parsed, "n\nl", "text")
+        assert ms.list_entries(parsed) == []
+
+    def test_entry_rename_to_a_name_with_a_carriage_return_is_refused(self):
+        parsed = ms.parse("## a\ntext\n")
+        with pytest.raises(ms.InvalidEntryNameError, match="newlines"):
+            ms.upsert_entry(parsed, "a", "text", rename_to="b\rc")
+        assert [e["name"] for e in ms.list_entries(parsed)] == ["a"]
+
+    def test_category_name_with_a_carriage_return_is_refused(self):
+        parsed = ms.parse("")
+        with pytest.raises(ms.InvalidEntryNameError, match="newlines"):
+            ms.create_category(parsed, "a\rb")
+
+
+class TestBodyTextNormalization:
+    def test_unclosed_fence_in_an_entry_body_is_closed_so_later_entries_survive(self):
+        parsed = ms.parse("## a\nold\n## b\nkeep me\n")
+        result = ms.upsert_entry(parsed, "a", "```python\nprint(1)")
+        assert result["closed_fences"] == 1
+        assert result["text"] == "```python\nprint(1)\n```"
+        reparsed = ms.parse("\n".join(ms.serialize(parsed)))
+        assert [e["name"] for e in ms.list_entries(reparsed)] == ["a", "b"]
+        assert ms.get_entry(reparsed, "b")["text"] == "keep me"
+
+    def test_balanced_fences_are_left_alone(self):
+        parsed = ms.parse("")
+        result = ms.upsert_entry(parsed, "a", "```\n## fenced heading\n```")
+        assert result["closed_fences"] == 0
+        assert result["adjusted_headings"] == 0
+        assert ms.get_entry(parsed, "a")["text"] == "```\n## fenced heading\n```"
+
+    def test_unclosed_fence_in_a_description_is_closed(self):
+        parsed = ms.parse("# Cats\n## a\ntext\n")
+        result = ms.set_category_description(parsed, "Cats", "```")
+        assert result["closed_fences"] == 1
+        reparsed = ms.parse("\n".join(ms.serialize(parsed)))
+        assert [e["name"] for e in ms.list_entries(reparsed)] == ["a"]
+        assert ms.get_category_description(reparsed, "Cats") == "```\n```"
+
+    def test_create_category_closes_an_unclosed_description_fence(self):
+        parsed = ms.parse("## a\ntext\n")
+        result = ms.create_category(parsed, "Code", "```js")
+        assert result["closed_fences"] == 1
+        assert ms.list_categories(parsed) == ["Code"]
+
+    def test_crlf_body_text_is_stored_with_lf_only(self):
+        parsed = ms.parse("")
+        result = ms.upsert_entry(parsed, "a", "one\r\ntwo\rthree")
+        assert result["text"] == "one\ntwo\nthree"
+        assert ms.get_entry(parsed, "a")["text"] == "one\ntwo\nthree"
+
+
+class TestReconcileWithTheFile:
+    def test_an_edit_below_a_hand_edited_open_fence_is_refused_not_lost(self):
+        # A hand-edited file with one ``` left open: anything appended after
+        # it would read back as fenced body text and vanish on reload.
+        parsed = ms.parse("## a\n```\nstill open\n")
+        with pytest.raises(ms.UnrepresentableEditError, match="line 2"):
+            ms.upsert_entry(parsed, "b", "text")
+        with pytest.raises(ms.UnrepresentableEditError, match="line 2"):
+            ms.create_category(parsed, "Cats")
+
+    def test_a_refused_edit_leaves_the_model_exactly_as_it_was(self):
+        parsed = ms.parse("## a\n```\nstill open\n")
+        before = ms.serialize(parsed)
+        with pytest.raises(ms.UnrepresentableEditError):
+            ms.create_category(parsed, "Cats", "desc")
+        assert ms.serialize(parsed) == before
+        assert ms.list_categories(parsed) == []
+
+    def test_fixing_the_fence_in_the_file_makes_the_same_edit_succeed(self):
+        parsed = ms.parse("## a\n```\nclosed\n```\n")
+        ms.upsert_entry(parsed, "b", "text")
+        reparsed = ms.parse("\n".join(ms.serialize(parsed)))
+        assert [e["name"] for e in ms.list_entries(reparsed)] == ["a", "b"]
+
+    def test_removing_one_of_two_duplicate_entries_surfaces_the_other(self):
+        parsed = ms.parse("## dup\nfirst\n## dup\nsecond\n")
+        assert [e["name"] for e in ms.list_entries(parsed)] == ["dup"]
+        assert ms.remove_entry(parsed, "dup") is True
+        # The file now holds exactly one "dup", so the model must show it too
+        # instead of reporting an empty notebook until the next reload.
+        assert [e["name"] for e in ms.list_entries(parsed)] == ["dup"]
+        assert ms.get_entry(parsed, "dup")["text"] == "second"
+        assert ms.serialize(parsed) == ["## dup", "second"]
+
+    def test_the_model_always_equals_the_reparse_of_its_own_file(self):
+        # The fuzz that found the defects, kept small and seeded so it runs in
+        # well under a second and fails the same way every time.
+        import inspect
+        import random
+
+        rng = random.Random(20261113)
+        atoms = ["# ", "## ", "### ", "#", " # x", "```", "text", "", " ", "## dup", "## dup", "# cat",
+                 "# cat", "##", "   ## indented", "\t## tabbed", "## trailing ##", "## a:b", "## été"]
+        names = ["a", "b", "dup", "cat", "new", "x y", "名字", "a/b", "*"]
+        texts = ["", "hello", "multi\nline", "## heading inside", "# top", "```\n## fenced\n```", "```", "a\r\nb"]
+        ops = [ms.upsert_entry, ms.remove_entry, ms.create_category, ms.set_category_description,
+               ms.set_category_name, ms.move_entry, ms.move_category, ms.delete_category]
+
+        def arg_for(pname):
+            if pname in ("text", "description"):
+                return rng.choice(texts)
+            if pname == "name":
+                return rng.choice(names)
+            return rng.choice([None, rng.choice(names)])
+
+        def snapshot(p):
+            return (ms.list_entries(p), ms.list_categories(p),
+                    [ms.get_entry(p, e["name"])["text"] for e in ms.list_entries(p)])
+
+        checked = 0
+        for _ in range(250):
+            text = "\n".join(rng.choice(atoms) for _ in range(rng.randint(0, 12)))
+            parsed = ms.parse(text)
+            for _ in range(rng.randint(1, 4)):
+                op = rng.choice(ops)
+                kwargs = {}
+                for pname, param in inspect.signature(op).parameters.items():
+                    if pname == "parsed":
+                        continue
+                    if param.default is inspect.Parameter.empty or rng.random() < 0.5:
+                        kwargs[pname] = arg_for(pname)
+                try:
+                    op(parsed, **kwargs)
+                except (ms.MarkdownStoreError, ValueError):
+                    continue
+                reparsed = ms.parse("\n".join(ms.serialize(parsed)))
+                assert snapshot(parsed) == snapshot(reparsed), (text, op.__name__, kwargs)
+                checked += 1
+        assert checked > 200
