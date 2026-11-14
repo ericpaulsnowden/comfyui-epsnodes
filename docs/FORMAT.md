@@ -2094,7 +2094,16 @@ is the functional core WITHOUT the grid.
   `OUTPUT_IS_LIST` like every other output — outputs are positional, so
   the ceiling is 8 images total, the §6.11 Distributor precedent),
   frontend-revealed to the highest wired `image_N` (true tail
-  add/remove, link-guarded). Semantics: every wired image is resized
+  add/remove, link-guarded). The revealed set is always CONTIGUOUS
+  (`resized_2..k`): the trim removes only an unwired tail and stops at
+  the first wired output from the top (that output and everything below
+  it stay, even above the highest wired `image_N`), because
+  `removeOutput` renumbers every later link's `origin_slot` and a hole
+  would re-point a consumer at the wrong backend slot; growing appends
+  in order. A disordered or holey set from an older save is repaired
+  on reveal (the deferred converge, after configure resolved the links):
+  the outputs are reordered in place by name and each link's
+  `origin_slot` follows, so a wire on the label `resized_4` stays on it. Semantics: every wired image is resized
   with the SAME settings — `resized_image` carries `image`'s result,
   `resized_k` carries `image_k`'s; an unwired `image_k` whose
   `resized_k` output exists emits a per-run `[ExecutionBlocker(None)]`
@@ -2103,7 +2112,11 @@ is the functional core WITHOUT the grid.
   `original_height` — emit blockers (owner: "disable the original
   width/height"; with N inputs there is no one original), and a `0`
   width/height derives from the FIRST wired image's aspect, applied to
-  ALL (same target for everyone — the ask's whole point). Preset
+  ALL (same target for everyone — the ask's whole point). That shared
+  target is derived ONCE (0-axis derivation, ratio lock, then
+  `multiple_of` rounding) and every image is resized into that exact
+  box with no second ratio pass, so each stretch/crop/pad result's
+  dimensions equal the reported `width`/`height`. Preset
   fan-out composes: each output stays one list element per selected
   preset.
 - **`Show original size` is now COSMETIC suppression (v0.61.0), not real

@@ -3866,9 +3866,55 @@ function convergeExtraImageInputs(node) {
   }
 }
 
-/** Reveal resized_N tail outputs through the highest wired image_N -- TRUE
- * add/remove is safe here because they are the genuine tail (appended
- * after original_height, §8). A wired resized_N is never removed. */
+const RESIZED_NAME_RE = /^resized_(\d+)$/
+
+/** Repair a resized_N set saved by a build that could shuffle it (an old
+ * trim removed an unwired resized_3 under a wired resized_4, or re-added it
+ * at the end): outputs are positional, so the on-node order must be the
+ * backend's resized_2..k. The label is the user's intent (a wire on
+ * "resized_4" means image_4's result), so the outputs are REORDERED IN
+ * PLACE by name -- never removeOutput/addOutput-and-reconnect, because
+ * removeOutput disconnects the slot -- and every link riding a moved output
+ * gets its origin_slot rewritten to the new index. Missing members up to
+ * the highest wired image_N / highest linked resized_N are appended first.
+ * Runs only from the deferred converge, i.e. after configure has resolved
+ * the links (the v0.16.0 reentrancy lesson). */
+function repairResizedOrder(node, highestWired) {
+  const outputs = node.outputs || []
+  const slots = []
+  let wantThrough = highestWired
+  outputs.forEach((output, idx) => {
+    const match = RESIZED_NAME_RE.exec(output?.name || '')
+    if (!match) return
+    slots.push({ idx, n: Number(match[1]) })
+    if (isOutputConnected(output)) wantThrough = Math.max(wantThrough, Number(match[1]))
+  })
+  const names = slots.map((slot) => slot.n)
+  const contiguous = names.every((n, i) => n === i + 2)
+  if (contiguous && names.length >= wantThrough - 1) return
+  for (let n = 2; n <= wantThrough; n++) {
+    if (!names.includes(n)) node.addOutput(`${RESIZED_PREFIX}${n}`, 'IMAGE')
+  }
+  const tail = node.outputs.filter((output) => RESIZED_NAME_RE.test(output?.name || ''))
+  const first = node.outputs.findIndex((output) => RESIZED_NAME_RE.test(output?.name || ''))
+  tail.sort((x, y) => Number(RESIZED_NAME_RE.exec(x.name)[1]) - Number(RESIZED_NAME_RE.exec(y.name)[1]))
+  node.outputs.splice(first, tail.length, ...tail)
+  const links = node.graph?._links ?? node.graph?.links
+  tail.forEach((output, i) => {
+    for (const id of output.links || []) {
+      const link = links?.get ? links.get(id) : links?.[id]
+      if (link) link.origin_slot = first + i
+    }
+  })
+}
+
+/** Reveal resized_N tail outputs through the highest wired image_N. The
+ * outputs are positional and removeOutput() renumbers every later link's
+ * origin_slot, so the resized_N set is kept CONTIGUOUS (resized_2..k): the
+ * trim only removes an unwired tail and stops at the first wired output
+ * (a wired resized_N and everything below it stays, even above the highest
+ * wired image_N), and growing appends in order -- never a hole, never an
+ * output above a missing lower slot (FORMAT.md §6.5). */
 function revealExtraOutputs(node) {
   ensureOriginalSizeOutputs(node) // the pair must occupy slots 4-5 FIRST
   let highest = 1
@@ -3876,14 +3922,17 @@ function revealExtraOutputs(node) {
     const match = EXTRA_IMAGE_RE.exec(input?.name || '')
     if (match && input.link != null) highest = Math.max(highest, Number(match[1]))
   }
+  repairResizedOrder(node, highest)
+  for (let n = MAX_IMAGES; n > highest && n >= 2; n--) {
+    const idx = outputIndexByName(node, `${RESIZED_PREFIX}${n}`)
+    if (idx === -1) continue
+    if (isOutputConnected(node.outputs[idx])) break
+    node.removeOutput(idx)
+  }
   for (let n = 2; n <= highest; n++) {
     if (outputIndexByName(node, `${RESIZED_PREFIX}${n}`) === -1) {
       node.addOutput(`${RESIZED_PREFIX}${n}`, 'IMAGE')
     }
-  }
-  for (let n = MAX_IMAGES; n > highest && n >= 2; n--) {
-    const idx = outputIndexByName(node, `${RESIZED_PREFIX}${n}`)
-    if (idx !== -1 && !isOutputConnected(node.outputs[idx])) node.removeOutput(idx)
   }
   resyncSize(node)
 }

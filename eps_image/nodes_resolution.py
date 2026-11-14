@@ -477,9 +477,10 @@ def _resolve_run(
     mode or which image(s) are wired -- it is not a per-preset field (see
     :meth:`EPSResolution.resolve`), so it is threaded through every
     :func:`_resolve_one` call here, including the MULTI-mode box probe:
-    the box itself gets conformed once, and re-conforming it again per
-    image below is a provable no-op (the box already satisfies the ratio),
-    never a second, possibly-different answer.
+    the box is derived ONCE (ratio lock, then multiple_of rounding) and
+    every image is resized into that exact box by :func:`_resize_into_box`
+    -- no second ratio pass, so each stretch/crop/pad result equals the
+    reported `width`/`height` exactly.
     """
     if not extra_images:
         base = _resolve_one(
@@ -520,9 +521,17 @@ def _resolve_run(
     def _resized(img: Any) -> Any:
         if img is None:
             return _execution_blocker()
-        return _resolve_one(
-            target_w, target_h, resize_method, interpolation, multiple_of, img, ratio
-        )[1]
+        width_px, height_px = _image_size(img)
+        return _resize_into_box(
+            img,
+            target_w,
+            target_h,
+            resize_method,
+            interpolation,
+            multiple_of,
+            width_px,
+            height_px,
+        )[0]
 
     blocker = _execution_blocker()
     tail = tuple(_resized(extra_images.get(index)) for index in range(2, 9))
@@ -568,6 +577,55 @@ class _FlexibleResolutionOptional(dict):
                 },
             )
         raise KeyError(key)
+
+
+def _resize_into_box(
+    image: Any,
+    target_w: int,
+    target_h: int,
+    resize_method: str,
+    interpolation: str,
+    multiple_of: int,
+    original_width: int,
+    original_height: int,
+) -> tuple[Any, int, int]:
+    """Resize *image* into the concrete box *target_w* x *target_h* per
+    *resize_method*; returns ``(resized, final_w, final_h)``. The ONE place
+    a resize happens -- :func:`_resolve_one` (single image) and the
+    multi-image path both call it, the latter with the shared box it
+    derived once, so no resize ever re-applies the ratio lock to a box that
+    already went through it."""
+    if resize_method == "keep aspect (fit)":
+        # Fit into the box FIRST, then FLOOR to the multiple so the
+        # constraint can never push a fitted axis back above the box
+        # (see _floor_to_multiple for the concrete failure it avoids).
+        # multiple_of inevitably perturbs the exact aspect slightly;
+        # that is the documented cost of opting into a size constraint,
+        # and flooring keeps the perturbation on the safe (smaller,
+        # still-contained) side.
+        fit_w, fit_h = _fit_dimensions(original_width, original_height, target_w, target_h)
+        final_w = _floor_to_multiple(fit_w, multiple_of)
+        final_h = _floor_to_multiple(fit_h, multiple_of)
+    else:
+        # stretch / crop to fill / pad target the box itself, so the
+        # output equals the (nearest-rounded) box exactly -- crop
+        # absorbs any aspect change via center-crop, pad via letterbox,
+        # stretch has no aspect to keep, so nearest-round is right here.
+        final_w = _round_to_multiple(target_w, multiple_of)
+        final_h = _round_to_multiple(target_h, multiple_of)
+
+    if resize_method == "crop to fill":
+        resized_image = _resize_tensor(image, final_w, final_h, interpolation, "center")
+    elif resize_method == "pad":
+        fit_w, fit_h = _fit_dimensions(original_width, original_height, final_w, final_h)
+        fitted = _resize_tensor(image, fit_w, fit_h, interpolation, "disabled")
+        resized_image = _pad_to(fitted, final_w, final_h)
+    else:
+        # "stretch" and "keep aspect (fit)" both land here: fit has
+        # already replaced final_w/final_h with the floored fitted size
+        # above, so a plain no-crop resize to that size is exactly right.
+        resized_image = _resize_tensor(image, final_w, final_h, interpolation, "disabled")
+    return resized_image, final_w, final_h
 
 
 def _resolve_one(
@@ -662,36 +720,16 @@ def _resolve_one(
     final_w, final_h = target_w, target_h
 
     if image is not None and target_w > 0 and target_h > 0:
-        if resize_method == "keep aspect (fit)":
-            # Fit into the box FIRST, then FLOOR to the multiple so the
-            # constraint can never push a fitted axis back above the box
-            # (see _floor_to_multiple for the concrete failure it avoids).
-            # multiple_of inevitably perturbs the exact aspect slightly;
-            # that is the documented cost of opting into a size constraint,
-            # and flooring keeps the perturbation on the safe (smaller,
-            # still-contained) side.
-            fit_w, fit_h = _fit_dimensions(original_width, original_height, target_w, target_h)
-            final_w = _floor_to_multiple(fit_w, multiple_of)
-            final_h = _floor_to_multiple(fit_h, multiple_of)
-        else:
-            # stretch / crop to fill / pad target the box itself, so the
-            # output equals the (nearest-rounded) box exactly -- crop
-            # absorbs any aspect change via center-crop, pad via letterbox,
-            # stretch has no aspect to keep, so nearest-round is right here.
-            final_w = _round_to_multiple(target_w, multiple_of)
-            final_h = _round_to_multiple(target_h, multiple_of)
-
-        if resize_method == "crop to fill":
-            resized_image = _resize_tensor(image, final_w, final_h, interpolation, "center")
-        elif resize_method == "pad":
-            fit_w, fit_h = _fit_dimensions(original_width, original_height, final_w, final_h)
-            fitted = _resize_tensor(image, fit_w, fit_h, interpolation, "disabled")
-            resized_image = _pad_to(fitted, final_w, final_h)
-        else:
-            # "stretch" and "keep aspect (fit)" both land here: fit has
-            # already replaced final_w/final_h with the floored fitted size
-            # above, so a plain no-crop resize to that size is exactly right.
-            resized_image = _resize_tensor(image, final_w, final_h, interpolation, "disabled")
+        resized_image, final_w, final_h = _resize_into_box(
+            image,
+            target_w,
+            target_h,
+            resize_method,
+            interpolation,
+            multiple_of,
+            original_width,
+            original_height,
+        )
     else:
         # Pure size-source path (no image, or nothing left to derive):
         # multiple_of still applies so this node is useful standalone.
