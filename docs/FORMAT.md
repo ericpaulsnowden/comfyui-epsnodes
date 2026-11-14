@@ -85,11 +85,17 @@ target raises `FileExistsError` even though POSIX rename replaces — so every
 save to an existing notebook there failed. Both atomic writers
 (`lora_library/context.py::_atomic_write_text`,
 `eps_image/image_grid_store.py::_atomic_write_bytes` — deliberate twins)
-now fall back: unlink the target, retry the rename, and if rename STILL
-fails, direct-write the new content so the target can never stay gone (the
-outer cleanup would otherwise delete the temp too, losing both versions).
-Ordinary filesystems never enter the fallback; the atomic path is
-unchanged there.
+now fall back: move the original aside to a sibling `<name>.<hex>.bak`
+(a plain rename to a NEW name works on gvfs), rename the temp into place,
+then delete the backup. If that rename fails too, the new content is written
+directly into the (free) target; if that also fails the original is moved
+back and the save raises, so the previous file is intact. (Until 2026-11-13
+the fallback unlinked the original and direct-wrote on failure; a share
+dropping mid-save could lose both versions.) If even the move-back fails,
+neither file is deleted and the raised `AtomicSaveError` (an `OSError`) names
+the `.bak` and `.tmp` paths that hold the two complete copies. At every
+point at least one complete version is on disk. Ordinary filesystems never
+enter the fallback; the single `os.replace` is unchanged there.
 
 **Library on a NAS (v0.74.0, 2026-08-22).** Every read of this folder may
 be a network round trip, so the server (a) performs every library-folder
@@ -310,6 +316,24 @@ the server refuses with `409 {"error", "mtime"}` and writes nothing; the UI
 offers reload-then-reapply. Omitting `base_mtime` skips the check (first
 save to a brand-new file).
 
+**The mtime always describes the contents it came with.** A loader reads the
+text and takes the mtime from the SAME open handle (`os.fstat(fh.fileno())`),
+never from a second `stat` of the path: an atomic save landing between the
+two would otherwise return the old text stamped with the new file's mtime,
+and a later edit would pass the check and overwrite that save.
+`markdown_store.load_notebook`, `lora_picker_store.load_state` and
+`resolution_presets_store.load_presets` follow this. (The set / Universal
+State / config loaders `stat` BEFORE they read and key a cache on it, which
+fails safe: a newer file just re-reads.)
+
+**A failed save is a JSON 5xx.** A notebook save that fails at the OS level
+(read-only share → `PermissionError`, full disk, disconnected mount) answers
+`500 {"error": "could not write <path>: <OS error>"}` and leaves the file as
+it was — `markdown_store.NotebookWriteError`, raised by `save_notebook`; the
+six mutating routes map any `MarkdownStoreError` to its `status` (400 for
+validation, 500 for this). Same shape and status as the layout-sidecar routes'
+`could not write the … layout`.
+
 **Within one server, each mutation is one locked transaction (v0.107.0; 2026-09-13
 release review #3).** The check above only compares mtimes. Every
 notebook mutation route used to load, check, mutate and save as four separate
@@ -320,8 +344,13 @@ touched different entries.
 - **What is locked.** All six routes (`entry`, `category`, `delete`, `move`,
   `move_category`, `delete_category`) now run the whole sequence inside ONE
   `asyncio.to_thread` call while holding `path_locks.lock_for(path)`. That is
-  a `threading.Lock` keyed on `realpath` plus `normcase`, and it is resolved
-  in the worker because a NAS `realpath` can block.
+  a `threading.Lock` found by file identity (`st_dev`, `st_ino`) when the file
+  exists, else by the `realpath` + `normcase` string, and it is resolved in
+  the worker because a NAS `realpath` can block. Identity is what makes
+  `Loras.md` and `loras.md` one lock on a case-insensitive macOS volume
+  (`normcase` folds case on Windows only). Residual window: two requests
+  CREATING the same new file under differently-cased spellings have no inode
+  yet and can hold different locks; later calls converge.
 - **The effect.** A request that overlaps another now gets an honest 409 (its
   base really is stale by then) and the panel's Reload/Overwrite banner.
   Each request re-reads the file under the lock, so even where a
@@ -507,7 +536,8 @@ Mostly under `/lora_library/`; the `eps_image/` node families register their
 own prefixes (`/eps_ckpt/`, `/eps_image_grid/`, `/eps_frame_saver/`,
 `/eps_resolution/`, `/eps/` — summarized at the foot of the table, each
 documented in full in its §6.x section). JSON in/out; errors are `{"error":
-"<human message>"}` with a 4xx status. `mtime` values are float POSIX seconds.
+"<human message>"}` with a 4xx status (5xx when the server could not write,
+e.g. a read-only share, §3.5). `mtime` values are float POSIX seconds.
 
 | Route | → |
 |---|---|

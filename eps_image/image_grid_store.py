@@ -139,6 +139,47 @@ def is_valid_grid_uuid(value: Any) -> bool:
 # ------------------------------------------------------------- atomic writes
 
 
+class AtomicSaveError(OSError):
+    """A save failed leaving a complete copy of the data under a name other
+    than the target; the message names it and it is NOT cleaned up."""
+
+
+def _replace_over_existing(tmp_name: str, path: Path, data: bytes) -> None:
+    """Twin of ``lora_library.context._replace_over_existing`` (see there for
+    the gvfs/FUSE rationale): move the original aside by plain rename, put
+    the temp in place, restore the original if that fails -- at least one
+    complete version always exists on disk."""
+    backup = f"{path}.{os.urandom(4).hex()}.bak"
+    try:
+        os.rename(path, backup)
+    except FileNotFoundError:
+        backup = ""
+    try:
+        try:
+            os.replace(tmp_name, path)
+        except OSError:
+            # A mount where even a rename to a free name fails: the last
+            # resort is a direct write into the now-free target. The
+            # original is safe in the backup meanwhile.
+            Path(path).write_bytes(data)
+    except OSError as exc:
+        if backup:
+            with contextlib.suppress(OSError):
+                os.unlink(path)  # a partial direct write, if any
+            try:
+                os.rename(backup, path)
+            except OSError as restore_exc:
+                raise AtomicSaveError(
+                    f"could not save {path}: {exc}; the previous version is at "
+                    f"{backup} and the new one at {tmp_name} (restore failed: "
+                    f"{restore_exc})"
+                ) from exc
+        raise
+    if backup:
+        with contextlib.suppress(OSError):
+            os.unlink(backup)
+
+
 def _atomic_write_bytes(path: Path, data: bytes) -> None:
     """*data* to *path* via a same-directory temp file + ``os.replace``.
 
@@ -155,26 +196,9 @@ def _atomic_write_bytes(path: Path, data: bytes) -> None:
         try:
             os.replace(tmp_name, path)
         except FileExistsError:
-        # gvfs/FUSE network mounts (owner's Linux box, 2026-08-25:
-        # /run/user/1000/gvfs/smb-share:...) reject rename-over-existing
-        # with EEXIST even though POSIX rename replaces -- so EVERY save to
-        # an already-existing file on such a mount failed. Fall back to
-        # unlink + replace: a tiny non-atomic window in which the target is
-        # briefly missing, strictly better than the save always failing.
-        # No data is at risk in the window -- the temp file next to the
-        # target already holds the complete new content, and a crash inside
-        # the window leaves that .tmp recoverable in the same directory.
-            with contextlib.suppress(FileNotFoundError):
-                os.unlink(path)
-            try:
-                os.replace(tmp_name, path)
-            except OSError:
-                # The target is unlinked at this point -- if the rename
-                # STILL fails, a direct write is the last resort that
-                # leaves the target present with the full new content
-                # (the outer cleanup would otherwise delete the temp too,
-                # losing both versions).
-                Path(path).write_bytes(data)
+            _replace_over_existing(tmp_name, path, data)
+    except AtomicSaveError:
+        raise
     except BaseException:
         with contextlib.suppress(OSError):
             os.unlink(tmp_name)

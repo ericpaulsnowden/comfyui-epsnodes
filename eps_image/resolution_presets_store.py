@@ -57,6 +57,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from pathlib import Path
 
 try:
@@ -278,6 +279,9 @@ def load_presets(context: LibraryContext) -> tuple[dict[str, dict], float | None
     try:
         with open(path, encoding="utf-8") as fh:
             raw_text = fh.read()
+            # Same handle as the text (FORMAT.md §3.5): a save landing
+            # after the read must not pair old contents with a new mtime.
+            mtime = os.fstat(fh.fileno()).st_mtime
     except FileNotFoundError:
         return {}, None
     # UnicodeDecodeError included (review 2026-08-09, found via the picker
@@ -296,11 +300,6 @@ def load_presets(context: LibraryContext) -> tuple[dict[str, dict], float | None
             return {}, path.stat().st_mtime
         except OSError:
             return {}, None
-
-    try:
-        mtime = path.stat().st_mtime
-    except OSError:
-        mtime = None
 
     try:
         data = json.loads(raw_text)
