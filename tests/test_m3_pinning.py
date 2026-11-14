@@ -1,5 +1,5 @@
 """Provenance M3 -- full pinning (FORMAT.md §6.14, roadmap
-``docs/ROADMAP-run-provenance.md``): EPS Save Image captures Prompt Notebook
+``docs/plan/ROADMAP-run-provenance.md``): EPS Save Image captures Prompt Notebook
 / Apply LoRA Set pins FROM THE STORES at save time (through the same
 helpers the nodes' run paths use) and bakes them into those nodes'
 TAIL-appended ``pinned`` / ``pinned_state`` widgets in the workflow chunk

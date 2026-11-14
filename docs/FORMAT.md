@@ -3193,7 +3193,7 @@ add; single batch-aware IMAGE input; disk-backed, survive-restart, NO cap.
   ComfyUI `/view?...` URL is appended by `{filename,subfolder,type}` ref
   with NO re-upload; anything else falls back to fetch + `/upload/image`.
   Fails soft if a future frontend renames the menu label.
-- **Bulk add (2026-07-29, owner ask — `docs/ROADMAP-image-grid-bulk-add.md`;
+- **Bulk add (2026-07-29, owner ask — `docs/plan/ROADMAP-image-grid-bulk-add.md`;
   "it's really hard to add many images to comfy," typical batch 20–100,
   ordering filename-numeric-aware):**
   - **"Add images…" button** (after Clear): a detached
@@ -3777,7 +3777,7 @@ was never built), the exact crash-a-consumer shape §6.9 forbids — and the
 v0.51.0 consumed-but-unwired guard now covers slot 7 (`model_low`) too.
 
 **Run tokens + `solo_run` (v0.67.0, provenance M1 — roadmap
-`docs/ROADMAP-run-provenance.md`, owner goal: "drop a single image
+`docs/plan/ROADMAP-run-provenance.md`, owner goal: "drop a single image
 from a set onto comfyui and recreate just that image"):** every
 `save_prefix` FILE component now ends with a run TOKEN built from pure
 1-based indices (owner's pinned choice over readable names — short,
@@ -4921,7 +4921,7 @@ skips odd shapes); one ticked checkpoint is untouched. Also documented by
 the same round's research: core holds CPU RAM ≈ N × checkpoint size for
 the whole queue (our list keeps the patchers alive; core's RAM-pressure
 eviction is structurally blind to live ModelPatcher entries) — inherent to
-the list design, roadmap `docs/ROADMAP-sweep-performance.md`.
+the list design, roadmap `docs/plan/ROADMAP-sweep-performance.md`.
 
 
 - **Separator-insensitive names (v0.71.0, §7.6; owner report 2026-08-22).**
@@ -5215,7 +5215,7 @@ and is gone; the bridges' root-only `findPllNodes`/`findDasiwaNodes` are
 marked unused (kept for their test pins, to be removed together).
 
 The answer to the owner's three LoRA-navigation pains (research round
-2026-08-09, roadmap `docs/ROADMAP-lora-picker.md`): the flat lora list,
+2026-08-09, roadmap `docs/plan/ROADMAP-lora-picker.md`): the flat lora list,
 no per-workflow "one folder + its subfolders" scope, and no favorites or
 recently-used anywhere in the ecosystem. Category `EPSNodes/LoRA`. Module
 `lora_library/nodes_picker.py`; panel `web/lora_library/picker.js`; store
@@ -5441,7 +5441,7 @@ contract for every other caller (tests pin both).
 
 
 NON-lora node in `eps_image/`, category "EPSNodes", class id `EPSSaveImage`
-frozen once shipped (§8). Provenance roadmap M2 (`docs/ROADMAP-run-
+frozen once shipped (§8). Provenance roadmap M2 (`docs/plan/ROADMAP-run-
 provenance.md`; owner goal 2026-08-18: "drop a single image from a set
 onto comfyui and recreate just that image"). Shipped v0.70.0.
 
@@ -5899,7 +5899,7 @@ with §6.2's lora controller, untouched; scope checkboxes per controller
 node, per workflow). `web/lora_library/universal_controller.js` — a
 FRONTEND-ONLY node on §6.2's architecture (`lusc-*` twin of `llsc-*`),
 backend §4.3 + `routes_universal_states.py`. Roadmap:
-`docs/ROADMAP-universal-state.md` (M3 cross-workflow diff, M4 risky
+`docs/plan/ROADMAP-universal-state.md` (M3 cross-workflow diff, M4 risky
 opt-ins, on the owner's word).
 
 - **The state registry (M0, the architecture decision).** Every
@@ -6317,7 +6317,7 @@ flag, `__epsMinWidthInstalled`; every panel imports it by its bare name.)
 This is the pack's hand-duplication convention leaking a fix for the third
 time (see also `_flushPendingNameEdit`, fixed in `controller.js` for v0.90.0
 and re-reported against `universal_controller.js` for v0.91.0). Until
-`docs/ROADMAP-shared-panel-code.md`'s milestones land, **grep `web/` for a
+`docs/plan/ROADMAP-shared-panel-code.md`'s milestones land, **grep `web/` for a
 helper's name before you finish fixing it** -- that grep is the only thing
 standing between a fix and its siblings.
 
@@ -6359,7 +6359,7 @@ copy") under an explicit snap-suppression guard.
 
 
 **One shared search module (v0.92.0 — the FIRST milestone of
-`docs/ROADMAP-shared-panel-code.md` to land as a real extraction; owner
+`docs/plan/ROADMAP-shared-panel-code.md` to land as a real extraction; owner
 decision 2026-09-08: "use Notebook as the model and make them all follow
 that paradigm").** Search had drifted four ways: `notebook.js` and
 `picker.js` implemented the same multi-word AND algorithm independently,
@@ -6591,7 +6591,7 @@ Class id `EPSBypass` (FROZEN, §8), category `EPSNodes/Utilities`.
   All-or-nothing: if a wire survives the unplug, everything is put back and
   the toggle returns to ON with a toast. Switching off with nothing wired
   does nothing and leaves any existing memory alone.
-- **Shared code is IMPORTED, not copied** (`docs/ROADMAP-shared-panel-code.md`:
+- **Shared code is IMPORTED, not copied** (`docs/plan/ROADMAP-shared-panel-code.md`:
   this pack's duplicated-helper fixes have missed siblings three times).
   `bypass.js` imports number_controller.js's `collectOutputTargets`,
   `disconnectAllTargets`, `reconnectRememberedTargets`,

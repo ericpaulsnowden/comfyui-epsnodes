@@ -243,7 +243,7 @@ function findWidget(node, name) {
 }
 
 // --- Empty selection -> dim every outgoing wire (file header). A BY-HAND
-// copy of switcher.js's all-off dimming (docs/ROADMAP-shared-panel-code.md);
+// copy of switcher.js's all-off dimming (docs/plan/ROADMAP-shared-panel-code.md);
 // `link.color` is never serialized, so this is always DERIVED. ---
 
 /** image_grid.js's dim grey -- the same "not really there" look. */

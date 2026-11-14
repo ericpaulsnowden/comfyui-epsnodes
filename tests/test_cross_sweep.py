@@ -752,7 +752,7 @@ class TestMultiplyDefaultsV0661:
 
 
 class TestRunTokensV0670:
-    """v0.67.0 provenance M1 (roadmap docs/ROADMAP-run-provenance.md).
+    """v0.67.0 provenance M1 (roadmap docs/plan/ROADMAP-run-provenance.md).
 
     Every emitted filename prefix ends with a run TOKEN built from pure
     indices (owner's pinned choice over readable names): sweep fragment

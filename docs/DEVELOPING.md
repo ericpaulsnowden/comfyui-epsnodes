@@ -274,7 +274,7 @@ ruff check .
    (§7.5).
 5. Shared-panel caveat: helpers such as `panelScale` and the group/category helpers
    are copied by hand between panels (the roadmap's census counted 119 source comments saying so), and fixes
-   have missed siblings (`docs/ROADMAP-shared-panel-code.md`). After fixing a helper, grep `web/` for its name
+   have missed siblings (`docs/plan/ROADMAP-shared-panel-code.md`). After fixing a helper, grep `web/` for its name
    and fix every copy. Already shared: `lora_library/api.js` (incl. `loggerFor(prefix)` -- each module binds its own
    `const { warn } = loggerFor(PREFIX)` -- and `showToast(...)`; do not hand-write `console.warn(PREFIX, ...)` or a
    `toast.add` helper), `search.js`, `panel_helpers.js` (`el`, `installMinWidth`),

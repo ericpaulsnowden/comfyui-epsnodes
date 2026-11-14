@@ -1637,7 +1637,7 @@ function wireRowRename(node) {
 // ---------------------------------------------------------------------------
 // All-off -> dim every outgoing wire (file header "All-off looks
 // unplugged"). image_grid.js's "Collect only" link dimming, copied BY HAND
-// (docs/ROADMAP-shared-panel-code.md: helpers are duplicated per file; grep
+// (docs/plan/ROADMAP-shared-panel-code.md: helpers are duplicated per file; grep
 // every sibling before calling one fixed). The cross-file convention is
 // distributor.js's: a link this file dims carries `LINK_COLOR_OWNER_KEY`,
 // so image_grid.js, distributor.js, bypass.js and save_image.js leave its

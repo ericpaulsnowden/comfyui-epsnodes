@@ -1,5 +1,5 @@
 """On-disk storage for EPSLoraPicker's favorites/recents (FORMAT.md §6.13,
-research round 2026-08-09, roadmap ``docs/ROADMAP-lora-picker.md``).
+research round 2026-08-09, roadmap ``docs/plan/ROADMAP-lora-picker.md``).
 
 ONE JSON file, ``lora_picker.json``, directly inside ``context.library_dir()``
 (no subdirectory — the same "exactly one file, not one per record" placement

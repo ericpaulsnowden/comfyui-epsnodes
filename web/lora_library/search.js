@@ -2,12 +2,12 @@
  * @file Shared search matcher for every LoRA-library / state panel
  * (FORMAT.md §7.2's search-field contract). The pack's first deliberate
  * shared-panel module -- the proof of concept for
- * docs/ROADMAP-shared-panel-code.md's "one implementation, not a fourth
+ * docs/plan/ROADMAP-shared-panel-code.md's "one implementation, not a fourth
  * copy" rule.
  *
  * Semantics (owner decision 2026-09-08: "use Notebook as the model and
  * make them all follow that paradigm", closing the product question
- * docs/ROADMAP-shared-panel-code.md left open): case-insensitive,
+ * docs/plan/ROADMAP-shared-panel-code.md left open): case-insensitive,
  * whitespace-split, every query word must appear somewhere in the
  * haystack -- AND across words, so a multi-word query narrows rather than
  * broadens. An empty/whitespace-only query matches everything. This is

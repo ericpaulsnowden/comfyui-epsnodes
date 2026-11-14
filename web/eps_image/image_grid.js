@@ -592,7 +592,7 @@
  * button out of a saved workflow's widget-value array; leaving it default
  * would insert an extra slot and risk desyncing that positional restore.
  *
- * ---- M1/M2 bulk add (docs/ROADMAP-image-grid-bulk-add.md, owner ask:
+ * ---- M1/M2 bulk add (docs/plan/ROADMAP-image-grid-bulk-add.md, owner ask:
  * "give the image grid an upload button ... multiselect") ----
  *
  * M1 adds "Add images…" right after Clear — a detached, lazily-created

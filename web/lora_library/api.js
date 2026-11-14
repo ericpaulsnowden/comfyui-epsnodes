@@ -10,7 +10,7 @@ import { api } from '../../../scripts/api.js'
 export { FRONTEND_VERSION } from './version.js'
 
 /**
- * Prefix-bound console logger (docs/ROADMAP-shared-panel-code.md M3). Before
+ * Prefix-bound console logger (docs/plan/ROADMAP-shared-panel-code.md M3). Before
  * this, `api.warn` was fixed to `[lora_library]` and every eps_image module
  * hand-wrote `warn(...)` (161 sites) or its own local copy.
  * Each module calls `const { warn } = loggerFor(PREFIX)` with its OWN prefix,
@@ -40,7 +40,7 @@ export const { warn, log } = loggerFor('[lora_library]')
 const TOAST_LIVES = { error: 6000, other: 3000 }
 
 /**
- * The ONE ComfyUI toast (docs/ROADMAP-shared-panel-code.md M3; replaces 14
+ * The ONE ComfyUI toast (docs/plan/ROADMAP-shared-panel-code.md M3; replaces 14
  * hand-copied helpers). Never throws: a toast is a nicety, never the reason
  * an action fails. Callers keep their own thin wrapper so the SUMMARY source
  * (node title / fixed string / argument) and call sites stay local.

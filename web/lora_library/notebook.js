@@ -3785,7 +3785,7 @@ function updateModeHint(state) {
  * searchWords() splits the query once per render, and entryMatchesSearch()
  * is the AND over a prebuilt haystack.
  *
- * v0.92.0 (docs/ROADMAP-shared-panel-code.md's shared-panel-code
+ * v0.92.0 (docs/plan/ROADMAP-shared-panel-code.md's shared-panel-code
  * milestone, owner decision 2026-09-08: "use Notebook as the model and
  * make them all follow that paradigm"): these three moved to `./search.js`
  * so picker.js/universal_controller.js/controller.js share this exact

@@ -1439,7 +1439,7 @@ class TestM3:
             assert got is expected, msg
 
     def test_lora_matches_search_delegates_to_the_shared_matcher(self, source: str) -> None:
-        """v0.92.0 (docs/ROADMAP-shared-panel-code.md, owner decision
+        """v0.92.0 (docs/plan/ROADMAP-shared-panel-code.md, owner decision
         2026-09-08: "use Notebook as the model and make them all follow
         that paradigm"): loraMatchesSearch used to be an independently
         written copy of notebook.js's entryMatchesSearch; it is now a
