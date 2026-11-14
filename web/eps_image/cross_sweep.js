@@ -780,7 +780,7 @@ function sourceCount(snapshot, link, path) {
       if (inner.error) return { count: 1, atLeast: true, srcId: id, error: inner.error }
       if (inner.count === 0 && !inner.atLeast) {
         const direct = resolveSource(snapshot, slotLink)
-        if (direct?.node && switcherIsStaticallyAllOff(snapshot, direct.node)) {
+        if (direct?.node && sourceIsStaticallyEmpty(snapshot, direct.node)) {
           continue // check_lazy_status's lazy skip: never requested, never blocks
         }
         return { count: 0, atLeast: false, srcId: id }
@@ -1100,6 +1100,19 @@ function sourceCount(snapshot, link, path) {
     const scaleMode = resolutionScaleModeActive(node.widgets?.scale_multiplier, liveInputs)
     const presets = scaleMode ? 1 : Math.max(1, resolutionPresetCount(node.widgets?.presets))
     return { count: mapLen * presets, atLeast, srcId: id }
+  }
+  // §6.11 EPSDistributor: a slot toggled OFF (`toggles` `{"out_N": false}`,
+  // absent = on -- nodes_distributor.py `_enabled_slots`) emits an
+  // ExecutionBlocker for that output, which blocks its consumer outright
+  // like any known-blocked source. The toggle key is the fixed backend
+  // name `out_N` whatever the socket is renamed to (renames are labels
+  // only). An ON slot falls through to the generic mapped-node rule below
+  // (the image input's count passes straight through).
+  if (type === 'EPSDistributor') {
+    const key = `out_${(resolved.slot ?? 0) + 1}`
+    if (parseToggles(node.widgets?.toggles)[key] === false) {
+      return { count: 0, atLeast: false, srcId: id }
+    }
   }
   // v0.68.0: ANY class whose list flags the adapter injected (from
   // `GET /eps/list_flags`) gets core's exact rule -- no allow-list needed
