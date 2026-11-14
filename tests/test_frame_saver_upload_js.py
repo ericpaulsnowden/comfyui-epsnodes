@@ -33,6 +33,7 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 FRAME_SAVER_JS = REPO_ROOT / "web" / "eps_image" / "frame_saver.js"
+PANEL_HELPERS_JS = REPO_ROOT / "web" / "lora_library" / "panel_helpers.js"
 
 NODE = shutil.which("node")
 
@@ -109,6 +110,9 @@ def upload_api(tmp_path_factory: pytest.TempPathFactory) -> dict:
     module_dir = layout / "extensions" / "comfyui-epsnodes" / "eps_image"
     module_dir.mkdir(parents=True)
     shutil.copyfile(FRAME_SAVER_JS, module_dir / "frame_saver.js")
+    helpers_dir = layout / "extensions" / "comfyui-epsnodes" / "lora_library"
+    helpers_dir.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(PANEL_HELPERS_JS, helpers_dir / "panel_helpers.js")
 
     probe = layout / "probe.mjs"
     probe.write_text(

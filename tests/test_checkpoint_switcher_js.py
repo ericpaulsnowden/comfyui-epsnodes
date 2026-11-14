@@ -46,6 +46,7 @@ CHECKPOINT_SWITCHER_JS = REPO_ROOT / "web" / "eps_image" / "checkpoint_switcher.
 PATH_HEAL_JS = REPO_ROOT / "web" / "lora_library" / "path_heal.js"
 API_JS = REPO_ROOT / "web" / "lora_library" / "api.js"
 VERSION_JS = REPO_ROOT / "web" / "lora_library" / "version.js"
+PANEL_HELPERS_JS = REPO_ROOT / "web" / "lora_library" / "panel_helpers.js"
 # 2026-11-05: the empty-selection dim imports the shared renderLink hook.
 OWNED_LINK_COLOUR_JS = REPO_ROOT / "web" / "eps_image" / "owned_link_colour.js"
 
@@ -221,6 +222,7 @@ def checkpoint_switcher_api(tmp_path_factory: pytest.TempPathFactory) -> dict:
     shutil.copyfile(PATH_HEAL_JS, lora_dir / "path_heal.js")
     shutil.copyfile(API_JS, lora_dir / "api.js")
     shutil.copyfile(VERSION_JS, lora_dir / "version.js")
+    shutil.copyfile(PANEL_HELPERS_JS, lora_dir / "panel_helpers.js")
 
     scripts = layout / "scripts"
     scripts.mkdir(parents=True, exist_ok=True)
@@ -605,17 +607,6 @@ def test_filter_input_keydown_stops_propagation(source: str) -> None:
 def test_min_node_width_floor_is_present(source: str) -> None:
     assert "const MIN_NODE_WIDTH = 320" in source
     assert "installMinWidth(state.node, MIN_NODE_WIDTH)" in source
-
-
-def test_width_floor_lifts_through_set_size_not_a_dead_is_array_guard(source: str) -> None:
-    """v0.68.1: `LGraphNode.size` is a Proxy over a typed-array view on the
-    installed frontend (1.48.7), never an Array, so installMinWidth's old
-    `Array.isArray(node.size)` lift never ran; the lift goes through
-    setSize() (litegraph's `_sizeUpdated` + the onResize wrap)."""
-    assert "Array.isArray(node.size)" not in source
-    body = _function_body(source, "installMinWidth(node, minWidth)")
-    assert "if (node.size && node.size[0] < minWidth)" in body
-    assert "node.setSize([minWidth, node.size[1]])" in body
 
 
 # ------------------------------------------- cross-OS spelling (FORMAT.md §7.6)

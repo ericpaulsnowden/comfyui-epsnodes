@@ -140,6 +140,7 @@ import { walkLiveNodes, walkGraphs } from './api.js'
 import * as pll from './pll_bridge.js'
 import * as dasiwa from './dasiwa_bridge.js'
 import { entryMatchesSearch, searchWords } from './search.js'
+import { el, installMinWidth } from './panel_helpers.js'
 
 /** Frozen once shipped -- mirrors the Python node's class id (§6.13). */
 export const CLASS_ID = 'EPSLoraPicker'
@@ -259,8 +260,8 @@ const SPLIT_MIN_TOP_PX = FIXED_SELECTED_ROWS * SELECTED_ROW_PX
 const SPLIT_MIN_BOTTOM_PX = 80
 
 /** ~360px floor (§6.13) -- same Linux-font-overflow rationale as every
- * DOM-widget node in this pack (FORMAT.md §7.2); self-contained
- * installMinWidth copy below, own guard flag. */
+ * DOM-widget node in this pack (FORMAT.md §7.2); enforced by the shared
+ * panel_helpers.js `installMinWidth`. */
 const MIN_NODE_WIDTH = 360
 
 const STYLE_TAG_ID = 'eps-lora-picker-styles'
@@ -571,27 +572,10 @@ function basename(name) {
   return idx === -1 ? name : name.slice(idx + 1)
 }
 
-// --- Tiny DOM builder (identical helper to every sibling web module --
-// controller.js's el() header explains the duplicated-by-hand convention). ---
-
-function el(tag, options = {}, children = []) {
-  const node = document.createElement(tag)
-  if (options.className) node.className = options.className
-  if (options.text !== undefined) node.textContent = options.text
-  if (options.attrs) {
-    for (const [key, value] of Object.entries(options.attrs)) node.setAttribute(key, value)
-  }
-  for (const child of children) {
-    if (child == null) continue
-    node.append(child instanceof Node ? child : document.createTextNode(String(child)))
-  }
-  return node
-}
-
 /**
  * A ComfyUI toast -- local copy of notebook.js's `toast()` / controller.js's
  * `_toast()` (same "duplicated by hand, no cross-module coupling"
- * convention as `el()` above). Fails soft: an older frontend without
+ * convention `el()` once had). Fails soft: an older frontend without
  * extensionManager.toast simply logs.
  */
 function toast(severity, summary, detail) {
@@ -691,24 +675,6 @@ function nodeClassOf(node) {
 
 function findWidget(node, name) {
   return node.widgets?.find((w) => w && w.name === name)
-}
-
-// --- Node width floor -- self-contained copy, own guard flag (see
-// controller.js's identical-shape installMinWidth for the house pattern). ---
-
-function installMinWidth(node, minWidth) {
-  if (!node || node.__epsLpMinWidthInstalled) return
-  node.__epsLpMinWidthInstalled = true
-  const originalOnResize = node.onResize
-  node.onResize = function (size) {
-    if (size && size[0] < minWidth) size[0] = minWidth
-    return originalOnResize?.call(this, size)
-  }
-  // v0.73.0: node.size is a Proxy over a typed array -- the old isArray guard was dead
-  // (§7.2 v0.68.1); lift through setSize so litegraph's size mirror runs.
-  if (node.size && node.size[0] < minWidth && typeof node.setSize === 'function') {
-    node.setSize([minWidth, node.size[1]])
-  }
 }
 
 // --- Node height policy -- the pure decision helpers (§6.13 height round,

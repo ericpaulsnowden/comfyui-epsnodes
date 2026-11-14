@@ -336,6 +336,7 @@
 
 import { api } from '../../../scripts/api.js'
 import { app } from '../../../scripts/app.js'
+import { el, installMinWidth } from '../lora_library/panel_helpers.js'
 
 /** FORMAT.md §6.7 — frozen once shipped. */
 const CLASS_ID = 'EPSFrameSaver'
@@ -499,28 +500,6 @@ function toast(node, severity, detail) {
 // helper, so this file follows suit rather than reaching into a sibling
 // family's module.
 // ---------------------------------------------------------------------------
-
-/**
- * @param {string} tag
- * @param {{className?: string, text?: string, attrs?: Record<string,string>}} [options]
- * @param {(Node|string)[]} [children]
- * @returns {HTMLElement}
- */
-function el(tag, options = {}, children = []) {
-  const node = document.createElement(tag)
-  if (options.className) node.className = options.className
-  if (options.text !== undefined) node.textContent = options.text
-  if (options.attrs) {
-    for (const [key, value] of Object.entries(options.attrs)) {
-      node.setAttribute(key, value)
-    }
-  }
-  for (const child of children) {
-    if (child == null) continue
-    node.append(child instanceof Node ? child : document.createTextNode(String(child)))
-  }
-  return node
-}
 
 /**
  * GET a JSON route. Resolves to parsed JSON; rejects with an Error whose
@@ -1073,30 +1052,8 @@ function createState(node, pathWidget, frameWidget) {
  *     comparable allowance forward, and rounding up since this is a
  *     proportionally bigger jump (twice the buttons) than that ~22px was
  *     ever stress-tested against, lands on 440.
- * Enforced by `installMinWidth` below, which only ever GROWS a node. */
+ * Enforced by `installMinWidth` (panel_helpers.js), which only ever GROWS a node. */
 const MIN_NODE_WIDTH = 440
-
-/** Twin of notebook.js/controller.js's installMinWidth (same rationale and
- * shape; each web module stays self-contained). */
-function installMinWidth(node, minWidth) {
-  if (!node || node.__epsMinWidthInstalled) return
-  node.__epsMinWidthInstalled = true
-  const originalOnResize = node.onResize
-  node.onResize = function (size) {
-    if (size && size[0] < minWidth) size[0] = minWidth
-    return originalOnResize?.call(this, size)
-  }
-  // v0.68.1 (2026-08-21): `node.size` is a Proxy over a typed-array view on
-  // this frontend (LGraphNode.ts `get size()`), never an Array -- the old
-  // `Array.isArray` guard was always false, so this lift of the
-  // CURRENT width (§7.2) never fired and only the onResize wrap above ever
-  // floored anything. setSize() runs litegraph's `_sizeUpdated` (the Vue
-  // layout mirror) and the wrap just installed, so it is the one safe path.
-  if (node.size && node.size[0] < minWidth) {
-    if (typeof node.setSize === 'function') node.setSize([minWidth, node.size[1]])
-    else node.size[0] = minWidth
-  }
-}
 
 function attachFillWidget(node, name, type, element, minHeight) {
   installMinWidth(node, MIN_NODE_WIDTH) // 2026-07-26 Linux fix

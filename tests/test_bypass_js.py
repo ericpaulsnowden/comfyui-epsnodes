@@ -40,6 +40,7 @@ WEB = REPO_ROOT / "web"
 BYPASS_JS = WEB / "eps_image" / "bypass.js"
 NUMBER_CONTROLLER_JS = WEB / "eps_image" / "number_controller.js"
 DISTRIBUTOR_JS = WEB / "eps_image" / "distributor.js"
+PANEL_HELPERS_JS = WEB / "lora_library" / "panel_helpers.js"
 
 NODE = shutil.which("node")
 
@@ -1026,6 +1027,7 @@ def probe(tmp_path_factory: pytest.TempPathFactory) -> dict:
     )
     lora_library = layout / "extensions" / "comfyui-epsnodes" / "lora_library"
     lora_library.mkdir(parents=True)
+    shutil.copyfile(PANEL_HELPERS_JS, lora_library / "panel_helpers.js")
     (lora_library / "api.js").write_text(
         # The real api.js hands every subscriber the flushed `entries`; the
         # probe delivers them straight to the (single, module-guarded) handler.
@@ -1577,14 +1579,14 @@ def test_shared_helpers_are_imported_not_copied(source: str) -> None:
         "reconnectRememberedTargets",
         "normalizeRememberedLinks",
         "hideValuesWidget",
-        "installMinWidth",
         "isOutputConnected",
     }
+    assert "import { installMinWidth } from '../lora_library/panel_helpers.js'" in source
     dist_import = re.search(r"import \{([^}]*)\} from './distributor\.js'", source)
     assert dist_import, "bypass.js must import from distributor.js"
     dist_names = {n.strip() for n in dist_import.group(1).split(",") if n.strip()}
     assert dist_names >= {"resolveAdoptedType", "LINK_COLOR_OWNER_KEY", "LINK_COLOR_RESYNC_HOOK"}
-    for name in (*imported, *dist_names):
+    for name in (*imported, *dist_names, "installMinWidth"):
         assert not re.search(rf"^(export )?(function|const) {name}\b", source, re.M), (
             f"{name} is imported AND redeclared in bypass.js"
         )
@@ -1600,7 +1602,6 @@ def test_the_shared_exports_exist_and_name_this_file(source: str) -> None:
         "disconnectAllTargets(node, idx)",
         "reconnectRememberedTargets(node, idx, remembered)",
         "hideValuesWidget(node, widget)",
-        "installMinWidth(node, minWidth)",
         "normalizeRememberedLinks(raw)",
     ):
         assert f"export function {name} {{" in nc, name
