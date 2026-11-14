@@ -607,7 +607,8 @@ favorites or recently-used anywhere in the ecosystem.
   and sets — point the library at a NAS and every machine sees the same
   stars. `＋ Add` is what stamps a lora recent.
   If a star can't be saved you always get an error toast and that star
-  flips back, even when you clicked several stars in quick succession.
+  flips back — only that one star, even when you clicked several in quick
+  succession.
 - **Outputs — Apply LoRA Set's exact five, so it drops in anywhere that
   node does:** `lora_stack` wires straight into the [EPS LoRA
   Iterator](#eps-lora-iterator-shipped) or any stack-consuming node;

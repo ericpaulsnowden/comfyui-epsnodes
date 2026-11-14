@@ -598,6 +598,9 @@ mode).** Two separate gaps, both closed:
    flushing any pending debounce — otherwise the entry draft is pruned by
    `pruneDraftsToSelection` and the category draft lingers under a name the
    file no longer has.
+   Every `drafts` read/write treats keys as OWN properties only
+   (`hasDraft`, `Object.fromEntries`), because an entry may legitimately be
+   named `__proto__` or `constructor`.
 2. **The open category PANE itself is now a node PROPERTY** (`Open
    category`, `PROP_OPEN_CATEGORY`) **— not just the draft text inside it.**
    Before this, `state.activeCategory` was a plain field on the `state`
