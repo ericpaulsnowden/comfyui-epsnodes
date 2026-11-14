@@ -11,10 +11,11 @@ from __future__ import annotations
 
 import copy
 import functools
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from .context import _atomic_write_text
+from .context import AtomicSaveError, _atomic_write_text
 
 
 class MarkdownStoreError(Exception):
@@ -23,7 +24,21 @@ class MarkdownStoreError(Exception):
     Always carries a human-readable message safe to surface verbatim
     (``routes_notebook.py`` does exactly that), same convention as
     ``sets_store.SetValidationError``.
+
+    ``status`` is the HTTP status the route answers with (400 unless a
+    subclass says otherwise).
     """
+
+    status = 400
+
+
+class NotebookWriteError(MarkdownStoreError):
+    """The save itself failed at the OS level (read-only share, full disk,
+    disconnected mount): a server-side failure, so ``status`` is 500, not
+    the 400 every other store error carries. The message names the file and
+    the OS error (FORMAT.md §3.6)."""
+
+    status = 500
 
 
 class InvalidEntryNameError(MarkdownStoreError):
@@ -1025,6 +1040,11 @@ def load_notebook(path: Path) -> tuple[ParsedNotebook, float | None, str]:
     try:
         with open(path, encoding="utf-8", newline="") as fh:
             raw = fh.read()
+            # mtime from the SAME open handle as the text: an atomic save
+            # (rename-over) landing after this read must not hand back the
+            # old contents stamped with the new file's mtime, or a later
+            # edit passes check_conflict and overwrites that save (§3.5).
+            mtime = os.fstat(fh.fileno()).st_mtime
     except FileNotFoundError:
         return parse(""), None, "\n"
     # Audit 2026-08-21: a file that EXISTS but cannot be read as a UTF-8
@@ -1036,7 +1056,6 @@ def load_notebook(path: Path) -> tuple[ParsedNotebook, float | None, str]:
     # and the read routes map below.
     except (OSError, ValueError) as exc:
         raise MarkdownStoreError(f"could not read {path.name}: {exc}") from exc
-    mtime = path.stat().st_mtime
     return parse(raw), mtime, detect_line_ending(raw)
 
 
@@ -1051,8 +1070,13 @@ def save_notebook(path: Path, parsed: ParsedNotebook, line_ending: str = "\n") -
     while lines and lines[-1] == "":
         lines.pop()
     text = (line_ending.join(lines) + line_ending) if lines else ""
-    _atomic_write_text(path, text)
-    return path.stat().st_mtime
+    try:
+        _atomic_write_text(path, text)
+        return path.stat().st_mtime
+    except AtomicSaveError as exc:
+        raise NotebookWriteError(str(exc)) from exc  # already names the file
+    except OSError as exc:
+        raise NotebookWriteError(f"could not write {path}: {exc}") from exc
 
 
 def check_conflict(base_mtime: float | None, current_mtime: float | None) -> None:

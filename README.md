@@ -304,7 +304,9 @@ captions).
   you since you loaded it. If it has (the other machine got there first),
   nothing is written — you get *File changed on disk* with **Reload** /
   **Overwrite** to resolve it yourself. Writes are atomic, and the file's
-  existing CRLF/LF style is preserved so cross-OS diffs stay clean.
+  existing CRLF/LF style is preserved so cross-OS diffs stay clean. If a save
+  fails (read-only share, full disk, dropped mount) the panel gets an error
+  naming the file and the cause, and the previous file is left untouched.
 - The workflow stores only the file path + selected entry name — never the
   text. The file is the truth; the node is a view.
 

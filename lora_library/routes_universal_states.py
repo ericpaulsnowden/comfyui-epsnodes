@@ -97,7 +97,7 @@ def register(context: LibraryContext, routes: web.RouteTableDef) -> None:
                 universal_states_store.save_layout, context, body["layout"]
             )
         except OSError as exc:
-            return error_response(500, f"could not write the universal states layout: {exc}")
+            return error_response(500, str(exc))
         return web.json_response({"ok": True, "layout": layout})
 
     @routes.get("/lora_library/universal_state")
@@ -137,6 +137,8 @@ def register(context: LibraryContext, routes: web.RouteTableDef) -> None:
             )
         except universal_states_store.StateValidationError as exc:
             return error_response(400, str(exc))
+        except OSError as exc:  # failed save: names the file and the cause
+            return error_response(500, str(exc))
         states = await asyncio.to_thread(universal_states_store.list_states, context)
         return web.json_response(
             {"ok": True, "slug": saved_slug, "states": states, "foreign": foreign}

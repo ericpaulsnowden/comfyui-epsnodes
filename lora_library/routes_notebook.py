@@ -375,7 +375,7 @@ def register(context: LibraryContext, routes: web.RouteTableDef) -> None:
                 markdown_store.load_notebook, path
             )
         except markdown_store.MarkdownStoreError as exc:
-            return error_response(400, str(exc))
+            return error_response(exc.status, str(exc))
         entries = markdown_store.list_entries(parsed)
         # §5 amendment (v0.53.0, owner ask 2026-08-08: a search field over
         # titles AND bodies): `include_text=1` adds each entry's body text
@@ -437,7 +437,7 @@ def register(context: LibraryContext, routes: web.RouteTableDef) -> None:
                 markdown_store.load_notebook, path
             )
         except markdown_store.MarkdownStoreError as exc:
-            return error_response(400, str(exc))
+            return error_response(exc.status, str(exc))
         description = markdown_store.get_category_description(parsed, name)
         if description is None:
             return error_response(404, f"no such category {name!r} in {path}")
@@ -490,7 +490,7 @@ def register(context: LibraryContext, routes: web.RouteTableDef) -> None:
         except markdown_store.ConflictError as exc:
             return web.json_response({"error": str(exc), "mtime": exc.current_mtime}, status=409)
         except markdown_store.MarkdownStoreError as exc:
-            return error_response(400, str(exc))
+            return error_response(exc.status, str(exc))
 
         response = {
             "ok": True,
@@ -519,7 +519,7 @@ def register(context: LibraryContext, routes: web.RouteTableDef) -> None:
                 markdown_store.load_notebook, path
             )
         except markdown_store.MarkdownStoreError as exc:
-            return error_response(400, str(exc))
+            return error_response(exc.status, str(exc))
         entry = markdown_store.get_entry(parsed, name)
         if entry is None:
             return error_response(404, f"no such entry {name!r} in {path}")
@@ -567,7 +567,7 @@ def register(context: LibraryContext, routes: web.RouteTableDef) -> None:
         except markdown_store.ConflictError as exc:
             return web.json_response({"error": str(exc), "mtime": exc.current_mtime}, status=409)
         except markdown_store.MarkdownStoreError as exc:
-            return error_response(400, str(exc))
+            return error_response(exc.status, str(exc))
 
         response = {
             "ok": True,
@@ -627,7 +627,7 @@ def register(context: LibraryContext, routes: web.RouteTableDef) -> None:
         except _NameNotFoundError as exc:
             return error_response(404, str(exc))
         except markdown_store.MarkdownStoreError as exc:
-            return error_response(400, str(exc))
+            return error_response(exc.status, str(exc))
 
         response = {
             "ok": True,
@@ -690,7 +690,7 @@ def register(context: LibraryContext, routes: web.RouteTableDef) -> None:
         except markdown_store.EntryNotFoundError as exc:
             return error_response(404, str(exc))
         except markdown_store.MarkdownStoreError as exc:
-            return error_response(400, str(exc))
+            return error_response(exc.status, str(exc))
 
         response = {
             "ok": True,
@@ -739,7 +739,7 @@ def register(context: LibraryContext, routes: web.RouteTableDef) -> None:
         except markdown_store.CategoryNotFoundError as exc:
             return error_response(404, str(exc))
         except markdown_store.MarkdownStoreError as exc:
-            return error_response(400, str(exc))
+            return error_response(exc.status, str(exc))
 
         return web.json_response(
             {
@@ -793,7 +793,7 @@ def register(context: LibraryContext, routes: web.RouteTableDef) -> None:
         except markdown_store.CategoryNotFoundError as exc:
             return error_response(404, str(exc))
         except markdown_store.MarkdownStoreError as exc:
-            return error_response(400, str(exc))
+            return error_response(exc.status, str(exc))
 
         return web.json_response(
             {
