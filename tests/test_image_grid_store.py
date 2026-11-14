@@ -582,6 +582,43 @@ class TestResolveUploadedPath:
     def test_rejects_unknown_type(self, fake_folder_paths: Path) -> None:
         assert store._resolve_uploaded_path("x.png", "", "not-a-real-type") is None
 
+    # Audit 2026-11-13: on Windows a drive-qualified filename REPLACES the
+    # directory it is joined to, and the containment check used to stop at
+    # the directory -- so every shape of absolute/relative Windows path must
+    # be refused on every OS, and the full path must be fenced too.
+    @pytest.mark.parametrize(
+        "filename",
+        [
+            "C:\\Users\\owner\\private.png",
+            "C:/Users/owner/private.png",
+            "C:private.png",
+            "\\\\server\\share\\private.png",
+            "sub\\x.png",
+            "..\\x.png",
+            "sub/x.png",
+            ".",
+            "..",
+            "x\x00.png",
+        ],
+    )
+    def test_rejects_every_non_plain_filename_shape(
+        self, fake_folder_paths: Path, filename: str
+    ) -> None:
+        assert store._resolve_uploaded_path(filename, "", "input") is None
+
+    @pytest.mark.parametrize("subfolder", ["/etc", "C:\\Windows", "\\\\server\\share"])
+    def test_rejects_an_absolute_subfolder(self, fake_folder_paths: Path, subfolder: str) -> None:
+        assert store._resolve_uploaded_path("x.png", subfolder, "input") is None
+
+    def test_full_path_is_fenced_even_when_the_pieces_look_plain(
+        self, fake_folder_paths: Path, fake_input_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Belt and braces: even if a future name slipped past the plain-name
+        # rule, the resolved FULL path must still sit under the base.
+        monkeypatch.setattr(store, "_is_plain_filename", lambda name: True)
+        assert store._resolve_uploaded_path("../escaped.png", "", "input") is None
+        assert store._resolve_uploaded_path("x.png", "", "input") == fake_input_dir / "x.png"
+
     def test_resolves_a_plain_filename_under_input(
         self, fake_folder_paths: Path, fake_input_dir: Path
     ) -> None:

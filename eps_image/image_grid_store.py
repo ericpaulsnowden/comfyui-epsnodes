@@ -98,7 +98,9 @@ from __future__ import annotations
 import contextlib
 import json
 import logging
+import ntpath
 import os
+import posixpath
 import re
 import shutil
 import tempfile
@@ -477,11 +479,9 @@ def _resolve_uploaded_path(filename: str, subfolder: str, source_type: str) -> P
     ``None`` for an unresolvable type or a path that would resolve outside
     it -- callers treat that exactly like "file not found".
     """
-    if not isinstance(filename, str) or not filename:
+    if not isinstance(filename, str) or not _is_plain_filename(filename):
         return None
-    if filename[0] in ("/", "\\") or ".." in filename:
-        return None
-    if not isinstance(subfolder, str) or ".." in subfolder:
+    if not isinstance(subfolder, str) or not _is_plain_subfolder(subfolder):
         return None
 
     import folder_paths  # ComfyUI's own module; only importable inside ComfyUI
@@ -490,11 +490,49 @@ def _resolve_uploaded_path(filename: str, subfolder: str, source_type: str) -> P
     if base is None:
         return None
 
-    full_dir = os.path.join(base, subfolder) if subfolder else base
-    full_dir_abs = os.path.abspath(full_dir)
-    if os.path.commonpath((full_dir_abs, base)) != base:
+    # Containment is checked on the FULL path, filename included, never on
+    # the directory alone: on Windows ``Path(dir) / "C:\\x.png"`` replaces
+    # the directory with the drive-qualified name, so a check that stopped
+    # at the directory let a LAN caller copy any image on the host into a
+    # readable grid buffer (audit 2026-11-13). `_is_plain_filename` already
+    # refuses such names; this is the second, independent fence.
+    base_abs = os.path.abspath(base)
+    full_abs = os.path.abspath(os.path.join(base_abs, subfolder, filename))
+    try:
+        common = os.path.commonpath((full_abs, base_abs))
+    except ValueError:  # different drives on Windows: nothing in common
         return None
-    return Path(full_dir_abs) / filename
+    if os.path.normcase(common) != os.path.normcase(base_abs):
+        return None
+    return Path(full_abs)
+
+
+def _is_plain_subfolder(subfolder: str) -> bool:
+    """``True`` for ``""`` or a RELATIVE folder path under both flavours: no
+    leading separator, no drive or UNC prefix, no ``..`` anywhere, no NUL --
+    the shape core's own ``/upload/image`` hands back. Judged with ``ntpath``
+    on every OS for the same reason as :func:`_is_plain_filename`."""
+    if subfolder == "":
+        return True
+    if "\x00" in subfolder or ".." in subfolder or subfolder[0] in ("/", "\\"):
+        return False
+    return not ntpath.splitdrive(subfolder)[0]
+
+
+def _is_plain_filename(name: str) -> bool:
+    """``True`` for exactly one path component under BOTH path flavours: no
+    separator, no drive (``C:x.png``, ``\\\\host\\share\\x.png``), not ``.``
+    or ``..``, no NUL. Judged with ``ntpath`` AND ``posixpath`` on every OS,
+    so an upload name is accepted or refused the same way on the owner's
+    Windows PC and the Linux box -- a backslash or a drive letter has no
+    legitimate meaning in a file the frontend just uploaded."""
+    if not name or "\x00" in name or name in (".", ".."):
+        return False
+    for flavour in (ntpath, posixpath):
+        drive, _tail = flavour.splitdrive(name)
+        if drive or flavour.dirname(name) or flavour.basename(name) != name:
+            return False
+    return True
 
 
 def append_uploaded_image(
