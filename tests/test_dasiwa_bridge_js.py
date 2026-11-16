@@ -13,11 +13,11 @@ GPL boundary (FORMAT.md §6.13 M4): the target node -- ComfyUI-DaSiWa-Nodes'
 ``DaSiWa_LTX2LoraLoader`` -- is GPL-3.0. The bridge is NEW code driven by
 that node's DATA format only; the source pins below hold that line: the
 attribution comment must record the schema's provenance, and the module
-must import nothing but the served ``scripts/app.js`` stub (never the clone).
+must import nothing at all (never the clone).
 
 Like ``test_pll_bridge_js.py``, the bridge's whole surface is drivable
-under Node in a served-layout tmp dir: ``app`` is the stubbed served module
-the bridge imports, and probe/write need only plain objects with a widgets
+under Node in a served-layout tmp dir: the bridge imports nothing, and
+probe/write need only plain objects with a widgets
 array, ``properties``, ``size``, and ``setDirtyCanvas`` -- so the mapping,
 the ±5 clamp, the loud-lossy ``{flattened, clamped}`` reporting, and the
 vs/as preservation all run for real rather than being source-pinned.
@@ -54,7 +54,6 @@ MSG_SHAPE_DRIFT = "DaSiWa Advanced LoRA Loader internals changed — send disabl
 
 PROBE_JS = """
 import * as m from './extensions/comfyui-epsnodes/lora_library/dasiwa_bridge.js'
-import { app } from './scripts/app.js'
 
 const TYPE = m.DASIWA_LOADER_TYPE
 
@@ -75,7 +74,6 @@ function fakeDasiwa(id, { properties = {}, widgets, size } = {}) {
 
 const out = {
   exports: {
-    hasFindDasiwaNodes: typeof m.findDasiwaNodes === 'function',
     hasProbeDasiwa: typeof m.probeDasiwa === 'function',
     hasRowsForDasiwa: typeof m.rowsForDasiwa === 'function',
     hasWriteRowsToDasiwa: typeof m.writeRowsToDasiwa === 'function'
@@ -83,13 +81,7 @@ const out = {
   loaderType: TYPE
 }
 
-app.graph = { _nodes: [] }
 out.probeNull = m.probeDasiwa(null)
-
-const high = fakeDasiwa(7)
-const low = fakeDasiwa(3)
-app.graph = { _nodes: [high, low, { id: 5, type: 'SomeOtherNode' }] }
-out.findOrder = m.findDasiwaNodes().map((node) => node.id)
 
 out.probeWrongType = m.probeDasiwa({ id: 9, type: 'SomeOtherNode', widgets: [] })
 out.probeNoWidget = m.probeDasiwa(fakeDasiwa(20, { widgets: [] }))
@@ -247,11 +239,7 @@ def bridge_api(tmp_path_factory: pytest.TempPathFactory) -> dict:
     module_dir = layout / "extensions" / "comfyui-epsnodes" / "lora_library"
     module_dir.mkdir(parents=True)
     shutil.copyfile(BRIDGE_JS, module_dir / "dasiwa_bridge.js")
-    # dasiwa_bridge.js imports only `../../../scripts/app.js` -- stub it
-    # exactly as test_pll_bridge_js.py does; the probe mutates `app.graph`.
-    scripts = layout / "scripts"
-    scripts.mkdir(parents=True, exist_ok=True)
-    (scripts / "app.js").write_text("export const app = {}\n", encoding="utf-8")
+    # dasiwa_bridge.js imports nothing, so the layout needs no stubs.
 
     probe = layout / "probe.mjs"
     probe.write_text(PROBE_JS, encoding="utf-8")
@@ -295,10 +283,9 @@ def test_dasiwa_bridge_js_parses() -> None:
 
 
 def test_module_exports_the_bridge_surface(bridge_api: dict) -> None:
-    """picker.js's send-adapter registry consumes exactly these four plus
+    """picker.js's send-adapter registry consumes exactly these three plus
     the type constant -- pll_bridge.js's surface, mirrored."""
     assert bridge_api["exports"] == {
-        "hasFindDasiwaNodes": True,
         "hasProbeDasiwa": True,
         "hasRowsForDasiwa": True,
         "hasWriteRowsToDasiwa": True,
@@ -307,12 +294,6 @@ def test_module_exports_the_bridge_surface(bridge_api: dict) -> None:
 
 def test_loader_type_is_the_exact_dasiwa_spelling(bridge_api: dict) -> None:
     assert bridge_api["loaderType"] == DASIWA_TYPE
-
-
-def test_find_dasiwa_nodes_sorted_ascending_and_type_filtered(bridge_api: dict) -> None:
-    """Graph order was [7, 3, non-DaSiWa]; the candidate order is ascending
-    id with the non-DaSiWa dropped (§6.13 M4's cross-family combo order)."""
-    assert bridge_api["findOrder"] == [3, 7]
 
 
 # ----------------------------------------------------------------- probeDasiwa
@@ -530,11 +511,9 @@ def test_attribution_comment_records_gpl_data_only_provenance(source: str) -> No
 
 
 def test_no_import_of_the_clone_only_the_served_app_stub(source: str) -> None:
-    """NEW code speaking the DATA format: the module's one import is the
-    served scripts/app.js -- never the GPL clone (or anything else)."""
-    assert re.findall(r"^import .*$", source, flags=re.MULTILINE) == [
-        "import { app } from '../../../scripts/app.js'"
-    ]
+    """NEW code speaking the DATA format: the module imports nothing --
+    never the GPL clone (or anything else)."""
+    assert re.findall(r"^import .*$", source, flags=re.MULTILINE) == []
     assert "scratchpad" not in source
 
 
@@ -575,14 +554,11 @@ def test_no_window_level_listeners(source: str) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_root_only_find_helper_is_marked_unused_by_the_picker(source: str) -> None:
+def test_root_only_find_helper_is_gone(source: str) -> None:
     """Since v0.64.0 picker.js's findSendCandidates() walks the whole
-    workflow itself; the registry's `find` key is gone (v0.68.1), so
-    findDasiwaNodes is reachable from nothing but this file's own probe. It
-    stays ONLY because the pins above (`hasFindDasiwaNodes`, `findOrder`)
-    pin it -- remove together, alongside pll_bridge.js's findPllNodes so
-    the two bridges keep mirroring each other's surface."""
-    block = source.split("export function findDasiwaNodes()", 1)[0]
-    assert "UNUSED BY THE PICKER, marked for removal" in block[-1200:]
+    workflow itself, so the bridge's root-only findDasiwaNodes had no
+    caller. Removed 2026-11-15 together with pll_bridge.js's findPllNodes
+    (the two bridges mirror each other's surface)."""
+    assert "findDasiwaNodes" not in source
     picker = (REPO_ROOT / "web" / "lora_library" / "picker.js").read_text(encoding="utf-8")
     assert "dasiwa.findDasiwaNodes" not in picker

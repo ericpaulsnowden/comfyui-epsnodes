@@ -4438,8 +4438,10 @@ toggle (`setHighlightedFile`), the Send-row candidate walk is memoized per
 synchronous run; `scheduleSendRowRefresh` coalesces on the root graph and
 walks the whole workflow; (4) the send-adapter registry surface is
 `{label, probe, write}` — the per-family `find` key was dead since v0.64.0
-and is gone; the bridges' root-only `findPllNodes`/`findDasiwaNodes` are
-marked unused (kept for their test pins, to be removed together).
+and is gone; the bridges' root-only `findPllNodes`/`findDasiwaNodes` were
+marked unused then and removed 2026-11-15, with `probePll`'s unreachable
+"nothing picked" leg (a null node now probes as `wrong-type`, as
+`probeDasiwa` always did).
 
 The answer to the owner's three LoRA-navigation pains (research round
 2026-08-09, roadmap `docs/plan/ROADMAP-lora-picker.md`): the flat lora list,
