@@ -11,6 +11,7 @@
 import { app } from '../../scripts/app.js'
 import { loggerFor } from './lora_library/api.js'
 import * as switcher from './eps_image/switcher.js'
+import { installPromptPostPass } from './eps_image/switcher_prompt.js'
 import * as resolution from './eps_image/resolution.js'
 import * as imageGrid from './eps_image/image_grid.js'
 import * as frameSaver from './eps_image/frame_saver.js'
@@ -125,6 +126,11 @@ app.registerExtension({
     safely('saveImage.init', () => saveImage.init?.()) // §6.14: filename-token solo on drop
     safely('numberController.init', () => numberController.init?.())
     safely('bypass.init', () => bypass.init?.())
+  },
+
+  /** Once the app exists: chain `app.graphToPrompt` (switcher_prompt.js). */
+  setup() {
+    safely('switcherPrompt.install', () => installPromptPostPass(app))
   },
 
   /** Fires once per node instance; each attach is a no-op for other types. */
