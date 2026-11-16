@@ -19,12 +19,7 @@ purpose).
 | One `nodeClassOf`, `findWidget`, `linkById` in `web/lora_library/panel_helpers.js` | 10, 11 and 7 hand copies, each set with one distinct body | v0.110.17 |
 | One `LINK_COLOR_OWNER_KEY` in `owned_link_colour.js` | Declared in six files | v0.110.17 |
 | A test fails if a panel re-declares any of these | `tests/test_panel_helpers_js.py` | v0.110.17 |
-
-## Open: drift that changes behaviour
-
-| Item | Evidence |
-| --- | --- |
-| Image Grid should not recolour a link another node has claimed | `reconcileLinkDimming` in `image_grid.js` overwrote the colour and owner tag of any link it did not own; `switcher.js`, `checkpoint_switcher.js` and `save_image.js` skip links another owner holds |
+| Image Grid no longer recolours a link another node has claimed | `reconcileLinkDimming` in `image_grid.js` overwrote the colour and owner tag of any link it did not own; the three sibling implementations skip links another owner holds. No graph that triggers it is known today: each owner only tags its own output links | v0.110.18 |
 
 ## Open, low risk
 
