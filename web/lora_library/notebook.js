@@ -227,8 +227,8 @@
  * Categories (FORMAT.md §7.2 amendment, owner ask 2026-07-19): typing a name
  * STARTING WITH `#` into the ＋ New row creates a CATEGORY instead of an
  * entry (POST `/notebook/category`; the `#`s + surrounding whitespace are
- * stripped from the stored name — see isCategoryNameInput()/
- * categoryNameFromInput()). Category headers, rendered from the §5
+ * stripped from the stored name — see isGroupNameInput()/
+ * groupNameFromInput()). Category headers, rendered from the §5
  * `categories` list rather than derived from `entries` (so an EMPTY
  * category still shows — see renderList()'s two-pointer merge of
  * `categories` and `entries`, both already in file order), are CLICKABLE:
@@ -338,7 +338,7 @@
  * separate pruning pass. A hand-edit of the property via the node's
  * right-click Properties panel repaints the section headers through the
  * same onPropertyChanged path, for free. The pure halves --
- * parseCollapsedSections() (tolerant: the canonical array-of-strings shape,
+ * parseCollapsedGroups() (tolerant: the canonical array-of-strings shape,
  * a JSON-encoded string of the same for a hand-edit, anything else folds to
  * `[]`), toggleCollapsedSection() (pure array in, new array out), and
  * isSectionCollapsed() -- are exported for tests/test_notebook_restore_js.py.
@@ -470,6 +470,7 @@
 import * as api from './api.js'
 import { entryMatchesSearch, searchHaystack, searchWords } from './search.js'
 import { el, findWidget, installMinWidth } from './panel_helpers.js'
+import { isGroupNameInput, groupNameFromInput, parseCollapsedGroups } from './group_helpers.js'
 
 /** FORMAT.md §6.1 — frozen once shipped. */
 const NODE_CLASS = 'LoraLibraryNotebook'
@@ -4089,32 +4090,6 @@ function buildCategoryHeaderRow(state, category) {
 // ---------------------------------------------------------------------------
 
 /**
- * Tolerant parse of the `Collapsed sections` node property into an array of
- * category-name strings. Accepts the canonical shape (an array, non-string
- * entries dropped), a JSON-encoded string of the same (what a hand-edit
- * through the node's Properties panel round-trips as), or anything else --
- * `undefined`/`null`/malformed JSON/a non-array all fold to `[]`. Never
- * throws.
- * @param {unknown} raw
- * @returns {string[]}
- */
-export function parseCollapsedSections(raw) {
-  if (Array.isArray(raw)) return raw.filter((name) => typeof name === 'string')
-  if (typeof raw === 'string') {
-    const trimmed = raw.trim()
-    if (!trimmed) return []
-    let parsed
-    try {
-      parsed = JSON.parse(trimmed)
-    } catch {
-      return []
-    }
-    return Array.isArray(parsed) ? parsed.filter((name) => typeof name === 'string') : []
-  }
-  return []
-}
-
-/**
  * Returns a NEW array with `name` toggled in/out of `list` -- pure, never
  * mutates its argument (this file's other list-transform helpers, e.g.
  * `parseSelectionValue`'s callers, follow the same rule).
@@ -4190,7 +4165,7 @@ function registerCollapsedSectionsProperty(state) {
  * syncCollapsedSectionsProperty() for the write half.
  */
 function applyCollapsedSectionsFromProperty(state) {
-  const names = parseCollapsedSections(state.node.properties?.[PROP_COLLAPSED_SECTIONS])
+  const names = parseCollapsedGroups(state.node.properties?.[PROP_COLLAPSED_SECTIONS])
   state.collapsedCategories = new Set(names)
 }
 
@@ -4223,7 +4198,7 @@ function syncCollapsedSectionsProperty(state) {
 
 /**
  * Tolerant parse of the `Open category` node property into a category NAME
- * or `null` ("nothing open") — mirrors parseCollapsedSections()'s
+ * or `null` ("nothing open") — mirrors parseCollapsedGroups()'s
  * never-throws contract, one value instead of a list: a non-string (a
  * hand-edit through the node's Properties panel that types a
  * number/object/etc, or simply `undefined`/`null` on a node whose property
@@ -5696,25 +5671,14 @@ function closeNewEntryRow(state) {
   renderFooter(state)
 }
 
-/** A ＋ New input starting with `#` (after trim) creates a CATEGORY instead
- * of an entry (FORMAT.md §7.2 amendment, owner ask 2026-07-19). */
-function isCategoryNameInput(rawName) {
-  return (rawName || '').trim().startsWith('#')
-}
-
-/** The stored category name: leading `#`s + whitespace stripped. */
-function categoryNameFromInput(rawName) {
-  return (rawName || '').trim().replace(/^#+\s*/, '').trim()
-}
-
 async function confirmNewEntry(state, rawName) {
   if (pinnedRefuse(state)) return // M3
   if (writesBlocked(state)) {
     showLoadError(state)
     return
   }
-  if (isCategoryNameInput(rawName)) {
-    await confirmNewCategory(state, categoryNameFromInput(rawName))
+  if (isGroupNameInput(rawName)) {
+    await confirmNewCategory(state, groupNameFromInput(rawName))
     return
   }
 
