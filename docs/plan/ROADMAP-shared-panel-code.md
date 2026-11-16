@@ -1,6 +1,9 @@
 # ROADMAP — shared panel code
 
-**Status:** planned, not started. Owner asked for the plan only (2026-09-08).
+**Status:** in progress. M1 (`el`, `installMinWidth`), M1b (`nodeClassOf`,
+`findWidget`, `linkById`, `LINK_COLOR_OWNER_KEY`) and M3 (`loggerFor`,
+`showToast`) are shipped and enforced by tests; M2 and M4 are open. The plan
+was first written on 2026-09-08.
 **Census:** performed 2026-09-08 against v0.91.1. Every number below was
 counted from the files, not estimated.
 
