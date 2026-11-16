@@ -664,3 +664,22 @@ def test_module_never_imports_comfy_or_torch() -> None:
     assert "import comfy" not in source
     assert "import torch" not in source
     assert "import folder_paths" not in source
+
+
+def test_builder_shares_the_notebooks_helpers_instead_of_copying_them() -> None:
+    """One implementation, one parse memo: the builder IMPORTS the Notebook's
+    list-unwrap, separator, path-peek and parse-memo helpers. Until
+    2026-11-15 it carried byte-identical copies ("own-your-helpers"), which
+    is how a fix reaches one node and not the other; a re-declared copy here
+    fails the identity check."""
+    from lora_library import nodes_notebook
+
+    for name in (
+        "_unwrap_scalar",
+        "_as_list",
+        "_decode_separator",
+        "_peek_resolved_path",
+        "_load_notebook_cached",
+    ):
+        assert getattr(nodes_prompt_builder, name) is getattr(nodes_notebook, name), name
+    assert not hasattr(nodes_prompt_builder, "_PARSE_CACHE"), "a second parse memo is back"

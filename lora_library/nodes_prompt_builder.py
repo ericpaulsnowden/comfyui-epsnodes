@@ -24,11 +24,10 @@ the blocks alone (no incoming part at all) -- which is why
 ``INPUT_IS_LIST``/``OUTPUT_IS_LIST`` are both declared on this node exactly
 like ``EPSCrossSweep`` (FORMAT.md §6.10): every input (including the
 otherwise-scalar ``file``/``blocks``/``separator`` widgets) arrives already
-list-wrapped, and small local unwrap helpers below undo that -- adapted
-from, not imported from, ``eps_image/nodes_cross_sweep.py``'s
-``_unwrap_scalar`` (own-your-helpers precedent: this module owns its own
-tiny helpers rather than reaching into a sibling family's module for
-conceptually identical ones).
+list-wrapped, and the small unwrap helpers undo that -- ``_unwrap_scalar``
+/ ``_as_list``, imported from ``nodes_notebook.py`` (the same package and
+the node this one already mirrors) together with the separator decode, the
+path peek and the parse memo, so the two nodes share one implementation.
 
 **Live-by-name, not frozen copies (owner decision, 2026-08-23).** A block
 is a NAME, not a snapshot: every ``build`` call re-parses the notebook file
@@ -131,18 +130,27 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-from pathlib import Path
 from typing import Any, ClassVar
 
 from . import markdown_store
 from .context import (
-    DEFAULT_NOTEBOOK_FILENAME,
     LibraryContext,
     foreign_absolute_note,
-    heal_foreign_absolute,
     is_foreign_absolute,
 )
-from .nodes_notebook import DRAFTS_WIDGET, parse_drafts
+
+# The list-unwrap, separator, path-peek and parse-memo helpers are the
+# Notebook's own (one implementation, one parse memo for both nodes);
+# tests/test_prompt_builder.py fails if a copy is declared here again.
+from .nodes_notebook import (
+    DRAFTS_WIDGET,
+    _as_list,
+    _decode_separator,
+    _load_notebook_cached,
+    _peek_resolved_path,
+    _unwrap_scalar,
+    parse_drafts,
+)
 
 logger = logging.getLogger("lora_library")
 
@@ -163,10 +171,6 @@ DEFAULT_SEPARATOR = "\\n"
 #: edits", so every workflow saved before this widget existed parses to it.
 DEFAULT_DRAFTS = "{}"
 
-#: The literal escapes `separator` decodes -- a small, fixed vocabulary
-#: (module docstring), not general Python string-escape decoding.
-_SEPARATOR_ESCAPES = {"n": "\n", "t": "\t", "\\": "\\"}
-
 
 def set_context(context: LibraryContext | None) -> None:
     """Wire the shared :class:`LibraryContext` into this module.
@@ -178,61 +182,6 @@ def set_context(context: LibraryContext | None) -> None:
     """
     global _context
     _context = context
-
-
-# --------------------------------------------------------- INPUT_IS_LIST unwrap
-#
-# Adapted from (not imported from) eps_image/nodes_cross_sweep.py's helpers
-# of the same names -- own-your-helpers precedent (module docstring).
-
-
-def _unwrap_scalar(value: Any, default: str) -> str:
-    """First element of an ``INPUT_IS_LIST``-wrapped widget value, tolerating
-    the bare (already-scalar) form too -- e.g. a test or direct caller that
-    passes ``"loras.md"`` straight instead of ``["loras.md"]``."""
-    if isinstance(value, (list, tuple)):
-        value = value[0] if value else default
-    if value is None:
-        return default
-    return str(value)
-
-
-def _as_list(value: Any) -> list[Any]:
-    """*value* as a plain list -- the shape an ``INPUT_IS_LIST`` LINK input
-    already arrives in (the full upstream list, not sliced per-index).
-    Tolerates a bare scalar (direct/test callers) and ``None`` (callers
-    handle "unwired" themselves before this is ever reached; here it is
-    just "nothing to list")."""
-    if value is None:
-        return []
-    if isinstance(value, (list, tuple)):
-        return list(value)
-    return [value]
-
-
-# ------------------------------------------------------------- separator decode
-
-
-def _decode_separator(raw: str) -> str:
-    """Decode ``\\n``/``\\t``/``\\\\`` escapes in *raw* into real
-    newline/tab/backslash characters (module docstring: a plain STRING
-    widget can't hold a literal newline, so ``\\n`` is how the user asks for
-    one). Only these three escapes are recognized; any other backslash
-    sequence -- ``\\d``, a trailing lone ``\\`` -- passes through UNCHANGED
-    rather than being swallowed or raising. Empty input decodes to empty
-    output (a valid plain-concatenation separator)."""
-    out: list[str] = []
-    i = 0
-    length = len(raw)
-    while i < length:
-        ch = raw[i]
-        if ch == "\\" and i + 1 < length and raw[i + 1] in _SEPARATOR_ESCAPES:
-            out.append(_SEPARATOR_ESCAPES[raw[i + 1]])
-            i += 2
-        else:
-            out.append(ch)
-            i += 1
-    return "".join(out)
 
 
 # --------------------------------------------------------------- blocks parsing
@@ -274,38 +223,6 @@ def _parse_blocks(raw: str) -> list[str]:
 
 
 # ---------------------------------------------------------------- file resolving
-
-
-def _peek_resolved_path(context: LibraryContext, file_value: str) -> Path:
-    """Best-effort mirror of :meth:`LibraryContext.resolve_notebook_file`
-    that never creates anything -- adapted from
-    ``nodes_notebook._peek_resolved_path`` (own-your-helpers precedent) so
-    an unreachable configured ``library_dir`` (its ``mkdir`` raising
-    ``OSError`` before a path is ever produced) still lets the
-    missing-block error below name a path, instead of leaking a raw
-    traceback. See that function's docstring for the full owner-report
-    rationale (2026-07-19); only the relative-``file`` branch ever consults
-    this -- absolute values pass through untouched either way.
-
-    Also mirrors ``resolve_notebook_file``'s 2026-08-28 foreign-absolute
-    healing (``nodes_notebook._peek_resolved_path``'s identical addition --
-    see that docstring): a value absolute for the OTHER platform is
-    neither genuinely relative nor locally absolute, so without this it
-    would fall into the plain ``base / path`` join below and reproduce
-    this bug's own broken-path shape even while just peeking for an error
-    message. Checked before the local ``is_absolute()`` branch -- same
-    real-world result, but keeps this peek exercisable under the
-    injectable ``_IS_WINDOWS`` seam in tests.
-    """
-    value = (file_value or "").strip() or DEFAULT_NOTEBOOK_FILENAME
-    configured = context.load_config().get("library_dir")
-    base = Path(configured) if configured else context.default_library_dir
-    if is_foreign_absolute(value):
-        return heal_foreign_absolute(value, base)
-    path = Path(value)
-    if path.is_absolute():
-        return path
-    return base / path
 
 
 def _resolve_blocks(
@@ -392,43 +309,6 @@ def _resolve_blocks(
 
 
 # -------------------------------------------------------------------- IS_CHANGED
-
-
-def _file_token(path: Path) -> str:
-    """*path*'s mtime+size as a cache-busting token, or a missing-marker --
-    verbatim ``nodes_notebook._file_token`` (module docstring: an on-disk
-    edit, or the file disappearing, must force a re-execution)."""
-    try:
-        stat = path.stat()
-    except OSError:
-        return "missing"
-    return f"{stat.st_mtime}:{stat.st_size}"
-
-
-#: ``markdown_store.load_notebook`` memoized by (mtime_ns, size) --
-#: v0.80.0 sweep-performance round, this module's own copy of
-#: ``nodes_notebook._load_notebook_cached`` (own-your-helpers precedent).
-#: Re-validated against a fresh ``stat()`` every call; consumers only READ
-#: the parsed object. Cleared wholesale past 16 files.
-_PARSE_CACHE: dict[str, tuple[tuple[int, int], Any, float | None, str]] = {}
-
-
-def _load_notebook_cached(path: Path) -> tuple[Any, float | None, str]:
-    key = str(path)
-    try:
-        stat = path.stat()
-        sig = (stat.st_mtime_ns, stat.st_size)
-    except OSError:
-        _PARSE_CACHE.pop(key, None)
-        return markdown_store.load_notebook(path)
-    hit = _PARSE_CACHE.get(key)
-    if hit is not None and hit[0] == sig:
-        return hit[1], hit[2], hit[3]
-    parsed, mtime, line_ending = markdown_store.load_notebook(path)
-    if len(_PARSE_CACHE) > 16:
-        _PARSE_CACHE.clear()
-    _PARSE_CACHE[key] = (sig, parsed, mtime, line_ending)
-    return parsed, mtime, line_ending
 
 
 def _blocks_token(
