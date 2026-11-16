@@ -844,6 +844,14 @@ off means three runs.
   empty grid off, or put something in it. Since v0.52.0 a Collect-mode grid
   in that state raises a warning toast naming those fixes, so the skip is
   no longer silent.)
+- **A switched-off row can't hold up the others:** when you queue, the
+  wires into switched-off rows are left out of the job sent to ComfyUI
+  (applies to every switcher). Before, an off row fed by something that
+  also ran for another node and produced "nothing" (for example an all-off
+  switcher) could silence the whole switcher. Your canvas and the workflow
+  saved in the image are unchanged; only the job (and **Save (API
+  format)**) omits those wires. Scripts that send jobs to ComfyUI's API
+  without the frontend keep the old behaviour.
 - **All off is allowed:** toggle everything off (or wire nothing) and the
   queue still succeeds — the image branch simply doesn't run that time. No
   error, no downstream crash.

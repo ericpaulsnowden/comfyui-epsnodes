@@ -11,6 +11,7 @@
 import { app } from '../../scripts/app.js'
 import { loggerFor } from './lora_library/api.js'
 import * as switcher from './eps_image/switcher.js'
+import { installPromptPostPass } from './eps_image/switcher_prompt.js'
 import * as resolution from './eps_image/resolution.js'
 import * as imageGrid from './eps_image/image_grid.js'
 import * as frameSaver from './eps_image/frame_saver.js'
@@ -175,6 +176,11 @@ app.registerExtension({
     safely('bypass.init', () => bypass.init?.())
     safely('groupBypass.init', () => groupBypass.init?.())
     safely('broadcast.init', () => broadcast.init?.()) // §6.10: the one canvas after-change listener
+  },
+
+  /** Once the app exists: chain `app.graphToPrompt` (switcher_prompt.js). */
+  setup() {
+    safely('switcherPrompt.install', () => installPromptPostPass(app))
   },
 
   /** Fires once per node instance; each attach is a no-op for other types. */

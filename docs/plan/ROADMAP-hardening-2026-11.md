@@ -54,8 +54,10 @@ shared `el()`.
    `run()`, lazy or not, so no node-side change can help. The fix is on the
    frontend: strip disabled rows' links from the PROMPT (a chained
    `app.graphToPrompt` post-pass, the rgthree precedent) so the server never
-   sees them. Design is clear, risk moderate (touches every queue). Not done
-   this round — say go.
+   sees them. **Built** (`web/eps_image/switcher_prompt.js`, FORMAT §6.4):
+   one pure function over the API prompt, chained from the extension's
+   `setup`, no setting; a Python-vs-JS parity test and a test against core's
+   real dispatch back it.
 2. **Image Grid `INPUT_IS_LIST` trade-off** (gate on PR #5): a list holding a
    blocker ELEMENT now blocks the grid for that run, where per-element
    mapping collected the valid ones. Kept (one batch for the common switcher
@@ -70,4 +72,3 @@ shared `el()`.
 
 - Shared code M2 (`chainHook`, ~90 sites, in batches) and M4 (group
   helpers) — see [ROADMAP-shared-panel-code.md](ROADMAP-shared-panel-code.md).
-- The `graphToPrompt` post-pass (decision 1) once the owner says go.

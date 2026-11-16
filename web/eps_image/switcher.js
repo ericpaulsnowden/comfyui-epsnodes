@@ -449,23 +449,31 @@ function getTogglesWidget(node) {
 // ---------------------------------------------------------------------------
 
 /**
- * Parses the `toggles` widget's current JSON value. Never throws -- a
- * malformed value (never expected from this file's own writes, but a
- * hand-edited workflow is always possible) degrades to "no overrides",
- * matching the backend's own `_parse_toggles` fallback.
- * @param {object} node
+ * The ONE reading of a `toggles` string (the widget's value, or the literal
+ * in an API prompt -- `switcher_prompt.js` strips disabled rows with it).
+ * Never throws: an empty, malformed or non-object value degrades to "no
+ * overrides", exactly the backend's `_parse_toggles` (nodes_switcher.py).
+ * @param {unknown} raw
  * @returns {Record<string, boolean>}
  */
-function readToggles(node) {
-  const widget = getTogglesWidget(node)
-  if (!widget) return {}
+export function parseToggles(raw) {
   try {
-    const parsed = JSON.parse(widget.value || '{}')
+    const parsed = JSON.parse(raw || '{}')
     return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {}
   } catch (error) {
     warn('toggles value is not valid JSON; treating as {}', error)
     return {}
   }
+}
+
+/**
+ * The `toggles` widget's current value, parsed (:func:`parseToggles`).
+ * @param {object} node
+ * @returns {Record<string, boolean>}
+ */
+function readToggles(node) {
+  const widget = getTogglesWidget(node)
+  return widget ? parseToggles(widget.value) : {}
 }
 
 function writeToggles(node, map) {
@@ -478,7 +486,7 @@ function writeToggles(node, map) {
  * backend's own rule over an ALREADY-PARSED map (v0.68.1: the draw paths
  * parse `toggles` once per pass and read rows through this, instead of one
  * JSON.parse per row per frame -- distributor.js's `isSlotEnabled` twin). */
-function isEnabledIn(toggles, name) {
+export function isEnabledIn(toggles, name) {
   return toggles[name] !== false
 }
 
