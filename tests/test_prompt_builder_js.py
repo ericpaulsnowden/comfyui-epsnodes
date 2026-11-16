@@ -41,6 +41,7 @@ VERSION_JS = WEB / "lora_library" / "version.js"
 # not use search.js; its own filterEntries() is untouched by this round).
 SEARCH_JS = WEB / "lora_library" / "search.js"
 PANEL_HELPERS_JS = WEB / "lora_library" / "panel_helpers.js"
+GROUP_HELPERS_JS = WEB / "lora_library" / "group_helpers.js"
 LORA_LIBRARY_JS = REPO_ROOT / "web" / "lora_library.js"
 
 NODE = shutil.which("node")
@@ -82,7 +83,8 @@ def test_prompt_builder_js_parses() -> None:
 
 def test_only_the_three_documented_imports(source: str) -> None:
     # 2026-09-01: the notebook.js import grew three more named pure helpers
-    # (parseCollapsedSections/toggleCollapsedSection/isSectionCollapsed,
+    # (toggleCollapsedSection/isSectionCollapsed -- parseCollapsedGroups
+    # moved to group_helpers.js in M4,
     # reused verbatim for the left column's collapsible category headers
     # instead of reinventing the same logic) -- still the same THREE source
     # files (app.js, api.js, notebook.js), so the assertion shape is
@@ -93,9 +95,10 @@ def test_only_the_three_documented_imports(source: str) -> None:
         "import * as api from './api.js'",
         "import { walkLiveNodes } from './api.js'",
         "import { notebookCacheGet, notebookCacheSet, isUnchangedResponse, "
-        "parseCollapsedSections, toggleCollapsedSection, isSectionCollapsed } "
+        "toggleCollapsedSection, isSectionCollapsed } "
         "from './notebook.js'",
         "import { el, installMinWidth } from './panel_helpers.js'",
+        "import { parseCollapsedGroups } from './group_helpers.js'",
     ]
 
 
@@ -303,7 +306,7 @@ def probe_api(tmp_path_factory: pytest.TempPathFactory) -> dict:
     layout = tmp_path_factory.mktemp("web_root")
     module_dir = layout / "extensions" / "comfyui-epsnodes" / "lora_library"
     module_dir.mkdir(parents=True)
-    for src in (PROMPT_BUILDER_JS, NOTEBOOK_JS, API_JS, VERSION_JS, SEARCH_JS, PANEL_HELPERS_JS):
+    for src in (PROMPT_BUILDER_JS, NOTEBOOK_JS, API_JS, VERSION_JS, SEARCH_JS, PANEL_HELPERS_JS, GROUP_HELPERS_JS):
         shutil.copyfile(src, module_dir / src.name)
     scripts = layout / "scripts"
     scripts.mkdir(parents=True, exist_ok=True)
@@ -762,16 +765,17 @@ def test_collapsed_sections_property_mirrors_notebook_exactly(source: str) -> No
     parallel one."""
     assert "const PROP_COLLAPSED_SECTIONS = 'Collapsed sections'" in source
     assert (
-        "parseCollapsedSections, toggleCollapsedSection, isSectionCollapsed } "
+        "toggleCollapsedSection, isSectionCollapsed } "
         "from './notebook.js'" in source
     )
+    assert "import { parseCollapsedGroups } from './group_helpers.js'" in source
     register = _body(source, "registerCollapsedSectionsProperty(state)")
     assert "node.addProperty(PROP_COLLAPSED_SECTIONS, [], 'array')" in register
     assert "applyCollapsedSectionsFromProperty(state)" in register
     assert "renderLeftPane(state)" in register
     apply_fn = _body(source, "applyCollapsedSectionsFromProperty(state)")
     assert (
-        "state.collapsedSections = parseCollapsedSections("
+        "state.collapsedSections = parseCollapsedGroups("
         "state.node.properties?.[PROP_COLLAPSED_SECTIONS])" in apply_fn
     )
     sync_fn = _body(source, "syncCollapsedSectionsProperty(state)")

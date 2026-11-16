@@ -823,8 +823,8 @@ both `toggleCategoryCollapse` branches,
 `restoreCategoryCollapseAfterDoubleClick`, and the two rename-migration
 sites. Unknown names are kept harmlessly and drop out on the next write.
 A hand-edited property repaints. No localStorage anywhere in the path.
-Pure helpers `parseCollapsedSections`/`toggleCollapsedSection`/
-`isSectionCollapsed` exported. (Tap semantics unchanged: the selecting tap
+Pure helpers `toggleCollapsedSection`/`isSectionCollapsed` exported
+(its parser is the shared `parseCollapsedGroups`, `lora_library/group_helpers.js`). (Tap semantics unchanged: the selecting tap
 on an inactive header only reveals; the second tap toggles.)
 
 
@@ -945,7 +945,7 @@ second read as "didn't create") and `_saveLayout`'s shared catch now toasts
 — a failed layout write was previously status-line-only, which is hidden by
 default. (2) Collapsed groups persist per workflow:
 `properties['Collapsed groups']` mirrors §6.1's `Collapsed sections` idiom
-(pure `parseCollapsedGroups`, read/write halves, 5 write-through sites,
+(shared pure `parseCollapsedGroups` from `group_helpers.js`, read/write halves, 5 write-through sites,
 apply at construct + configure). (3) Delete State is optimistic:
 `_doDelete(entry)` removes the row from `_setsCache` and toasts
 `Deleting "X"…` before the POST; failure restores from a pre-mutation
@@ -1290,7 +1290,7 @@ queue. It drives a **genuine, untouched `Power Lora Loader (rgthree)`**:
   add a # to the left row and create groups as the lora notebooks. Same
   drag and drop etc."):** a `#`-prefixed name in the `name` field turns
   New State into New GROUP (the Notebook's exact New-button contract;
-  `isCategoryNameInput`/`categoryNameFromInput` duplicated by hand). The
+  `isGroupNameInput`/`groupNameFromInput`, shared from `group_helpers.js`). The
   pane renders uncategorized rows first, then each group's header +
   rows, from the §4.2 layout merged with the sets cache (layout-only
   slugs skipped, cache-only sets appended ungrouped). Headers: tap =
@@ -1476,7 +1476,7 @@ queue. It drives a **genuine, untouched `Power Lora Loader (rgthree)`**:
 2026-09-02: "doesn't seem to work, or at least not reliably").** Three
 earlier fixes (v0.67.2 field-clearing, v0.72.1 announcement, v0.80.1 loud
 save failure) all addressed what happened AFTER
-`isCategoryNameInput(this._w.name.value)` read the field; none questioned
+`isGroupNameInput(this._w.name.value)` read the field; none questioned
 the read itself. Verified against comfyui_frontend_package 1.48.7's own
 sourcemaps: **the Vue renderer was never at fault** -- PrimeVue's
 `InputText` writes `widget.value` on every keystroke via the native `input`
@@ -1488,7 +1488,7 @@ neither -- the dialog's outside-click check tests `e.target === canvas`, so
 a click on a real `<button>` neither commits nor discards; it just leaves
 the dialog open with the typed text unread and `widget.value` stale. Enter
 first and it worked; click straight through and it silently made a STATE
-instead of a group. `_flushPendingNameEdit()` now reads that dialog's live
+instead of a group. `_flushPendingNameEdit()` (a wrapper over the shared `flushPendingNameEdit` in `group_helpers.js`) now reads that dialog's live
 DOM value and commits it (value + callback + dirty, this file's established
 idiom) before both `_onCaptureClick()`'s branch and `_onUpdateClick()`'s
 rename read, fail-soft if the frontend's internals ever change shape.
@@ -4864,7 +4864,7 @@ entry and the panel's existing GET carries it; the builder simply ignored it.
 (never re-sorted); each named group gets a collapsible header with a count,
 and the leading un-headed region stays header-less exactly as notebook.js
 renders it. Collapse persists in a `Collapsed sections` node PROPERTY -- the
-SAME name and the same pure helpers (`parseCollapsedSections`/
+SAME name and the same pure helpers (`parseCollapsedGroups` from `group_helpers.js`,
 `toggleCollapsedSection`/`isSectionCollapsed`, imported from notebook.js
 rather than reimplemented), because the owner has repeatedly reported groups
 behaving inconsistently between nodes. Search filters BEFORE grouping, so an
@@ -4975,7 +4975,7 @@ click having already selected it.
 
 **An open group rename now survives a tab switch here too (§7.9, tab-switch
 sweep 2026-08-31/09-01) — `PROP_RENAME_DRAFT`, ported from §6.3's
-`controller.js` fix verbatim** (same property name, same `[category, text]`
+`controller.js` fix** (now the one shared `PROP_RENAME_DRAFT`/`parseRenameDraft` in `group_helpers.js`; same property name, same `[category, text]`
 shape, same fail-soft `parseRenameDraft`, same 2-phase
 `onPropertyChanged`/`_pendingRenameDraft`/`_restorePendingRenameDraft`
 restore — see §6.3 for the full write-up). This file had cloned the §6.2/§6.3
@@ -5107,10 +5107,9 @@ selected and, with no groups yet, held the single entry `(ungrouped)`. A
 dead one-item menu, and the one route that did create groups was broken on
 his renderer, so the feature was effectively unreachable. Two fixes:
 
-1. `_flushPendingNameEdit()`, a hand-port of §6.3 `controller.js`'s v0.90.0
-   fix (duplicated by hand, not cross-imported -- this file's standing
-   convention for `parseCollapsedGroups`/`isGroupNameInput`/
-   `groupNameFromInput`). Same cause, verified there against the frontend's
+1. `_flushPendingNameEdit()`, §6.3 `controller.js`'s v0.90.0 fix (it was
+   hand-ported here; since M4 both call the one shared
+   `flushPendingNameEdit` in `group_helpers.js`). Same cause, verified there against the frontend's
    own sourcemaps: the classic canvas renderer's floating prompt dialog
    commits to `widget.value` only on Enter or its OK button, so typing
    `# Portraits` and clicking New State straight after silently made a
@@ -5167,8 +5166,8 @@ flag, `__epsMinWidthInstalled`; every panel imports it by its bare name.)
 
 This is the pack's hand-duplication convention leaking a fix for the third
 time (see also `_flushPendingNameEdit`, fixed in `controller.js` for v0.90.0
-and re-reported against `universal_controller.js` for v0.91.0). Until
-`docs/plan/ROADMAP-shared-panel-code.md`'s milestones land, **grep `web/` for a
+and re-reported against `universal_controller.js` for v0.91.0). (`group_helpers.js` now holds that one; `docs/plan/ROADMAP-shared-panel-code.md`
+tracks what is still duplicated.) Until its milestones land, **grep `web/` for a
 helper's name before you finish fixing it** -- that grep is the only thing
 standing between a fix and its siblings.
 

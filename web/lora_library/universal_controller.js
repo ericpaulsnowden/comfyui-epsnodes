@@ -85,8 +85,9 @@
  * `validateStateValue`, `buildStatePayload`, `applyPlan`,
  * `exclusionsAfterToggle`, `classToggleState`, `summarizeCapture`,
  * `summarizeUpdate`, `summarizeApply`, `compareStateEntries`,
+ * `normalizeExclusions`, `normalizeRegistry`. (The `#`-group helpers --
  * `parseCollapsedGroups`, `isGroupNameInput`, `groupNameFromInput`,
- * `normalizeExclusions`, `normalizeRegistry`.
+ * `parseRenameDraft` -- live in group_helpers.js.)
  *
  * 2026-08-29 bugfix round, second half (owner: "applying any of the sets
  * won't change anything") — `_doApply()`'s write loop (`_writeApplyPlan()`)
@@ -112,6 +113,7 @@ import { app } from '../../../scripts/app.js'
 import * as api from './api.js'
 import { entryMatchesSearch, searchHaystack, searchWords } from './search.js'
 import { el, installMinWidth } from './panel_helpers.js'
+import { PROP_RENAME_DRAFT, isGroupNameInput, groupNameFromInput, parseCollapsedGroups, parseRenameDraft, flushPendingNameEdit } from './group_helpers.js'
 
 // ---------------------------------------------------------------- constants
 
@@ -158,7 +160,6 @@ const PROP_INCLUDED_NODES = 'Included nodes'
  * `_renderStateList()` -- reopens the editor once that header actually
  * exists, idempotent either order.
  */
-const PROP_RENAME_DRAFT = 'Group rename draft'
 
 const LABEL_CAPTURE = 'New State'
 const LABEL_UPDATE = 'Save State'
@@ -762,62 +763,6 @@ export function compareStateEntries(a, b) {
   const bn = (b.name || '').toLowerCase()
   if (an !== bn) return an < bn ? -1 : 1
   return a.slug < b.slug ? -1 : a.slug > b.slug ? 1 : 0
-}
-
-/** Tolerant parse of the `Collapsed groups` property -- controller.js's
- * `parseCollapsedGroups()` duplicated by hand (this pack's no-cross-import
- * convention for small, exactly-shared helpers). */
-export function parseCollapsedGroups(raw) {
-  if (Array.isArray(raw)) return raw.filter((name) => typeof name === 'string')
-  if (typeof raw === 'string') {
-    const trimmed = raw.trim()
-    if (!trimmed) return []
-    let parsed
-    try {
-      parsed = JSON.parse(trimmed)
-    } catch {
-      return []
-    }
-    return Array.isArray(parsed) ? parsed.filter((name) => typeof name === 'string') : []
-  }
-  return []
-}
-
-/** `# Portraits` -> is-a-group-name / "Portraits" -- controller.js's
- * `isCategoryNameInput`/`categoryNameFromInput` duplicated by hand. */
-export function isGroupNameInput(rawName) {
-  return (rawName || '').trim().startsWith('#')
-}
-
-/**
- * Fail-soft parse for `PROP_RENAME_DRAFT` -- controller.js's identical
- * `parseRenameDraft` duplicated by hand (file convention: small, stable
- * cross-file constants/helpers are copied, not imported). Same
- * lenient-degrade shape as `parseCollapsedGroups` above (a raw array from
- * `configure()`'s normal restore, OR a JSON string from a hand-edit
- * through the Properties panel), returning `null` for "no open rename"
- * instead of throwing on anything malformed.
- * @param {unknown} raw
- * @returns {{category: string, text: string} | null}
- */
-export function parseRenameDraft(raw) {
-  let value = raw
-  if (typeof raw === 'string') {
-    const trimmed = raw.trim()
-    if (!trimmed) return null
-    try {
-      value = JSON.parse(trimmed)
-    } catch {
-      return null
-    }
-  }
-  if (!Array.isArray(value) || value.length !== 2) return null
-  const [category, text] = value
-  if (typeof category !== 'string' || !category || typeof text !== 'string') return null
-  return { category, text }
-}
-export function groupNameFromInput(rawName) {
-  return (rawName || '').trim().replace(/^#+\s*/, '').trim()
 }
 
 /** A structurally-sound client copy of the group layout -- controller.js's
@@ -2329,16 +2274,12 @@ export function registerControllerNode() {
       // ------------------------------------------------------ button actions
 
       /**
-       * HAND-PORT of controller.js's `_flushPendingNameEdit()` fix
-       * (v0.90.0 there; this file cloned the blueprint before that round
-       * and the fix was never carried over -- this pack's "duplicated by
-       * hand, not imported" convention, same note as
-       * `parseCollapsedGroups`/`isGroupNameInput`/`groupNameFromInput`
-       * above, cuts both ways: nothing here re-syncs automatically when
-       * the original gets a bugfix). Owner report 2026-09-07 ("unclear to
+       * Thin wrapper over group_helpers.js's `flushPendingNameEdit()`, the
+       * ONE implementation shared with controller.js (the fix first shipped
+       * in controller.js v0.90.0 and missed this file until the owner
+       * reported it a second time). Owner report 2026-09-07 ("unclear to
        * me how to create one") led to reading `_onCaptureClick()` here,
-       * which turned up this SEPARATE, already-fixed-once-elsewhere bug on
-       * the exact same `#`-group entry point.
+       * which turned up this bug on the exact same `#`-group entry point.
        *
        * The mechanism (VERIFY(live), not re-investigated -- see
        * controller.js's `_onCaptureClick()` doc comment for the full
@@ -2363,36 +2304,7 @@ export function registerControllerNode() {
        * §7 fail-soft law).
        */
       _flushPendingNameEdit() {
-        const widget = this._w.name
-        if (!widget) return
-        try {
-          const dialog = app.canvas?.prompt_box
-          if (!dialog?.isConnected) return // nothing open -- widget.value is authoritative
-          const input = dialog.querySelector?.('.value') // prompt()'s own input/textarea class
-          if (!input) return
-          const live = input.value
-          if (live === widget.value) return // already in sync, nothing pending
-          // Same idiom as `_clearNameField()`: value + callback + dirty, so
-          // this reads as a real committed edit to BOTH renderers and to
-          // every other method that reads `this._w.name.value` afterward
-          // (`_doNewCategory()`, `_doCapture()`, `_saveAsNewName()`).
-          widget.value = live
-          try {
-            widget.callback?.(live)
-          } catch (error) {
-            api.warn(`${NODE_TITLE}: name widget callback threw`, error)
-          }
-          this.setDirtyCanvas(true, true)
-          // Courtesy close: we just applied the SAME value Enter/OK would
-          // have, through the SAME widget.value+callback path -- close()
-          // only tears down the dialog's own DOM/state, never re-invokes
-          // callback, so this cannot double-fire anything.
-          dialog.close?.()
-        } catch (error) {
-          // Best-effort internals probe -- never let it be the reason a
-          // click "does nothing" (FORMAT.md §7 fail-soft law).
-          api.warn(`${NODE_TITLE}: could not flush pending name edit`, error)
-        }
+        flushPendingNameEdit({ node: this, widget: this._w.name, canvas: app.canvas, title: NODE_TITLE, warn: api.warn })
       }
 
       _onCaptureClick() {
