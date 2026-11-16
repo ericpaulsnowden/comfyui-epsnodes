@@ -827,7 +827,7 @@ const dom = out.dom
   graph.register(node2)
   nc.attach(node2)
   node2.widgets[0].value = savedValue
-  node2.onConfigure({})
+  node2.onConfigure({ id: node2.id })
 
   const row1b = rowsOf(node2)[0]
   const result = {

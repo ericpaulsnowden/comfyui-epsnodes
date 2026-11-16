@@ -243,7 +243,7 @@ out.consumerWiredAfterOff = consumer.inputs[0].link != null
 // paste: same widget JSON, new id, no links
 const copy = makeFakeNode(savedValues, 205); graph.register(copy)
 nc.attach(copy)
-copy.onConfigure?.({ widgets_values: [savedValues] })
+copy.onConfigure?.({ id: -1, widgets_values: [savedValues] })
 await tick(); await tick()
 row = rowsOf(copy)[0]
 row.enabledInput.checked = true; row.enabledInput.dispatch('change')
@@ -261,13 +261,64 @@ const c2 = makeFakeTargetNode(302, 'cfg', 'FLOAT'); g2.register(c2)
 const legacy = JSON.stringify({ num_1: { name: '', value: 0, type: 'FLOAT', enabled: false, links: [{ node: 302, input: 'cfg' }] } })
 const n2 = makeFakeNode(legacy, 301); g2.register(n2)
 nc.attach(n2)
-n2.onConfigure?.({ widgets_values: [legacy] })
+n2.onConfigure?.({ id: 301, widgets_values: [legacy] })
 await tick(); await tick()
 out.legacyStamped = JSON.parse(n2.widgets[0].value).num_1.owner
 row = rowsOf(n2)[0]
 row.enabledInput.checked = true; row.enabledInput.dispatch('change')
 const l2 = c2.inputs[0].link != null ? g2.links.get(c2.inputs[0].link) : null
 out.legacyReconnectedTo = l2 && l2.origin_id
+// cross-graph: the copy lands in ANOTHER workflow with the SAME id, and an
+// unrelated node there has the same id as the original's consumer
+const gA = makeFakeGraph(); gA.id = 'graph-A'
+const cA = makeFakeTargetNode(402, 'steps', 'INT'); gA.register(cA)
+const nA = makeFakeNode('{}', 401); gA.register(nA)
+nc.attach(nA)
+nA.connect(0, cA, 0); nA.__epsNcReload()
+row = rowsOf(nA)[0]
+row.enabledInput.checked = false; row.enabledInput.dispatch('change')
+const savedA = nA.widgets[0].value
+const gB = makeFakeGraph(); gB.id = 'graph-B'
+const stranger = makeFakeTargetNode(402, 'steps', 'INT'); gB.register(stranger)
+const pasted = makeFakeNode(savedA, 401); gB.register(pasted)
+nc.attach(pasted)
+pasted.onConfigure?.({ id: -1, widgets_values: [savedA] })
+await tick(); await tick()
+row = rowsOf(pasted)[0]
+row.enabledInput.checked = true; row.enabledInput.dispatch('change')
+out.crossGraphStrangerWired = stranger.inputs[0].link != null
+row = rowsOf(nA)[0]
+row.enabledInput.checked = true; row.enabledInput.dispatch('change')
+const lA = cA.inputs[0].link != null ? gA.links.get(cA.inputs[0].link) : null
+out.crossGraphOriginalOrigin = lA && lA.origin_id
+
+out.crossGraphMemoryAfterConfigure = JSON.parse(pasted.widgets[0].value).num_1?.links ?? null
+
+// Save As / Duplicate: another graph id, the SAME node ids -> memory survives
+const gC = makeFakeGraph(); gC.id = 'graph-C'
+const cC = makeFakeTargetNode(502, 'steps', 'INT'); gC.register(cC)
+const nC = makeFakeNode('{}', 501); gC.register(nC)
+nc.attach(nC)
+nC.connect(0, cC, 0); nC.__epsNcReload()
+row = rowsOf(nC)[0]
+row.enabledInput.checked = false; row.enabledInput.dispatch('change')
+const savedC = nC.widgets[0].value
+gC.id = 'graph-C-saved-as'
+nC.onConfigure?.({ id: 501, widgets_values: [savedC] })
+await tick(); await tick()
+row = rowsOf(nC)[0]
+row.enabledInput.checked = true; row.enabledInput.dispatch('change')
+const lC = cC.inputs[0].link != null ? gC.links.get(cC.inputs[0].link) : null
+out.saveAsOrigin = lC && lC.origin_id
+
+// Alt-drag / Ctrl+C ghost: clone() configures with id undefined, off-graph
+const ghost = makeFakeNode(savedC, 501)
+gC.register(ghost)
+nc.attach(ghost)
+ghost.graph = null // never joins a graph
+ghost.onConfigure?.({ id: undefined, widgets_values: [savedC] })
+out.ghostRows = JSON.parse(ghost.widgets[0].value)
+
 console.log(JSON.stringify(out))
 """
 
@@ -305,3 +356,20 @@ def test_unstamped_memory_from_an_older_save_is_adopted_by_the_node_that_reads_i
 ) -> None:
     assert result["legacyStamped"] == 301
     assert result["legacyReconnectedTo"] == 301
+
+
+def test_a_pasted_copy_in_another_workflow_never_wires_an_unrelated_node(result: dict) -> None:
+    assert result["crossGraphMemoryAfterConfigure"] is None
+    assert result["crossGraphStrangerWired"] is False
+    # ...and the graph that wrote it still gets its wire back.
+    assert result["crossGraphOriginalOrigin"] == 401
+
+
+def test_save_as_keeps_every_node_id_so_the_memory_still_replugs(result: dict) -> None:
+    assert result["saveAsOrigin"] == 501
+
+
+def test_a_clone_ghost_drops_the_memory(result: dict) -> None:
+    row = result["ghostRows"]["num_1"]
+    assert row["enabled"] is False  # the row's own state is kept
+    assert "links" not in row and "owner" not in row

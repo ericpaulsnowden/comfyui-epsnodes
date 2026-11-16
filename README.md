@@ -978,9 +978,14 @@ save and recall the whole set at once — which is the point of it.
 - **Copy and paste is safe.** When you untick a row, the node remembers which
   sockets it was plugged into so ticking it again can plug them back. That
   memory is stamped with the node that made it, so a pasted copy ignores the
-  original's and can never grab its wires. A workflow saved before this
-  stamp existed keeps working: the first node to open it takes the memory
-  over and stamps it.
+  original's and can never grab its wires. A copy never inherits the memory
+  at all: a pasted or Alt-dragged copy starts with none, even when you paste
+  it into another workflow where it happens to get the same node number as
+  the original. (Save As and Duplicate keep every node's number, so there the
+  memory is kept and still plugs the wires back.) The same goes for EPS
+  Bypass and for an all-off switcher's unplugged wires. A workflow saved
+  before this stamp existed keeps working: the first node to open it takes
+  the memory over and stamps it.
 
 - **A socket becomes the right kind of number by itself.** Rows start untyped.
   Plug one into `steps` and it sends a whole number; plug another into `cfg`
