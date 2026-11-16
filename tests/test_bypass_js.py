@@ -724,7 +724,7 @@ async function build(makeTargets = (g) => [makeVideo(g)], { wireInput = true } =
   bp.attach(node2)
   app.configuringGraph = true // the whole (re)load runs inside LGraph.configure
   origin.connect(0, node2, 1) // litegraph restores the input link
-  node2.configure({ widgets_values: saved })
+  node2.configure({ id: node2.id, widgets_values: saved })
   app.configuringGraph = false
   const syncLabel = node2.outputs[0].label // right after onConfigure, no tick
   await tick()
@@ -756,7 +756,7 @@ async function build(makeTargets = (g) => [makeVideo(g)], { wireInput = true } =
   node2.outputs[0].links = [link]
   graph.links.get(link).origin_id = 10
   app.configuringGraph = true
-  node2.configure({ widgets_values: [false, '{}'] })
+  node2.configure({ id: node2.id, widgets_values: [false, '{}'] })
   app.configuringGraph = false
   await tick()
   await tick()
@@ -777,7 +777,7 @@ async function build(makeTargets = (g) => [makeVideo(g)], { wireInput = true } =
   bp.attach(node2)
   app.configuringGraph = true
   origin.connect(0, node2, 1)
-  node2.configure({ widgets_values: [true, memory] })
+  node2.configure({ id: node2.id, widgets_values: [true, memory] })
   app.configuringGraph = false
   await tick()
   await tick()
@@ -796,7 +796,7 @@ async function build(makeTargets = (g) => [makeVideo(g)], { wireInput = true } =
   const copy = makeBypass(graph, 11) // a NEW id
   bp.attach(copy)
   origin.connect(0, copy, 1)
-  copy.configure({ widgets_values: copyValues })
+  copy.configure({ id: -1, widgets_values: copyValues })
   await tick()
   resetToasts()
   clickToggle(copy) // switch the COPY on
@@ -811,6 +811,59 @@ async function build(makeTargets = (g) => [makeVideo(g)], { wireInput = true } =
     afterCopyOn, originalReplugged: isWired(video, 'audio'),
     originalOrigin: linkObj(video, 'audio')?.origin_id, originalId: node.id
   }
+}
+
+// ---- K2: the same node id in ANOTHER workflow is not the same node
+{
+  const { graph, node, targets: [video] } = await build()
+  graph.id = 'graph-A'
+  clickToggle(node) // unplug: memory remembered
+  await tick()
+  const copyValues = [false, widgetOf(node, 'links').value]
+  const graphB = makeGraph()
+  graphB.id = 'graph-B'
+  const stranger = makeVideo(graphB) // unrelated node that happens to share the target's id
+  graphB.nodesById.delete(stranger.id)
+  stranger.id = video.id
+  graphB.nodesById.set(stranger.id, stranger)
+  const copy = makeBypass(graphB, node.id) // graph.add: the same id as the original
+  bp.attach(copy)
+  makeOrigin(graphB).connect(0, copy, 1)
+  copy.configure({ id: -1, widgets_values: copyValues }) // paste: configured AFTER add, id -1
+  await tick()
+  const memoryAfterConfigure = widgetOf(copy, 'links').value
+  clickToggle(copy) // switch ON: replugs the memory, if it were trusted
+  await tick()
+  out.g.crossGraph = { memoryAfterConfigure, strangerWired: isWired(stranger, 'audio') }
+}
+
+// ---- K3: Save As / Duplicate -- another graph id, the SAME node ids
+{
+  const { graph, node, targets: [video] } = await build()
+  graph.id = 'graph-A'
+  clickToggle(node)
+  await tick()
+  const saved = [false, widgetOf(node, 'links').value]
+  graph.id = 'graph-saved-as'
+  node.configure({ id: node.id, widgets_values: saved })
+  await tick()
+  clickToggle(node)
+  await tick()
+  out.g.saveAs = { wired: isWired(video, 'audio'), origin: linkObj(video, 'audio')?.origin_id, id: node.id }
+}
+
+// ---- K4: an Alt-drag / Ctrl+C ghost (clone(): id undefined, never in a graph)
+{
+  const { node } = await build()
+  clickToggle(node)
+  await tick()
+  const memory = widgetOf(node, 'links').value
+  const ghost = makeBypass(makeGraph(), node.id)
+  bp.attach(ghost)
+  ghost.graph = null
+  ghost.configure({ id: undefined, widgets_values: [false, memory] })
+  await tick()
+  out.g.ghost = { memoryRaw: widgetOf(ghost, 'links').value }
 }
 
 // -------------------- L: the Universal State Controller apply route
@@ -1464,6 +1517,24 @@ def test_a_pasted_copys_memory_is_stale_and_never_wires_the_original_consumers(
     # ...and the original still reconnects its own consumer.
     assert p["originalReplugged"] is True
     assert p["originalOrigin"] == p["originalId"]
+
+
+def test_a_pasted_copy_in_another_workflow_never_wires_an_unrelated_node(probe: dict) -> None:
+    # Same owner id, same target id, different graph: configured without a
+    # real id, the copy owns no memory.
+    p = probe["g"]["crossGraph"]
+    assert p["memoryAfterConfigure"] == "{}"
+    assert p["strangerWired"] is False
+
+
+def test_save_as_keeps_every_node_id_so_the_memory_still_replugs(probe: dict) -> None:
+    p = probe["g"]["saveAs"]
+    assert p["wired"] is True
+    assert p["origin"] == p["id"]
+
+
+def test_a_clone_ghost_drops_the_memory(probe: dict) -> None:
+    assert probe["g"]["ghost"]["memoryRaw"] == "{}"
 
 
 # ------------------------------------------ the Universal State Controller

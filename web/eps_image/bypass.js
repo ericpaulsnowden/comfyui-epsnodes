@@ -109,6 +109,7 @@ import { loggerFor, showToast, subscribeWidgetsChangedExternally } from '../lora
 import { findWidget, installMinWidth, linkById, nodeClassOf } from '../lora_library/panel_helpers.js'
 import {
   collectOutputTargets,
+  configuredAsCopy,
   disconnectAllTargets,
   hideValuesWidget,
   isOutputConnected,
@@ -807,6 +808,7 @@ export function attach(node) {
     node.onConfigure = function (info) {
       const result = originalOnConfigure?.apply(this, arguments)
       try {
+        if (configuredAsCopy(info)) writeMemory(state, []) // a copy owns no memory
         settle(state)
         schedule(false)
       } catch (error) {

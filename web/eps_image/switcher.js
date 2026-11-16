@@ -295,7 +295,11 @@ import { app } from '../../../scripts/app.js'
 import { loggerFor, showToast } from '../lora_library/api.js'
 import { findWidget, linkById, nodeClassOf } from '../lora_library/panel_helpers.js'
 import { LINK_COLOR_OWNER_KEY, ensureOwnedLinkColourHook } from './owned_link_colour.js'
-import { normalizeRememberedLinks, reconnectRememberedTargets } from './number_controller.js'
+import {
+  configuredAsCopy,
+  normalizeRememberedLinks,
+  reconnectRememberedTargets
+} from './number_controller.js'
 import { inputVerdict, sameTarget } from './bypass.js'
 
 const PREFIX = '[eps_image:switcher]'
@@ -1823,6 +1827,7 @@ function installLinkDimConfigureSync(node) {
   const original = node.onConfigure
   node.onConfigure = function (...args) {
     const result = typeof original === 'function' ? original.apply(this, args) : undefined
+    if (configuredAsCopy(args[0])) writeUnplugMemory(this, {}) // a copy owns no memory
     syncLinkDimming(this, 'onConfigure')
     scheduleUnplugReconcile(this) // unplug/replug once the restore settles
     return result

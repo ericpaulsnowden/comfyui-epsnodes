@@ -445,6 +445,44 @@ export function normalizeRememberedLinks(raw) {
 }
 
 /**
+ * Whether a `configure(info)` call is configuring a COPY of a node rather
+ * than restoring one. A remembered-target memory (this file's rows,
+ * bypass.js's `links`, switcher.js's `EPSSwitcher.unplugged`) names targets
+ * by node id, and an id means something only inside the graph it was
+ * recorded in -- so the memory belongs to ONE node, and a copy is another
+ * node. litegraph configures a copy without a real id: a paste
+ * (`_deserializeItems`) sets `info.id = -1` and configures the node AFTER
+ * `graph.add` already gave it its new id, and `LGraphNode.clone()` (Ctrl+C
+ * / Alt-drag ghosts, which may never join a graph) sets `data.id =
+ * undefined`. A workflow load, undo/redo, tab switch, Save As, Duplicate
+ * and convert-to-subgraph all configure each node with its saved id. So the
+ * decision can only be taken here, in configure, never at replug time (the
+ * id is no longer informative by then). Each memory's `onConfigure` wrap
+ * calls this and drops what it remembers.
+ */
+export function configuredAsCopy(info) {
+  return info?.id == null || String(info.id) === '-1'
+}
+
+/** Forgets every row's remembered targets (`owner` + `links`), leaving the
+ * rows' own enabled/name/value alone. Writes `widget.value` directly, as
+ * configure itself does -- no callback. */
+function dropRememberedLinks(node) {
+  const widget = findWidget(node, VALUES_WIDGET_NAME)
+  if (!widget) return
+  const map = parseValues(widget.value)
+  let changed = false
+  for (const entry of Object.values(map)) {
+    if (entry && (entry.links !== undefined || entry.owner !== undefined)) {
+      delete entry.links
+      delete entry.owner
+      changed = true
+    }
+  }
+  if (changed) widget.value = serializeValues(map)
+}
+
+/**
  * The remembered links of one row's stored *entry* that belong to *node*.
  * The memory rides in the `values` widget, which a paste copies verbatim, so
  * it carries the id of the node that wrote it (`owner`, a sibling of
@@ -1782,6 +1820,7 @@ export function attach(node) {
     node.onConfigure = function (info) {
       const result = originalOnConfigure?.apply(this, arguments)
       try {
+        if (configuredAsCopy(info)) dropRememberedLinks(this)
         // Same reset, same reason as `__epsNcReload` above: `configure()`
         // just replaced `widget.value` (and `node.size`) WHOLESALE, so the
         // pre-restore row count in `state.lastRowCount` must not be diffed
