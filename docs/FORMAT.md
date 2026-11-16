@@ -1256,7 +1256,13 @@ queue. It drives a **genuine, untouched `Power Lora Loader (rgthree)`**:
   DOM-widget sizing so the panel fills the node and never collapses.
 - Widgets/controls retained: `target` (COMBO of PLL nodes by title `#id`,
   PLUS `All Power Lora Loaders (N)` when N ≥ 2 — the WAN high/low case;
-  auto-selects when exactly one exists). **Target discovery must NEVER
+  auto-selects when exactly one exists). **The saved target is never
+  rewritten by a refresh that finds NO loader** (configure order, undo,
+  subgraph swap or delete + re-add pass through an empty graph): only an
+  empty value becomes `(none found)`; a saved one, including a sticky
+  `All ... (N)`, stays and the status line reports "not found" until the
+  loader is back — the same tolerance as a stale id among 2+ loaders
+  (`tests/test_controller_target_persist_js.py`). **Target discovery must NEVER
   depend on drawing (v0.63.1, owner report 2026-08-14: "won't see a Power
   Lora Loader node when dropped into a workflow").** It rode only on
   `_heartbeat()`, which runs from `onDrawForeground()`, and that loses the

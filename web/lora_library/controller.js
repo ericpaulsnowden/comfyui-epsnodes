@@ -4128,7 +4128,14 @@ export function registerControllerNode() {
         if (!widget) return
         const candidates = findTargetCandidates()
         if (candidates.length === 0) {
-          widget.value = PLACEHOLDER_NO_TARGET
+          // The value is SAVED state (widgets_values). A graph with no loader
+          // right now is not the user choosing "none": configure order, undo,
+          // a subgraph swap or delete + re-add all pass through it, and
+          // overwriting the saved target here lost the choice (a sticky
+          // "All (N)" too). Only an empty value gets the placeholder; a
+          // stale one is left alone, like a stale id among 2+ loaders
+          // below -- probeTargets() reports "not found".
+          if (!widget.value) widget.value = PLACEHOLDER_NO_TARGET
           return
         }
         if (candidates.length >= 2 && ALL_TARGETS_RE.test(String(widget.value || ''))) {
