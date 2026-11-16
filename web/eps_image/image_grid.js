@@ -4313,6 +4313,151 @@ function installExecutionRefreshListener() {
   })
 }
 
+// ---------------------------------------------------------------------------
+// Skipped-run alert (FORMAT.md §6.6): core never calls an INPUT_IS_LIST node
+// whose incoming list holds an ExecutionBlocker, so Python cannot report that
+// skip. The frontend detects it by ABSENCE: a grid core announced as running
+// (`progress_state` state 'running', which carries the real node id AND the
+// prompt id -- the plain `executing` message reaches the frontend as only a
+// DISPLAY node id string, no prompt id) that never sent
+// `eps-image-grid-ran`. Decided only at `execution_success`: the grid's
+// `image` input is lazy, so a grid is announced, core evaluates upstream,
+// and announces it AGAIN before it runs.
+//
+// Which ids are grids is read from the PROMPT THAT WAS QUEUED (our chained
+// `api.queuePrompt`), never from whichever graph is open when an event
+// arrives. Missing history is never evidence of a skip: a prompt this tab did
+// not queue is ignored, and a websocket gap or a newer `execution_start`
+// discards what was tracked.
+// ---------------------------------------------------------------------------
+
+/** Pure: ids of `grids` (Map id -> title) announced by core but never run. */
+export function skippedGridIds(grids, announced, ran) {
+  return [...grids.keys()].filter((id) => announced.has(id) && !ran.has(id))
+}
+
+/**
+ * Pure: the grids of a queued prompt as a Map of execution id -> title.
+ * `output` is the API prompt (`{ id: { class_type } }`, subgraph ids like
+ * "3:2"); titles come from the saved `workflow` JSON (top-level nodes, or a
+ * subgraph definition's nodes for "3:2"), else the default title.
+ */
+export function gridsOfQueuedPrompt(output, workflow) {
+  const grids = new Map()
+  for (const [id, node] of Object.entries(output || {})) {
+    if (node?.class_type !== CLASS_ID) continue
+    const parts = id.split(':')
+    let nodes = workflow?.nodes
+    let found = null
+    for (let i = 0; i < parts.length; i++) {
+      found = Array.isArray(nodes) ? nodes.find((n) => String(n?.id) === parts[i]) : null
+      if (i < parts.length - 1) {
+        nodes = workflow?.definitions?.subgraphs?.find((g) => g?.id === found?.type)?.nodes
+      }
+    }
+    grids.set(id, found?.title || NODE_TITLE)
+  }
+  return grids
+}
+
+/**
+ * The per-prompt bookkeeping, effects injected so it is testable without a
+ * browser. State: prompt_id -> { grids: Map|null, announced, ran }; an entry
+ * is deleted at that prompt's success/error/interrupt, on any websocket gap,
+ * and when a newer prompt starts (no timers).
+ */
+export function createSkippedRunTracker({ onSkipped }) {
+  const prompts = new Map()
+  const entry = (promptId) => {
+    if (!prompts.has(promptId)) {
+      prompts.set(promptId, { grids: null, announced: new Set(), ran: new Set() })
+    }
+    return prompts.get(promptId)
+  }
+  return {
+    /** The queue response: which ids of this prompt are grids. */
+    queued(promptId, grids) {
+      if (promptId) entry(promptId).grids = grids
+    },
+    /** `progress_state` detail: `{ prompt_id, nodes: { id: { state } } }`. */
+    progressState(detail) {
+      const promptId = detail?.prompt_id
+      if (!promptId) return
+      for (const [id, info] of Object.entries(detail.nodes || {})) {
+        if (info?.state === 'running') entry(promptId).announced.add(String(id))
+      }
+    },
+    /** `eps-image-grid-ran` detail: `{ node, prompt_id }`. A missing
+     * prompt_id counts for every open prompt: the safe direction (no alert). */
+    ran(detail) {
+      const id = String(detail?.node)
+      const promptId = detail?.prompt_id
+      const targets = promptId ? [prompts.get(promptId)] : [...prompts.values()]
+      for (const e of targets) e?.ran.add(id)
+    },
+    /** The server runs one prompt at a time: an entry with announcements
+     * that is not this one started earlier and its end was missed. Entries
+     * that were only queued (no announcements) are still waiting: kept. */
+    started(detail) {
+      for (const [id, e] of prompts) {
+        if (id !== detail?.prompt_id && e.announced.size > 0) prompts.delete(id)
+      }
+    },
+    /** `execution_success` detail: `{ prompt_id }`. */
+    success(detail) {
+      const e = prompts.get(detail?.prompt_id)
+      prompts.delete(detail?.prompt_id)
+      if (!e?.grids) return
+      for (const id of skippedGridIds(e.grids, e.announced, e.ran)) onSkipped(id, e.grids.get(id))
+    },
+    /** `execution_error` / `execution_interrupted`: core reports those. */
+    discard(detail) {
+      prompts.delete(detail?.prompt_id)
+    },
+    /** Websocket `reconnecting`/`reconnected`: messages were missed. */
+    reset() {
+      prompts.clear()
+    },
+    size: () => prompts.size
+  }
+}
+
+let skippedRunAlertInstalled = false
+
+function installSkippedRunAlert() {
+  if (skippedRunAlertInstalled) return
+  skippedRunAlertInstalled = true
+  const tracker = createSkippedRunTracker({
+    onSkipped: (id, title) => {
+      const detail =
+        'Skipped this run: something wired into it was blocked upstream, ' +
+        'so nothing was collected or emitted.'
+      warn(`${title} (${id}) ${detail}`)
+      showToast('warn', title, detail, { life: 12000, warn })
+    }
+  })
+  // Chain, never replace: other extensions wrap queuePrompt too. Our
+  // bookkeeping runs after the original resolves and can never affect it.
+  const originalQueuePrompt = api.queuePrompt
+  api.queuePrompt = async function (number, data, ...rest) {
+    const response = await originalQueuePrompt.call(this, number, data, ...rest)
+    try {
+      tracker.queued(response?.prompt_id, gridsOfQueuedPrompt(data?.output, data?.workflow))
+    } catch (error) {
+      warn('skipped-run bookkeeping failed', error)
+    }
+    return response
+  }
+  api.addEventListener('progress_state', (event) => tracker.progressState(event?.detail))
+  api.addEventListener('eps-image-grid-ran', (event) => tracker.ran(event?.detail))
+  api.addEventListener('execution_start', (event) => tracker.started(event?.detail))
+  api.addEventListener('execution_success', (event) => tracker.success(event?.detail))
+  api.addEventListener('execution_error', (event) => tracker.discard(event?.detail))
+  api.addEventListener('execution_interrupted', (event) => tracker.discard(event?.detail))
+  api.addEventListener('reconnecting', () => tracker.reset())
+  api.addEventListener('reconnected', () => tracker.reset())
+}
+
 /**
  * Wraps `node.onExecuted` so a Run's reported refs are folded into the
  * full-buffer view SYNCHRONOUSLY, in the same tick core clobbers the store
@@ -4380,6 +4525,7 @@ function installExecutedMerge(node) {
  * exactly once per extension load. */
 export function init() {
   installExecutionRefreshListener()
+  installSkippedRunAlert()
   installClipspaceCopyFullRes() // 2026-09-09 grid-vs-1-up clipspace copy size parity
   // v0.52.0 (owner direction 2026-08-03): the backend's Collect-with-
   // nothing-wired dead-wire detection is a NON-BLOCKING warning now, not a

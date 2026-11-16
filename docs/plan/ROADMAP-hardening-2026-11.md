@@ -61,7 +61,8 @@ shared `el()`.
 2. **Image Grid `INPUT_IS_LIST` trade-off** (gate on PR #5): a list holding a
    blocker ELEMENT now blocks the grid for that run, where per-element
    mapping collected the valid ones. Kept (one batch for the common switcher
-   case); say so if you would rather revert.
+   case). Decision: kept one-run, with a skipped-run alert (a warning toast
+   when the grid was skipped; FORMAT §6.6).
 3. **Suspected, not pursued** (agent reports, unverified on the rig):
    `controller.js` `_refreshTargetCombo` may overwrite the saved target on a
    transient zero-loader tick; `sets.js` `healMirrorsTags` undo ordering;
