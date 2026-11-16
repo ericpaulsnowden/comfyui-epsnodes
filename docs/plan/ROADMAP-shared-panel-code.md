@@ -1,9 +1,10 @@
 # ROADMAP — shared panel code
 
 **Status:** in progress. M1 (`el`, `installMinWidth`), M1b (`nodeClassOf`,
-`findWidget`, `linkById`, `LINK_COLOR_OWNER_KEY`) and M3 (`loggerFor`,
-`showToast`) are shipped and enforced by tests; M2 and M4 are open. The plan
-was first written on 2026-09-08.
+`findWidget`, `linkById`, `LINK_COLOR_OWNER_KEY`), M3 (`loggerFor`,
+`showToast`) and M4 (the group helpers, `group_helpers.js`) are shipped and
+enforced by tests; M2, M5 and M6 are open. The plan was first written on
+2026-09-08.
 **Census:** performed 2026-09-08 against v0.91.1. Every number below was
 counted from the files, not estimated.
 
@@ -245,24 +246,46 @@ their subscription stubs and re-export the real `loggerFor` / `showToast`).
 Declaration pins on the toast bodies were rewritten to the shared module;
 `console.warn(PREFIX, …)` text pins became `warn(…)`.
 
-### M4 — The group-system helpers (care required)
+### M4 — The group-system helpers — **SHIPPED 2026-11-15**
 
-Byte-identical logic, extractable:
+The group system was hand-copied into 2-3 panels under two names. Re-counted
+on v0.110.14 (the v0.91.1 census numbers still held, no near-copies under
+other names): `isCategoryNameInput`/`isGroupNameInput` 3 declarations,
+`categoryNameFromInput`/`groupNameFromInput` 3, `parseCollapsedSections`/
+`parseCollapsedGroups` 3 (notebook, controller, universal_controller; plus
+prompt_builder importing notebook's), `parseRenameDraft` + `PROP_RENAME_DRAFT`
+2, `_flushPendingNameEdit` 2. Diffing the copies found them behaviourally
+identical apart from names and the two panels' `NODE_TITLE`, so no drift fix
+was needed and no behaviour changed.
 
-| Helper | Copies |
-| --- | --- |
-| `isCategoryNameInput` / `isGroupNameInput` | 3 |
-| `categoryNameFromInput` / `groupNameFromInput` | 3 |
-| `parseCollapsedSections` / `parseCollapsedGroups` | 3 |
-| `parseRenameDraft` + `PROP_RENAME_DRAFT` | 2 |
-| `_flushPendingNameEdit` | 2 |
+Now `web/lora_library/group_helpers.js` owns all of it, under the `group`
+vocabulary: `isGroupNameInput`, `groupNameFromInput`, `parseCollapsedGroups`,
+`parseRenameDraft`, `PROP_RENAME_DRAFT` and `flushPendingNameEdit({ node,
+widget, canvas, title, warn })`. It is a new module rather than more of
+`panel_helpers.js` because that file is DOM and node helpers while this is
+pure domain logic with no `app`/`document`, so Node tests import it with no
+layout. 4 panels import it (`notebook.js`, `controller.js`,
+`universal_controller.js`, `prompt_builder.js`); `web/` loses about 220
+lines. Saved data is untouched: each panel keeps its own property key
+(`Collapsed sections` in the Notebook and Prompt Builder, `Collapsed groups`
+in the Controllers) and passes the value in; only `PROP_RENAME_DRAFT`, always
+spelled identically, moved.
 
-**Rename to one name.** The `category`/`group` split is a pure naming
-accident and is itself a source of confusion when grepping for a fix.
+Left separate on purpose: each Controller keeps a one-line
+`_flushPendingNameEdit()` method that calls the shared function with its own
+widget, `NODE_TITLE` and logger (so the click handlers and their tests are
+unchanged); `toggleCollapsedSection`/`isSectionCollapsed` stay in
+`notebook.js` (one definition, imported by `prompt_builder.js`); the
+`_beginCategoryRename`/`_commitCategoryRename` bodies and the layout
+mutation (M6).
 
-**The hidden cost lives here** — see "Test-pin migration" below. Do M1–M3
-first; by then the extraction pattern will be established and the test
-migration is the only novel work left.
+Tests: `tests/test_group_helpers_js.py` drives the helpers directly and fails
+if any other file under `web/` declares one under its old or new name, or
+touches `prompt_box` / the `#` strip regex. The declaration pins and parser
+probes in the Controller, Notebook and Prompt Builder test files were
+removed or pointed at the shared module (their behaviour is now tested once);
+call-site pins changed only by the rename. Six test files that copy panels
+into a served layout copy `group_helpers.js` too.
 
 ### M5 — Two-click armed confirm
 

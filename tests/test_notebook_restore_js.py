@@ -486,6 +486,7 @@ VERSION_JS = WEB / "lora_library" / "version.js"
 # resolve notebook.js's import under Node.
 SEARCH_JS = WEB / "lora_library" / "search.js"
 PANEL_HELPERS_JS = WEB / "lora_library" / "panel_helpers.js"
+GROUP_HELPERS_JS = WEB / "lora_library" / "group_helpers.js"
 NODE = shutil.which("node")
 
 CACHE_PROBE_JS = """
@@ -496,7 +497,6 @@ const out = {
     notebookCacheGet: typeof nb.notebookCacheGet === 'function',
     notebookCacheSet: typeof nb.notebookCacheSet === 'function',
     isUnchangedResponse: typeof nb.isUnchangedResponse === 'function',
-    parseCollapsedSections: typeof nb.parseCollapsedSections === 'function',
     panelScale: typeof nb.panelScale === 'function',
     splitterLeftWidth: typeof nb.splitterLeftWidth === 'function',
     toggleCollapsedSection: typeof nb.toggleCollapsedSection === 'function',
@@ -540,20 +540,8 @@ out.pickServerFolder = [
 ]
 
 // Collapsed sections persist with the workflow (owner ask 2026-08-23) --
-// the pure array helpers behind the `Collapsed sections` node property.
-out.collapsedParse = [
-  nb.parseCollapsedSections(['A', 'B']),
-  nb.parseCollapsedSections(['A', 1, null, 'B', {}]), // non-strings dropped
-  nb.parseCollapsedSections('["A","B"]'), // a hand-edited JSON string round-trips
-  nb.parseCollapsedSections('not json'), // malformed JSON folds to []
-  nb.parseCollapsedSections('[1,2]'), // a JSON array of non-strings folds to []
-  nb.parseCollapsedSections(''), // blank string
-  nb.parseCollapsedSections('   '), // whitespace-only string
-  nb.parseCollapsedSections(null),
-  nb.parseCollapsedSections(undefined),
-  nb.parseCollapsedSections(42),
-  nb.parseCollapsedSections({ A: true }) // a plain object, not an array
-]
+// the pure array helpers behind the `Collapsed sections` node property
+// (its parser, parseCollapsedGroups, is group_helpers.js's: tests/test_group_helpers_js.py).
 const onceCollapsed = nb.toggleCollapsedSection([], 'A')
 const twiceCollapsed = nb.toggleCollapsedSection(onceCollapsed, 'A')
 const addInput = ['A']
@@ -578,7 +566,7 @@ out.collapsedIsSection = [
 ]
 // `Open category` node property (v0.87.5, tab-switch REBUILD round) --
 // the pure parser behind PROP_OPEN_CATEGORY, same tolerance contract as
-// parseCollapsedSections() above but returning a single name (or `null`
+// parseCollapsedGroups() above but returning a single name (or `null`
 // for "nothing open") instead of a list.
 out.openCategoryParse = [
   nb.parseOpenCategoryProperty('Prompts'), // a normal saved name
@@ -728,7 +716,7 @@ def cache_api(tmp_path_factory: pytest.TempPathFactory) -> dict:
     layout = tmp_path_factory.mktemp("web_root")
     module_dir = layout / "extensions" / "comfyui-epsnodes" / "lora_library"
     module_dir.mkdir(parents=True)
-    for src in (NOTEBOOK_JS, API_JS, VERSION_JS, SEARCH_JS, PANEL_HELPERS_JS):
+    for src in (NOTEBOOK_JS, API_JS, VERSION_JS, SEARCH_JS, PANEL_HELPERS_JS, GROUP_HELPERS_JS):
         shutil.copyfile(src, module_dir / src.name)
     scripts = layout / "scripts"
     scripts.mkdir(parents=True, exist_ok=True)
@@ -1068,29 +1056,8 @@ def test_single_load_per_restore_logic_is_intact_around_the_cache(source: str) -
 
 
 def test_collapsed_sections_pure_helpers_are_exported(cache_api: dict) -> None:
-    assert cache_api["exports"]["parseCollapsedSections"] is True
     assert cache_api["exports"]["toggleCollapsedSection"] is True
     assert cache_api["exports"]["isSectionCollapsed"] is True
-
-
-def test_parse_collapsed_sections_is_tolerant(cache_api: dict) -> None:
-    """CONTRACT: the canonical array-of-strings shape, and a JSON-encoded
-    string of the same (a hand-edit through the node's Properties panel
-    round-trips as a string) both parse; everything else -- malformed JSON,
-    a JSON array of non-strings, blank/whitespace, null, undefined, a bare
-    number, a plain object -- folds to `[]` rather than throwing."""
-    parsed = cache_api["collapsedParse"]
-    assert parsed[0] == ["A", "B"]
-    assert parsed[1] == ["A", "B"]  # non-string array entries dropped
-    assert parsed[2] == ["A", "B"]  # JSON-encoded string round-trips
-    assert parsed[3] == []  # malformed JSON
-    assert parsed[4] == []  # JSON array of non-strings
-    assert parsed[5] == []  # blank string
-    assert parsed[6] == []  # whitespace-only string
-    assert parsed[7] == []  # null
-    assert parsed[8] == []  # undefined
-    assert parsed[9] == []  # a bare number
-    assert parsed[10] == []  # a plain object, not an array
 
 
 def test_toggle_collapsed_section_round_trips_and_never_mutates_its_input(
@@ -1150,7 +1117,7 @@ def test_apply_collapsed_sections_from_property_reads_through_the_tolerant_parse
     source: str,
 ) -> None:
     apply_fn = _body(source, "applyCollapsedSectionsFromProperty(state)")
-    assert "parseCollapsedSections(state.node.properties?.[PROP_COLLAPSED_SECTIONS])" in apply_fn
+    assert "parseCollapsedGroups(state.node.properties?.[PROP_COLLAPSED_SECTIONS])" in apply_fn
     assert "state.collapsedCategories = new Set(names)" in apply_fn
 
 
@@ -1238,7 +1205,6 @@ def test_collapsed_sections_export_list_is_additive(source: str) -> None:
     for signature in pre_existing:
         assert signature in source, signature
     added_this_round = (
-        "export function parseCollapsedSections(raw)",
         "export function toggleCollapsedSection(list, name)",
         "export function isSectionCollapsed(list, name)",
         "export function describePendingCategoryDelete(state, category)",
@@ -1266,7 +1232,7 @@ def test_collapsed_sections_export_list_is_additive(source: str) -> None:
     # backing `state.activeCategory` the same way `Collapsed sections`
     # backs `state.collapsedCategories` above -- exported so this round's
     # own tests can drive its tolerant parser directly under Node, same
-    # convention as `parseCollapsedSections`.
+    # convention as `toggleCollapsedSection`.
     added_v0_87_5 = ("export function parseOpenCategoryProperty(raw)",)
     for signature in added_v0_87_5:
         assert signature in source, signature

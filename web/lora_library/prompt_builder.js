@@ -72,8 +72,8 @@
  *    `isUnchangedResponse` rather than reimplemented, so this panel and any
  *    open Notebook on the SAME file share one browser-session cache.
  *  - Collapsed groups (notebook.js's `PROP_COLLAPSED_SECTIONS` section):
- *    its exported `parseCollapsedSections`/`toggleCollapsedSection`/
- *    `isSectionCollapsed` are pure and already do exactly what this panel's
+ *    group_helpers.js's `parseCollapsedGroups` and its exported
+ *    `toggleCollapsedSection`/`isSectionCollapsed` are pure and already do exactly what this panel's
  *    read-only category headers need, so they're imported rather than
  *    re-written — only the property NAME (`'Collapsed sections'`, a local
  *    const here, same posture as `NOTEBOOK_CLASS_ID` below) is duplicated,
@@ -97,8 +97,9 @@
 import { app } from '../../../scripts/app.js'
 import * as api from './api.js'
 import { walkLiveNodes } from './api.js'
-import { notebookCacheGet, notebookCacheSet, isUnchangedResponse, parseCollapsedSections, toggleCollapsedSection, isSectionCollapsed } from './notebook.js'
+import { notebookCacheGet, notebookCacheSet, isUnchangedResponse, toggleCollapsedSection, isSectionCollapsed } from './notebook.js'
 import { el, findWidget, installMinWidth } from './panel_helpers.js'
+import { parseCollapsedGroups } from './group_helpers.js'
 
 /** FORMAT.md — frozen once shipped. */
 export const CLASS_ID = 'EPSPromptBuilder'
@@ -1295,7 +1296,7 @@ function registerCollapsedSectionsProperty(state) {
  * property currently says. Never writes the property or dirties the
  * canvas — see syncCollapsedSectionsProperty() for the write half. */
 function applyCollapsedSectionsFromProperty(state) {
-  state.collapsedSections = parseCollapsedSections(state.node.properties?.[PROP_COLLAPSED_SECTIONS])
+  state.collapsedSections = parseCollapsedGroups(state.node.properties?.[PROP_COLLAPSED_SECTIONS])
 }
 
 /** WRITE half — folds the CURRENT `state.collapsedSections` back into the
