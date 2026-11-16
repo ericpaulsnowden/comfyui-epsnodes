@@ -30,7 +30,9 @@
 
 const PREFIX = '[EPSNodes owned_link_colour]'
 
-/** The tag image_grid.js / save_image.js / distributor.js / bypass.js share. */
+/** The tag every link-colouring EPS file stamps (image_grid.js, save_image.js,
+ * switcher.js, checkpoint_switcher.js, distributor.js and, through
+ * distributor.js's re-export, bypass.js). The ONE definition: import it. */
 export const LINK_COLOR_OWNER_KEY = '__epsLinkColorOwner'
 
 const HOOK_FLAG = '__epsOwnedLinkColour'

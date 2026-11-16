@@ -140,7 +140,7 @@ import { walkLiveNodes, walkGraphs } from './api.js'
 import * as pll from './pll_bridge.js'
 import * as dasiwa from './dasiwa_bridge.js'
 import { entryMatchesSearch, searchWords } from './search.js'
-import { el, installMinWidth } from './panel_helpers.js'
+import { el, findWidget, installMinWidth, nodeClassOf } from './panel_helpers.js'
 
 /** Frozen once shipped -- mirrors the Python node's class id (§6.13). */
 export const CLASS_ID = 'EPSLoraPicker'
@@ -649,20 +649,6 @@ function injectStyles() {
   style.id = STYLE_TAG_ID
   style.textContent = CSS_TEXT
   document.head.appendChild(style)
-}
-
-// --- Node / widget lookups ---
-
-/** @param {object} node @returns {string|null} */
-function nodeClassOf(node) {
-  if (!node) return null
-  if (node.comfyClass) return node.comfyClass
-  if (node.constructor && node.constructor.comfyClass) return node.constructor.comfyClass
-  return null
-}
-
-function findWidget(node, name) {
-  return node.widgets?.find((w) => w && w.name === name)
 }
 
 // --- Node height policy -- the pure decision helpers (§6.13 height round,

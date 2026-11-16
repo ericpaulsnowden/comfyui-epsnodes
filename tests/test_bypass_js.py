@@ -1013,7 +1013,13 @@ def probe(tmp_path_factory: pytest.TempPathFactory) -> dict:
     layout = tmp_path_factory.mktemp("web_root")
     module_dir = layout / "extensions" / "comfyui-epsnodes" / "eps_image"
     module_dir.mkdir(parents=True)
-    for source in (BYPASS_JS, NUMBER_CONTROLLER_JS, DISTRIBUTOR_JS):
+    # owned_link_colour.js: distributor.js re-exports its LINK_COLOR_OWNER_KEY
+    for source in (
+        BYPASS_JS,
+        NUMBER_CONTROLLER_JS,
+        DISTRIBUTOR_JS,
+        BYPASS_JS.parent / "owned_link_colour.js",
+    ):
         shutil.copyfile(source, module_dir / source.name)
 
     scripts = layout / "scripts"
@@ -1587,7 +1593,10 @@ def test_shared_helpers_are_imported_not_copied(source: str) -> None:
         "hideValuesWidget",
         "isOutputConnected",
     }
-    assert "import { installMinWidth } from '../lora_library/panel_helpers.js'" in source
+    assert (
+        "import { findWidget, installMinWidth, linkById, nodeClassOf } "
+        "from '../lora_library/panel_helpers.js'"
+    ) in source
     dist_import = re.search(r"import \{([^}]*)\} from './distributor\.js'", source)
     assert dist_import, "bypass.js must import from distributor.js"
     dist_names = {n.strip() for n in dist_import.group(1).split(",") if n.strip()}
@@ -1613,7 +1622,11 @@ def test_the_shared_exports_exist_and_name_this_file(source: str) -> None:
         assert f"export function {name} {{" in nc, name
     assert nc.count("bypass.js") >= 4
     dist = DISTRIBUTOR_JS.read_text(encoding="utf-8")
-    assert "export const LINK_COLOR_OWNER_KEY = '__epsLinkColorOwner'" in dist
+    # the owner key has ONE definition (owned_link_colour.js); distributor.js
+    # re-exports it so this file's import keeps working
+    assert "import { LINK_COLOR_OWNER_KEY } from './owned_link_colour.js'" in dist
+    assert "export { LINK_COLOR_OWNER_KEY }" in dist
+    assert "'__epsLinkColorOwner'" not in dist
     assert "export const LINK_COLOR_RESYNC_HOOK = '__epsResyncLinkColors'" in dist
     assert "bypass.js" in dist
 

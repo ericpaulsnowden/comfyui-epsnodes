@@ -342,7 +342,8 @@
 
 import { app } from '../../../scripts/app.js'
 import { loggerFor, showToast } from '../lora_library/api.js'
-import { installMinWidth } from '../lora_library/panel_helpers.js'
+import { LINK_COLOR_OWNER_KEY } from './owned_link_colour.js'
+import { findWidget, installMinWidth, linkById, nodeClassOf } from '../lora_library/panel_helpers.js'
 
 /** FORMAT.md section 6.11 -- frozen once shipped. */
 export const CLASS_ID = 'EPSDistributor'
@@ -446,10 +447,12 @@ const HEADER_WIDGET_NAME = '__eps_distributor_toggle_all'
  * v0.99.0: both constants are now EXPORTED and `bypass.js` (EPS Bypass,
  * FORMAT.md section 6.18) imports them -- it is a second node that adopts a
  * wired type and recolours the links it owns, so it must honour the same
- * tag and expose the same hook. image_grid.js keeps its own mirrored copy of
- * both strings: keep all three files in lockstep.
+ * tag and expose the same hook. The owner key has ONE definition, in
+ * owned_link_colour.js, re-exported here for bypass.js; image_grid.js still
+ * keeps its own mirrored copy of the resync-hook string: keep those in
+ * lockstep.
  */
-export const LINK_COLOR_OWNER_KEY = '__epsLinkColorOwner'
+export { LINK_COLOR_OWNER_KEY }
 export const LINK_COLOR_RESYNC_HOOK = '__epsResyncLinkColors'
 
 // --------------------------------------------------------- draw geometry
@@ -753,20 +756,9 @@ export function toggleBoxRect(socketLocalX, socketLocalY, textReach = 0) {
 }
 
 // ---------------------------------------------------------------------------
-// Node / widget lookups (switcher.js's identical helpers, copied verbatim --
-// each eps_image/*.js module keeps its own copy rather than sharing one)
+// Node / widget lookups (`nodeClassOf` / `findWidget` / `linkById` are
+// imported from panel_helpers.js)
 // ---------------------------------------------------------------------------
-
-function nodeClassOf(node) {
-  if (!node) return null
-  if (node.comfyClass) return node.comfyClass
-  if (node.constructor && node.constructor.comfyClass) return node.constructor.comfyClass
-  return null
-}
-
-function findWidget(node, name) {
-  return node.widgets?.find((w) => w && w.name === name)
-}
 
 function getTogglesWidget(node) {
   return findWidget(node, TOGGLES_WIDGET_NAME) || null
@@ -783,15 +775,6 @@ function outputIndexByName(node, name) {
  * result mutates the real slot. */
 function findInput(node, name) {
   return (node.inputs || []).find((input) => input && input.name === name)
-}
-
-/** Looks up an LLink object by id, tolerant of either shape this
- * frontend's forks have used for `graph.links` (a plain object/array
- * indexed by id, or a `Map`) -- frame_saver.js's identical defensive
- * lookup (`resolveWiredVideo`). Returns null if unreachable. */
-function linkById(graph, linkId) {
-  if (linkId == null || !graph) return null
-  return graph.links?.[linkId] ?? graph.links?.get?.(linkId) ?? null
 }
 
 /** The colour `syncSlotTypes` should paint a link carrying *type* --

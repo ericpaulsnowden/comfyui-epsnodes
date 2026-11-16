@@ -29,10 +29,10 @@
  * (`LINK_COLOR_OWNER_KEY`/`LINK_COLOR_RESYNC_HOOK`). All are IMPORTED under
  * their existing bare names, not hand-copied: this pack has shipped a fix to
  * a duplicated helper that missed a sibling three times, and unplug/replug is
- * exactly the code that must never diverge between two nodes. Only the
- * trivial lookups (`nodeClassOf`, `findWidget`, `linkById`, `toast`) are
- * local copies, like every other module's. Those exports carry a comment in
- * their own files naming this one.
+ * exactly the code that must never diverge between two nodes. The trivial
+ * lookups (`nodeClassOf`, `findWidget`, `linkById`) come from the shared
+ * `panel_helpers.js`; only the `toast` wrapper is local. Those exports carry
+ * a comment in their own files naming this one.
  *
  * **Required-input guard -- refuse wholesale, never partially.** Before
  * disconnecting anything, every target input is classified
@@ -106,7 +106,7 @@
 
 import { app } from '../../../scripts/app.js'
 import { loggerFor, showToast, subscribeWidgetsChangedExternally } from '../lora_library/api.js'
-import { installMinWidth } from '../lora_library/panel_helpers.js'
+import { findWidget, installMinWidth, linkById, nodeClassOf } from '../lora_library/panel_helpers.js'
 import {
   collectOutputTargets,
   disconnectAllTargets,
@@ -309,27 +309,9 @@ export function refusalMessage(blockers) {
 }
 
 // ---------------------------------------------------------------------------
-// Node / graph lookups (local copies of the pack's trivial helpers -- module
-// docstring: only these four are hand-copied, deliberately).
+// Node / graph lookups (`nodeClassOf` / `findWidget` / `linkById` are
+// imported from panel_helpers.js).
 // ---------------------------------------------------------------------------
-
-function nodeClassOf(node) {
-  if (!node) return null
-  if (node.comfyClass) return node.comfyClass
-  if (node.constructor && node.constructor.comfyClass) return node.constructor.comfyClass
-  return null
-}
-
-function findWidget(node, name) {
-  return node.widgets?.find((w) => w && w.name === name)
-}
-
-/** An LLink by id, tolerant of `graph.links` being a plain object/array or
- * a Map (distributor.js's/number_controller.js's identical lookup). */
-function linkById(graph, linkId) {
-  if (linkId == null || !graph) return null
-  return graph.links?.[linkId] ?? graph.links?.get?.(linkId) ?? null
-}
 
 function toast(node, severity, detail, life) {
   showToast(severity, node.title || NODE_TITLE, detail, { life, warn })

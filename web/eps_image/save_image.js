@@ -33,7 +33,8 @@
 
 import { app } from '../../../scripts/app.js'
 import { loggerFor, showToast, walkLiveNodes } from '../lora_library/api.js'
-import { ensureOwnedLinkColourHook } from './owned_link_colour.js'
+import { findWidget, linkById, nodeClassOf } from '../lora_library/panel_helpers.js'
+import { LINK_COLOR_OWNER_KEY, ensureOwnedLinkColourHook } from './owned_link_colour.js'
 
 const PREFIX = '[EPSNodes save_image]'
 const { warn } = loggerFor(PREFIX)
@@ -152,7 +153,6 @@ export function init() {
 
 /** image_grid.js's dim grey -- the same "not really there" look. */
 const DIM_LINK_COLOR = 'rgba(128,128,128,0.25)'
-const LINK_COLOR_OWNER_KEY = '__epsLinkColorOwner'
 const LINK_COLOR_OWNER_SAVE = 'EPSSaveImage:image-output-off'
 const LINK_COLOR_RESYNC_HOOK = '__epsResyncLinkColors'
 
@@ -163,23 +163,6 @@ const attachedNodes = new WeakSet()
  * (its identity is its lifetime); `{color}` so a stashed `undefined` -- the
  * usual case -- is distinguishable from "never stashed". */
 const dimStash = new WeakMap()
-
-/** Same lookups as bypass.js / image_grid.js (own copies, by convention). */
-function nodeClassOf(node) {
-  if (!node) return null
-  if (node.comfyClass) return node.comfyClass
-  if (node.constructor && node.constructor.comfyClass) return node.constructor.comfyClass
-  return null
-}
-
-function findWidget(node, name) {
-  return node.widgets?.find((w) => w && w.name === name)
-}
-
-function linkById(graph, linkId) {
-  if (linkId == null || !graph) return null
-  return graph.links?.[linkId] ?? graph.links?.get?.(linkId) ?? null
-}
 
 /** The backend's `parse_image_output` rule: only an explicit `false` (or
  * the string "false", any case) is off. */

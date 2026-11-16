@@ -2417,10 +2417,11 @@ def cross_sweep_api(tmp_path_factory: pytest.TempPathFactory) -> dict:
     module_dir = layout / "extensions" / "comfyui-epsnodes" / "eps_image"
     module_dir.mkdir(parents=True)
     shutil.copyfile(CROSS_SWEEP_JS, module_dir / "cross_sweep.js")
-    # its shared logger/toast (`loggerFor`, `showToast`) live in lora_library/api.js
+    # its shared logger/toast (`loggerFor`, `showToast`) live in lora_library/api.js,
+    # `nodeClassOf` in lora_library/panel_helpers.js
     helpers_dir = layout / "extensions" / "comfyui-epsnodes" / "lora_library"
     helpers_dir.mkdir(parents=True)
-    for name in ("api.js", "version.js"):
+    for name in ("api.js", "version.js", "panel_helpers.js"):
         shutil.copyfile(REPO_ROOT / "web" / "lora_library" / name, helpers_dir / name)
 
     # cross_sweep.js's two imports -- `../../../scripts/api.js` and

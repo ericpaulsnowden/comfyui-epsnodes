@@ -1,9 +1,10 @@
 """Behaviour tests for the shared panel helpers
 (``web/lora_library/panel_helpers.js``: ``el`` and ``installMinWidth``,
-docs/plan/ROADMAP-shared-panel-code.md M1 + the installMinWidth unification).
+docs/plan/ROADMAP-shared-panel-code.md M1 + the installMinWidth unification;
+``nodeClassOf`` / ``findWidget`` / ``linkById`` since 2026-11-15).
 
-Before that module existed both helpers were hand-copied into 8-9 panels and
-a fix reached only some copies. These tests drive the one implementation under
+Before that module existed the helpers were hand-copied into 7-11 files each
+and a fix reached only some copies. These tests drive the one implementation under
 Node with a tiny DOM stub (the module imports nothing, so no served layout is
 needed) and guard against a panel declaring its own copy again.
 """
@@ -27,7 +28,7 @@ NODE = shutil.which("node")
 pytestmark = pytest.mark.skipif(NODE is None, reason="node (JS runtime) not installed")
 
 PROBE_JS = """
-import { el, installMinWidth } from '%(module)s'
+import { el, findWidget, installMinWidth, linkById, nodeClassOf } from '%(module)s'
 
 class FakeNode {
   constructor(tag) { this.tag = tag; this.attrs = {}; this.kids = [] }
@@ -81,6 +82,31 @@ out.bare = bare.size[0]
 installMinWidth(null, 300)
 installMinWidth(undefined, 300)
 out.nullSafe = true
+
+class Ctor { static comfyClass = 'FromConstructor' }
+out.nodeClassOf = {
+  own: nodeClassOf({ comfyClass: 'Own', constructor: { comfyClass: 'Ctor' } }),
+  ctor: nodeClassOf(new Ctor()),
+  none: nodeClassOf({}),
+  nullNode: nodeClassOf(null)
+}
+const seed = { name: 'seed', value: 7 }
+const widgetNode = { widgets: [null, { name: 'steps', value: 20 }, seed, { name: 'seed', value: 'second' }] }
+out.findWidget = {
+  hitIsTheFirstMatch: findWidget(widgetNode, 'seed') === seed,
+  miss: findWidget(widgetNode, 'cfg') === undefined,
+  noWidgets: findWidget({}, 'seed') === undefined
+}
+const link = { id: 5 }
+out.linkById = {
+  plainObject: linkById({ links: { 5: link } }, 5) === link,
+  map: linkById({ links: new Map([[5, link]]) }, 5) === link,
+  missing: linkById({ links: new Map() }, 5),
+  noLinks: linkById({}, 5),
+  noGraph: linkById(null, 5),
+  nullId: linkById({ links: { null: link } }, null),
+  zeroId: linkById({ links: { 0: link } }, 0) === link
+}
 process.stdout.write('RESULT:' + JSON.stringify(out))
 """
 
@@ -147,14 +173,66 @@ def test_install_min_width_tolerates_a_missing_node(probe: dict) -> None:
     assert probe["nullSafe"] is True
 
 
+def test_node_class_of_reads_the_instance_then_the_constructor(probe: dict) -> None:
+    assert probe["nodeClassOf"] == {
+        "own": "Own",
+        "ctor": "FromConstructor",
+        "none": None,
+        "nullNode": None,
+    }
+
+
+def test_find_widget_returns_the_first_widget_of_that_name(probe: dict) -> None:
+    # a null hole in `widgets` is skipped; a miss / no widgets is undefined
+    assert probe["findWidget"] == {"hitIsTheFirstMatch": True, "miss": True, "noWidgets": True}
+
+
+def test_link_by_id_reads_object_and_map_shaped_link_tables(probe: dict) -> None:
+    assert probe["linkById"] == {
+        "plainObject": True,
+        "map": True,
+        "missing": None,
+        "noLinks": None,
+        "noGraph": None,
+        "nullId": None,  # "no link" is never looked up, whatever the table holds
+        "zeroId": True,  # 0 is a real id
+    }
+
+
 def test_no_panel_declares_its_own_copy_of_a_shared_helper() -> None:
     """The point of the module: one implementation. A second declaration is
     the drift this pack kept paying for (docs/plan/ROADMAP-shared-panel-code.md)."""
-    declaration = re.compile(r"^(?:export )?(?:function|const) (el|installMinWidth)\b", re.M)
+    declaration = re.compile(
+        r"^(?:export )?(?:function|const) (el|installMinWidth|nodeClassOf|findWidget|linkById)\b",
+        re.M,
+    )
     offenders = [
         f"{path.relative_to(WEB)}: {m.group(1)}"
         for path in sorted(WEB.rglob("*.js"))
         if path != PANEL_HELPERS_JS
         for m in declaration.finditer(path.read_text(encoding="utf-8"))
+    ]
+    assert not offenders, offenders
+
+
+def test_the_link_colour_owner_key_has_one_definition() -> None:
+    """Six files used to spell `LINK_COLOR_OWNER_KEY = '__epsLinkColorOwner'`
+    by hand; a typo in one would make that file blind to every other file's
+    claim. The one definition lives in owned_link_colour.js; everyone else
+    imports it (distributor.js re-exports it for bypass.js)."""
+    owner_module = WEB / "eps_image" / "owned_link_colour.js"
+    assert (
+        "export const LINK_COLOR_OWNER_KEY = '__epsLinkColorOwner'"
+        in owner_module.read_text(encoding="utf-8")
+    )
+    declaration = re.compile(r"^(?:export )?(?:const|let|var) LINK_COLOR_OWNER_KEY\b", re.M)
+    offenders = [
+        str(path.relative_to(WEB))
+        for path in sorted(WEB.rglob("*.js"))
+        if path != owner_module
+        and (
+            declaration.search(path.read_text(encoding="utf-8"))
+            or "'__epsLinkColorOwner'" in path.read_text(encoding="utf-8")
+        )
     ]
     assert not offenders, offenders

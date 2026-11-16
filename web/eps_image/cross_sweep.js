@@ -126,6 +126,7 @@
 import { api } from '../../../scripts/api.js'
 import { app } from '../../../scripts/app.js'
 import { loggerFor, showToast } from '../lora_library/api.js'
+import { nodeClassOf } from '../lora_library/panel_helpers.js'
 
 /** Frozen once shipped -- mirrors the Python node's class id (§6.10/§8). */
 export const CLASS_ID = 'EPSCrossSweep'
@@ -1676,14 +1677,6 @@ function injectStyles() {
   style.id = STYLE_TAG_ID
   style.textContent = CSS_TEXT
   document.head.appendChild(style)
-}
-
-/** @param {object} node @returns {string|null} */
-function nodeClassOf(node) {
-  if (!node) return null
-  if (node.comfyClass) return node.comfyClass
-  if (node.constructor && node.constructor.comfyClass) return node.constructor.comfyClass
-  return null
 }
 
 /** Re-estimates from the live graph and repaints the line -- only when the

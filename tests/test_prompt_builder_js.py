@@ -95,7 +95,7 @@ def test_only_the_three_documented_imports(source: str) -> None:
         "import { notebookCacheGet, notebookCacheSet, isUnchangedResponse, "
         "parseCollapsedSections, toggleCollapsedSection, isSectionCollapsed } "
         "from './notebook.js'",
-        "import { el, installMinWidth } from './panel_helpers.js'",
+        "import { el, findWidget, installMinWidth } from './panel_helpers.js'",
     ]
 
 
