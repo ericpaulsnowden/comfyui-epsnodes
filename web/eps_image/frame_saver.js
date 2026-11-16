@@ -337,7 +337,7 @@
 import { api } from '../../../scripts/api.js'
 import { app } from '../../../scripts/app.js'
 import { loggerFor, showToast } from '../lora_library/api.js'
-import { el, installMinWidth } from '../lora_library/panel_helpers.js'
+import { el, findWidget, installMinWidth, nodeClassOf } from '../lora_library/panel_helpers.js'
 
 /** FORMAT.md §6.7 — frozen once shipped. */
 const CLASS_ID = 'EPSFrameSaver'
@@ -533,22 +533,6 @@ function frontTruncate(text, maxChars = 60) {
 // ---------------------------------------------------------------------------
 // Node / widget lookups
 // ---------------------------------------------------------------------------
-
-/**
- * @param {object} node
- * @returns {string|null} the node's ComfyUI class id, or null if it can't be
- * determined (ported from `notebook.js`'s `isNotebookNode`/`nodeClassOf`).
- */
-function nodeClassOf(node) {
-  if (!node) return null
-  if (node.comfyClass) return node.comfyClass
-  if (node.constructor && node.constructor.comfyClass) return node.constructor.comfyClass
-  return null
-}
-
-function findWidget(node, name) {
-  return node.widgets?.find((w) => w && w.name === name)
-}
 
 /** Writes *value* through *widget*'s real setter + callback, so a
  * programmatic change (Browse's onChoose) behaves exactly like the user

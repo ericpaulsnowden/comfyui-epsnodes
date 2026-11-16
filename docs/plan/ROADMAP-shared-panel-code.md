@@ -148,6 +148,41 @@ declaration pins were removed (their behaviour is now tested once in
 own copy again). 14 test files that copy modules into a served layout (and
 `conftest.py`'s `install_switcher_js`) copy `panel_helpers.js` too.*
 
+### M1b — `nodeClassOf`, `findWidget`, `linkById`, one `LINK_COLOR_OWNER_KEY` — **DONE 2026-11-15**
+
+Same recipe as M1 (branch `simplify/dead-code-and-duplicates`, on v0.110.14).
+Grouped by normalised body first; every copy of the three lookups was
+identical, so all of them moved into `panel_helpers.js` and are imported
+under their existing bare names (call sites untouched):
+
+| Helper | Declarations before | Files |
+| --- | --- | --- |
+| `nodeClassOf` | 10 -> 1 | 9 eps_image panels + `picker.js` |
+| `findWidget` | 11 -> 1 | 8 eps_image panels + `notebook.js`, `picker.js`, `prompt_builder.js` |
+| `linkById` | 7 -> 1 | `bypass`, `checkpoint_switcher`, `distributor`, `image_grid`, `number_controller`, `save_image`, `switcher` |
+
+`LINK_COLOR_OWNER_KEY = '__epsLinkColorOwner'` was spelled in 6 files; the
+one definition is `eps_image/owned_link_colour.js`'s. `save_image.js`,
+`switcher.js`, `image_grid.js` and `checkpoint_switcher.js` import it from
+there; `distributor.js` imports it and re-exports it (`export {
+LINK_COLOR_OWNER_KEY }`) so `bypass.js`'s import from `distributor.js` is
+unchanged.
+
+**Left alone: `injectStyles` (7 declarations).** Six bodies are textually
+identical (`number_controller.js` adds a `typeof document` guard), but each
+closes over its own module's `stylesInjected` flag, `STYLE_TAG_ID` and
+`CSS_TEXT`, so they are seven different functions. Sharing one means a
+parameterised `injectStyles(id, css)` and a changed call site in every
+panel, which is a different job from this recipe.
+
+Enforcement: `tests/test_panel_helpers_js.py` now fails on a re-declared
+`nodeClassOf` / `findWidget` / `linkById` anywhere under `web/` and on a
+second spelling of the owner key, and tests the three lookups' behaviour
+once. Four more files import `panel_helpers.js` (`save_image.js`,
+`switcher.js`, `cross_sweep.js`, `image_grid.js`) and `distributor.js` now
+imports `owned_link_colour.js`, so the served layouts of five test files copy
+those modules too.
+
 ### M2 — `chainHook()`: the biggest number in the census
 
 The pack hand-rolls "capture the original hook, wrap it, try/catch both

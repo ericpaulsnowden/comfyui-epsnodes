@@ -1063,10 +1063,11 @@ def grid_api(tmp_path_factory: pytest.TempPathFactory) -> dict:
         IMAGE_GRID_JS.parent / "owned_link_colour.js", module_dir / "owned_link_colour.js"
     )
 
-    # its shared logger/toast (`loggerFor`, `showToast`) live in lora_library/api.js
+    # its shared logger/toast (`loggerFor`, `showToast`) live in lora_library/api.js,
+    # its node/widget/link lookups in lora_library/panel_helpers.js
     helpers_dir = layout / "extensions" / "comfyui-epsnodes" / "lora_library"
     helpers_dir.mkdir(parents=True)
-    for name in ("api.js", "version.js"):
+    for name in ("api.js", "version.js", "panel_helpers.js"):
         shutil.copyfile(REPO_ROOT / "web" / "lora_library" / name, helpers_dir / name)
 
     # image_grid.js's two imports, stubbed at the served depth

@@ -293,7 +293,8 @@
 
 import { app } from '../../../scripts/app.js'
 import { loggerFor, showToast } from '../lora_library/api.js'
-import { ensureOwnedLinkColourHook } from './owned_link_colour.js'
+import { findWidget, linkById, nodeClassOf } from '../lora_library/panel_helpers.js'
+import { LINK_COLOR_OWNER_KEY, ensureOwnedLinkColourHook } from './owned_link_colour.js'
 import { normalizeRememberedLinks, reconnectRememberedTargets } from './number_controller.js'
 import { inputVerdict, sameTarget } from './bypass.js'
 
@@ -410,14 +411,6 @@ const attachedNodes = new WeakSet()
 // Node / widget lookups
 // ---------------------------------------------------------------------------
 
-/** @param {object} node @returns {string|null} */
-function nodeClassOf(node) {
-  if (!node) return null
-  if (node.comfyClass) return node.comfyClass
-  if (node.constructor && node.constructor.comfyClass) return node.constructor.comfyClass
-  return null
-}
-
 /**
  * @param {object} node
  * @returns {{prefix: string, type: string, inputRe: RegExp}|null} *node*'s
@@ -431,10 +424,6 @@ function nodeClassOf(node) {
  */
 function switcherSpecOf(node) {
   return SWITCHER_CLASSES[nodeClassOf(node)] || null
-}
-
-function findWidget(node, name) {
-  return node.widgets?.find((w) => w && w.name === name)
 }
 
 function getTogglesWidget(node) {
@@ -1655,7 +1644,6 @@ function wireRowRename(node) {
 
 /** image_grid.js's dim grey -- the same "not really there" look. */
 const DIM_LINK_COLOR = 'rgba(128,128,128,0.25)'
-const LINK_COLOR_OWNER_KEY = '__epsLinkColorOwner'
 export const LINK_COLOR_OWNER_SWITCHER = 'EPSSwitcher:all-off'
 const LINK_COLOR_RESYNC_HOOK = '__epsResyncLinkColors'
 
@@ -1663,12 +1651,6 @@ const LINK_COLOR_RESYNC_HOOK = '__epsResyncLinkColors'
  * (its identity is its lifetime); `{color}` so a stashed `undefined` -- the
  * usual case -- is distinguishable from "never stashed". */
 const dimStash = new WeakMap()
-
-/** Same lookup as image_grid.js / save_image.js (own copy, by convention). */
-function linkById(graph, linkId) {
-  if (linkId == null || !graph) return null
-  return graph.links?.[linkId] ?? graph.links?.get?.(linkId) ?? null
-}
 
 /** Whether the `toggles` widget's OWN input socket is wired (frontend 1.5x
  * gives every widget one) -- then the enabled set is only known at run

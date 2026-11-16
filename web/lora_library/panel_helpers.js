@@ -1,16 +1,18 @@
 /**
  * @file Shared DOM/node helpers for every EPS panel (docs/plan/ROADMAP-shared-panel-code.md
- * M1 + the `installMinWidth` unification). Before this module `el` was
+ * M1 + the `installMinWidth` unification; the three lookups at the bottom
+ * joined 2026-11-15). Before this module `el` was
  * declared 8 times and `installMinWidth` 9 times, one copy per panel, and a
  * fix to one never reached its siblings (the v0.68.1 width-lift fix reached
  * five of nine copies; M0 / v0.91.2 patched the other four).
  *
  * Every panel imports these under their EXISTING bare names (`el`,
- * `installMinWidth`) so every CALL-SITE string a test pins on stays
+ * `installMinWidth`, `nodeClassOf`, `findWidget`, `linkById`) so every CALL-SITE string a test pins on stays
  * byte-identical; only the declarations moved (the search.js precedent).
  * eps_image panels import it as `../lora_library/panel_helpers.js`.
  *
- * Browser-only (`document`, `Node`); no other imports.
+ * `el` is browser-only (`document`, `Node`); the rest are plain functions.
+ * No imports.
  */
 
 /**
@@ -66,4 +68,36 @@ export function installMinWidth(node, minWidth) {
     if (typeof node.setSize === 'function') node.setSize([minWidth, node.size[1]])
     else node.size[0] = minWidth
   }
+}
+
+/**
+ * A node's ComfyUI class id (`comfyClass`, on the instance or its
+ * constructor), or null when it can't be determined. Was declared in 10
+ * files, byte-identical.
+ * @param {object} node @returns {string|null}
+ */
+export function nodeClassOf(node) {
+  if (!node) return null
+  if (node.comfyClass) return node.comfyClass
+  if (node.constructor && node.constructor.comfyClass) return node.constructor.comfyClass
+  return null
+}
+
+/**
+ * *node*'s widget called *name*, or undefined. Was declared in 11 files,
+ * byte-identical.
+ * @param {object} node @param {string} name
+ */
+export function findWidget(node, name) {
+  return node.widgets?.find((w) => w && w.name === name)
+}
+
+/**
+ * An LLink by id, tolerant of either shape this frontend's forks have used
+ * for `graph.links` (a plain object/array indexed by id, or a `Map`). Null
+ * when unreachable. Was declared in 7 files, byte-identical.
+ */
+export function linkById(graph, linkId) {
+  if (linkId == null || !graph) return null
+  return graph.links?.[linkId] ?? graph.links?.get?.(linkId) ?? null
 }

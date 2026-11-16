@@ -5533,7 +5533,7 @@ Class id `EPSBypass` (FROZEN, §8), category `EPSNodes/Utilities`.
   refuses a mismatched later connection, so no veto hook is installed. Links
   are recoloured to the adopted type honouring the v0.98.0 owner-tag
   convention (`LINK_COLOR_OWNER_KEY`/`LINK_COLOR_RESYNC_HOOK`, imported from
-  distributor.js), so a Grid in Collect-only mode feeding this node keeps its
+  distributor.js, which re-exports the key from `owned_link_colour.js`), so a Grid in Collect-only mode feeding this node keeps its
   dimmed wire.
 - **"Off" is visible on the node, with nothing drawn on the canvas:** the
   toggle's own text (`label_off`) reads "off — sends nothing" and the output

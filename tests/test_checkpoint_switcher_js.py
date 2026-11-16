@@ -712,4 +712,4 @@ def test_empty_selection_dim_is_rederived_at_every_selection_change(source: str)
     assert "syncLinkDimming(state.node, 'reload')" in source
     assert "syncLinkDimming(state.node, 'selection write')" in source
     assert "installLinkDimHooks(node)" in source
-    assert "import { ensureOwnedLinkColourHook } from './owned_link_colour.js'" in source
+    assert "import { LINK_COLOR_OWNER_KEY, ensureOwnedLinkColourHook } from './owned_link_colour.js'" in source

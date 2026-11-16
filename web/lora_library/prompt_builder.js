@@ -98,7 +98,7 @@ import { app } from '../../../scripts/app.js'
 import * as api from './api.js'
 import { walkLiveNodes } from './api.js'
 import { notebookCacheGet, notebookCacheSet, isUnchangedResponse, parseCollapsedSections, toggleCollapsedSection, isSectionCollapsed } from './notebook.js'
-import { el, installMinWidth } from './panel_helpers.js'
+import { el, findWidget, installMinWidth } from './panel_helpers.js'
 
 /** FORMAT.md — frozen once shipped. */
 export const CLASS_ID = 'EPSPromptBuilder'
@@ -641,10 +641,6 @@ function isNotebookCanvasNode(node) {
   if (node.comfyClass === NOTEBOOK_CLASS_ID) return true
   if (node.constructor && node.constructor.comfyClass === NOTEBOOK_CLASS_ID) return true
   return false
-}
-
-function findWidget(node, name) {
-  return node.widgets?.find((w) => w && w.name === name)
 }
 
 // ---------------------------------------------------------------------------
