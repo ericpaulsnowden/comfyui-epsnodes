@@ -4794,8 +4794,9 @@ onto comfyui and recreate just that image"). Shipped v0.70.0.
 `_blocks_token`: zero blocks → the constant `"no-blocks"` (no file, no
 context — mirrors `_resolve_blocks`'s shortcut); otherwise sha1 of resolved
 path + each BLOCK's name and current text. Editing entries no block
-references no longer invalidates sweeps built on this node. Own
-`_load_notebook_cached` copy (own-your-helpers).
+references no longer invalidates sweeps built on this node. Reads through
+`nodes_notebook._load_notebook_cached` (one shared parse memo since
+2026-11-15; before that, its own identical copy).
 
 
 New in v0.76.0 (owner spec 2026-08-23, four design choices confirmed the same
