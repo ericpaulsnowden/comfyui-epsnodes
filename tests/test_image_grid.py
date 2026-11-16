@@ -1299,3 +1299,96 @@ class TestImageListArrivesInOneRun:
         assert math.isnan(_is_changed(mode="Collect", grid_uuid=VALID_UUID))
         token = _is_changed(mode="Emit All", grid_uuid=VALID_UUID)
         assert token == f"emit:{store.buffer_token(VALID_UUID)}"
+
+
+# ------------------------------------------- skipped-run alert, server half
+
+
+class TestRanEvent:
+    """`run()` announces itself (`eps-image-grid-ran`) exactly once per call,
+    in every mode and on the blocker-returning paths; the frontend alerts
+    for an announced grid that never sends it (FORMAT §6.6)."""
+
+    @staticmethod
+    def _server(monkeypatch, prompt_id="p-1"):
+        sent = TestCollectMode._fake_prompt_server(monkeypatch)
+        utils = types.ModuleType("comfy_execution.utils")
+        utils.get_executing_context = lambda: types.SimpleNamespace(
+            prompt_id=prompt_id, node_id="7", list_index=0
+        )
+        monkeypatch.setitem(sys.modules, "comfy_execution.utils", utils)
+        return sent
+
+    @staticmethod
+    def _ran(sent):
+        return [p for e, p in sent if e == "eps-image-grid-ran"]
+
+    @pytest.mark.parametrize("mode", ["Collect", "Collect only", "Emit", "Emit All"])
+    @pytest.mark.parametrize("wired", [True, False])
+    def test_sent_once_per_call_in_every_mode(
+        self, mode, wired, fake_folder_paths, fake_execution_blocker, monkeypatch
+    ) -> None:
+        sent = self._server(monkeypatch)
+        kwargs = {"mode": mode, "grid_uuid": VALID_UUID, "unique_id": "7"}
+        if wired:
+            kwargs["image"] = _make_batch(1)
+        _run(_node(), **kwargs)
+        assert self._ran(sent) == [{"node": "7", "prompt_id": "p-1"}]
+
+    def test_two_calls_send_two_events(
+        self, fake_folder_paths, fake_execution_blocker, monkeypatch
+    ) -> None:
+        sent = self._server(monkeypatch)
+        for _ in range(2):
+            _run(_node(), mode="Collect", grid_uuid=VALID_UUID, unique_id="7", image=_make_batch(1))
+        assert len(self._ran(sent)) == 2
+
+    def test_a_missing_server_changes_nothing(
+        self, fake_folder_paths, fake_execution_blocker, monkeypatch
+    ) -> None:
+        monkeypatch.setitem(sys.modules, "server", None)
+        result = _run(_node(), mode="Collect", grid_uuid=VALID_UUID, image=_make_batch(1))
+        assert len(result["result"][0]) == 1
+
+    CORE_SCRIPT = """
+import asyncio, sys, types, tempfile
+sys.path[:0] = [{core!r}, {repo!r}]
+out = tempfile.mkdtemp()
+fp = types.ModuleType("folder_paths"); fp.get_output_directory = lambda: out
+sys.modules["folder_paths"] = fp
+sent = []
+srv = types.ModuleType("server")
+class PS:
+    class instance:
+        send_sync = staticmethod(lambda e, p, sid=None: sent.append((e, p)))
+srv.PromptServer = PS
+sys.modules["server"] = srv
+import torch
+from execution import _async_map_node_over_list
+from comfy_execution.graph import ExecutionBlocker
+from eps_image.nodes_image_grid import EPSImageGrid
+def call(images):
+    sent.clear()
+    data = {{"mode": ["Collect"], "image": images, "grid_uuid": ["{uuid}"],
+             "focus": [""], "prompt": [None], "unique_id": ["7"]}}
+    asyncio.run(_async_map_node_over_list("pid-9", "7", EPSImageGrid(), data, "run"))
+    return [p for e, p in sent if e == "eps-image-grid-ran"]
+b = torch.zeros(1, 4, 6, 3)
+print(call([b, ExecutionBlocker(None), b]), call([b, b]))
+"""
+
+    def test_real_core_does_not_call_run_for_a_blocked_list(self) -> None:
+        import subprocess
+
+        core = Path.home() / "Library/Application Support/comfy_ps/rig/ComfyUI"
+        if not (core / "execution.py").is_file():
+            pytest.skip("ComfyUI core checkout not available")
+        script = self.CORE_SCRIPT.format(
+            core=str(core), repo=str(Path(__file__).resolve().parent.parent), uuid=VALID_UUID
+        )
+        result = subprocess.run(
+            [sys.executable, "-I", "-c", script],
+            capture_output=True, encoding="utf-8", timeout=120, cwd=str(core),
+        )
+        assert result.returncode == 0, result.stderr[-2000:]
+        assert result.stdout.strip().splitlines()[-1] == "[] [{'node': '7', 'prompt_id': 'pid-9'}]"

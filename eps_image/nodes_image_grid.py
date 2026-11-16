@@ -187,6 +187,30 @@ def _expand_to_frames(image_batch: Any) -> list:
     return [image_batch[i : i + 1] for i in range(batch_len)]
 
 
+def _announce_ran(unique_id: Any) -> None:
+    """Tell the frontend this grid's `run()` was actually called.
+
+    Core never calls an `INPUT_IS_LIST` node whose incoming list holds an
+    `ExecutionBlocker`, so Python cannot report that skip; the frontend
+    detects it by ABSENCE of this event for a grid core had announced
+    (FORMAT §6.6). Sent first thing, in every mode."""
+    try:
+        from comfy_execution.utils import get_executing_context
+        from server import PromptServer  # ComfyUI-only; absent in tests
+
+        context = get_executing_context()
+        PromptServer.instance.send_sync(
+            "eps-image-grid-ran",
+            {
+                "node": str(unique_id),
+                "prompt_id": context.prompt_id if context else None,
+            },
+        )
+    except Exception:
+        # No live server (tests/direct callers): nothing to tell.
+        pass
+
+
 class EPSImageGrid:
     """Wire an image loader in; whatever's wired ALWAYS flows straight
     through to the output in `Collect`/`Emit` — `mode` decides whether it's
@@ -447,6 +471,7 @@ class EPSImageGrid:
         grid_uuid = _unwrap(grid_uuid, DEFAULT_GRID_UUID)
         focus = _unwrap(focus, DEFAULT_FOCUS)
         prompt, unique_id = _unwrap(prompt), _unwrap(unique_id)
+        _announce_ran(unique_id)
         batches = _arriving_batches(image)
         live = [frame for batch in batches for frame in _expand_to_frames(batch)]
         #: Refs THIS run actually appended to disk — the ONLY thing `ui`
