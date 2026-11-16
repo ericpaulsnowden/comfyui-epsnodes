@@ -1361,7 +1361,8 @@ times to gather images, then send the whole set through a workflow at once.
   whole grid for that run. The grid now shows a warning toast naming itself
   ("Skipped this run: something wired into it was blocked upstream, so
   nothing was collected or emitted") instead of silently doing nothing. A
-  grid fed by another grid in Collect only mode also toasts, by design.
+  grid fed by another grid in Collect only mode also toasts, by design. Only runs queued from this browser tab are checked, and a dropped
+  connection to the server cancels the check for that run rather than guess.
 - **Flow-through, always (in Collect/Emit):** whatever's wired into the node
   continues downstream. **Collect** mode ALSO records it into the buffer
   (only that Run's own image(s) continue downstream — Collect doesn't
