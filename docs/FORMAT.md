@@ -2499,6 +2499,26 @@ lazy-skipped statically (above) and a Distributor's off slot blocks every
 element either way. Kept as is: one batch and one downstream run for the
 common switcher case outweighs the rare mixed list; reverting would bring
 back the duplicated Emit All.
+**Skipped-run alert (owner decision 2: one-run kept, but never silent).**
+Python cannot report a skip it never runs for, so the frontend detects it by
+absence. `run()` sends `eps-image-grid-ran` `{node, prompt_id}` first thing
+in every mode (`_announce_ran`; prompt id from core's
+`get_executing_context()`, `None` in tests). `image_grid.js`
+(`createSkippedRunTracker`, pure `skippedGridIds`) tracks per `prompt_id`
+the grids core announced and the grids that reported `ran`. The
+announcement is `progress_state` with `state: 'running'` (core's
+`start_progress`, sent just before `executing` and before the blocker check
+in `process_inputs`): unlike `executing`, which the frontend re-dispatches as
+only a display-node id string with no prompt id (a subgraph's inner node
+reports its parent), it carries the real node id and the prompt id. The
+decision is made only at `execution_success`: `image` is lazy, so a grid is
+announced, upstream is evaluated, and the grid is announced again before it
+runs. Any announced grid with no `ran` gets ONE `warn` toast (node title) and
+one log line; `execution_error` / `execution_interrupted` discard the
+prompt's entry silently, as does success. Cached grids are never announced
+(`execution_cached`). By-design blocked feeds (a grid in Collect only wired
+into another grid) toast too; an all-off switcher does not, because the
+grid does not request that lazy slot and runs.
 
 **"Emit All" — a fourth `mode` value (v0.104.0, owner ask: "sends out all
 of the images at once vs one at a time").** Appended last in `MODES`, the
