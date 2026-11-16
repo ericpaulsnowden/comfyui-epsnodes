@@ -203,6 +203,7 @@ def _heal_stale_pytest_garbage_dirs(tmp_path_factory: pytest.TempPathFactory) ->
 _EPS_WEB = Path(__file__).resolve().parent.parent / "web" / "eps_image"
 _SWITCHER_JS_CLOSURE = (
     "switcher.js",
+    "switcher_prompt.js",
     "owned_link_colour.js",
     "number_controller.js",
     "bypass.js",
