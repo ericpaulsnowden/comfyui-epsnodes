@@ -1356,6 +1356,12 @@ Since v0.69.0 the on-node thumbnails are real downscaled previews served by the 
 Runs** into a buffer and then fans them out — wire a loader in, run it a few
 times to gather images, then send the whole set through a workflow at once.
 
+- **Skipped runs say so.** If something wired into the grid was blocked
+  upstream (for example one image of a list was blocked), ComfyUI skips the
+  whole grid for that run. The grid now shows a warning toast naming itself
+  ("Skipped this run: something wired into it was blocked upstream, so
+  nothing was collected or emitted") instead of silently doing nothing. A
+  grid fed by another grid in Collect only mode also toasts, by design.
 - **Flow-through, always (in Collect/Emit):** whatever's wired into the node
   continues downstream. **Collect** mode ALSO records it into the buffer
   (only that Run's own image(s) continue downstream — Collect doesn't

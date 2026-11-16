@@ -4299,6 +4299,100 @@ function installExecutionRefreshListener() {
   })
 }
 
+// ---------------------------------------------------------------------------
+// Skipped-run alert (FORMAT.md §6.6): core never calls an INPUT_IS_LIST node
+// whose incoming list holds an ExecutionBlocker, so Python cannot report that
+// skip. The frontend detects it by ABSENCE: a grid core announced as running
+// (`progress_state` state 'running', which carries the real node id AND the
+// prompt id -- the plain `executing` message reaches the frontend as only a
+// DISPLAY node id string, no prompt id, and a subgraph's inner node reports
+// its parent there) that never sent `eps-image-grid-ran`. Decided only at
+// `execution_success`: the grid's `image` input is lazy, so a grid is
+// announced, core evaluates upstream, and announces it AGAIN before it runs.
+// ---------------------------------------------------------------------------
+
+/** Pure: ids announced by core but never reported as run. */
+export function skippedGridIds(announced, ran) {
+  return [...announced].filter((id) => !ran.has(id))
+}
+
+/**
+ * The per-prompt bookkeeping, with its effects injected so it is testable
+ * without a browser. State: prompt_id -> { announced, ran } -- created at the
+ * first sighting, deleted at that prompt's success/error/interrupt (no
+ * timers, nothing outlives a prompt).
+ */
+export function createSkippedRunTracker({ isGrid, onSkipped }) {
+  const prompts = new Map()
+  const entry = (promptId) => {
+    if (!prompts.has(promptId)) prompts.set(promptId, { announced: new Set(), ran: new Set() })
+    return prompts.get(promptId)
+  }
+  return {
+    /** `progress_state` detail: `{ prompt_id, nodes: { id: { state } } }`. */
+    progressState(detail) {
+      const promptId = detail?.prompt_id
+      if (!promptId) return
+      for (const [id, info] of Object.entries(detail.nodes || {})) {
+        if (info?.state === 'running' && isGrid(id)) entry(promptId).announced.add(String(id))
+      }
+    },
+    /** `eps-image-grid-ran` detail: `{ node, prompt_id }`. A missing
+     * prompt_id counts for every open prompt: the safe direction (no alert). */
+    ran(detail) {
+      const id = String(detail?.node)
+      const promptId = detail?.prompt_id
+      const targets = promptId ? [prompts.get(promptId)] : [...prompts.values()]
+      for (const e of targets) e?.ran.add(id)
+    },
+    /** `execution_success` detail: `{ prompt_id }`. */
+    success(detail) {
+      const e = prompts.get(detail?.prompt_id)
+      prompts.delete(detail?.prompt_id)
+      if (e) for (const id of skippedGridIds(e.announced, e.ran)) onSkipped(id)
+    },
+    /** `execution_error` / `execution_interrupted`: core reports those. */
+    discard(detail) {
+      prompts.delete(detail?.prompt_id)
+    },
+    size: () => prompts.size
+  }
+}
+
+/** The node an execution id names: plain "7" or subgraph-scoped "3:2". */
+function nodeForExecutionId(id) {
+  let graph = app.graph
+  let node = null
+  for (const part of String(id).split(':')) {
+    node = graph?.getNodeById?.(Number(part)) ?? null
+    graph = node?.subgraph
+  }
+  return node
+}
+
+let skippedRunAlertInstalled = false
+
+function installSkippedRunAlert() {
+  if (skippedRunAlertInstalled) return
+  skippedRunAlertInstalled = true
+  const tracker = createSkippedRunTracker({
+    isGrid: (id) => nodeClassOf(nodeForExecutionId(id)) === CLASS_ID,
+    onSkipped: (id) => {
+      const detail =
+        'Skipped this run: something wired into it was blocked upstream, ' +
+        'so nothing was collected or emitted.'
+      const title = nodeForExecutionId(id)?.title || NODE_TITLE
+      warn(`${title} (${id}) ${detail}`)
+      showToast('warn', title, detail, { life: 12000, warn })
+    }
+  })
+  api.addEventListener('progress_state', (event) => tracker.progressState(event?.detail))
+  api.addEventListener('eps-image-grid-ran', (event) => tracker.ran(event?.detail))
+  api.addEventListener('execution_success', (event) => tracker.success(event?.detail))
+  api.addEventListener('execution_error', (event) => tracker.discard(event?.detail))
+  api.addEventListener('execution_interrupted', (event) => tracker.discard(event?.detail))
+}
+
 /**
  * Wraps `node.onExecuted` so a Run's reported refs are folded into the
  * full-buffer view SYNCHRONOUSLY, in the same tick core clobbers the store
@@ -4366,6 +4460,7 @@ function installExecutedMerge(node) {
  * exactly once per extension load. */
 export function init() {
   installExecutionRefreshListener()
+  installSkippedRunAlert()
   installClipspaceCopyFullRes() // 2026-09-09 grid-vs-1-up clipspace copy size parity
   // v0.52.0 (owner direction 2026-08-03): the backend's Collect-with-
   // nothing-wired dead-wire detection is a NON-BLOCKING warning now, not a
