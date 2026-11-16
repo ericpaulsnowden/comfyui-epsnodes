@@ -792,6 +792,7 @@ import { pickServerFolder } from './notebook.js'
 import { setLibraryDir } from './settings.js'
 import { entryMatchesSearch, searchHaystack, searchWords } from './search.js'
 import { el, installMinWidth } from './panel_helpers.js'
+import { PROP_RENAME_DRAFT, isGroupNameInput, groupNameFromInput, parseCollapsedGroups, parseRenameDraft, flushPendingNameEdit } from './group_helpers.js'
 
 // ---------------------------------------------------------------- constants
 
@@ -894,7 +895,6 @@ const PROP_COLLAPSED_GROUPS = 'Collapsed groups'
  * sites are idempotent (`_pendingRenameDraft` is consumed exactly once),
  * so whichever runs second does nothing.
  */
-const PROP_RENAME_DRAFT = 'Group rename draft'
 
 /**
  * FORMAT.md §6.3 target FAMILIES (v0.64.0, owner ask 2026-08-14: "eps lora
@@ -1037,72 +1037,6 @@ function libraryFolderSetToast(path) {
 //: notebook.js's DRAG_THRESHOLD_PX twin -- same feel, same reason.
 const STATE_DRAG_THRESHOLD_PX = 4
 const CATEGORY_DELETE_CONFIRM_MS = 4000
-
-/** notebook.js's isCategoryNameInput/categoryNameFromInput, verbatim by
- * hand (no cross-module import -- the two files' standing convention). */
-function isCategoryNameInput(rawName) {
-  return (rawName || '').trim().startsWith('#')
-}
-function categoryNameFromInput(rawName) {
-  return (rawName || '').trim().replace(/^#+\s*/, '').trim()
-}
-
-/**
- * Tolerant parse of the `Collapsed groups` node property into an array of
- * group-name strings -- notebook.js's `parseCollapsedSections()` by hand
- * (this file's no-cross-import #-helper convention, same as
- * isCategoryNameInput/categoryNameFromInput above). Accepts the canonical
- * shape (an array, non-string entries dropped), a JSON-encoded string of
- * the same (what a hand-edit through the node's Properties panel
- * round-trips as), or anything else -- `undefined`/`null`/malformed
- * JSON/a non-array all fold to `[]`. Never throws. Exported for
- * tests/test_pll_bridge_js.py.
- * @param {unknown} raw
- * @returns {string[]}
- */
-export function parseCollapsedGroups(raw) {
-  if (Array.isArray(raw)) return raw.filter((name) => typeof name === 'string')
-  if (typeof raw === 'string') {
-    const trimmed = raw.trim()
-    if (!trimmed) return []
-    let parsed
-    try {
-      parsed = JSON.parse(trimmed)
-    } catch {
-      return []
-    }
-    return Array.isArray(parsed) ? parsed.filter((name) => typeof name === 'string') : []
-  }
-  return []
-}
-
-/**
- * Fail-soft parse for `PROP_RENAME_DRAFT` -- same lenient-degrade shape as
- * `parseCollapsedGroups()` above (a raw array from `configure()`'s normal
- * restore, OR a JSON string from a hand-edit through the Properties
- * panel), returning `null` for "no open rename" instead of throwing on
- * anything malformed (a missing/renamed category resolves this to `null`
- * too, one call later, via `_restorePendingRenameDraft()`'s own check --
- * not this function's job).
- * @param {unknown} raw
- * @returns {{category: string, text: string} | null}
- */
-export function parseRenameDraft(raw) {
-  let value = raw
-  if (typeof raw === 'string') {
-    const trimmed = raw.trim()
-    if (!trimmed) return null
-    try {
-      value = JSON.parse(trimmed)
-    } catch {
-      return null
-    }
-  }
-  if (!Array.isArray(value) || value.length !== 2) return null
-  const [category, text] = value
-  if (typeof category !== 'string' || !category || typeof text !== 'string') return null
-  return { category, text }
-}
 
 /** A structurally-sound client copy of the §4.2 layout -- categories
  * unique + non-empty, every category (and UNCATEGORIZED) has an order
@@ -4700,7 +4634,7 @@ export function registerControllerNode() {
        * "fixes" are still in this file -- v0.67.2/v0.72.1/v0.80.1, cited by
        * name below and at `_clearNameField()`/`_doNewCategory()`/
        * `_saveLayout()` -- and every one of them was a REAL bug. None of
-       * them questioned whether `isCategoryNameInput(this._w.name.value)`'s
+       * them questioned whether `isGroupNameInput(this._w.name.value)`'s
        * READ was ever wrong. It can be, and reliably-*sometimes* so, which
        * is exactly what "doesn't seem to work, or at least not reliably"
        * describes and none of the three touch.
@@ -4791,7 +4725,7 @@ export function registerControllerNode() {
         // §4.2 (v0.65.0): a `#`-prefixed name creates a GROUP, not a state
         // -- the Notebook's exact New-button contract, and the owner's own
         // wording ("add a # to the left row and create groups").
-        if (isCategoryNameInput(this._w.name?.value)) {
+        if (isGroupNameInput(this._w.name?.value)) {
           this._runAction('New Group', () => this._doNewCategory())
           return
         }
@@ -4826,46 +4760,13 @@ export function registerControllerNode() {
        * result afterward, and is far rarer than the bug this closes.
        */
       _flushPendingNameEdit() {
-        const widget = this._w.name
-        if (!widget) return
-        try {
-          const dialog = app.canvas?.prompt_box
-          if (!dialog?.isConnected) return // nothing open -- widget.value is authoritative
-          const input = dialog.querySelector?.('.value') // prompt()'s own input/textarea class
-          if (!input) return
-          const live = input.value
-          if (live === widget.value) return // already in sync, nothing pending
-          // Same idiom as `_clearNameField()`: value + callback + dirty, so
-          // this reads as a real committed edit to BOTH renderers and to
-          // every other method that reads `this._w.name.value` afterward
-          // (`_doNewCategory()`, `_doCapture()`, `_saveAsNewName()`).
-          widget.value = live
-          try {
-            widget.callback?.(live)
-          } catch (error) {
-            api.warn(`${NODE_TITLE}: name widget callback threw`, error)
-          }
-          this.setDirtyCanvas(true, true)
-          // Courtesy close: we just applied the SAME value Enter/OK would
-          // have, through the SAME widget.value+callback path -- `close()`
-          // only tears down the dialog's own DOM/state (it never re-invokes
-          // `callback`), so this cannot double-fire anything. Leaving the
-          // dialog open after we already acted on its contents would just
-          // strand a second, now-meaningless copy of what we read on screen.
-          dialog.close?.()
-        } catch (error) {
-          // Best-effort internals probe -- never let it be the reason a
-          // click "does nothing" (FORMAT.md §7 fail-soft law). Worst case:
-          // fall back to whatever widget.value already holds, same as
-          // every click before this method existed.
-          api.warn(`${NODE_TITLE}: could not flush pending name edit`, error)
-        }
+        flushPendingNameEdit({ node: this, widget: this._w.name, canvas: app.canvas, title: NODE_TITLE, warn: api.warn })
       }
 
       /** Create an empty group from the name field ("# Portraits" ->
        * "Portraits") -- Notebook's confirmNewCategory sibling. */
       async _doNewCategory() {
-        const name = categoryNameFromInput(this._w.name?.value)
+        const name = groupNameFromInput(this._w.name?.value)
         if (!name) {
           this._setStatusText('Enter a group name after the #.')
           this._toast('warn', NODE_TITLE, 'Enter a group name after the # (e.g. "# Portraits").')
