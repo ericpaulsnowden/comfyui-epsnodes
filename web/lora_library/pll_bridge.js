@@ -14,8 +14,6 @@
  * against BOTH files).
  */
 
-import { app } from '../../../scripts/app.js'
-
 /** Exact rgthree type/title/comfyClass string — constants.js addRgthree("Power Lora Loader"). */
 export const POWER_LORA_LOADER_TYPE = 'Power Lora Loader (rgthree)'
 /** Per-node property (not per-row) that picks single vs dual strength mode. */
@@ -28,28 +26,7 @@ const MAX_ROW_ADJUST_STEPS = 500
 
 const MSG_NO_RGTHREE = 'Install rgthree-comfy, or use EPS Apply LoRA Set instead'
 const MSG_SHAPE_DRIFT = 'Power Lora Loader internals changed — controller disabled (v-check)'
-const MSG_NO_TARGET_IN_GRAPH =
-  'No Power Lora Loader (rgthree) or EPS LoRA Picker node in this workflow yet — add one, then pick it above.'
 const MSG_NO_TARGET_SELECTED = 'Pick a target loader node above.'
-
-/** Every live `Power Lora Loader (rgthree)` instance in the current graph,
- * ascending node id — §6.13 M2's target-combo order.
- * v0.68.1: UNUSED BY THE PICKER, marked for removal. Since v0.64.0
- * picker.js's findSendCandidates() walks the whole workflow (subgraphs
- * included) against its adapter registry and never calls this (the
- * registry's `find` key is gone as of v0.68.1); the only remaining caller
- * is probePll(null)'s null-target leg below, which the picker never reaches
- * either (its probeSendTarget owns the family-agnostic null legs). Both are
- * root-only and kept solely because tests/test_pll_bridge_js.py pins the
- * export surface (`hasFindPllNodes`, `findPllOrder`) and the null legs
- * (`probeNullNoCandidates` / `probeNullWithCandidates`); remove together
- * with those pins. */
-export function findPllNodes() {
-  const nodes = app.graph?._nodes || app.graph?.nodes || []
-  return nodes
-    .filter((node) => node && node.type === POWER_LORA_LOADER_TYPE)
-    .sort((a, b) => a.id - b.id)
-}
 
 /** rgthree registers the PLL type with LiteGraph iff it's installed and loaded. */
 function isRgthreeInstalled() {
@@ -89,17 +66,7 @@ export function probePll(node) {
   if (!isRgthreeInstalled()) {
     return { ok: false, code: 'no-rgthree', message: MSG_NO_RGTHREE }
   }
-  if (!node) {
-    // v0.68.1: unreachable from the picker (see findPllNodes) -- kept for
-    // the test pins only.
-    const hasAny = findPllNodes().length > 0
-    return {
-      ok: false,
-      code: hasAny ? 'no-target-selected' : 'no-target-in-graph',
-      message: hasAny ? MSG_NO_TARGET_SELECTED : MSG_NO_TARGET_IN_GRAPH
-    }
-  }
-  if (node.type !== POWER_LORA_LOADER_TYPE) {
+  if (!node || node.type !== POWER_LORA_LOADER_TYPE) {
     return { ok: false, code: 'wrong-type', message: MSG_NO_TARGET_SELECTED }
   }
   if (

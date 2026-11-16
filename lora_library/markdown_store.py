@@ -49,15 +49,6 @@ class InvalidEntryNameError(MarkdownStoreError):
     heading line, like an entry name, per FORMAT.md §3.2)."""
 
 
-class InvalidEntryTextError(MarkdownStoreError):
-    """Entry text contains a line that would be read back as a heading
-    (FORMAT.md §3.4's original "cannot be represented" rule). NO LONGER
-    RAISED anywhere in this module since v0.48.1 — the write paths demote
-    such lines instead (:func:`demote_unrepresentable_headings`). Kept for
-    API compatibility with external callers of the strict
-    :func:`find_unrepresentable_heading_line` check."""
-
-
 class NameCollisionError(MarkdownStoreError):
     """``rename_to`` names a different entry that already exists — also
     reused by :func:`create_category` when *name* already names a category
