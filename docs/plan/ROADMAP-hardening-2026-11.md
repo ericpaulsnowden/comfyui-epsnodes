@@ -48,16 +48,21 @@ shared `el()`.
 
 ## Decisions for the owner
 
-1. **A disabled switcher row still blocks its switcher when the row's source
-   emits blockers and that source is executed anyway** (Codex, switchers
-   audit). Core scans every PROVIDED input for `ExecutionBlocker`s before
-   `run()`, lazy or not, so no node-side change can help. The fix is on the
-   frontend: strip disabled rows' links from the PROMPT (a chained
-   `app.graphToPrompt` post-pass, the rgthree precedent) so the server never
-   sees them. **Built** (`web/eps_image/switcher_prompt.js`, FORMAT §6.4):
-   one pure function over the API prompt, chained from the extension's
-   `setup`, no setting; a Python-vs-JS parity test and a test against core's
-   real dispatch back it.
+1. **"A disabled switcher row blocks its switcher" — NOT A BUG. Closed
+   2026-11-24.** The audit claimed core scans every provided input for
+   `ExecutionBlocker`s, so a disabled row whose source ran anyway would block
+   the rows that are on. Core does scan every PROVIDED input, but an
+   unrequested lazy input is never provided: `ExecutionList.get_cache` only
+   returns links registered through `add_strong_link`, and a lazy link becomes
+   strong only when `check_lazy_status` asks for it
+   (`comfy_execution/graph.py`; true on v0.36.0 and back to at least
+   v0.28.0). Queued by hand on a live v0.36.0 server in three execution
+   orders, the enabled row came out every time. A `graphToPrompt` post-pass
+   shipped in v0.110.16 on the strength of a test harness whose cache fake
+   handed over every link; it fixed nothing, ran on every queue and changed
+   API-format exports, so the owner had it removed in v0.110.20. **Lesson:**
+   a claim about core's execution is proved by queueing a prompt on a live
+   server, not by a harness that fakes core's cache.
 2. **Image Grid `INPUT_IS_LIST` trade-off** (gate on PR #5): a list holding a
    blocker ELEMENT now blocks the grid for that run, where per-element
    mapping collected the valid ones. Kept (one batch for the common switcher

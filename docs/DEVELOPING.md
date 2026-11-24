@@ -72,7 +72,7 @@ through `safely(label, fn)`, so one broken panel cannot block the rest. Neither 
 | Entry file | Extension name | Hooks used |
 |---|---|---|
 | `web/lora_library.js` | `lora_library.LoraLibrary` | `settings`, `aboutPageBadges`; `init` (registers the two virtual nodes via `LiteGraph.registerNodeType`); `beforeRegisterVueAppNodeDefs` (their display names); `nodeCreated` (notebook, prompt_builder, sets, picker, `path_heal.attachConfigureHeal`); `loadedGraphNode` (`path_heal`); `setup` (`initSettings`, `sets.initSetsFreshness`) |
-| `web/eps_image.js` | `eps_image.EPSImageNodes` | `aboutPageBadges`; `setup` (chains `app.graphToPrompt` to drop disabled switcher rows' links, `eps_image/switcher_prompt.js`); `init` (per-module one-time setup: stylesheets, event listeners, a chained `app.handleFile`); `nodeCreated` (every `eps_image/*.js` attach, plus the Vue-mode warning `warnIfVueNodesMode`); `loadedGraphNode` (`image_grid`, `frame_saver`) |
+| `web/eps_image.js` | `eps_image.EPSImageNodes` | `aboutPageBadges`; `init` (per-module one-time setup: stylesheets, event listeners, a chained `app.handleFile`); `nodeCreated` (every `eps_image/*.js` attach, plus the Vue-mode warning `warnIfVueNodesMode`); `loadedGraphNode` (`image_grid`, `frame_saver`) |
 
 ## 2. One request, end to end: saving a Prompt Notebook entry
 

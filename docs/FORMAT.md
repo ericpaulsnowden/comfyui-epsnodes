@@ -1726,42 +1726,6 @@ per-input toggle + toggle-all header + N-enabled→N-runs fan-out.
   blocks the ENTIRE switcher before it runs, silently skipping the whole
   branch (queue still succeeds). Toggle an empty grid off (its branch then
   never even executes) or collect into it first.
-- **Disabled rows are removed from the PROMPT the frontend sends**
-  (`web/eps_image/switcher_prompt.js`). The core semantic above has a second
-  face no node-side code can fix: core scans EVERY provided input for an
-  `ExecutionBlocker` before calling the node, lazy or not, so a DISABLED row
-  whose source also feeds another node (and so runs, and emits a blocker --
-  e.g. an all-off switcher) blocks the whole switcher and its enabled rows
-  come out empty. `installPromptPostPass(app)` (called from the extension's
-  `setup`) chains `app.graphToPrompt` -- chain, never replace: other packs
-  wrap it too; installed once per app, `this` and arguments forwarded, the
-  original awaited and its result object returned. Both queueing
-  (`app.queuePrompt`) and Save (API format) call `app.graphToPrompt`. After
-  the original returns `{ workflow, output }`, `stripDisabledSwitcherRows`
-  deletes from `output[id].inputs` the `[nodeId, slot]` links of rows whose
-  `toggles` entry is `false`, for every class in `SWITCHER_CLASSES`
-  (Image/Model/CLIP/VAE/Latent), including a row's partner socket
-  (`model_N_low`, `mask_N`), which follows its row's one toggle. Rules:
-  the disabled test is THE backend's (`toggles[row] === false`; empty,
-  malformed or non-object `toggles` = every row enabled), read through
-  `parseToggles`/`isEnabledIn`, the same code the draw paths use;
-  `tests/test_switcher_prompt_js.py` checks, for every class and a table of
-  `toggles` values, that JS strips exactly the rows `check_lazy_status`
-  would not request, and fails if Python builds a switcher class JS does not
-  know. Only what the prompt alone proves: a `toggles` that is itself wired
-  (or absent) leaves the node untouched; only links are removed, never a
-  widget value. Server side nothing changes: every row input is `optional`
-  (core validation accepts its absence), and `execute`, `check_lazy_status`
-  and the all-off helpers (`inputs_fed_by_an_all_off_switcher`, "from the
-  prompt alone") answer identically with the links gone. `workflow` (the
-  canvas, the saved PNG) is never modified. If the pruning itself throws,
-  the failure is logged (`[eps_image:switcher_prompt]`) and the unpruned
-  result is returned, so a queue is never stopped by it. Scripts that POST
-  `/prompt` without the frontend keep the old behaviour. No setting.
-  Other EPS nodes were checked: EPS Distributor's `toggles` gate its
-  OUTPUTS (no input is provided for an off slot), and EPS Checkpoint
-  Switcher selects by `selection` and has no per-row inputs, so neither has
-  this shape.
 - **A slot fed by a provably-empty SIBLING switcher is never requested**
   (2026-07-26 owner report: "if one of them has all of the inputs unchecked
   the entire workflow won't run. Even if it's earlier in the workflow than
