@@ -72,7 +72,41 @@ out.pure = grid.skippedGridIds(G('a', 'b', 'c', 'd'), new Set(['a', 'b', 'x']), 
 { // never recorded by queuePrompt -> nothing
   const { t, skipped } = mk()
   t.progressState(running('p', 'g1')); t.success({ prompt_id: 'p' })
-  out.unrecorded = { skipped, size: t.size() }
+  const held = t.size() // held as finished in case its queue response is still coming
+  t.started({ prompt_id: 'next' })
+  out.unrecorded = { skipped, held, size: t.size() }
+}
+{ // the prompt FINISHES before its queue response resolves (no ordering between ws and http)
+  const { t, skipped } = mk()
+  t.progressState(running('p', 'g1')); t.success({ prompt_id: 'p' }); t.queued('p', G('g1'))
+  out.finishedBeforeQueued = { skipped, size: t.size() }
+}
+{ // same race, but the grid ran: no alert, nothing kept
+  const { t, skipped } = mk()
+  t.progressState(running('p', 'g1')); t.ran({ node: 'g1', prompt_id: 'p' })
+  t.success({ prompt_id: 'p' }); t.queued('p', G('g1'))
+  out.finishedBeforeQueuedRan = { skipped, size: t.size() }
+}
+{ // a prompt with no grid is never tracked, whichever arrives first
+  const { t } = mk()
+  t.queued('a', G()); const first = t.size()
+  t.progressState(running('b', 'x')); t.queued('b', G()); const second = t.size()
+  t.progressState(running('c', 'x')); t.success({ prompt_id: 'c' }); t.queued('c', G())
+  out.noGrid = { first, second, third: t.size() }
+}
+{ // waiting prompts that were cancelled: the server's empty queue is the only signal
+  const { t, skipped } = mk()
+  for (let i = 0; i < 1000; i++) t.queued('w' + i, G('g1'))
+  t.queued('run', G('g1')); t.started({ prompt_id: 'run' }); t.progressState(running('run', 'g1'))
+  t.status({ exec_info: { queue_remaining: 3 } }); const stillWaiting = t.size()
+  t.status({ exec_info: { queue_remaining: 0 } }); const afterEmpty = t.size() // the running one is kept
+  t.success({ prompt_id: 'run' })
+  out.cancelled = { stillWaiting, afterEmpty, skipped, size: t.size() }
+}
+{ // a status with no numbers changes nothing
+  const { t } = mk()
+  t.queued('p', G('g1')); t.status(null); t.status({}); t.status({ exec_info: {} })
+  out.statusNoise = t.size()
 }
 { // lazy pass: announced twice, then ran
   const { t, skipped } = mk()
@@ -231,7 +265,26 @@ def test_queue_response_after_the_first_progress_state_still_alerts(probe: dict)
 
 
 def test_prompt_never_recorded_by_queue_prompt_alerts_nothing(probe: dict) -> None:
-    assert probe["unrecorded"] == {"skipped": [], "size": 0}
+    # Held while its queue response could still arrive; gone when the next prompt starts.
+    assert probe["unrecorded"] == {"skipped": [], "held": 1, "size": 0}
+
+
+def test_a_prompt_that_finishes_before_its_queue_response_still_alerts(probe: dict) -> None:
+    assert probe["finishedBeforeQueued"] == {"skipped": [["g1", "Tg1"]], "size": 0}
+    assert probe["finishedBeforeQueuedRan"] == {"skipped": [], "size": 0}
+
+
+def test_a_prompt_without_a_grid_is_never_tracked(probe: dict) -> None:
+    assert probe["noGrid"] == {"first": 0, "second": 0, "third": 0}
+
+
+def test_cancelled_waiting_prompts_are_forgotten_when_the_queue_is_empty(probe: dict) -> None:
+    cancelled = probe["cancelled"]
+    assert cancelled["stillWaiting"] == 1001
+    assert cancelled["afterEmpty"] == 1
+    assert cancelled["skipped"] == [["g1", "Tg1"]]  # the running prompt keeps its verdict
+    assert cancelled["size"] == 0
+    assert probe["statusNoise"] == 1
 
 
 def test_lazy_double_announcement_then_ran_does_not_alert(probe: dict) -> None:

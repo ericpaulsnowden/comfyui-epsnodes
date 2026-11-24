@@ -2534,7 +2534,13 @@ The decision is made only at `execution_success` (`image` is lazy: a grid is
 announced, upstream is evaluated, and it is announced again before it runs):
 each id in `grids` that was announced and never ran gets ONE `warn` toast
 (its queued title) and one log line. Cached grids are never announced
-(`execution_cached`). `execution_error` / `execution_interrupted` discard the
+(`execution_cached`). The queue response and the websocket race, so the
+verdict is given by whichever of the two arrives LAST: a prompt that
+succeeds before its response resolved is held as `finished` and `queued()`
+decides. A prompt with no grid is never tracked. A waiting prompt that is
+cancelled gets no event of its own from core, so a `status` event with
+`exec_info.queue_remaining === 0` drops every entry that never started.
+`execution_error` / `execution_interrupted` discard the
 prompt silently. Missing history is never evidence: websocket
 `reconnecting`/`reconnected` discard every tracked prompt, and an
 `execution_start` for another prompt discards earlier entries that had
