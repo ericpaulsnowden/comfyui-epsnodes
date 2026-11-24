@@ -30,7 +30,7 @@ const src = fs.readFileSync(process.argv[2], 'utf8').replace(/\r\n/g, '\n') // C
 const grab = (re) => { const m = re.exec(src); if (!m) throw new Error('missing ' + re); return m[0] }
 const body = [
   grab(/const ORIGINAL_SIZE_NAMES = [^\n]*/), grab(/const ORIGINAL_SIZE_TYPE = [^\n]*/),
-  grab(/const EXTRA_IMAGE_RE = [^\n]*/), grab(/const MAX_IMAGES = [^\n]*/), grab(/const RESIZED_PREFIX = [^\n]*/),
+  grab(/const MAX_IMAGES = [^\n]*/), grab(/const EXTRA_IMAGE_RE = [^\n]*/), grab(/const RESIZED_PREFIX = [^\n]*/),
   grab(/function outputIndexByName[\s\S]*?\n}\n/),
   grab(/export function isOutputConnected[\s\S]*?\n}\n/).replace('export ', ''),
   grab(/const RESIZED_NAME_RE = [^\n]*/), grab(/const NODE_TYPE = [^\n]*/), grab(/const savedWireIntent = [^\n]*/), grab(/const savedFloatingIntent = [^\n]*/),
@@ -43,7 +43,7 @@ const body = [
 const { revealExtraOutputs, beforeConfigureGraph, applySavedOutputIntent, savedWireIntent, savedFloatingIntent } = new Function(body)()
 
 const BACKEND = ['image','resized_image','width','height','original_width','original_height',
-  'resized_2','resized_3','resized_4','resized_5','resized_6','resized_7','resized_8']
+  'resized_2','resized_3','resized_4','resized_5','resized_6','resized_7','resized_8','resized_9']
 const BASE = BACKEND.slice(0, 6)
 globalThis.LiteGraph = { registered_node_types: { EPSResolution: { nodeData: { output_name: BACKEND } } } }
 

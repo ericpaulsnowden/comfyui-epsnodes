@@ -113,7 +113,8 @@ WIRED_CASES = [
     ([{"name": "image", "link": 0}], True),  # link id 0 is a real link
     ([{"name": "image", "link": None}, {"name": "image_2", "link": 3}], True),
     ([{"name": "image_8", "link": 3}], True),
-    ([{"name": "image_9", "link": 3}], False),  # outside the 2..8 ceiling
+    ([{"name": "image_9", "link": 3}], True),  # the ninth image (v0.110.19)
+    ([{"name": "image_10", "link": 3}], False),  # outside the 2..9 ceiling
     ([{"name": "mask", "link": 3}], False),
     ([None, {"name": "image_3", "link": 1}], True),
 ]

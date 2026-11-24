@@ -151,7 +151,7 @@ def _resolve_scalar(node: nodes_resolution.EPSResolution, **kwargs: object):
     # v0.61.0: 13 outputs -- the first six are the historical contract,
     # the 7 resized_N tail lists carry one blocker per run when no
     # image_N is wired (asserted in TestMultiImage, tolerated here).
-    assert len(result) == 13
+    assert len(result) == 14
     out_image, resized, width, height, orig_w, orig_h = result[:6]
     lists = (out_image, resized, width, height, orig_w, orig_h)
     assert all(isinstance(lst, list) and len(lst) == 1 for lst in lists)
@@ -399,7 +399,7 @@ def test_original_size_outputs_report_the_input_images_actual_shape() -> None:
 def test_class_shape_matches_format_md_section_6_5() -> None:
     cls = nodes_resolution.EPSResolution
     assert cls.CATEGORY == "EPSNodes/Images"
-    assert cls.RETURN_TYPES == ("IMAGE", "IMAGE", "INT", "INT", "INT", "INT") + ("IMAGE",) * 7
+    assert cls.RETURN_TYPES == ("IMAGE", "IMAGE", "INT", "INT", "INT", "INT") + ("IMAGE",) * 8
     assert cls.RETURN_NAMES == (
         "image",
         "resized_image",
@@ -414,8 +414,9 @@ def test_class_shape_matches_format_md_section_6_5() -> None:
         "resized_6",
         "resized_7",
         "resized_8",
+        "resized_9",
     )
-    assert cls.OUTPUT_IS_LIST == (True,) * 13
+    assert cls.OUTPUT_IS_LIST == (True,) * 14
     assert cls.FUNCTION == "resolve"
 
 
@@ -539,7 +540,7 @@ class TestPresetsInputDeclaration:
         assert optional["presets"][1]["hidden"] is True
 
     def test_output_is_list_declared_for_all_outputs(self) -> None:
-        assert nodes_resolution.EPSResolution.OUTPUT_IS_LIST == (True,) * 13
+        assert nodes_resolution.EPSResolution.OUTPUT_IS_LIST == (True,) * 14
 
     def test_width_height_multiple_of_bounds_unchanged(self) -> None:
         # The M3 refactor moved these into named constants -- pin the
@@ -734,13 +735,16 @@ class TestMultiImage:
     inputs, tail resized_N outputs, blockers on the single-image-only
     outputs."""
 
-    def test_flexible_optional_accepts_only_2_through_8(self) -> None:
+    def test_flexible_optional_accepts_only_2_through_9(self) -> None:
+        # Nine images since v0.110.19 (owner ask: current video models take nine).
         optional = nodes_resolution.EPSResolution.INPUT_TYPES()["optional"]
-        for n in range(2, 9):
+        for n in range(2, 10):
             assert f"image_{n}" in optional
             assert optional[f"image_{n}"][0] == "IMAGE"
         assert "image_1" not in optional
-        assert "image_9" not in optional
+        assert "image_10" not in optional
+        assert "image_02" not in optional
+        assert "image_90" not in optional
         assert "image_" not in optional
         # static entries untouched, and iteration still shows only them
         # ("ratio" then "scale_multiplier" appended LAST -- §8: see
@@ -765,6 +769,59 @@ class TestMultiImage:
         assert isinstance(result[5][0], fake_execution_blocker)   # original_height
         # width/height still report the shared target
         assert result[2][0] == 100 and result[3][0] == 50
+
+    def test_nine_images_each_come_out_on_their_own_output(
+        self, fake_execution_blocker: type
+    ) -> None:
+        """v0.110.19 (owner ask: current video models take nine reference
+        images). Each image is given its own size so a swapped or dropped
+        slot would show: image_N -> resized_N, the Nth output after the six
+        fixed ones."""
+        images = {
+            ("image" if n == 1 else f"image_{n}"): _make_image(height=8 * n, width=16 * n, value=n / 10)
+            for n in range(1, 10)
+        }
+        result = _node().resolve(width=100, height=50, resize_method="stretch", **images)
+        assert len(result) == 14
+        for n in range(1, 10):
+            out = result[1 if n == 1 else n + 4][0]  # resized_image is 1; resized_N is N + 4
+            assert tuple(out.shape) == (1, 50, 100, 3)
+            assert torch.allclose(out, torch.full_like(out, n / 10))
+
+    def test_the_ninth_image_alone_leaves_the_other_extras_blocked(
+        self, fake_execution_blocker: type
+    ) -> None:
+        result = _node().resolve(width=64, height=64, image_9=_make_image(height=32, width=32))
+        assert tuple(result[13][0].shape) == (1, 64, 64, 3)
+        for index in range(6, 13):  # resized_2..resized_8: nothing wired
+            assert isinstance(result[index][0], fake_execution_blocker)
+
+    def test_a_tenth_image_is_not_an_input(self) -> None:
+        # image_10 is not one of this node's inputs: it is ignored like any
+        # other unknown keyword, never read as an image.
+        result = _node().resolve(width=64, height=48, image_10=_make_image(height=32, width=32))
+        assert len(result) == 14
+        assert result[2][0] == 64 and result[3][0] == 48
+
+    def test_frontend_and_backend_agree_on_the_image_limit(self) -> None:
+        """One number on both sides: the frontend grows image_N and reveals
+        resized_N up to ITS limit, and the run estimator has its own name
+        pattern. A drift would offer a socket the backend ignores (or hide
+        one it accepts)."""
+        import re
+        from pathlib import Path
+
+        web = Path(__file__).resolve().parent.parent / "web" / "eps_image"
+        limit = nodes_resolution.MAX_IMAGES
+        assert limit == 9
+        frontend = web.joinpath("resolution.js").read_text(encoding="utf-8")
+        assert re.search(r"^export const MAX_IMAGES = (\d+)$", frontend, re.M).group(1) == str(limit)
+        estimator = web.joinpath("cross_sweep.js").read_text(encoding="utf-8")
+        pattern = re.search(r"name === 'image' \|\| /(\^image_\[2-\d\]\$)/\.test\(name\)", estimator)
+        names = re.compile(pattern.group(1))
+        assert names.fullmatch(f"image_{limit}") and not names.fullmatch(f"image_{limit + 1}")
+        assert not names.fullmatch("image_1")
+        assert nodes_resolution.EPSResolution.RETURN_NAMES[-1] == f"resized_{limit}"
 
     def test_ratio_lock_with_multiple_of_gives_every_image_the_reported_size(self) -> None:
         """Audit 2026-11: the shared box was ratio-locked + rounded once, then
@@ -804,7 +861,7 @@ class TestMultiImage:
         assert isinstance(result[6][0], fake_execution_blocker)  # resized_2 (unwired)
         assert isinstance(result[7][0], fake_execution_blocker)  # resized_3 (unwired)
         assert tuple(result[8][0].shape) == (1, 32, 32, 3)       # image_4 -> resized_4
-        for idx in range(9, 13):
+        for idx in range(9, 14):
             assert isinstance(result[idx][0], fake_execution_blocker)
 
     def test_zero_dim_derives_from_first_wired_image_for_all(self) -> None:
@@ -841,7 +898,7 @@ class TestMultiImage:
         result = node.resolve(width=32, height=32, image=a)
         assert tuple(result[1][0].shape) == (1, 32, 32, 3)
         assert result[4][0] == 64 and result[5][0] == 64  # original size LIVE in single mode
-        for idx in range(6, 13):
+        for idx in range(6, 14):
             assert isinstance(result[idx][0], fake_execution_blocker)
 
     def test_multi_composes_with_preset_fanout(self, context: LibraryContext) -> None:
@@ -1611,7 +1668,7 @@ class TestScaleMultiplierWithImage:
         assert isinstance(result[4][0], fake_execution_blocker)
         assert isinstance(result[5][0], fake_execution_blocker)
         # unwired slots still block their own output
-        for idx in range(8, 13):
+        for idx in range(8, 14):
             assert isinstance(result[idx][0], fake_execution_blocker)
 
     def test_multi_image_first_wired_is_the_lowest_slot_when_image_is_unwired(
@@ -1792,7 +1849,7 @@ class TestLazyImagesSkipAnAllOffSwitcher:
         assert types["optional"]["image_5"][1]["lazy"] is True  # the flexible extras too
         assert types["hidden"] == {"prompt": "PROMPT", "unique_id": "UNIQUE_ID"}
         assert EPSResolution.LAZY_IMAGE_INPUTS == (
-            "image", "image_2", "image_3", "image_4", "image_5", "image_6", "image_7", "image_8"
+            "image", "image_2", "image_3", "image_4", "image_5", "image_6", "image_7", "image_8", "image_9"
         )
 
     def test_check_lazy_status_skips_the_all_off_feed_only(self) -> None:
@@ -1813,6 +1870,6 @@ class TestLazyImagesSkipAnAllOffSwitcher:
         from eps_image.nodes_resolution import EPSResolution
 
         # Hidden inputs ride in through **extra and must never be mistaken
-        # for an image_N (the extras collector matches image_[2-8] only).
+        # for an image_N (the extras collector matches image_2..image_9 only).
         result = EPSResolution().resolve(width=640, height=480, prompt={}, unique_id="5")
         assert result[2] == [640] and result[3] == [480]
