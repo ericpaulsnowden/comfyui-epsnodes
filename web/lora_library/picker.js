@@ -140,7 +140,7 @@ import { walkLiveNodes, walkGraphs } from './api.js'
 import * as pll from './pll_bridge.js'
 import * as dasiwa from './dasiwa_bridge.js'
 import { entryMatchesSearch, searchWords } from './search.js'
-import { el, findWidget, installMinWidth, nodeClassOf } from './panel_helpers.js'
+import { chainHook, el, findWidget, installMinWidth, nodeClassOf } from './panel_helpers.js'
 
 /** Frozen once shipped -- mirrors the Python node's class id (§6.13). */
 export const CLASS_ID = 'EPSLoraPicker'
@@ -1396,23 +1396,14 @@ export function feedContentEqual(a, b) {
  */
 function wireConfigureReload(state) {
   const node = state.node
-  const originalOnConfigure = node.onConfigure
-  node.onConfigure = function (info) {
-    let result
-    if (typeof originalOnConfigure === 'function') {
-      try {
-        result = originalOnConfigure.apply(this, arguments)
-      } catch (error) {
-        api.warn('original onConfigure threw', error)
-      }
-    }
-    try {
+  chainHook(
+    node,
+    'onConfigure',
+    function (info) {
       reloadFromWidget(state)
-    } catch (error) {
-      api.warn('post-configure resync failed', error)
-    }
-    return result
-  }
+    },
+    { warn: api.warn, label: 'post-configure resync', onOriginalThrow: 'log' }
+  )
 }
 
 /**
@@ -1441,25 +1432,20 @@ function wireConfigureReload(state) {
  */
 function wireNodeCleanup(state) {
   const node = state.node
-  const originalOnRemoved = node.onRemoved
-  node.onRemoved = function (...args) {
-    let result
-    if (typeof originalOnRemoved === 'function') {
+  chainHook(
+    node,
+    'onRemoved',
+    function () {
       try {
-        result = originalOnRemoved.apply(this, args)
+        commitActiveStrengthEdit(state)
       } catch (error) {
-        api.warn('original onRemoved threw', error)
+        api.warn('picker strength flush on remove failed', error)
       }
-    }
-    try {
-      commitActiveStrengthEdit(state)
-    } catch (error) {
-      api.warn('picker strength flush on remove failed', error)
-    }
-    clearTimeout(state.syncTimer)
-    state.syncTimer = null
-    return result
-  }
+      clearTimeout(state.syncTimer)
+      state.syncTimer = null
+    },
+    { warn: api.warn, onOriginalThrow: 'log' }
+  )
 }
 
 // --- Mutations ---
@@ -1839,15 +1825,14 @@ function installManualResizeWatch(state) {
   const node = state.node
   if (!node || node.__epsLpResizeWatchInstalled) return
   node.__epsLpResizeWatchInstalled = true
-  const originalOnResize = node.onResize
-  node.onResize = function (size) {
-    try {
+  chainHook(
+    node,
+    'onResize',
+    function (size) {
       if (isManualResize(node, app.canvas, state.programmaticResize)) noteManualResize(state)
-    } catch (error) {
-      api.warn('manual-resize watch failed', error)
-    }
-    return originalOnResize?.call(this, size)
-  }
+    },
+    { warn: api.warn, label: 'manual-resize watch', order: 'before' }
+  )
 }
 
 /** The user just dragged the node's corner: the height is theirs now.
@@ -1883,18 +1868,20 @@ function noteManualResize(state) {
 function wireAutoGrowProperty(state) {
   const node = state.node
   if (typeof node.addProperty === 'function') node.addProperty(PROP_AUTO_GROW, true, 'boolean')
-  const original = node.onPropertyChanged
-  node.onPropertyChanged = function (name, value, prevValue) {
-    const result = original?.call(this, name, value, prevValue)
-    if (name === PROP_AUTO_GROW) {
-      try {
-        applyAutoGrowChange(state, value, prevValue)
-      } catch (error) {
-        api.warn('auto-grow property change failed', error)
+  chainHook(
+    node,
+    'onPropertyChanged',
+    function (name, value, prevValue) {
+      if (name === PROP_AUTO_GROW) {
+        try {
+          applyAutoGrowChange(state, value, prevValue)
+        } catch (error) {
+          api.warn('auto-grow property change failed', error)
+        }
       }
-    }
-    return result
-  }
+    },
+    { warn: api.warn }
+  )
 }
 
 /** onPropertyChanged body for PROP_AUTO_GROW: class first (both
@@ -1922,18 +1909,20 @@ function wireSplitProperty(state) {
   if (typeof node.addProperty === 'function') {
     node.addProperty(PROP_SELECTED_SPLIT, DEFAULT_SPLIT_FRACTION, 'number')
   }
-  const original = node.onPropertyChanged
-  node.onPropertyChanged = function (name, value, prevValue) {
-    const result = original?.call(this, name, value, prevValue)
-    if (name === PROP_SELECTED_SPLIT) {
-      try {
-        applySplit(state)
-      } catch (error) {
-        api.warn('split property change failed', error)
+  chainHook(
+    node,
+    'onPropertyChanged',
+    function (name, value, prevValue) {
+      if (name === PROP_SELECTED_SPLIT) {
+        try {
+          applySplit(state)
+        } catch (error) {
+          api.warn('split property change failed', error)
+        }
       }
-    }
-    return result
-  }
+    },
+    { warn: api.warn }
+  )
 }
 
 /**
@@ -1948,20 +1937,22 @@ function wireSplitProperty(state) {
 function wireBrowsePathProperty(state) {
   const node = state.node
   if (typeof node.addProperty === 'function') node.addProperty(PROP_BROWSE_PATH, [], 'array')
-  const original = node.onPropertyChanged
-  node.onPropertyChanged = function (name, value, prevValue) {
-    const result = original?.call(this, name, value, prevValue)
-    if (name === PROP_BROWSE_PATH) {
-      try {
-        const seeded = browsePathFromProperty(value)
-        state.pendingPathSeed = seeded.path.length ? seeded : null
-        if (tryApplyPendingPathSeed(state)) renderBrowser(state)
-      } catch (error) {
-        api.warn('browse path property change failed', error)
+  chainHook(
+    node,
+    'onPropertyChanged',
+    function (name, value, prevValue) {
+      if (name === PROP_BROWSE_PATH) {
+        try {
+          const seeded = browsePathFromProperty(value)
+          state.pendingPathSeed = seeded.path.length ? seeded : null
+          if (tryApplyPendingPathSeed(state)) renderBrowser(state)
+        } catch (error) {
+          api.warn('browse path property change failed', error)
+        }
       }
-    }
-    return result
-  }
+    },
+    { warn: api.warn }
+  )
 }
 
 /**
@@ -1983,25 +1974,27 @@ function wireBrowsePathProperty(state) {
 function wireLinkedLoaderProperty(state) {
   const node = state.node
   if (typeof node.addProperty === 'function') node.addProperty(PROP_LINKED_LOADER, '', 'string')
-  const original = node.onPropertyChanged
-  node.onPropertyChanged = function (name, value, prevValue) {
-    const result = original?.call(this, name, value, prevValue)
-    if (name === PROP_LINKED_LOADER) {
-      try {
-        const restored = linkedLoaderIdFromProperty(value)
-        // setLinkedTarget pre-assigns linkedTargetId before calling
-        // setProperty, so an unchanged id here means our own write; a
-        // DIFFERENT id is a restore (configure/undo/redo) -- see the
-        // linkedSyncedOnce note where the state is built.
-        if (restored !== state.linkedTargetId) state.linkedSyncedOnce = restored != null
-        state.linkedTargetId = restored
-        renderSend(state)
-      } catch (error) {
-        api.warn('linked loader property change failed', error)
+  chainHook(
+    node,
+    'onPropertyChanged',
+    function (name, value, prevValue) {
+      if (name === PROP_LINKED_LOADER) {
+        try {
+          const restored = linkedLoaderIdFromProperty(value)
+          // setLinkedTarget pre-assigns linkedTargetId before calling
+          // setProperty, so an unchanged id here means our own write; a
+          // DIFFERENT id is a restore (configure/undo/redo) -- see the
+          // linkedSyncedOnce note where the state is built.
+          if (restored !== state.linkedTargetId) state.linkedSyncedOnce = restored != null
+          state.linkedTargetId = restored
+          renderSend(state)
+        } catch (error) {
+          api.warn('linked loader property change failed', error)
+        }
       }
-    }
-    return result
-  }
+    },
+    { warn: api.warn }
+  )
 }
 
 // --- §6.13 M5: draggable Selected/browse split (owner ask 2026-08-23) ---

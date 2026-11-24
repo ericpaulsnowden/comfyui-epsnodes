@@ -98,7 +98,7 @@ import { app } from '../../../scripts/app.js'
 import * as api from './api.js'
 import { walkLiveNodes } from './api.js'
 import { notebookCacheGet, notebookCacheSet, isUnchangedResponse, toggleCollapsedSection, isSectionCollapsed } from './notebook.js'
-import { el, findWidget, installMinWidth } from './panel_helpers.js'
+import { chainHook, el, findWidget, installMinWidth } from './panel_helpers.js'
 import { parseCollapsedGroups } from './group_helpers.js'
 
 /** FORMAT.md — frozen once shipped. */
@@ -870,23 +870,14 @@ function wireHeaderEvents(state) {
 
 function wireNodeCleanup(state) {
   const node = state.node
-  const originalOnRemoved = node.onRemoved
-  node.onRemoved = function (...args) {
-    let result
-    if (typeof originalOnRemoved === 'function') {
-      try {
-        result = originalOnRemoved.apply(this, args)
-      } catch (error) {
-        api.warn('original node onRemoved threw', error)
-      }
-    }
-    try {
+  chainHook(
+    node,
+    'onRemoved',
+    function () {
       teardown(state)
-    } catch (error) {
-      api.warn('prompt builder teardown failed', error)
-    }
-    return result
-  }
+    },
+    { warn: api.warn, label: 'prompt builder teardown', onOriginalThrow: 'log' }
+  )
 }
 
 function teardown(state) {
@@ -904,17 +895,10 @@ function teardown(state) {
  * notebook.js's own `wireConfigureReload`. */
 function wireConfigureReload(state) {
   const node = state.node
-  const originalOnConfigure = node.onConfigure
-  node.onConfigure = function (...args) {
-    let result
-    if (typeof originalOnConfigure === 'function') {
-      try {
-        result = originalOnConfigure.apply(this, args)
-      } catch (error) {
-        api.warn('original node onConfigure threw', error)
-      }
-    }
-    try {
+  chainHook(
+    node,
+    'onConfigure',
+    function () {
       state.configureReloaded = true
       state.blocks = parseBlocks(state.blocksWidget.value)
       renderRightPane(state)
@@ -924,11 +908,9 @@ function wireConfigureReload(state) {
           api.warn('post-configure prompt builder reload failed', error)
         )
       )
-    } catch (error) {
-      api.warn('prompt builder configure reload failed', error)
-    }
-    return result
-  }
+    },
+    { warn: api.warn, label: 'prompt builder configure reload', onOriginalThrow: 'log' }
+  )
 }
 
 /**
@@ -1009,19 +991,14 @@ function installPollWhenInGraph(state) {
     installPoll(state)
     return
   }
-  const originalOnAdded = node.onAdded
-  node.onAdded = function (...args) {
-    let result
-    if (typeof originalOnAdded === 'function') {
-      try {
-        result = originalOnAdded.apply(this, args)
-      } catch (error) {
-        api.warn('original node onAdded threw', error)
-      }
-    }
-    if (!state.pollTimer) installPoll(state)
-    return result
-  }
+  chainHook(
+    node,
+    'onAdded',
+    function () {
+      if (!state.pollTimer) installPoll(state)
+    },
+    { warn: api.warn, label: 'poll install on add', onOriginalThrow: 'log' }
+  )
 }
 
 function installPoll(state) {
@@ -1285,17 +1262,19 @@ function registerCollapsedSectionsProperty(state) {
     node.properties = node.properties || {}
     if (!(PROP_COLLAPSED_SECTIONS in node.properties)) node.properties[PROP_COLLAPSED_SECTIONS] = []
   }
-  const original = node.onPropertyChanged
-  node.onPropertyChanged = function (name, value, prevValue) {
-    const result = original?.call(this, name, value, prevValue)
-    if (name === PROP_COLLAPSED_SECTIONS) {
-      // Covers BOTH configure()'s restore and a live hand-edit through the
-      // node's right-click Properties panel.
-      applyCollapsedSectionsFromProperty(state)
-      renderLeftPane(state)
-    }
-    return result
-  }
+  chainHook(
+    node,
+    'onPropertyChanged',
+    function (name, value, prevValue) {
+      if (name === PROP_COLLAPSED_SECTIONS) {
+        // Covers BOTH configure()'s restore and a live hand-edit through the
+        // node's right-click Properties panel.
+        applyCollapsedSectionsFromProperty(state)
+        renderLeftPane(state)
+      }
+    },
+    { warn: api.warn }
+  )
   // addProperty() alone never fires onPropertyChanged (see above) — sync a
   // FRESH node's list explicitly now; a RESTORED node's configure() does
   // this again momentarily with the real saved value via the wrapper above.

@@ -91,7 +91,7 @@ def probe(tmp_path_factory: pytest.TempPathFactory) -> dict:
     layout = tmp_path_factory.mktemp("web_root")
     lora_library = layout / "extensions" / "comfyui-epsnodes" / "lora_library"
     lora_library.mkdir(parents=True)
-    for name in ("api.js", "version.js"):
+    for name in ("api.js", "version.js", "panel_helpers.js"):  # api.js imports panel_helpers.js (chainHook)
         shutil.copyfile(LORA_LIBRARY / name, lora_library / name)
     scripts = layout / "scripts"
     scripts.mkdir()

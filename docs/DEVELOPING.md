@@ -272,12 +272,19 @@ ruff check .
    Handle both orders of the restore race; never let a late response overwrite a field being typed in (§7.5).
    In Vue mode `onDrawForeground` / `onMouseDown` never run, and window-level listeners must be capture-phase
    (§7.5).
-5. Shared-panel caveat: helpers such as `panelScale` are copied by hand between panels (the roadmap's census counted 119 source comments saying so), and fixes
+5. Hooks: never write "capture the original, assign a wrapper" by hand (FORMAT.md §7.5, "chain, never
+   replace"). `chainHook(target, hook, ours, { warn, label, order, onOriginalThrow, veto })` from
+   `panel_helpers.js` does it for node hooks, graph hooks and widget callbacks: the original runs with the
+   same `this` and arguments and its result is returned, `ours` is caught and logged through your module's
+   `warn`. Keep your per-node install-once flag at the call site. A site that cannot fit it goes in
+   `HAND_CHAIN_ALLOW` in `tests/test_chain_hook_js.py` with a reason; that test fails on any other
+   hand-assigned `.onX` / captured original.
+6. Shared-panel caveat: helpers such as `panelScale` are copied by hand between panels (the roadmap's census counted 119 source comments saying so), and fixes
    have missed siblings (`docs/plan/ROADMAP-shared-panel-code.md`). After fixing a helper, grep `web/` for its name
    and fix every copy. Already shared: `lora_library/api.js` (incl. `loggerFor(prefix)` -- each module binds its own
    `const { warn } = loggerFor(PREFIX)` -- and `showToast(...)`; do not hand-write `console.warn(PREFIX, ...)` or a
    `toast.add` helper), `search.js`, `panel_helpers.js` (`el`, `installMinWidth`,
-   `nodeClassOf`, `findWidget`, `linkById`), `group_helpers.js` (the `#`-group name rules,
+   `nodeClassOf`, `findWidget`, `linkById`, `chainHook`), `group_helpers.js` (the `#`-group name rules,
    `parseCollapsedGroups`, `parseRenameDraft` + `PROP_RENAME_DRAFT`, `flushPendingNameEdit`; pure, no `app`),
    `path_heal.js`, `eps_image/owned_link_colour.js` (import-free by test;
    the one definition of `LINK_COLOR_OWNER_KEY`). A test that copies a panel into a served

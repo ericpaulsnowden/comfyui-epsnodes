@@ -90,7 +90,7 @@ import { api } from '../../../scripts/api.js'
 import { healComboValue, isHealEnabled } from '../lora_library/path_heal.js'
 import { loggerFor, subscribeWidgetsChangedExternally } from '../lora_library/api.js'
 import { LINK_COLOR_OWNER_KEY, ensureOwnedLinkColourHook } from './owned_link_colour.js'
-import { el, findWidget, installMinWidth, linkById, nodeClassOf } from '../lora_library/panel_helpers.js'
+import { chainHook, el, findWidget, installMinWidth, linkById, nodeClassOf } from '../lora_library/panel_helpers.js'
 
 /** Frozen once shipped -- mirrors the Python node's class id. */
 export const CLASS_ID = 'EPSCheckpointSwitcher'
@@ -344,22 +344,22 @@ function syncLinkDimming(node, where) {
 function installLinkDimHooks(node) {
   if (node.__epsCkptLinkDimWrapped) return
   node.__epsCkptLinkDimWrapped = true
-  const originalConnections = node.onConnectionsChange
-  node.onConnectionsChange = function (...args) {
-    const result =
-      typeof originalConnections === 'function' ? originalConnections.apply(this, args) : undefined
-    syncLinkDimming(this, 'onConnectionsChange')
-    return result
-  }
-  const originalRemoved = node.onRemoved
-  node.onRemoved = function (...args) {
-    try {
+  chainHook(
+    node,
+    'onConnectionsChange',
+    function () {
+      syncLinkDimming(this, 'onConnectionsChange')
+    },
+    { warn, label: 'link dim sync (onConnectionsChange)' }
+  )
+  chainHook(
+    node,
+    'onRemoved',
+    function () {
       reconcileLinkDimming(this, { forceUndim: true })
-    } catch (error) {
-      warn('link dim cleanup (onRemoved) failed', error)
-    }
-    return typeof originalRemoved === 'function' ? originalRemoved.apply(this, args) : undefined
-  }
+    },
+    { warn, label: 'link dim cleanup (onRemoved)', order: 'before' }
+  )
 }
 
 // --- State ---
@@ -793,23 +793,14 @@ async function loadCheckpoints(state, force = false) {
  */
 function wireConfigureReload(state) {
   const node = state.node
-  const originalOnConfigure = node.onConfigure
-  node.onConfigure = function (info) {
-    let result
-    if (typeof originalOnConfigure === 'function') {
-      try {
-        result = originalOnConfigure.apply(this, arguments)
-      } catch (error) {
-        warn('original onConfigure threw', error)
-      }
-    }
-    try {
+  chainHook(
+    node,
+    'onConfigure',
+    function (info) {
       reloadFromWidget(state)
-    } catch (error) {
-      warn('post-configure resync failed', error)
-    }
-    return result
-  }
+    },
+    { warn, label: 'post-configure resync', onOriginalThrow: 'log' }
+  )
 }
 
 // --- Public entry points (called from web/eps_image.js) ---

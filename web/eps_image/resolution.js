@@ -238,6 +238,7 @@ import {
   showToast,
   subscribeWidgetsChangedExternally
 } from '../lora_library/api.js'
+import { chainHook } from '../lora_library/panel_helpers.js'
 import { addButtonRow, captureUndoState } from './button_row.js'
 
 const NODE_TYPE = 'EPSResolution'
@@ -1872,22 +1873,16 @@ function attachSizeGrid(node) {
     // changes with it (one line becomes two), hence applyGridHeight +
     // applyWidthDrivenNodeSize before the repaint, in the same order every
     // other size-affecting path here uses. Wrap-never-replace, per §7.1.
-    const originalOnConnectionsChange = node.onConnectionsChange
-    node.onConnectionsChange = function (...args) {
-      let result
-      try {
-        result = originalOnConnectionsChange?.apply(this, args)
-      } finally {
-        try {
-          applyGridHeight(node)
-          applyWidthDrivenNodeSize(node)
-          renderGrid(node)
-        } catch (error) {
-          warn('connection-change grid refresh failed', error)
-        }
-      }
-      return result
-    }
+    chainHook(
+      node,
+      'onConnectionsChange',
+      function () {
+        applyGridHeight(node)
+        applyWidthDrivenNodeSize(node)
+        renderGrid(node)
+      },
+      { warn, label: 'connection-change grid refresh', onOriginalThrow: 'still-run' }
+    )
 
     // A freshly-wired upstream image is usually still DECODING when
     // onConnectionsChange fires, so its naturalWidth reads 0 and the line
@@ -1902,16 +1897,14 @@ function attachSizeGrid(node) {
     for (const name of ['width', 'height']) {
       const widget = widgetByName(node, name)
       if (!widget) continue
-      const originalCallback = widget.callback
-      widget.callback = function (...args) {
-        let result
-        try {
-          result = originalCallback?.apply(this, args)
-        } finally {
+      chainHook(
+        widget,
+        'callback',
+        function () {
           renderGrid(node)
-        }
-        return result
-      }
+        },
+        { warn, label: 'grid repaint (width/height callback)', onOriginalThrow: 'still-run' }
+      )
     }
 
     // Live resize drag: LGraphCanvas's resize interaction calls setSize()
@@ -1924,14 +1917,16 @@ function attachSizeGrid(node) {
     // accessor, not setSize(), so this callback cannot re-enter itself
     // (file header). The grid's own knobs + repaint follow, since nothing
     // re-computes a plain computedHeight field for us on a bare drag.
-    const originalOnResize = node.onResize
-    node.onResize = function (size) {
-      const result = originalOnResize?.call(this, size)
-      applyWidthDrivenNodeSize(this)
-      applyGridHeight(this)
-      renderGrid(this)
-      return result
-    }
+    chainHook(
+      node,
+      'onResize',
+      function (size) {
+        applyWidthDrivenNodeSize(this)
+        applyGridHeight(this)
+        renderGrid(this)
+      },
+      { warn, label: 'grid repaint (onResize)' }
+    )
 
     // configure() restores widgets_values with a bare assignment (no
     // callback — see file header), so a reloaded workflow needs its own
@@ -1941,53 +1936,54 @@ function attachSizeGrid(node) {
     // stuck-tall by v0.19.3 loads normalized at its saved width, and one
     // saved by this version round-trips exactly (its saved height already
     // equals the derived height).
-    const originalOnConfigure = node.onConfigure
-    node.onConfigure = function (info) {
-      let result
-      try {
-        result = originalOnConfigure?.call(this, info)
-      } finally {
+    chainHook(
+      node,
+      'onConfigure',
+      function (info) {
         applyGridShowHide(this)
         applyWidthDrivenNodeSize(this, { growWidthToMinimum: true })
         applyGridHeight(this)
         if (isGridVisible(this)) renderGrid(this)
-      }
-      return result
-    }
+      },
+      { warn, label: 'grid post-configure reconcile', onOriginalThrow: 'still-run' }
+    )
 
-    const originalOnRemoved = node.onRemoved
-    node.onRemoved = function (...args) {
-      try {
-        node._epsGrid?.resizeObserver?.disconnect()
-      } catch (error) {
-        warn('grid resize-observer disconnect failed', error)
-      }
-      try {
-        node._epsGrid?.cancelDrag?.()
-      } catch (error) {
-        warn('grid drag cleanup failed', error)
-      }
-      try {
-        // The source-size probe (2026-07-29) is the only timer this widget
-        // owns; a deleted node must not leave one ticking.
-        if (node._epsGrid?.sourceProbe) {
-          clearTimeout(node._epsGrid.sourceProbe)
-          node._epsGrid.sourceProbe = null
+    chainHook(
+      node,
+      'onRemoved',
+      function () {
+        try {
+          node._epsGrid?.resizeObserver?.disconnect()
+        } catch (error) {
+          warn('grid resize-observer disconnect failed', error)
         }
-      } catch (error) {
-        warn('source-probe cleanup failed', error)
-      }
-      try {
-        // ...and the coalesced repaint's pending frame (v0.68.1).
-        if (node._epsGrid?.renderRaf != null && typeof cancelAnimationFrame === 'function') {
-          cancelAnimationFrame(node._epsGrid.renderRaf)
-          node._epsGrid.renderRaf = null
+        try {
+          node._epsGrid?.cancelDrag?.()
+        } catch (error) {
+          warn('grid drag cleanup failed', error)
         }
-      } catch (error) {
-        warn('grid repaint-frame cleanup failed', error)
-      }
-      return originalOnRemoved?.apply(this, args)
-    }
+        try {
+          // The source-size probe (2026-07-29) is the only timer this widget
+          // owns; a deleted node must not leave one ticking.
+          if (node._epsGrid?.sourceProbe) {
+            clearTimeout(node._epsGrid.sourceProbe)
+            node._epsGrid.sourceProbe = null
+          }
+        } catch (error) {
+          warn('source-probe cleanup failed', error)
+        }
+        try {
+          // ...and the coalesced repaint's pending frame (v0.68.1).
+          if (node._epsGrid?.renderRaf != null && typeof cancelAnimationFrame === 'function') {
+            cancelAnimationFrame(node._epsGrid.renderRaf)
+            node._epsGrid.renderRaf = null
+          }
+        } catch (error) {
+          warn('grid repaint-frame cleanup failed', error)
+        }
+      },
+      { warn, label: 'grid teardown (onRemoved)', order: 'before' }
+    )
   } catch (error) {
     warn('size grid setup failed; typed width/height fields remain usable', error)
   }
@@ -2312,16 +2308,14 @@ function wireManualEditClearsSelection(node, state) {
   for (const field of PRESET_FIELD_NAMES) {
     const widget = widgetByName(node, field)
     if (!widget) continue
-    const originalCallback = widget.callback
-    widget.callback = function (...args) {
-      let result
-      try {
-        result = originalCallback?.apply(this, args)
-      } finally {
+    chainHook(
+      widget,
+      'callback',
+      function () {
         if (clearsPresetOnManualEdit(state)) commitSelection(node, [])
-      }
-      return result
-    }
+      },
+      { warn, label: 'preset clear on manual edit', onOriginalThrow: 'still-run' }
+    )
   }
 }
 
@@ -2976,6 +2970,8 @@ function createPresetCombo(node, state) {
   // technique itself was independently verified stable), so shadowing
   // `.onClick` as an own property is a stable override, canvas-only by
   // construction (Vue never reads `.onClick` at all -- file header).
+  // Not chainHook: replaces the combo's `onClick` and calls the stock one only
+  // for a plain click (a bound call, no `this` passthrough).
   const stockOnClick = typeof combo.onClick === 'function' ? combo.onClick.bind(combo) : null
   combo.onClick = function presetComboOnClick(opts) {
     const event = opts && opts.e
@@ -3150,20 +3146,14 @@ function attachPresetsUi(node) {
     // Wrapped defensively (own try/catch), distinct from attachSizeGrid's
     // own onConfigure wrap already installed earlier in attach() -- chains
     // on top of it rather than replacing it.
-    const originalOnConfigure = node.onConfigure
-    node.onConfigure = function presetsOnConfigure(info) {
-      let result
-      try {
-        result = originalOnConfigure?.call(this, info)
-      } finally {
-        try {
-          reconcilePresetsUi(this)
-        } catch (error) {
-          warn('preset post-configure resync failed', error)
-        }
-      }
-      return result
-    }
+    chainHook(
+      node,
+      'onConfigure',
+      function (info) {
+        reconcilePresetsUi(this)
+      },
+      { warn, label: 'preset post-configure resync', onOriginalThrow: 'still-run' }
+    )
 
     // Universal State Controller Apply fix (see installExternalWriteSubscription's
     // own doc comment): the one shared subscription routes by
@@ -3645,6 +3635,8 @@ function wireRatioLock(node) {
   const ratioWidget = widgetByName(node, RATIO_WIDGET_NAME)
   if (ratioWidget) {
     installRatioChoices(node, ratioWidget)
+    // Hand-written, NOT chainHook (HAND_CHAIN_ALLOW): `custom…` is read from the
+    // arguments BEFORE the original runs and then skips it entirely.
     const originalRatioCallback = ratioWidget.callback
     ratioWidget.callback = function (...args) {
       // `custom…` is a command, not a value (M6 section): open the box and
@@ -3678,57 +3670,48 @@ function wireRatioLock(node) {
   for (const name of ['width', 'height']) {
     const widget = widgetByName(node, name)
     if (!widget) continue
-    const originalCallback = widget.callback
-    widget.callback = function (...args) {
-      let result
-      try {
-        result = originalCallback?.apply(this, args)
-      } finally {
+    chainHook(
+      widget,
+      'callback',
+      function () {
         // A callback fired by one of OUR derived writes (see
         // `withRatioDerivedWrite`) has nothing to derive: the pair is already
         // the lock's answer, and deriving back from it is what walked an
         // inexact ratio away from the number the user typed.
-        if (!node._epsRatioDeriving) {
-          const w = Number(widgetByName(node, 'width')?.value) || 0
-          const h = Number(widgetByName(node, 'height')?.value) || 0
-          const conformed = conformNodeSizeToRatio(node, w, h, name)
-          const otherName = name === 'width' ? 'height' : 'width'
-          withRatioDerivedWrite(node, () =>
-            setWidgetValue(widgetByName(node, otherName), conformed[otherName])
-          )
-        }
-      }
-      return result
-    }
+        if (node._epsRatioDeriving) return
+        const w = Number(widgetByName(node, 'width')?.value) || 0
+        const h = Number(widgetByName(node, 'height')?.value) || 0
+        const conformed = conformNodeSizeToRatio(node, w, h, name)
+        const otherName = name === 'width' ? 'height' : 'width'
+        withRatioDerivedWrite(node, () =>
+          setWidgetValue(widgetByName(node, otherName), conformed[otherName])
+        )
+      },
+      { warn, label: 'ratio-lock apply (dimension callback)', onOriginalThrow: 'still-run' }
+    )
   }
 
-  const originalOnConfigure = node.onConfigure
-  node.onConfigure = function ratioLockOnConfigure(info) {
-    let result
-    try {
-      result = originalOnConfigure?.call(this, info)
-    } finally {
-      try {
-        // M6: the restore wrote the ratio with no callback -- re-sync what
-        // the custom… flow remembers, and canonicalise, before the reconcile
-        // below reads it.
-        resyncRatioAfterRestore(this)
-        withRatioApplyGuard(this, () => {
-          const w = Number(widgetByName(this, 'width')?.value) || 0
-          const h = Number(widgetByName(this, 'height')?.value) || 0
-          const conformed = conformNodeSizeToRatio(this, w, h, 'width')
-          if (conformed.height !== h) {
-            withRatioDerivedWrite(this, () =>
-              setWidgetValue(widgetByName(this, 'height'), conformed.height)
-            )
-          }
-        })
-      } catch (error) {
-        warn('ratio-lock post-configure reconcile failed', error)
-      }
-    }
-    return result
-  }
+  chainHook(
+    node,
+    'onConfigure',
+    function (info) {
+      // M6: the restore wrote the ratio with no callback -- re-sync what
+      // the custom… flow remembers, and canonicalise, before the reconcile
+      // below reads it.
+      resyncRatioAfterRestore(this)
+      withRatioApplyGuard(this, () => {
+        const w = Number(widgetByName(this, 'width')?.value) || 0
+        const h = Number(widgetByName(this, 'height')?.value) || 0
+        const conformed = conformNodeSizeToRatio(this, w, h, 'width')
+        if (conformed.height !== h) {
+          withRatioDerivedWrite(this, () =>
+            setWidgetValue(widgetByName(this, 'height'), conformed.height)
+          )
+        }
+      })
+    },
+    { warn, label: 'ratio-lock post-configure reconcile', onOriginalThrow: 'still-run' }
+  )
 }
 
 // ------------------------------------------- M5: multiple_of widget step + snap
@@ -3836,12 +3819,10 @@ function wireMultipleOfSnap(node) {
   for (const name of ['width', 'height']) {
     const widget = widgetByName(node, name)
     if (!widget) continue
-    const originalCallback = widget.callback
-    widget.callback = function (...args) {
-      let result
-      try {
-        result = originalCallback?.apply(this, args)
-      } finally {
+    chainHook(
+      widget,
+      'callback',
+      function () {
         if (!node._epsSuppressMultipleOfSnap) {
           const unit = currentMultipleOfValue(node)
           if (unit > 0) {
@@ -3851,9 +3832,9 @@ function wireMultipleOfSnap(node) {
             if (snapped !== this.value) this.value = snapped
           }
         }
-      }
-      return result
-    }
+      },
+      { warn, label: 'multiple_of snap (dimension callback)', onOriginalThrow: 'still-run' }
+    )
   }
 }
 
@@ -3950,37 +3931,29 @@ function wireMultipleOfLock(node) {
 
   const multipleOfWidget = widgetByName(node, 'multiple_of')
   if (multipleOfWidget) {
-    const originalCallback = multipleOfWidget.callback
-    multipleOfWidget.callback = function (...args) {
-      let result
-      try {
-        result = originalCallback?.apply(this, args)
-      } finally {
+    chainHook(
+      multipleOfWidget,
+      'callback',
+      function () {
         applyMultipleOfWidgetStep(node)
         resnapCurrentSizeToMultipleOf(node)
         renderGrid(node)
-      }
-      return result
-    }
+      },
+      { warn, label: 'multiple_of resnap (callback)', onOriginalThrow: 'still-run' }
+    )
   }
 
   wireMultipleOfSnap(node)
 
-  const originalOnConfigure = node.onConfigure
-  node.onConfigure = function multipleOfOnConfigure(info) {
-    let result
-    try {
-      result = originalOnConfigure?.call(this, info)
-    } finally {
-      try {
-        applyMultipleOfWidgetStep(this)
-        resnapCurrentSizeToMultipleOf(this)
-      } catch (error) {
-        warn('multiple_of post-configure reconcile failed', error)
-      }
-    }
-    return result
-  }
+  chainHook(
+    node,
+    'onConfigure',
+    function (info) {
+      applyMultipleOfWidgetStep(this)
+      resnapCurrentSizeToMultipleOf(this)
+    },
+    { warn, label: 'multiple_of post-configure reconcile', onOriginalThrow: 'still-run' }
+  )
 }
 
 // ------------------------------------------- v0.101.0: scale multiplier
@@ -4347,49 +4320,35 @@ function wireScaleMultiplier(node) {
   node._epsScale = true
   const widget = widgetByName(node, SCALE_MULTIPLIER_WIDGET_NAME)
   if (widget) {
-    const originalCallback = widget.callback
-    widget.callback = function (...args) {
-      let result
-      try {
-        result = originalCallback?.apply(this, args)
-      } finally {
+    chainHook(
+      widget,
+      'callback',
+      function () {
         applyScaleMultiplierState(node)
-      }
-      return result
-    }
+      },
+      { warn, label: 'scale-multiplier state (callback)', onOriginalThrow: 'still-run' }
+    )
   } else {
     warn('EPSResolution node is missing its `scale_multiplier` widget; scale-mode greying not wired')
   }
 
-  const originalOnConnectionsChange = node.onConnectionsChange
-  node.onConnectionsChange = function scaleOnConnectionsChange(...args) {
-    let result
-    try {
-      result = originalOnConnectionsChange?.apply(this, args)
-    } finally {
-      try {
-        applyScaleMultiplierState(this)
-      } catch (error) {
-        warn('scale-mode connection refresh failed', error)
-      }
-    }
-    return result
-  }
+  chainHook(
+    node,
+    'onConnectionsChange',
+    function () {
+      applyScaleMultiplierState(this)
+    },
+    { warn, label: 'scale-mode connection refresh', onOriginalThrow: 'still-run' }
+  )
 
-  const originalOnConfigure = node.onConfigure
-  node.onConfigure = function scaleMultiplierOnConfigure(info) {
-    let result
-    try {
-      result = originalOnConfigure?.call(this, info)
-    } finally {
-      try {
-        applyScaleMultiplierState(this)
-      } catch (error) {
-        warn('scale-mode post-configure refresh failed', error)
-      }
-    }
-    return result
-  }
+  chainHook(
+    node,
+    'onConfigure',
+    function (info) {
+      applyScaleMultiplierState(this)
+    },
+    { warn, label: 'scale-mode post-configure refresh', onOriginalThrow: 'still-run' }
+  )
 
   applyScaleMultiplierState(node)
 }
@@ -4823,20 +4782,19 @@ function attachCopyRotateRow(node) {
 
   // ...which is why the hole is compacted back out on the way to disk (see
   // above). `i in values` is the point: it is false exactly for the holes a
-  // skipped widget leaves, and true for a real stored `null`.
-  const originalOnSerialize = node.onSerialize
-  node.onSerialize = function (info) {
-    const result = originalOnSerialize?.apply(this, arguments)
-    try {
+  // skipped widget leaves, and true for a real stored `null`. Chained, never
+  // replaced.
+  chainHook(
+    node,
+    'onSerialize',
+    function (info) {
       const values = info?.widgets_values
       if (Array.isArray(values)) {
         info.widgets_values = values.filter((_, i) => i in values)
       }
-    } catch (error) {
-      warn('widgets_values compaction failed', error)
-    }
-    return result
-  }
+    },
+    { warn, label: 'widgets_values compaction' }
+  )
 }
 
 export function attach(node) {
@@ -4847,22 +4805,24 @@ export function attach(node) {
 
   installPassthroughVisibility(node)
 
-  const originalOnPropertyChanged = node.onPropertyChanged
-  node.onPropertyChanged = function (name, value, prevValue) {
-    const result = originalOnPropertyChanged?.call(this, name, value, prevValue)
-    if (name === PROP_SHOW_PASSTHROUGH) {
-      applyPassthroughVisibility(this)
-    } else if (name === PROP_SHOW_ORIGINAL_SIZE) {
-      applyOriginalSizeVisibility(this)
-    } else if (name === PROP_SHOW_GRID) {
-      applyGridVisibility(this)
-    } else if (name === PROP_GRID_MAX) {
-      renderGrid(this)
-    } else if (name === PROP_PRESETS_ENABLED) {
-      applyPresetsPropertyVisibility(this)
-    }
-    return result
-  }
+  chainHook(
+    node,
+    'onPropertyChanged',
+    function (name, value, prevValue) {
+      if (name === PROP_SHOW_PASSTHROUGH) {
+        applyPassthroughVisibility(this)
+      } else if (name === PROP_SHOW_ORIGINAL_SIZE) {
+        applyOriginalSizeVisibility(this)
+      } else if (name === PROP_SHOW_GRID) {
+        applyGridVisibility(this)
+      } else if (name === PROP_GRID_MAX) {
+        renderGrid(this)
+      } else if (name === PROP_PRESETS_ENABLED) {
+        applyPresetsPropertyVisibility(this)
+      }
+    },
+    { warn, label: 'property visibility sync' }
+  )
 
   // 2026-07-20 owner ask: hidden BY DEFAULT now (M1 shipped shown-by-
   // default). A freshly created node's just-seeded properties are both
@@ -4903,20 +4863,17 @@ export function attach(node) {
   // incoming file inside the wrap below, so pre-stamping cannot skip it.
   node.properties[WIDGET_LAYOUT_PROP] = WIDGET_LAYOUT_CURRENT
 
-  const originalOnConnectionsChange = node.onConnectionsChange
-  node.onConnectionsChange = function (...args) {
-    let result
-    if (typeof originalOnConnectionsChange === 'function') {
-      try {
-        result = originalOnConnectionsChange.apply(this, args)
-      } catch (error) {
-        warn('original onConnectionsChange threw', error)
-      }
-    }
-    scheduleImageConverge(this)
-    return result
-  }
+  chainHook(
+    node,
+    'onConnectionsChange',
+    function () {
+      scheduleImageConverge(this)
+    },
+    { warn, label: 'image converge (onConnectionsChange)', onOriginalThrow: 'log' }
+  )
 
+  // Not chainHook: `fromOldLayout` must be read from `info` BEFORE the original
+  // onConfigure runs, which chainHook's call-then-ours order cannot express.
   const originalOnConfigureV61 = node.onConfigure
   node.onConfigure = function (info) {
     // Read BEFORE the original runs -- configure merges info.properties

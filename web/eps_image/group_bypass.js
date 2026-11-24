@@ -48,7 +48,7 @@
 
 import { app } from '../../../scripts/app.js'
 import { loggerFor, resolveInputSources, resolveSourcesAt, rootGraphOf } from '../lora_library/api.js'
-import { findWidget, nodeClassOf } from '../lora_library/panel_helpers.js'
+import { chainHook, findWidget, nodeClassOf } from '../lora_library/panel_helpers.js'
 import { hideValuesWidget, parseValues, slotName } from './number_controller.js'
 import { captureUndoState } from './button_row.js'
 
@@ -324,24 +324,28 @@ function wireGroupCombo(state) {
   const { node, groupWidget, groupIdWidget } = state
   groupWidget.options = groupWidget.options || {}
   groupWidget.options.values = () => [NO_GROUP, ...groupOptions(groupsOf(node.graph)).map((o) => o.label)]
-  const originalCallback = groupWidget.callback
-  groupWidget.callback = function (value) {
-    const result = originalCallback?.apply(this, arguments)
-    const option = groupOptions(groupsOf(node.graph)).find((o) => o.label === value)
-    groupIdWidget.value = option ? option.id : ''
-    refreshAll()
-    return result
-  }
+  chainHook(
+    groupWidget,
+    'callback',
+    function (value) {
+      const option = groupOptions(groupsOf(node.graph)).find((o) => o.label === value)
+      groupIdWidget.value = option ? option.id : ''
+      refreshAll()
+    },
+    { warn, label: 'group pick' }
+  )
 }
 
 /** Run the poll right away after a click, so the group answers instantly. */
 function wireSwitch(widget) {
-  const originalCallback = widget.callback
-  widget.callback = function () {
-    const result = originalCallback?.apply(this, arguments)
-    setTimeout(refreshAll, 0)
-    return result
-  }
+  chainHook(
+    widget,
+    'callback',
+    () => {
+      setTimeout(refreshAll, 0)
+    },
+    { warn, label: 'switch refresh' }
+  )
 }
 
 export function init() {}
@@ -366,19 +370,24 @@ export function attach(node) {
     wireSwitch(enabledWidget)
     wireSwitch(muteWidget)
 
-    const originalOnConfigure = node.onConfigure
-    node.onConfigure = function () {
-      const result = originalOnConfigure?.apply(this, arguments)
-      state.last = undefined
-      return result
-    }
-    const originalOnRemoved = node.onRemoved
-    node.onRemoved = function () {
-      // Dropped by the next poll unless it is re-added (moved into a
-      // subgraph) first.
-      state.removed = true
-      return originalOnRemoved?.apply(this, arguments)
-    }
+    chainHook(
+      node,
+      'onConfigure',
+      () => {
+        state.last = undefined
+      },
+      { warn, label: 'post-configure reset' }
+    )
+    chainHook(
+      node,
+      'onRemoved',
+      () => {
+        // Dropped by the next poll unless it is re-added (moved into a
+        // subgraph) first.
+        state.removed = true
+      },
+      { warn, label: 'removal mark', order: 'before' }
+    )
 
     states.add(state)
     ensurePoll()

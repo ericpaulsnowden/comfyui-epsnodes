@@ -90,6 +90,12 @@ HOOK_BY_HAND_RE = re.compile(
 )
 
 
+#: chainHook() aimed straight at a graph: it chains, but without the stored-and-
+#: re-verified bookkeeping that survives core restoring the hook. Only api.js
+#: (watchGraphHooks, which is excluded from the scan) may do that.
+CHAIN_HOOK_ON_GRAPH_RE = re.compile(r"chainHook\(\s*\w*[gG]raph\w*\s*,")
+
+
 def test_graph_hooks_are_only_ever_installed_through_the_shared_helper() -> None:
     """Core restores graph hooks on subgraph enter/exit and Nodes 2.0 toggles
     (useGraphNodeManager cleanup / installErrorClearingHooks disposer), so a
@@ -97,9 +103,11 @@ def test_graph_hooks_are_only_ever_installed_through_the_shared_helper() -> None
     watchGraphHooks is the stored-and-re-verified implementation."""
     offenders = []
     for path in _web_modules():
+        if path.name == "panel_helpers.js":
+            continue  # chainHook's own generic `target[hook] = ...`: the one chain implementation
         rel = path.relative_to(REPO_ROOT).as_posix()
         for number, line in _code_lines(path):
-            if HOOK_BY_HAND_RE.search(line):
+            if HOOK_BY_HAND_RE.search(line) or CHAIN_HOOK_ON_GRAPH_RE.search(line):
                 offenders.append(f"{rel}:{number}: {line.strip()}")
     assert not offenders, (
         "install graph hooks with api.watchGraphHooks / api.watchAllGraphs:\n"
@@ -114,7 +122,8 @@ def test_api_owns_the_stored_and_reverified_watch() -> None:
     body = source.split("export function watchGraphHooks(", 1)[1].split("\n}\n", 1)[0]
     assert "if (current && current === stored[hook]) continue" in body
     assert "current.__epsWatchKeys?.has(ownerKey)" in body, "sibling features must not stack layers"
-    assert "graph[hook] = wrapper" in body
+    assert "chainHook(graph, hook," in body, "the chain itself is the one shared chainHook"
+    assert "wrapper[ownerKey] = true" in body
 
 
 #: Modules that CONTROL or READ other nodes, and the shared reach they must use.

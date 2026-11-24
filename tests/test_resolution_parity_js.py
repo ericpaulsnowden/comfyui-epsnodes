@@ -77,7 +77,7 @@ def layout(tmp_path_factory: pytest.TempPathFactory) -> Path:
         shutil.copyfile(REPO_ROOT / "web" / "eps_image" / name, module_dir / name)
     lora_library = root / "extensions" / "comfyui-epsnodes" / "lora_library"
     lora_library.mkdir(parents=True)
-    for name in ("api.js", "version.js"):  # the real module: the shared loggerFor/showToast, and v1's nested-reach walkers
+    for name in ("api.js", "version.js", "panel_helpers.js"):  # the real module: the shared loggerFor/showToast, v1's nested-reach walkers, and chainHook
         shutil.copyfile(REPO_ROOT / "web" / "lora_library" / name, lora_library / name)
     scripts = root / "scripts"
     scripts.mkdir()

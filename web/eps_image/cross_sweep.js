@@ -19,7 +19,7 @@
  *    disagreement or a multiply-mode same-origin vae paints the line as the
  *    ERROR it will become at queue time, BEFORE the queue. Refresh follows
  *    the §6.3 controller idiom through ONE `READOUT_MIN_INTERVAL_MS`
- *    throttle riding the chained triggers (`wrapWithRecompute`): the
+ *    throttle riding the chained triggers (`chainHook` -> `maybeRecompute`): the
  *    `onDrawForeground` wrap as the litegraph catch-all -- which NEVER
  *    fires under the Vue ("New node design") renderer, where the project
  *    rule is no canvas drawing at all -- plus triggers that exist in BOTH
@@ -179,7 +179,7 @@ import {
   walkLiveNodes,
   watchAllGraphs
 } from '../lora_library/api.js'
-import { nodeClassOf } from '../lora_library/panel_helpers.js'
+import { chainHook, nodeClassOf } from '../lora_library/panel_helpers.js'
 import * as broadcast from './broadcast.js'
 
 /** Frozen once shipped -- mirrors the Python node's class id (§6.10/§8). */
@@ -2010,28 +2010,6 @@ function maybeRecompute(state) {
 }
 
 /**
- * Chains a throttled recompute AFTER *original* -- the one wrapper every
- * refresh trigger goes through, so they all share the SAME
- * `maybeRecompute` throttle. Wrap, never replace: *original* (a litegraph
- * hook or a widget callback, possibly undefined) keeps running first with
- * its own `this`/arguments and its return value is passed through; the
- * recompute itself can never throw out of the caller (try/catch).
- * @param {Function|undefined} original @param {object} state
- * @returns {Function}
- */
-function wrapWithRecompute(original, state) {
-  return function () {
-    const result = typeof original === 'function' ? original.apply(this, arguments) : undefined
-    try {
-      maybeRecompute(state)
-    } catch (error) {
-      warn('run-count recompute failed', error)
-    }
-    return result
-  }
-}
-
-/**
  * Recompute EVERY run-count readout in the whole workflow *graph* belongs
  * to, coalesced to one pass per tick. Same shape (and same reason) as
  * controller.js's `scheduleControllerRefresh` -- see `installGraphNodeWatch`
@@ -2168,18 +2146,14 @@ function applyModeVisibility(node) {
 
 function wireModeVisibility(node) {
   node.addProperty(PROP_SHOW_MODES, false, 'boolean')
-  const original = node.onPropertyChanged
-  node.onPropertyChanged = function (name, value, prevValue) {
-    const result = original?.call(this, name, value, prevValue)
-    if (name === PROP_SHOW_MODES) {
-      try {
-        applyModeVisibility(this)
-      } catch (error) {
-        warn('mode visibility failed', error)
-      }
-    }
-    return result
-  }
+  chainHook(
+    node,
+    'onPropertyChanged',
+    function (name) {
+      if (name === PROP_SHOW_MODES) applyModeVisibility(this)
+    },
+    { warn, label: 'mode visibility' }
+  )
   // Apply the hidden default once -- addProperty never fires the handler,
   // and a restored file's own value lands via configure's property loop
   // (which DOES fire it). resolution.js's exact rationale.
@@ -2269,7 +2243,7 @@ export function attach(node) {
 
     // Refresh triggers (§6.3's controller idiom -- wrap, never replace,
     // never throw out of the caller; ONE shared throttle via
-    // wrapWithRecompute -> maybeRecompute). No timers of this file's own,
+    // chainHook -> maybeRecompute). No timers of this file's own,
     // no window listeners (§7.5). Several triggers because the renderers
     // differ: onDrawForeground is the litegraph catch-all (a graph edit
     // dirties the canvas, the repaint lands here) but NEVER fires under
@@ -2278,11 +2252,13 @@ export function attach(node) {
     // onConnectionsChange (a rewire is exactly what changes the count)
     // and THREE widget callbacks: pair_mode/sweep_mode flips and a
     // solo_run token paste all change the math with no rewire at all.
-    node.onDrawForeground = wrapWithRecompute(node.onDrawForeground, state)
-    node.onConnectionsChange = wrapWithRecompute(node.onConnectionsChange, state)
+    const onTrigger = () => maybeRecompute(state)
+    const hookOptions = { warn, label: 'run-count recompute' }
+    chainHook(node, 'onDrawForeground', onTrigger, hookOptions)
+    chainHook(node, 'onConnectionsChange', onTrigger, hookOptions)
     for (const name of ['pair_mode', 'sweep_mode', 'solo_run']) {
       const widget = (node.widgets || []).find((w) => w && w.name === name)
-      if (widget) widget.callback = wrapWithRecompute(widget.callback, state)
+      if (widget) chainHook(widget, 'callback', onTrigger, hookOptions)
     }
     wireModeVisibility(node)
 

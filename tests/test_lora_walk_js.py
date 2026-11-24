@@ -46,6 +46,7 @@ def walk_api(tmp_path_factory: pytest.TempPathFactory) -> dict:
     module_dir = layout / "extensions" / "comfyui-epsnodes" / "lora_library"
     module_dir.mkdir(parents=True)
     shutil.copyfile(API_JS, module_dir / "api.js")
+    shutil.copyfile(API_JS.parent / "panel_helpers.js", module_dir / "panel_helpers.js")  # api.js imports it (chainHook)
     # api.js imports ComfyUI's scripts/api.js -- stub it (same served-layout
     # technique as test_pll_bridge_js.py's app.js stub). 2026-08-29: api.js
     # also gained a static `scripts/app.js` import (the cross-panel

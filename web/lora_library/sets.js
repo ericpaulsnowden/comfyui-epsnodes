@@ -160,6 +160,7 @@
 
 import { app } from '../../../scripts/app.js'
 import * as api from './api.js'
+import { chainHook } from './panel_helpers.js'
 
 const NODE_CLASS = 'LoraLibraryApplySet'
 const WIDGET_NAME = 'set'
@@ -787,23 +788,11 @@ function hidePinnedStateWidget(node) {
 function wirePinnedStateWidget(node, state) {
   const widget = findWidgetByName(node, PINNED_STATE_WIDGET_NAME)
   if (!widget) return
-  const original = widget.callback
-  widget.callback = function (value, ...rest) {
-    let result
-    if (typeof original === 'function') {
-      try {
-        result = original.apply(this, [value, ...rest])
-      } catch (error) {
-        api.warn('original pinned_state callback threw', error)
-      }
-    }
-    try {
-      syncPinFromWidget(state)
-    } catch (error) {
-      api.warn('pinned_state sync threw', error)
-    }
-    return result
-  }
+  chainHook(widget, 'callback', () => syncPinFromWidget(state), {
+    warn: api.warn,
+    label: 'pinned_state sync',
+    onOriginalThrow: 'log'
+  })
 }
 
 /** `onConfigure` fires at the END of configure() -- the one hook that sees
@@ -811,24 +800,15 @@ function wirePinnedStateWidget(node, state) {
  * paste and a clone alike (notebook.js's wireConfigureReload lesson). Heals
  * the pre-M3 positional shift first, then reconciles the pin. Chained. */
 function wirePinConfigureSync(node, state) {
-  const original = node.onConfigure
-  node.onConfigure = function (...args) {
-    let result
-    if (typeof original === 'function') {
-      try {
-        result = original.apply(this, args)
-      } catch (error) {
-        api.warn('original onConfigure threw', error)
-      }
-    }
-    try {
+  chainHook(
+    node,
+    'onConfigure',
+    function () {
       healLegacyWidgetShift(node)
       syncPinFromWidget(state)
-    } catch (error) {
-      api.warn('pinned_state sync after configure failed', error)
-    }
-    return result
-  }
+    },
+    { warn: api.warn, label: 'pinned_state sync after configure', onOriginalThrow: 'log' }
+  )
 }
 
 /**
@@ -1139,13 +1119,15 @@ export function attachApplySetBehavior(node) {
   // onPropertyChanged wrapper below needs to branch on either name.
   node.addProperty(PROP_SHOW_LOADER_SLOT, false, 'boolean')
 
-  const originalOnPropertyChanged = node.onPropertyChanged
-  node.onPropertyChanged = function (name, value, prevValue) {
-    const result = originalOnPropertyChanged?.call(this, name, value, prevValue)
-    if (name === PROP_SHOW_STRENGTH_SCALE) applyStrengthScaleVisibility(this)
-    if (name === PROP_SHOW_LOADER_SLOT) applyLoaderSlotVisibility(this)
-    return result
-  }
+  chainHook(
+    node,
+    'onPropertyChanged',
+    function (name, value, prevValue) {
+      if (name === PROP_SHOW_STRENGTH_SCALE) applyStrengthScaleVisibility(this)
+      if (name === PROP_SHOW_LOADER_SLOT) applyLoaderSlotVisibility(this)
+    },
+    { warn: api.warn, label: 'strength-scale / loader-slot visibility' }
+  )
 
   applyStrengthScaleVisibility(node)
   applyLoaderSlotVisibility(node)

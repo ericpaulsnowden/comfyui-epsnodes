@@ -176,6 +176,7 @@ def grid_api(tmp_path_factory: pytest.TempPathFactory) -> dict:
     lora_dir = layout / "extensions" / "comfyui-epsnodes" / "lora_library"
     lora_dir.mkdir(parents=True)
     shutil.copyfile(API_JS, lora_dir / "api.js")
+    shutil.copyfile(API_JS.with_name("panel_helpers.js"), lora_dir / "panel_helpers.js")
     shutil.copyfile(VERSION_JS, lora_dir / "version.js")
 
     probe = layout / "probe.mjs"
@@ -556,8 +557,8 @@ class TestCopyFromImageV0630:
         against a litegraph serialize/configure model); the compaction stays
         here, chained and never replaced."""
         body = _function_body(source, "attachCopyRotateRow(node)")
-        assert "const originalOnSerialize = node.onSerialize" in body
-        assert "originalOnSerialize?.apply(this, arguments)" in body
+        assert "chainHook(\n    node,\n    'onSerialize'," in body
+        assert "node.onSerialize =" not in body
         # `i in values` distinguishes a HOLE from a genuinely stored null.
         assert "values.filter((_, i) => i in values)" in body
         # the row is built by the shared helper, which owns the two flags

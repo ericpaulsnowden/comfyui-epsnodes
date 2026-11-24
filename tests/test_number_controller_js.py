@@ -3022,7 +3022,8 @@ def test_type_veto_is_installed_and_consults_is_allowed_type(source: str) -> Non
     exist as a stub."""
     assert "wireTypeVeto(node)" in source, "not installed from attach()"
     body = _function_body(source, "wireTypeVeto(node)")
-    assert "node.onConnectOutput = function" in body
+    assert "chainHook(" in body and "'onConnectOutput'" in body
+    assert "veto: true" in body and "node.onConnectOutput =" not in body
     assert "isAllowedType(inputType)" in body
     assert "return false" in body
 
@@ -3421,7 +3422,7 @@ def test_deferred_hook_guards_restore_and_missing_graph(source: str) -> None:
     meanwhile needs no pass)."""
     body = _function_body(source, "wireRowSync(state)")
     assert "node.configure = function" in body
-    assert "node.onConnectionsChange = function" in body
+    assert "chainHook(\n    node,\n    'onConnectionsChange'," in body
     assert "hook.restoring = true" in body
     assert "hook.restoring = false" in body
     assert "if (hook.restoring || !target.graph) return" in body

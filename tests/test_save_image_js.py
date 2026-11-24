@@ -618,11 +618,15 @@ def test_attach_is_registered_in_the_extensions_node_created() -> None:
 
 def test_hooks_chain_never_replace_and_are_guarded_per_instance(source: str) -> None:
     """Each installer guards on its OWN flag (never `attachedNodes`, which
-    only guards `attach()` itself) and calls the original it wrapped --
-    image_grid.js's installer shape, copied by hand."""
-    assert "originalCallback.apply(this, args)" in source
-    assert "original.apply(this, args)" in source
-    assert "original.call(this, info)" in source
+    only guards `attach()` itself) and calls the original it wrapped through
+    the shared chainHook."""
+    # the image_output callback and the three node hooks all go through the
+    # shared chainHook
+    assert "chainHook(\n    widget,\n    'callback'," in source
+    assert "widget.callback =" not in source
+    for hook in ("onConnectionsChange", "onRemoved", "onConfigure"):
+        assert f"'{hook}'" in source
+        assert f"node.{hook} =" not in source
     assert "forceUndim: true" in source
     assert "widget.__epsSaveDimSyncInstalled" in source
     assert "node.__epsSaveLinkDimConnectionsWrapped" in source

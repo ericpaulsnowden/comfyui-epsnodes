@@ -6,6 +6,7 @@
 
 import { app } from '../../../scripts/app.js'
 import { api } from '../../../scripts/api.js'
+import { chainHook } from './panel_helpers.js'
 
 export { FRONTEND_VERSION } from './version.js'
 
@@ -783,25 +784,17 @@ export function watchGraphHooks(graph, ownerKey, hooks, onEvent) {
         stored[hook] = current // ours (or a sibling's wrapper that still contains ours)
         continue
       }
-      const original = current
-      const wrapper = function (...args) {
-        let result
-        try {
-          result = original?.apply(this, args)
-        } catch (error) {
-          warn(`original ${hook} threw`, error)
-        }
-        try {
-          onEvent(graph, hook, args)
-        } catch (error) {
-          warn(`${hook} watcher threw`, error)
-        }
-        return result
-      }
+      // The closure's graph, not `this`: a core wrapper chaining to us may
+      // call without a receiver.
+      chainHook(graph, hook, (...args) => onEvent(graph, hook, args), {
+        warn,
+        label: `${hook} watcher`,
+        onOriginalThrow: 'log'
+      })
+      const wrapper = graph[hook]
       wrapper[ownerKey] = true
-      wrapper.__epsWatchKeys = new Set([...(original?.__epsWatchKeys || []), ownerKey])
+      wrapper.__epsWatchKeys = new Set([...(current?.__epsWatchKeys || []), ownerKey])
       stored[hook] = wrapper
-      graph[hook] = wrapper
       installed = true
     }
   } catch (error) {

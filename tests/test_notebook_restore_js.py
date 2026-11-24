@@ -76,9 +76,10 @@ def test_post_configure_reload_wraps_on_configure(source: str) -> None:
     restored (for both a whole-workflow load and a pasted/cloned node)."""
     block = source.split("function wireConfigureReload(state)", 1)[1]
     block = block.split("\nfunction ", 1)[0]
-    assert "node.onConfigure" in block
-    # Must chain, never replace: other wiring (and core) may already own it.
-    assert "originalOnConfigure" in block
+    # Must chain, never replace: other wiring (and core) may already own it
+    # -- the shared chainHook does the chaining.
+    assert "chainHook(" in block and "'onConfigure'" in block
+    assert "node.onConfigure =" not in block
     assert "reloadNow(state)" in block
 
 
@@ -1098,9 +1099,9 @@ def test_collapsed_sections_property_follows_the_packs_property_idiom(source: st
     reg = source.split("function registerCollapsedSectionsProperty(state)", 1)[1]
     reg = reg.split("\n}\n", 1)[0]
     assert "node.addProperty(PROP_COLLAPSED_SECTIONS, [], 'array')" in reg
-    assert "const original = node.onPropertyChanged" in reg
-    assert "node.onPropertyChanged = function (name, value, prevValue) {" in reg
-    assert "original?.call(this, name, value, prevValue)" in reg
+    assert "chainHook(" in reg and "'onPropertyChanged'" in reg
+    assert "node.onPropertyChanged =" not in reg
+    assert "function (name, value, prevValue) {" in reg
     assert "if (name === PROP_COLLAPSED_SECTIONS) {" in reg
     assert "applyCollapsedSectionsFromProperty(state)" in reg
     assert "renderList(state)" in reg
@@ -1581,7 +1582,7 @@ def api_timeout_probe(tmp_path_factory: pytest.TempPathFactory) -> dict:
     layout = tmp_path_factory.mktemp("api_timeout_web_root")
     module_dir = layout / "extensions" / "comfyui-epsnodes" / "lora_library"
     module_dir.mkdir(parents=True)
-    for src in (API_JS, VERSION_JS):
+    for src in (API_JS, VERSION_JS, PANEL_HELPERS_JS):  # api.js imports panel_helpers.js (chainHook)
         shutil.copyfile(src, module_dir / src.name)
     scripts = layout / "scripts"
     scripts.mkdir(parents=True, exist_ok=True)
@@ -2120,9 +2121,9 @@ class TestOpenCategorySurvivesARebuild:
         reg = source.split("function registerOpenCategoryProperty(state)", 1)[1]
         reg = reg.split("\n}\n", 1)[0]
         assert "node.addProperty(PROP_OPEN_CATEGORY, '', 'string')" in reg
-        assert "const original = node.onPropertyChanged" in reg
-        assert "node.onPropertyChanged = function (name, value, prevValue) {" in reg
-        assert "original?.call(this, name, value, prevValue)" in reg
+        assert "chainHook(" in reg and "'onPropertyChanged'" in reg
+        assert "node.onPropertyChanged =" not in reg
+        assert "function (name, value, prevValue) {" in reg
         assert "if (name === PROP_OPEN_CATEGORY) {" in reg
         assert "applyOpenCategoryFromProperty(state)" in reg
         after_wrapper = reg.rsplit("}", 1)[1]

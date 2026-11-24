@@ -346,7 +346,7 @@ import {
   resolveSourcesAt,
   showToast
 } from '../lora_library/api.js'
-import { el, findWidget, installMinWidth, nodeClassOf } from '../lora_library/panel_helpers.js'
+import { chainHook, el, findWidget, installMinWidth, nodeClassOf } from '../lora_library/panel_helpers.js'
 
 /** FORMAT.md §6.7 — frozen once shipped. */
 const CLASS_ID = 'EPSFrameSaver'
@@ -2733,23 +2733,14 @@ function wireGlobalListenersOnAdded(state) {
     installGlobalListeners(state)
     return
   }
-  const originalOnAdded = node.onAdded
-  node.onAdded = function (...args) {
-    let result
-    if (typeof originalOnAdded === 'function') {
-      try {
-        result = originalOnAdded.apply(this, args)
-      } catch (error) {
-        warn('original node onAdded threw', error)
-      }
-    }
-    try {
+  chainHook(
+    node,
+    'onAdded',
+    function () {
       installGlobalListeners(state)
-    } catch (error) {
-      warn('global listener install failed', error)
-    }
-    return result
-  }
+    },
+    { warn, label: 'global listener install', onOriginalThrow: 'log' }
+  )
 }
 
 /** Removes the paste listener (same capture flag -- removal must match
@@ -2767,17 +2758,10 @@ function removePastePathHandler(state) {
 
 function wireNodeCleanup(state) {
   const node = state.node
-  const originalOnRemoved = node.onRemoved
-  node.onRemoved = function (...args) {
-    let result
-    if (typeof originalOnRemoved === 'function') {
-      try {
-        result = originalOnRemoved.apply(this, args)
-      } catch (error) {
-        warn('original node onRemoved threw', error)
-      }
-    }
-    try {
+  chainHook(
+    node,
+    'onRemoved',
+    function () {
       closePicker(state)
       removePastePathHandler(state)
       // Owner report 2026-09-10: a node deleted mid-upload must not leave
@@ -2801,11 +2785,9 @@ function wireNodeCleanup(state) {
         state.windowBlurHandler = null
       }
       nodeStates.delete(node)
-    } catch (error) {
-      warn('frame_saver teardown failed', error)
-    }
-    return result
-  }
+    },
+    { warn, label: 'frame_saver teardown', onOriginalThrow: 'log' }
+  )
 }
 
 /** Undo/redo re-applies a node's prior serialized state via
@@ -2831,19 +2813,20 @@ function wireConfigureResync(state) {
       state.restoring = false
     }
   }
-  const originalOnConfigure = node.onConfigure
-  node.onConfigure = function (...args) {
-    const result =
-      typeof originalOnConfigure === 'function' ? originalOnConfigure.apply(this, args) : undefined
-    afterTickIfInGraph(node, () => {
-      try {
-        fullResync(state)
-      } catch (error) {
-        warn('post-configure resync failed', error)
-      }
-    })
-    return result
-  }
+  chainHook(
+    node,
+    'onConfigure',
+    function () {
+      afterTickIfInGraph(node, () => {
+        try {
+          fullResync(state)
+        } catch (error) {
+          warn('post-configure resync failed', error)
+        }
+      })
+    },
+    { warn, label: 'post-configure resync scheduling' }
+  )
 }
 
 // ---------------------------------------------------------------------------
@@ -2883,28 +2866,19 @@ export function attach(node) {
     wireConfigureResync(state)
     // §6.7 v0.60.0: (un)wiring the `video` input changes the whole source
     // story -- re-derive through the same fullResync every restore hook
-    // uses. Chained + guarded, the pack's standard wrap; fires in BOTH
+    // uses. Chained through chainHook; fires in BOTH
     // renderers (a node hook, not a canvas one).
-    const originalOnConnectionsChange = node.onConnectionsChange
-    node.onConnectionsChange = function (...args) {
-      let result
-      if (typeof originalOnConnectionsChange === 'function') {
-        try {
-          result = originalOnConnectionsChange.apply(this, args)
-        } catch (error) {
-          warn('original onConnectionsChange threw', error)
-        }
-      }
-      try {
+    chainHook(
+      node,
+      'onConnectionsChange',
+      function () {
         // v0.68.1: not during configure()'s per-link replay -- see
         // wireConfigureResync; fullResync's own source-key compare makes
         // the live calls (including output-side rewires) reload-free.
         if (!state.restoring) fullResync(state)
-      } catch (error) {
-        warn('wire-change resync failed', error)
-      }
-      return result
-    }
+      },
+      { warn, label: 'wire-change resync', onOriginalThrow: 'log' }
+    )
     // After wireNodeCleanup on purpose: the removal wrap exists before the
     // window/document listeners do, so there is no window where a torn-down
     // node could leak them.

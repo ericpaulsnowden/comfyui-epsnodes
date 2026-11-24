@@ -253,6 +253,7 @@ def scale_api(tmp_path_factory: pytest.TempPathFactory) -> dict:
     lora_dir = layout / "extensions" / "comfyui-epsnodes" / "lora_library"
     lora_dir.mkdir(parents=True)
     shutil.copyfile(API_JS, lora_dir / "api.js")
+    shutil.copyfile(API_JS.with_name("panel_helpers.js"), lora_dir / "panel_helpers.js")
     shutil.copyfile(VERSION_JS, lora_dir / "version.js")
 
     scripts = layout / "scripts"
@@ -481,17 +482,16 @@ class TestTriggers:
 
     def test_multiplier_callback_is_chained_not_replaced(self, source: str) -> None:
         body = _function_body(source, "wireScaleMultiplier(node)")
-        assert "const originalCallback = widget.callback" in body
-        assert "originalCallback?.apply(this, args)" in body
+        assert "chainHook(\n      widget,\n      'callback'," in body
+        assert "widget.callback =" not in body
         # callback, connections, configure, initial
         assert body.count("applyScaleMultiplierState(") >= 4
 
     def test_connections_and_configure_are_chained_never_replaced(self, source: str) -> None:
         body = _function_body(source, "wireScaleMultiplier(node)")
-        assert "const originalOnConnectionsChange = node.onConnectionsChange" in body
-        assert "originalOnConnectionsChange?.apply(this, args)" in body
-        assert "const originalOnConfigure = node.onConfigure" in body
-        assert "originalOnConfigure?.call(this, info)" in body
+        assert "chainHook(\n    node,\n    'onConnectionsChange'," in body
+        assert "chainHook(\n    node,\n    'onConfigure'," in body
+        assert "node.onConnectionsChange =" not in body and "node.onConfigure =" not in body
 
     def test_deferred_converge_reapplies_after_the_inputs_settle(self, source: str) -> None:
         body = _function_body(source, "scheduleImageConverge(node)")

@@ -63,7 +63,7 @@
 
 import { app } from '../../../scripts/app.js'
 import { loggerFor, showToast, walkGraphs, watchGraphHooks } from '../lora_library/api.js'
-import { nodeClassOf } from '../lora_library/panel_helpers.js'
+import { chainHook, nodeClassOf } from '../lora_library/panel_helpers.js'
 import {
   BROADCAST_OUTPUTS,
   KINDS,
@@ -523,16 +523,18 @@ export function installLegacyMenuFallback(nodeType, nodeData) {
   const proto = nodeType?.prototype
   if (!proto || proto[LEGACY_PATCH_FLAG]) return
   proto[LEGACY_PATCH_FLAG] = true
-  const original = proto.getExtraMenuOptions
-  proto.getExtraMenuOptions = function (canvas, options) {
-    const result = original?.call(this, canvas, options)
-    const items = getNodeMenuItems(this)
-    if (items.length && Array.isArray(options)) {
-      if (options.length) options.push(null)
-      options.push(...items)
-    }
-    return result
-  }
+  chainHook(
+    proto,
+    'getExtraMenuOptions',
+    function (canvas, options) {
+      const items = getNodeMenuItems(this)
+      if (items.length && Array.isArray(options)) {
+        if (options.length) options.push(null)
+        options.push(...items)
+      }
+    },
+    { warn, label: 'broadcast menu items' }
+  )
 }
 
 // ---------------------------------------------------------------------------
@@ -589,6 +591,7 @@ export function installLegacyCanvasMenuFallback(canvasClass) {
   if (!proto || typeof proto.getCanvasMenuOptions !== 'function') return false
   if (proto[LEGACY_CANVAS_PATCH_FLAG]) return true
   proto[LEGACY_CANVAS_PATCH_FLAG] = true
+  // Hand-written, not chainHook: the wrapper needs the original's RESULT (the options array) to append to.
   const original = proto.getCanvasMenuOptions
   proto.getCanvasMenuOptions = function () {
     const options = original.apply(this, arguments)
@@ -920,24 +923,22 @@ export function attach(node, readout) {
     ensureDrawHooks() // a multiplier exists: the canvas does too
     if (readout?.rootEl) mountRow(state, readout)
 
-    const originalConnections = node.onConnectionsChange
-    node.onConnectionsChange = function () {
-      const result = typeof originalConnections === 'function' ? originalConnections.apply(this, arguments) : undefined
-      try {
+    chainHook(
+      node,
+      'onConnectionsChange',
+      function () {
         if (!isApplying() && !app.configuringGraph) {
           refreshRow(this)
           schedulePass()
         }
-      } catch (error) {
-        warn('connection hook failed', error)
-      }
-      return result
-    }
+      },
+      { warn, label: 'connection hook' }
+    )
 
-    const originalConfigure = node.onConfigure
-    node.onConfigure = function () {
-      const result = typeof originalConfigure === 'function' ? originalConfigure.apply(this, arguments) : undefined
-      try {
+    chainHook(
+      node,
+      'onConfigure',
+      function () {
         // A whole-graph load / undo / paste: records may be stale, the
         // baseline is gone -- re-derive, never rewire (loading never does).
         bumpBroadcastEpoch()
@@ -945,20 +946,22 @@ export function attach(node, readout) {
         refreshRow(this)
         ensureNodeFloor(this)
         schedulePass()
-      } catch (error) {
-        warn('post-configure failed', error)
-      }
-      return result
-    }
+      },
+      { warn, label: 'post-configure' }
+    )
 
-    const originalRemoved = node.onRemoved
-    node.onRemoved = function () {
-      multipliers.delete(node)
-      bumpBroadcastEpoch()
-      closePopover()
-      closeDialog()
-      return typeof originalRemoved === 'function' ? originalRemoved.apply(this, arguments) : undefined
-    }
+    // Ours first (the cleanup runs while the node is still intact), then the original.
+    chainHook(
+      node,
+      'onRemoved',
+      function () {
+        multipliers.delete(node)
+        bumpBroadcastEpoch()
+        closePopover()
+        closeDialog()
+      },
+      { warn, label: 'removal cleanup', order: 'before' }
+    )
 
     ensureNodeFloor(node)
     schedulePass()

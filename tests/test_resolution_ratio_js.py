@@ -308,6 +308,7 @@ def ratio_api(tmp_path_factory: pytest.TempPathFactory) -> dict:
     lora_dir = layout / "extensions" / "comfyui-epsnodes" / "lora_library"
     lora_dir.mkdir(parents=True)
     shutil.copyfile(API_JS, lora_dir / "api.js")
+    shutil.copyfile(API_JS.with_name("panel_helpers.js"), lora_dir / "panel_helpers.js")
     shutil.copyfile(VERSION_JS, lora_dir / "version.js")
 
     scripts = layout / "scripts"
@@ -513,7 +514,10 @@ class TestRatioLockOrthogonalToPresets:
     ) -> None:
         body = _function_body(source, "wireRatioLock(node)")
         assert "withRatioApplyGuard(node," in body
-        assert "ratioWidget.callback" in body
+        # hand-written on purpose (HAND_CHAIN_ALLOW): the `custom…` command is
+        # read from the arguments before the original runs
+        assert "ratioWidget.callback = function (...args)" in body
+        assert "originalRatioCallback?.apply(this, args)" in body
 
     def test_ratio_apply_guard_reuses_the_presets_own_applying_flag(
         self, source: str
@@ -568,8 +572,8 @@ class TestRatioLockReloadReconcile:
 
     def test_on_configure_is_chained_not_replaced(self, source: str) -> None:
         body = _function_body(source, "wireRatioLock(node)")
-        assert "const originalOnConfigure = node.onConfigure" in body
-        assert "originalOnConfigure?.call(this, info)" in body
+        assert "chainHook(\n    node,\n    'onConfigure'," in body
+        assert "node.onConfigure =" not in body
 
     def test_reconcile_runs_under_the_same_guard(self, source: str) -> None:
         body = _function_body(source, "wireRatioLock(node)")

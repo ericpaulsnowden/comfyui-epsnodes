@@ -346,7 +346,7 @@
 
 import { app } from '../../../scripts/app.js'
 import { SUBGRAPH_OUTPUT_ID, loggerFor, showToast, subscribeWidgetsChangedExternally } from '../lora_library/api.js'
-import { el, findWidget, installMinWidth, linkById, nodeClassOf } from '../lora_library/panel_helpers.js'
+import { chainHook, el, findWidget, installMinWidth, linkById, nodeClassOf } from '../lora_library/panel_helpers.js'
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -2156,31 +2156,30 @@ function wireRowSync(state) {
     }
   }
 
-  const originalOnConnectionsChange = node.onConnectionsChange
-  node.onConnectionsChange = function (type, index, isConnected, linkInfo, slot) {
-    let result
-    if (typeof originalOnConnectionsChange === 'function') {
-      result = originalOnConnectionsChange.apply(this, arguments)
-    }
-    // Name-matched (`num_N` is only ever an output on this node) rather
-    // than slot-type-matched -- distributor.js's identical reasoning. This
-    // deliberately never branches on `isConnected`: litegraph's restore
-    // loop passes it hardcoded `true` even for a slot with no link, and
-    // `highestWiredSlot`/`slotCarriesContent` both recompute wiring/content
-    // from the slots and the map themselves, so a stale argument can never
-    // misdrive this. A subgraph output's own `disconnect()` (v1.2.0, nested
-    // paragraph) reports the SubgraphOutput -- whose name the user may have
-    // changed -- as `slot` but still passes THIS node's output index, so
-    // the output-kind event is also matched by that index's name.
-    const ownOutputName = type === NODE_SLOT_OUTPUT ? this.outputs?.[index]?.name : ''
-    if (
-      !hook.restoring &&
-      (OUTPUT_NAME_RE.test(slot?.name || '') || OUTPUT_NAME_RE.test(ownOutputName || ''))
-    ) {
-      schedule(this)
-    }
-    return result
-  }
+  chainHook(
+    node,
+    'onConnectionsChange',
+    function (type, index, isConnected, linkInfo, slot) {
+      // Name-matched (`num_N` is only ever an output on this node) rather
+      // than slot-type-matched -- distributor.js's identical reasoning. This
+      // deliberately never branches on `isConnected`: litegraph's restore
+      // loop passes it hardcoded `true` even for a slot with no link, and
+      // `highestWiredSlot`/`slotCarriesContent` both recompute wiring/content
+      // from the slots and the map themselves, so a stale argument can never
+      // misdrive this. A subgraph output's own `disconnect()` (v1.2.0, nested
+      // paragraph) reports the SubgraphOutput -- whose name the user may have
+      // changed -- as `slot` but still passes THIS node's output index, so
+      // the output-kind event is also matched by that index's name.
+      const ownOutputName = type === NODE_SLOT_OUTPUT ? this.outputs?.[index]?.name : ''
+      if (
+        !hook.restoring &&
+        (OUTPUT_NAME_RE.test(slot?.name || '') || OUTPUT_NAME_RE.test(ownOutputName || ''))
+      ) {
+        schedule(this)
+      }
+    },
+    { warn, label: 'schedule grow (onConnectionsChange)' }
+  )
 }
 
 /**
@@ -2200,35 +2199,37 @@ function wireRowSync(state) {
  * switch, either way round). Both use the same quiet toast-and-`false` path.
  */
 function wireTypeVeto(node) {
-  const original = node.onConnectOutput
-  node.onConnectOutput = function (outputIndex, inputType, input, targetNode, inputIndex) {
-    const output = this.outputs?.[outputIndex]
-    if (output && OUTPUT_NAME_RE.test(output.name || '')) {
-      if (!isAllowedType(inputType)) {
-        toast(
-          this,
-          'warn',
-          `EPS Number Controller only carries whole numbers, decimals or on/off (BOOLEAN) values -- not ${inputType}.`
-        )
-        return false
+  chainHook(
+    node,
+    'onConnectOutput',
+    function (outputIndex, inputType, input, targetNode, inputIndex) {
+      const output = this.outputs?.[outputIndex]
+      if (output && OUTPUT_NAME_RE.test(output.name || '')) {
+        if (!isAllowedType(inputType)) {
+          toast(
+            this,
+            'warn',
+            `EPS Number Controller only carries whole numbers, decimals or on/off (BOOLEAN) values -- not ${inputType}.`
+          )
+          return false
+        }
+        // One row, one KIND (owner decision 2026-10-25): a number wire and an
+        // on/off wire may not share a row, in either direction. INT with FLOAT
+        // is the same kind and stays allowed, exactly as before. The row's
+        // current kind comes from its LIVE links (the same per-slot read the
+        // adoption pass uses), not `output.type`: that only narrows after the
+        // deferred reconcile, so a replug that connects several remembered
+        // targets back to back would otherwise slip a mixed pair through while
+        // the output still reads `*`.
+        const carriedType = resolveAdoptedType(collectSlotLinkTypes(this, outputIndex)).type
+        if (wouldMixKinds(carriedType, inputType)) {
+          toast(this, 'warn', mixRefusalMessage(carriedType, inputType))
+          return false
+        }
       }
-      // One row, one KIND (owner decision 2026-10-25): a number wire and an
-      // on/off wire may not share a row, in either direction. INT with FLOAT
-      // is the same kind and stays allowed, exactly as before. The row's
-      // current kind comes from its LIVE links (the same per-slot read the
-      // adoption pass uses), not `output.type`: that only narrows after the
-      // deferred reconcile, so a replug that connects several remembered
-      // targets back to back would otherwise slip a mixed pair through while
-      // the output still reads `*`.
-      const carriedType = resolveAdoptedType(collectSlotLinkTypes(this, outputIndex)).type
-      if (wouldMixKinds(carriedType, inputType)) {
-        toast(this, 'warn', mixRefusalMessage(carriedType, inputType))
-        return false
-      }
-    }
-    if (typeof original === 'function') return original.apply(this, arguments)
-    return undefined
-  }
+    },
+    { warn, label: 'type veto (onConnectOutput)', order: 'before', veto: true }
+  )
 }
 
 // ---------------------------------------------------------------------------
@@ -2297,10 +2298,10 @@ export function attach(node) {
     // `widget.value` for both a whole-workflow load and a paste
     // (distributor.js's/checkpoint_switcher.js's identical citation of this
     // ordering). Chained, never replaced.
-    const originalOnConfigure = node.onConfigure
-    node.onConfigure = function (info) {
-      const result = originalOnConfigure?.apply(this, arguments)
-      try {
+    chainHook(
+      node,
+      'onConfigure',
+      function (info) {
         restampRememberedLinks(this, configuredAsCopy(info))
         // Same reset, same reason as `__epsNcReload` above: `configure()`
         // just replaced `widget.value` (and `node.size`) WHOLESALE, so the
@@ -2308,11 +2309,9 @@ export function attach(node) {
         // against the freshly-restored one.
         state.lastRowCount = null
         syncNode(state)
-      } catch (error) {
-        warn('post-configure sync failed', error)
-      }
-      return result
-    }
+      },
+      { warn, label: 'post-configure sync' }
+    )
 
     // Settle once now: covers a FRESH node (nothing to restore -- collapses
     // to one blank row) and the other race order, a value already sitting

@@ -7089,6 +7089,32 @@ which runs litegraph's `_sizeUpdated` (the Vue layout mirror) and the
 onResize wrap. Whole-workflow loads are also floored by core's post-load
 `node.setSize(max(saved, computed))`.
 
+**§7.5 amendment — chaining a hook is ONE helper (chain, never replace):**
+a node, graph or widget hook (`onConfigure`, `onRemoved`, `onPropertyChanged`,
+`onConnectionsChange`, `onDrawForeground`, `getExtraMenuOptions`, a widget
+`callback`, the graph's `onNodeAdded`/`onNodeRemoved`, ...) is never assigned
+by hand. `chainHook(target, hook, ours, { warn, label, order, onOriginalThrow,
+veto })` in `web/lora_library/panel_helpers.js` captures whatever is on
+`target[hook]` at install time and installs a wrapper that runs it and `ours`
+with the SAME `this` and arguments and returns THE ORIGINAL'S result. `ours`
+throwing never breaks the node and never stops the original: it is caught and
+reported as `warn(`${label} failed`, error)`. The rest is explicit:
+`order: 'before'` runs ours first (cleanups that need the node intact);
+`onOriginalThrow` is `'propagate'` (default: the original's error escapes,
+ours is skipped), `'still-run'` (ours runs, then the original's error is
+rethrown) or `'log'` (the error is reported as `original <hook> threw`, ours
+runs, the result is undefined); `veto: true` (with `order: 'before'`) lets
+ours answer for the hook instead of the original (`onConnectInput` /
+`onConnectOutput` return `false` to refuse a link; any non-`undefined` answer
+short-circuits, and a throwing veto fails OPEN to the original). Install-once
+guards stay at the call site (independent chains on one hook are normal), and
+the §7.5 amendment below still applies: a graph hook's installed wrapper must
+be re-verified, and `chainHook` is what installs it. A site that cannot take
+this shape (it must read an argument BEFORE the original runs, it replaces the
+hook on purpose, it answers `false` rather than `undefined` with no original)
+stays hand-written and is listed with its reason in `HAND_CHAIN_ALLOW` in
+`tests/test_chain_hook_js.py`, which fails on any other hand-assigned hook.
+
 **§7.5 amendment — graph-level hooks are not ours to keep (v0.68.1):**
 `useGraphNodeManager`'s cleanup and `installErrorClearingHooks`'s disposer
 restore `graph.onNodeAdded/onNodeRemoved` to the values captured at THEIR

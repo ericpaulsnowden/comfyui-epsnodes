@@ -877,7 +877,7 @@ import {
   showToast,
   walkLiveNodes
 } from '../lora_library/api.js'
-import { findWidget, linkById, nodeClassOf } from '../lora_library/panel_helpers.js'
+import { chainHook, findWidget, linkById, nodeClassOf } from '../lora_library/panel_helpers.js'
 import { LINK_COLOR_OWNER_KEY, ensureOwnedLinkColourHook } from './owned_link_colour.js'
 
 const CLASS_ID = 'EPSImageGrid'
@@ -1643,9 +1643,10 @@ function installFileInputCleanup(node) {
   if (node.__epsGridFileCleanupInstalled) return
   node.__epsGridFileCleanupInstalled = true
 
-  const originalOnRemoved = node.onRemoved
-  node.onRemoved = function (...args) {
-    try {
+  chainHook(
+    node,
+    'onRemoved',
+    function () {
       const state = nodeFileState.get(node)
       if (state) {
         if (state.input) {
@@ -1661,11 +1662,9 @@ function installFileInputCleanup(node) {
           state.batch.controller?.abort()
         }
       }
-    } catch (error) {
-      warn('file-input cleanup failed', error)
-    }
-    return originalOnRemoved?.apply(this, args)
-  }
+    },
+    { warn, label: 'file-input cleanup', order: 'before' }
+  )
 }
 
 // ---------------------------------------------------------------------------
@@ -2250,15 +2249,14 @@ export function ensureFocusedFullRes(node) {
 function installFocusedFullResSwap(node) {
   if (node.__epsGridFocusSwapInstalled) return
   node.__epsGridFocusSwapInstalled = true
-  const original = node.onDrawBackground
-  node.onDrawBackground = function (...args) {
-    try {
+  chainHook(
+    node,
+    'onDrawBackground',
+    function () {
       ensureFocusedFullRes(this)
-    } catch (error) {
-      warn('focused full-res swap failed', error)
-    }
-    return typeof original === 'function' ? original.apply(this, args) : undefined
-  }
+    },
+    { warn, label: 'focused full-res swap', order: 'before' }
+  )
 }
 
 // ---------------------------------------------------------------------------
@@ -2514,16 +2512,15 @@ export function adoptPreservedOutputs(node) {
 function installFocusWidgetSync(node) {
   if (node.__epsGridFocusWidgetSyncInstalled) return
   node.__epsGridFocusWidgetSyncInstalled = true
-  const original = node.onDrawBackground
-  node.onDrawBackground = function (...args) {
-    try {
+  chainHook(
+    node,
+    'onDrawBackground',
+    function () {
       adoptPreservedOutputs(this)
       syncFocusFromView(this)
-    } catch (error) {
-      warn('focus widget sync failed', error)
-    }
-    return typeof original === 'function' ? original.apply(this, args) : undefined
-  }
+    },
+    { warn, label: 'focus widget sync', order: 'before' }
+  )
 }
 
 // ---------------------------------------------------------------------------
@@ -2850,17 +2847,14 @@ function installModeDimSync(node) {
   const widget = findWidget(node, MODE_WIDGET_NAME)
   if (!widget || widget.__epsGridDimSyncInstalled) return
   widget.__epsGridDimSyncInstalled = true
-  const originalCallback = widget.callback
-  widget.callback = function (...args) {
-    const result =
-      typeof originalCallback === 'function' ? originalCallback.apply(this, args) : undefined
-    try {
+  chainHook(
+    widget,
+    'callback',
+    function () {
       reconcileLinkDimming(node)
-    } catch (error) {
-      warn('link dim sync (mode callback) failed', error)
-    }
-    return result
-  }
+    },
+    { warn, label: 'link dim sync (mode callback)' }
+  )
 }
 
 /**
@@ -2877,16 +2871,14 @@ function installModeDimSync(node) {
 function installLinkDimConnectionsSync(node) {
   if (node.__epsGridLinkDimConnectionsWrapped) return
   node.__epsGridLinkDimConnectionsWrapped = true
-  const original = node.onConnectionsChange
-  node.onConnectionsChange = function (...args) {
-    const result = typeof original === 'function' ? original.apply(this, args) : undefined
-    try {
+  chainHook(
+    node,
+    'onConnectionsChange',
+    function () {
       reconcileLinkDimming(this)
-    } catch (error) {
-      warn('link dim sync (onConnectionsChange) failed', error)
-    }
-    return result
-  }
+    },
+    { warn, label: 'link dim sync (onConnectionsChange)' }
+  )
 }
 
 /**
@@ -2908,15 +2900,14 @@ function installLinkDimConnectionsSync(node) {
 function installLinkDimCleanup(node) {
   if (node.__epsGridLinkDimCleanupWrapped) return
   node.__epsGridLinkDimCleanupWrapped = true
-  const original = node.onRemoved
-  node.onRemoved = function (...args) {
-    try {
+  chainHook(
+    node,
+    'onRemoved',
+    function () {
       reconcileLinkDimming(this, { forceUndim: true })
-    } catch (error) {
-      warn('link dim cleanup (onRemoved) failed', error)
-    }
-    return typeof original === 'function' ? original.apply(this, args) : undefined
-  }
+    },
+    { warn, label: 'link dim cleanup (onRemoved)', order: 'before' }
+  )
 }
 
 /**
@@ -3655,28 +3646,30 @@ function installCopyImageMenuItem(node) {
   if (node.__epsGridCopyMenuInstalled) return
   node.__epsGridCopyMenuInstalled = true
 
-  const original = node.getExtraMenuOptions
-  node.getExtraMenuOptions = function (canvas, options) {
-    const result = original ? original.call(this, canvas, options) : undefined
-    const { img, ref } = currentMenuSelection(node)
-    if (img) {
-      options.push({
-        content: 'Copy image',
-        callback: () => {
-          const url = fullResImageUrl(node, img, ref)
-          if (canUseOsClipboardImage()) {
-            copyImageToOsClipboard(url).catch((error) => {
-              warn('OS clipboard image copy failed', error)
-              notifyClipboard(node, `Copy image failed: ${error?.message || error}`)
-            })
-          } else {
-            degradedCopyImage(node, url)
+  chainHook(
+    node,
+    'getExtraMenuOptions',
+    function (canvas, options) {
+      const { img, ref } = currentMenuSelection(node)
+      if (img) {
+        options.push({
+          content: 'Copy image',
+          callback: () => {
+            const url = fullResImageUrl(node, img, ref)
+            if (canUseOsClipboardImage()) {
+              copyImageToOsClipboard(url).catch((error) => {
+                warn('OS clipboard image copy failed', error)
+                notifyClipboard(node, `Copy image failed: ${error?.message || error}`)
+              })
+            } else {
+              degradedCopyImage(node, url)
+            }
           }
-        }
-      })
-    }
-    return result
-  }
+        })
+      }
+    },
+    { warn, label: 'copy-image menu item' }
+  )
 }
 
 // ---------------------------------------------------------------------------
@@ -3960,28 +3953,30 @@ function installDeleteImageMenuItem(node) {
   if (node.__epsGridDeleteMenuInstalled) return
   node.__epsGridDeleteMenuInstalled = true
 
-  const original = node.getExtraMenuOptions
-  node.getExtraMenuOptions = function (canvas, options) {
-    const result = original ? original.call(this, canvas, options) : undefined
-    const { ref } = currentMenuSelection(node)
-    if (ref && ref.filename) {
-      options.push({
-        content: DELETE_MENU_LABEL,
-        callback: () => {
-          const state = getNodeFileState(node)
-          if (state.batch && !state.batch.done) {
-            notifyClipboard(
-              node,
-              'A batch is already adding images -- finish or cancel it first, then delete.'
-            )
-            return
+  chainHook(
+    node,
+    'getExtraMenuOptions',
+    function (canvas, options) {
+      const { ref } = currentMenuSelection(node)
+      if (ref && ref.filename) {
+        options.push({
+          content: DELETE_MENU_LABEL,
+          callback: () => {
+            const state = getNodeFileState(node)
+            if (state.batch && !state.batch.done) {
+              notifyClipboard(
+                node,
+                'A batch is already adding images -- finish or cancel it first, then delete.'
+              )
+              return
+            }
+            void deleteBufferFrame(node, ref)
           }
-          void deleteBufferFrame(node, ref)
-        }
-      })
-    }
-    return result
-  }
+        })
+      }
+    },
+    { warn, label: 'delete menu item' }
+  )
 }
 
 // ---------------------------------------------------------------------------
@@ -4128,20 +4123,24 @@ function installClipspacePasteOverride(node) {
   if (node.__epsGridClipspaceOverrideInstalled) return
   node.__epsGridClipspaceOverrideInstalled = true
 
-  const original = node.getExtraMenuOptions
-  node.getExtraMenuOptions = function (canvas, options) {
-    const result = original ? original.call(this, canvas, options) : undefined
-    const pasteItem = options.find((opt) => opt && opt.content === CLIPSPACE_PASTE_MENU_LABEL)
-    if (pasteItem && typeof pasteItem.callback === 'function') {
-      const originalCallback = pasteItem.callback
-      pasteItem.callback = (...args) => {
-        const returned = originalCallback(...args)
-        void addClipspaceToBuffer(node)
-        return returned
+  chainHook(
+    node,
+    'getExtraMenuOptions',
+    function (canvas, options) {
+      const pasteItem = options.find((opt) => opt && opt.content === CLIPSPACE_PASTE_MENU_LABEL)
+      if (pasteItem && typeof pasteItem.callback === 'function') {
+        // Not chainHook: wraps a menu ITEM's callback (rebuilt on every menu
+        // open), and the original is called unbound, as litegraph's menu does.
+        const originalCallback = pasteItem.callback
+        pasteItem.callback = (...args) => {
+          const returned = originalCallback(...args)
+          void addClipspaceToBuffer(node)
+          return returned
+        }
       }
-    }
-    return result
-  }
+    },
+    { warn, label: 'clipspace paste override' }
+  )
 }
 
 // ---------------------------------------------------------------------------
@@ -4356,12 +4355,10 @@ function installConfigureRefresh(node) {
   if (node.__epsGridConfigureWrapped) return
   node.__epsGridConfigureWrapped = true
 
-  const originalOnConfigure = node.onConfigure
-  node.onConfigure = function (info) {
-    let result
-    try {
-      result = originalOnConfigure?.call(this, info)
-    } finally {
+  chainHook(
+    node,
+    'onConfigure',
+    function (info) {
       if (!isGraphConfiguring()) {
         // Deferred one tick and skipped for a node still outside a graph: a
         // real load/paste/undo joins its graph by then (core runs
@@ -4390,9 +4387,9 @@ function installConfigureRefresh(node) {
       } catch (error) {
         warn('link dim sync (onConfigure) failed', error)
       }
-    }
-    return result
-  }
+    },
+    { warn, label: 'post-configure refresh', onOriginalThrow: 'still-run' }
+  )
 }
 
 // ---------------------------------------------------------------------------
@@ -4904,23 +4901,18 @@ function installSkippedRunAlert() {
  * (`pendingForce` re-fetches rather than riding). One `/list` per run.
  */
 function installExecutedMerge(node) {
-  const originalOnExecuted = node.onExecuted
-  node.onExecuted = function (output) {
-    let result
-    if (typeof originalOnExecuted === 'function') {
-      result = originalOnExecuted.apply(this, arguments)
-    }
-    try {
+  chainHook(
+    node,
+    'onExecuted',
+    function (output) {
       const incoming = output && Array.isArray(output.images) ? output.images : []
       const existing = Array.isArray(this.images) ? this.images : []
       const { refs, added } = mergeBufferRefs(existing, incoming)
       if (added > 0) setNodeImagesFromRefs(this, refs)
       else syncCoreOutputStore(this, refs)
-    } catch (error) {
-      warn('onExecuted merge failed', error)
-    }
-    return result
-  }
+    },
+    { warn, label: 'onExecuted merge' }
+  )
 }
 
 // ---------------------------------------------------------------------------

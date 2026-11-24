@@ -37,6 +37,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 PATH_HEAL_JS = REPO_ROOT / "web" / "lora_library" / "path_heal.js"
 API_JS = REPO_ROOT / "web" / "lora_library" / "api.js"
 VERSION_JS = REPO_ROOT / "web" / "lora_library" / "version.js"
+PANEL_HELPERS_JS = REPO_ROOT / "web" / "lora_library" / "panel_helpers.js"
 SETTINGS_JS = REPO_ROOT / "web" / "lora_library" / "settings.js"
 ENTRY_JS = REPO_ROOT / "web" / "lora_library.js"
 
@@ -330,6 +331,7 @@ def heal_api(tmp_path_factory: pytest.TempPathFactory) -> dict:
     # the served ComfyUI scripts (app.js records settings reads + toasts).
     shutil.copyfile(API_JS, module_dir / "api.js")
     shutil.copyfile(VERSION_JS, module_dir / "version.js")
+    shutil.copyfile(PANEL_HELPERS_JS, module_dir / "panel_helpers.js")
 
     scripts = layout / "scripts"
     scripts.mkdir(parents=True, exist_ok=True)
@@ -562,9 +564,11 @@ def test_configure_wrap_respects_the_gate_and_a_missing_original(heal_api: dict)
 def test_configure_wrap_source_shape(source: str) -> None:
     body = _function_body(source, "attachConfigureHeal(node)")
     assert "wrappedNodes.has(node)" in body
-    assert "const originalOnConfigure = node.onConfigure" in body
-    assert "node.onConfigure = function (info) {" in body
-    assert "originalOnConfigure.apply(this, arguments)" in body
+    # chained through the shared helper (its own behaviour is tested in
+    # tests/test_chain_hook_js.py), never by assigning the hook by hand
+    assert "chainHook(" in body
+    assert "'onConfigure'" in body
+    assert "node.onConfigure =" not in body
     assert "recordHealed(healNode(this))" in body
 
 

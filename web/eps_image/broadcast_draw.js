@@ -99,6 +99,7 @@
 import { app } from '../../../scripts/app.js'
 import { broadcastLinkOwner, broadcastLinkOwners } from './broadcast_graph.js'
 import { loggerFor } from '../lora_library/api.js'
+import { chainHook } from '../lora_library/panel_helpers.js'
 
 const PREFIX = '[eps_image:broadcast]'
 const { warn } = loggerFor(PREFIX)
@@ -469,6 +470,7 @@ export function installSelectionRepaint(proto = canvasClass()?.prototype) {
       any = true
       continue
     }
+    // Hand-written, not chainHook: select/deselect are canvas methods, not hooks.
     const wrapper = function (...args) {
       const result = original.apply(this, args)
       repaintForSelection(this)
@@ -490,15 +492,12 @@ export function installSelectionRepaint(proto = canvasClass()?.prototype) {
  */
 export function installSelectionCallback(canvas = activeCanvas()) {
   if (!canvas) return false
-  const current = canvas.onSelectionChange
-  if (typeof current === 'function' && current[REPAINT_FLAG] === true) return true
-  const chained = function (...args) {
-    const result = typeof current === 'function' ? current.apply(this, args) : undefined
-    repaintForSelection(canvas)
-    return result
-  }
-  chained[REPAINT_FLAG] = true
-  canvas.onSelectionChange = chained
+  if (canvas.onSelectionChange?.[REPAINT_FLAG] === true) return true
+  chainHook(canvas, 'onSelectionChange', () => repaintForSelection(canvas), {
+    warn,
+    label: 'selection repaint'
+  })
+  canvas.onSelectionChange[REPAINT_FLAG] = true
   return true
 }
 
