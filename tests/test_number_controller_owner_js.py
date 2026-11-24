@@ -11,6 +11,7 @@ import shutil
 import subprocess
 
 import pytest
+from subgraph_paste import SUBGRAPH_PASTE_JS
 
 NODE = shutil.which("node")
 
@@ -93,6 +94,8 @@ globalThis.Node = FakeNode
 // is only responsible for making a real link exist (or not) so this file's
 // own detach/remember/reconnect logic has something real to operate on.
 // ---------------------------------------------------------------------------
+
+//__SUBGRAPH_PASTE__
 
 let nextFakeLinkId = 1
 
@@ -319,6 +322,67 @@ ghost.graph = null // never joins a graph
 ghost.onConfigure?.({ id: undefined, widgets_values: [savedC] })
 out.ghostRows = JSON.parse(ghost.widgets[0].value)
 
+
+// A pasted SUBGRAPH (frontend 1.52.7): interior nodes are configured with REAL
+// ids after the clipboard remap, the definition gets a NEW uuid. Interior ids
+// [1, 7, 20] pasted into a workflow using 7 and 19 become [1, 20, 21]: the
+// remembered target 20 now names the decoy, the intended consumer is 21.
+function subgraphFake(id) {
+  const g = makeFakeGraph(); g.id = id; g.isRootGraph = false
+  return g
+}
+const sgSrc = subgraphFake('sub-1')
+const sgIntended = makeFakeTargetNode(20, 'steps', 'INT'); sgSrc.register(sgIntended)
+const sgNode = makeFakeNode('{}', 1); sgSrc.register(sgNode)
+nc.attach(sgNode)
+sgNode.connect(0, sgIntended, 0); sgNode.__epsNcReload()
+row = rowsOf(sgNode)[0]
+row.enabledInput.checked = false; row.enabledInput.dispatch('change')
+const sgSaved = sgNode.widgets[0].value
+out.sgStampWritten = JSON.parse(sgSaved).num_1
+{
+  const [nodeId, decoyId, intendedId] = remapPastedInteriorIds([1, 7, 20], [7, 19], 19).map((m) => m.to)
+  out.sgIds = [nodeId, decoyId, intendedId]
+  const sgDst = subgraphFake('sub-2')
+  const decoy = makeFakeTargetNode(decoyId, 'steps', 'INT'); sgDst.register(decoy)
+  const intended = makeFakeTargetNode(intendedId, 'steps', 'INT'); sgDst.register(intended)
+  const pastedNode = makeFakeNode(sgSaved, nodeId); sgDst.register(pastedNode)
+  nc.attach(pastedNode)
+  pastedNode.onConfigure?.({ id: nodeId, widgets_values: [sgSaved] })
+  out.sgMemoryAfterConfigure = JSON.parse(pastedNode.widgets[0].value).num_1
+  await tick(); await tick()
+  row = rowsOf(pastedNode)[0]
+  row.enabledInput.checked = true; row.enabledInput.dispatch('change')
+  out.sgDecoyWired = decoy.inputs[0].link != null
+  out.sgIntendedWired = intended.inputs[0].link != null
+}
+// the SAME definition reloaded (undo / Save As / Duplicate change only the
+// root workflow id): the memory is kept and replugs
+sgNode.onConfigure?.({ id: 1, widgets_values: [sgSaved] })
+await tick(); await tick()
+row = rowsOf(sgNode)[0]
+row.enabledInput.checked = true; row.enabledInput.dispatch('change')
+out.sgReloadWired = sgIntended.inputs[0].link != null
+// converted into a subgraph together with its target: written in the root
+// graph (no graph stamp), configured in a brand-new subgraph -> kept, restamped
+const gR = makeFakeGraph(); gR.id = 'root'
+const cR = makeFakeTargetNode(602, 'steps', 'INT'); gR.register(cR)
+const nR = makeFakeNode('{}', 601); gR.register(nR)
+nc.attach(nR)
+nR.connect(0, cR, 0); nR.__epsNcReload()
+row = rowsOf(nR)[0]
+row.enabledInput.checked = false; row.enabledInput.dispatch('change')
+const rootSaved = nR.widgets[0].value
+out.rootStamp = JSON.parse(rootSaved).num_1
+const gNew = subgraphFake('sub-new')
+gNew.register(cR); gNew.register(nR)
+nR.onConfigure?.({ id: 601, widgets_values: [rootSaved] })
+await tick(); await tick()
+out.convertedStamp = JSON.parse(nR.widgets[0].value).num_1
+row = rowsOf(nR)[0]
+row.enabledInput.checked = true; row.enabledInput.dispatch('change')
+out.convertedWired = cR.inputs[0].link != null
+
 console.log(JSON.stringify(out))
 """
 
@@ -327,7 +391,9 @@ console.log(JSON.stringify(out))
 def result(tmp_path_factory: pytest.TempPathFactory, install_switcher_js) -> dict:
     layout = tmp_path_factory.mktemp("nc_owner")
     install_switcher_js(layout)
-    (layout / "probe.mjs").write_text(PROBE_JS, encoding="utf-8")
+    (layout / "probe.mjs").write_text(
+        PROBE_JS.replace("//__SUBGRAPH_PASTE__", SUBGRAPH_PASTE_JS), encoding="utf-8"
+    )
     run = subprocess.run(
         [NODE, str(layout / "probe.mjs")],
         capture_output=True,
@@ -373,3 +439,26 @@ def test_a_clone_ghost_drops_the_memory(result: dict) -> None:
     row = result["ghostRows"]["num_1"]
     assert row["enabled"] is False  # the row's own state is kept
     assert "links" not in row and "owner" not in row
+
+
+def test_a_pasted_subgraphs_interior_never_wires_an_unrelated_node(result: dict) -> None:
+    # Frontend 1.52.7 configures a pasted subgraph's interior with REAL ids
+    # (so configuredAsCopy says "not a copy") and remaps colliding ids.
+    assert result["sgStampWritten"]["owner"] == 1
+    assert result["sgIds"] == [1, 20, 21]
+    assert result["sgDecoyWired"] is False  # the harm: an unrelated node gets wired
+    assert result["sgIntendedWired"] is False
+    assert result["sgMemoryAfterConfigure"].get("links") is None
+
+
+def test_a_subgraph_reload_keeps_the_memory_and_replugs(result: dict) -> None:
+    assert result["sgStampWritten"]["graph"] == "sub-1"
+    assert result["sgReloadWired"] is True
+
+
+def test_converting_a_node_into_a_subgraph_with_its_target_keeps_the_memory(
+    result: dict,
+) -> None:
+    assert "graph" not in result["rootStamp"]  # root memory carries no graph id
+    assert result["convertedStamp"]["graph"] == "sub-new"
+    assert result["convertedWired"] is True

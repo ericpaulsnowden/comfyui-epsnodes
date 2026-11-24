@@ -34,6 +34,7 @@ import subprocess
 from pathlib import Path
 
 import pytest
+from subgraph_paste import SUBGRAPH_PASTE_JS
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 WEB = REPO_ROOT / "web"
@@ -224,9 +225,9 @@ out.pure.exports = {
   inputName: bp.INPUT_NAME, outputIndex: bp.OUTPUT_INDEX, minWidth: bp.MIN_NODE_WIDTH,
   offLabel: bp.OFF_LABEL, anyLabel: bp.ANY_LABEL, hollow: bp.HOLLOW_CIRCLE_SHAPE
 }
-out.pure.parseMemory = __PARSE_MEMORY__.map(([raw, owner]) => bp.parseMemory(raw, owner))
+out.pure.parseMemory = __PARSE_MEMORY__.map(([raw, owner]) => bp.parseMemory(raw, { id: owner }))
 out.pure.serializeMemory = __SERIALIZE_MEMORY__.map(
-  ([owner, links]) => bp.serializeMemory(owner, links))
+  ([owner, links]) => bp.serializeMemory({ id: owner }, links))
 out.pure.isEnabled = __IS_ENABLED__.map(([v]) => bp.isBypassEnabled(v))
 out.pure.labelForType = __LABEL_FOR_TYPE__.map(([t]) => bp.labelForType(t))
 out.pure.outputLabel = {
@@ -255,6 +256,8 @@ out.pure.refusal = {
 }
 
 // -------------------------------------------------- a small fake litegraph
+
+//__SUBGRAPH_PASTE__
 
 let nextLinkId = 1
 let nextNodeId = 100
@@ -866,6 +869,88 @@ async function build(makeTargets = (g) => [makeVideo(g)], { wireInput = true } =
   out.g.ghost = { memoryRaw: widgetOf(ghost, 'links').value }
 }
 
+// ---- K5: a pasted SUBGRAPH. Frontend 1.52.7 configures its interior nodes
+// through LGraph.configure with REAL ids (not -1), after remapping the ids that
+// collide with the destination workflow -- so a remembered target id can end up
+// naming an unrelated interior node. The definition gets a new UUID though.
+async function subgraphWithBypass(subgraphId, ids) {
+  const sg = makeGraph()
+  sg.id = subgraphId
+  sg.isRootGraph = false
+  const origin = makeOrigin(sg)
+  const node = makeBypass(sg, ids.bypass)
+  bp.attach(node)
+  const decoy = makeTarget(sg, 'Decoy Video', VIDEO_DEF, videoInputs(), { id: ids.decoy })
+  const intended = makeTarget(sg, 'Create Video', VIDEO_DEF, videoInputs(), { id: ids.intended })
+  origin.connect(0, node, 1)
+  await tick()
+  return { sg, origin, node, decoy, intended }
+}
+{
+  const src = await subgraphWithBypass('sub-1', { bypass: 1, decoy: 7, intended: 20 })
+  src.node.connect(0, src.intended, 1)
+  clickToggle(src.node)
+  await tick()
+  const memory = widgetOf(src.node, 'links').value
+  // paste into a workflow that already uses ids 7 and 19 (counter at 19)
+  const [bypassId, decoyId, intendedId] =
+    remapPastedInteriorIds([1, 7, 20], [7, 19], 19).map((m) => m.to)
+  const dst = await subgraphWithBypass('sub-2', { bypass: bypassId, decoy: decoyId, intended: intendedId })
+  dst.node.configure({ id: bypassId, widgets_values: [false, memory] })
+  await tick()
+  const memoryAfterConfigure = widgetOf(dst.node, 'links').value
+  clickToggle(dst.node) // switch ON: replugs the memory, if it were trusted
+  await tick()
+  out.g.subgraphPaste = {
+    ids: [bypassId, decoyId, intendedId],
+    memoryAfterConfigure,
+    decoyWired: isWired(dst.decoy, 'audio'),
+    intendedWired: isWired(dst.intended, 'audio')
+  }
+}
+
+// ---- K6: the SAME subgraph definition keeps its memory -- a reload / undo /
+// Save As / Duplicate configure the interior with its saved id, in a subgraph
+// whose UUID did not change (only the ROOT workflow id does).
+{
+  const src = await subgraphWithBypass('sub-1', { bypass: 1, decoy: 7, intended: 20 })
+  src.node.connect(0, src.intended, 1)
+  clickToggle(src.node)
+  await tick()
+  const saved = [false, widgetOf(src.node, 'links').value]
+  src.node.configure({ id: 1, widgets_values: saved })
+  await tick()
+  const stamp = memoryOf(src.node)
+  clickToggle(src.node)
+  await tick()
+  out.g.subgraphReload = {
+    stamp,
+    intendedWired: isWired(src.intended, 'audio'),
+    decoyWired: isWired(src.decoy, 'audio')
+  }
+}
+
+// ---- K7: converted into a subgraph WITH its target (convert-to-subgraph keeps
+// node ids, configures them in a brand-new subgraph, and the memory was written
+// in the root graph): the memory is kept, and from then on belongs to that subgraph.
+{
+  const { graph, node, targets: [video] } = await build()
+  clickToggle(node)
+  await tick()
+  const saved = [false, widgetOf(node, 'links').value]
+  const sg = makeGraph()
+  sg.id = 'sub-new'
+  sg.isRootGraph = false
+  sg.add(node)
+  sg.add(video)
+  node.configure({ id: node.id, widgets_values: saved })
+  await tick()
+  const stamp = memoryOf(node)
+  clickToggle(node)
+  await tick()
+  out.g.convert = { stamp, wired: isWired(video, 'audio'), origin: linkObj(video, 'audio')?.origin_id, id: node.id }
+}
+
 // -------------------- L: the Universal State Controller apply route
 {
   const { node, targets: [video] } = await build()
@@ -1117,7 +1202,7 @@ def probe(tmp_path_factory: pytest.TempPathFactory) -> dict:
         )
     )
     probe_file = layout / "probe.mjs"
-    probe_file.write_text(source, encoding="utf-8")
+    probe_file.write_text(source.replace("//__SUBGRAPH_PASTE__", SUBGRAPH_PASTE_JS), encoding="utf-8")
 
     result = subprocess.run(
         [NODE, str(probe_file)], capture_output=True, encoding="utf-8", timeout=60, cwd=layout
@@ -1537,6 +1622,32 @@ def test_a_clone_ghost_drops_the_memory(probe: dict) -> None:
     assert probe["g"]["ghost"]["memoryRaw"] == "{}"
 
 
+def test_a_pasted_subgraphs_interior_never_wires_an_unrelated_node(probe: dict) -> None:
+    # The finding: a subgraph paste configures its interior with REAL ids, so
+    # the copy-id check passes, and the id remap makes the remembered target
+    # id (20) name the decoy. Interior ids [1, 7, 20] become [1, 20, 21].
+    p = probe["g"]["subgraphPaste"]
+    assert p["ids"] == [1, 20, 21]
+    assert p["decoyWired"] is False  # the harm: an unrelated node gets wired
+    assert p["intendedWired"] is False
+    assert p["memoryAfterConfigure"] == "{}"
+
+
+def test_a_subgraph_reload_keeps_the_memory_and_replugs(probe: dict) -> None:
+    p = probe["g"]["subgraphReload"]
+    assert p["stamp"]["owner"] == 1
+    assert p["stamp"]["graph"] == "sub-1"
+    assert p["intendedWired"] is True
+    assert p["decoyWired"] is False
+
+
+def test_converting_a_node_into_a_subgraph_with_its_target_keeps_the_memory(probe: dict) -> None:
+    p = probe["g"]["convert"]
+    assert p["stamp"]["graph"] == "sub-new"
+    assert p["wired"] is True
+    assert p["origin"] is not None
+
+
 # ------------------------------------------ the Universal State Controller
 
 
@@ -1750,7 +1861,7 @@ def test_settle_and_sync_types_never_write_a_widget(source: str) -> None:
 
 def test_the_memory_is_written_from_one_place(source: str) -> None:
     body = _function_body(source, "writeMemory(state, links)")
-    assert "serializeMemory(state.node.id, links)" in body
+    assert "serializeMemory(state.node, links)" in body
     assert "state.linksWidget.value = json" in body
     assert source.count("linksWidget.value = ") == 1
 

@@ -297,6 +297,8 @@ import { findWidget, linkById, nodeClassOf } from '../lora_library/panel_helpers
 import { LINK_COLOR_OWNER_KEY, ensureOwnedLinkColourHook } from './owned_link_colour.js'
 import {
   configuredAsCopy,
+  isForeignStamp,
+  memoryStamp,
   normalizeRememberedLinks,
   reconnectRememberedTargets
 } from './number_controller.js'
@@ -1827,7 +1829,9 @@ function installLinkDimConfigureSync(node) {
   const original = node.onConfigure
   node.onConfigure = function (...args) {
     const result = typeof original === 'function' ? original.apply(this, args) : undefined
-    if (configuredAsCopy(args[0])) writeUnplugMemory(this, {}) // a copy owns no memory
+    // A copy owns no memory; anything else keeps what is still its own,
+    // re-stamped for the graph it now sits in (`isForeignStamp`).
+    writeUnplugMemory(this, configuredAsCopy(args[0]) ? {} : readUnplugMemory(this))
     syncLinkDimming(this, 'onConfigure')
     scheduleUnplugReconcile(this) // unplug/replug once the restore settles
     return result
@@ -1894,20 +1898,20 @@ export const UNPLUG_EXEMPT_CLASSES = new Set([
 ])
 
 /**
- * Parses the unplug memory for *ownerId*. Never throws. Returns `{<output
+ * Parses the unplug memory for *node*. Never throws. Returns `{<output
  * name>: [{node, input}, ...]}` with only non-empty, sanitised lists, or
  * `{}` for: nothing stored, malformed JSON, a non-object, or a missing/
- * foreign `owner` -- bypass.js `parseMemory`'s rule exactly (ids compared
- * as strings): a pasted copy has a new id, and its inherited memory names
- * the ORIGINAL's consumers, so it is stale. Accepts the stored string or an
- * already-parsed object (a hand-edited workflow). Exported for tests.
+ * foreign `owner` or foreign `graph` -- bypass.js `parseMemory`'s rule
+ * exactly (`isForeignStamp`): a pasted copy has a new id, and its inherited
+ * memory names the ORIGINAL's consumers, so it is stale. Accepts the stored
+ * string or an already-parsed object (a hand-edited workflow). Exported for
+ * tests.
  */
-export function parseUnplugMemory(raw, ownerId) {
+export function parseUnplugMemory(raw, node) {
   try {
     const parsed = typeof raw === 'string' ? JSON.parse(raw || '{}') : raw
     if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return {}
-    if (parsed.owner == null || ownerId == null) return {}
-    if (String(parsed.owner) !== String(ownerId)) return {}
+    if (parsed.owner == null || isForeignStamp(parsed, node)) return {}
     const outputs = parsed.outputs
     if (!outputs || typeof outputs !== 'object' || Array.isArray(outputs)) return {}
     const result = {}
@@ -1924,22 +1928,22 @@ export function parseUnplugMemory(raw, ownerId) {
 /** Inverse of `parseUnplugMemory`: the JSON string, or `null` when nothing
  * survives sanitising (the caller then deletes the property -- a switcher
  * with nothing remembered carries no residue in its saved workflow). */
-export function serializeUnplugMemory(ownerId, outputs) {
+export function serializeUnplugMemory(node, outputs) {
   const clean = {}
   for (const [name, list] of Object.entries(outputs || {})) {
     const links = normalizeRememberedLinks(list)
     if (name && links.length > 0) clean[name] = links
   }
-  return Object.keys(clean).length > 0 ? JSON.stringify({ owner: ownerId, outputs: clean }) : null
+  return Object.keys(clean).length > 0 ? JSON.stringify({ ...memoryStamp(node), outputs: clean }) : null
 }
 
 function readUnplugMemory(node) {
-  return parseUnplugMemory(node.properties?.[UNPLUGGED_PROPERTY], node.id)
+  return parseUnplugMemory(node.properties?.[UNPLUGGED_PROPERTY], node)
 }
 
 /** The SOLE writer of the memory property; deletes it when empty. */
 function writeUnplugMemory(node, outputs) {
-  const json = serializeUnplugMemory(node.id, outputs)
+  const json = serializeUnplugMemory(node, outputs)
   if (json === null) {
     if (node.properties && UNPLUGGED_PROPERTY in node.properties) {
       delete node.properties[UNPLUGGED_PROPERTY]
