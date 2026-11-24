@@ -187,7 +187,7 @@ def probe(tmp_path_factory: pytest.TempPathFactory) -> dict:
     (ext / "lora_library").mkdir(parents=True)
     for name in ("image_grid.js", "owned_link_colour.js"):
         shutil.copyfile(WEB / "eps_image" / name, ext / "eps_image" / name)
-    for name in ("api.js", "version.js"):
+    for name in ("api.js", "version.js", "panel_helpers.js"):
         shutil.copyfile(WEB / "lora_library" / name, ext / "lora_library" / name)
     scripts = layout / "scripts"
     scripts.mkdir()
