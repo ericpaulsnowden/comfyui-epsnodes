@@ -228,6 +228,13 @@ installers (no original exists), and the Notebook file widget's remote-viewer
 revert (answers instead of the original). `installMinWidth` now uses
 `chainHook` too.*
 
+*Arguments are forwarded as received.* Several old wrappers called the
+original with a fixed argument list (`original.call(this, name, value,
+previous)`), so a two-argument call reached it padded to three. `chainHook`
+passes exactly what the caller passed, as if the wrapper were not there. Only
+an original that inspects `arguments.length` can tell (adversarial review,
+2026-11-24; kept on purpose).
+
 *"Now caught" (an uncaught `ours` used to propagate; it is now logged and the
 original / node carry on): Bypass's connection settle, EPS Switcher's gate
 and dim hooks, Distributor / Number Controller type vetoes (a throwing veto now fails
