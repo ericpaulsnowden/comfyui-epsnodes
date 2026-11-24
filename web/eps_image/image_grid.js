@@ -2621,8 +2621,12 @@ export function outputLinkIds(node) {
  * `LINK_COLOR_OWNER_KEY` tag cleared, and its TARGET node's
  * `LINK_COLOR_RESYNC_HOOK` invited to reassert its own colour if it has
  * one (see that constant's own docstring for why). Anything newly desired
- * that this file doesn't already own is dimmed: its current colour stashed
- * first, then overwritten to `DIM_LINK_COLOR` and tagged as owned.
+ * that nobody owns is dimmed: its current colour stashed first, then
+ * overwritten to `DIM_LINK_COLOR` and tagged as owned. A link another owner
+ * has claimed is left alone -- not recoloured, not re-tagged, not tracked --
+ * and retried on the next reconcile (switcher.js's / save_image.js's /
+ * checkpoint_switcher.js's rule; until 2026-11-15 this file painted over it
+ * and took the tag, so the other owner could never restore its colour).
  *
  * v1.2.0 (owner ask 2026-10-03, FORMAT.md §7.10): when one of those links
  * ends at a SubgraphNode input -- or this grid sits INSIDE a subgraph and its
@@ -2674,11 +2678,13 @@ export function reconcileLinkDimming(node, { forceUndim = false } = {}) {
   // it draw a link we've claimed in our colour (owned_link_colour.js).
   if (desired.size) ensureOwnedLinkColourHook()
 
-  // Dim anything newly desired that this file doesn't already own.
+  // Dim anything newly desired that nobody else owns.
   for (const id of desired) {
     const link = linkById(graph, id)
     if (!link) continue
-    if (link[LINK_COLOR_OWNER_KEY] !== LINK_COLOR_OWNER_GRID) {
+    const owner = link[LINK_COLOR_OWNER_KEY]
+    if (owner && owner !== LINK_COLOR_OWNER_GRID) continue
+    if (!owner) {
       dimStash.set(link, { color: link.color })
       link.color = DIM_LINK_COLOR
       link[LINK_COLOR_OWNER_KEY] = LINK_COLOR_OWNER_GRID

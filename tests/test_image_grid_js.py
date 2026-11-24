@@ -1035,6 +1035,45 @@ out.basenames = [
     }
   }
 
+  // -- a link ANOTHER owner has claimed keeps its colour and its tag for the
+  // whole dim/restore cycle; a sibling link nobody owns is still dimmed and
+  // still restored exactly (the same rule switcher.js / save_image.js /
+  // checkpoint_switcher.js follow) --
+  {
+    const OTHER = 'EPSSwitcher:all-off'
+    const claimed = makeLink(50, 600, 'orange')
+    claimed[OWNER_KEY] = OTHER
+    const free = makeLink(51, 601, 'teal')
+    const graph = makeGraph({ 50: claimed, 51: free }, {})
+    const node = makeGridNode('Collect only', graph, [
+      { name: 'image', links: [50] }, { name: 'width', links: [51] }, { name: 'height', links: [] }
+    ])
+    grid.reconcileLinkDimming(node)
+    const whileDimming = {
+      claimedColor: claimed.color, claimedOwner: claimed[OWNER_KEY],
+      freeColor: free.color, freeOwner: free[OWNER_KEY],
+      claimedTracked: node.__epsGridDimmedLinkIds.has(50)
+    }
+    node.widgets[0].value = 'Collect' // leave Collect only
+    grid.reconcileLinkDimming(node)
+    out.dimOtherOwner = {
+      whileDimming,
+      afterRestore: {
+        claimedColor: claimed.color, claimedOwner: claimed[OWNER_KEY],
+        freeColor: free.color, freeOwnerCleared: !(OWNER_KEY in free)
+      }
+    }
+
+    // only a claimed link on the outputs: nothing to do, so no repaint
+    const lone = makeLink(52, 602, 'pink')
+    lone[OWNER_KEY] = OTHER
+    const loneGraph = makeGraph({ 52: lone }, {})
+    grid.reconcileLinkDimming(makeGridNode('Collect only', loneGraph, [
+      { name: 'image', links: [52] }, { name: 'width', links: [] }, { name: 'height', links: [] }
+    ]))
+    out.dimOtherOwner.loneClaimedLinkDirtied = loneGraph.dirtyCount
+  }
+
   // -- mode never Collect only: a pure no-op, nothing tracked, no repaint --
   {
     const linkA = makeLink(60, 700)
@@ -2157,6 +2196,27 @@ def test_distributor_resync_hook_fires_once_only_on_restore_after_the_colour(
     assert result["noCallWhileDimming"] is True
     assert result["calledExactlyOnceOnRestore"] is True
     assert result["restoredColorFirst"] is True
+
+
+def test_a_link_another_node_has_claimed_is_never_recoloured(grid_api: dict) -> None:
+    """The owner tag is a claim: Collect only must not paint over a link some
+    other EPS node is colouring, nor take its tag, nor "restore" it later --
+    while a link nobody owns is still dimmed and still gets its colour back."""
+    result = grid_api["dimOtherOwner"]
+    assert result["whileDimming"] == {
+        "claimedColor": "orange",
+        "claimedOwner": "EPSSwitcher:all-off",
+        "freeColor": "rgba(128,128,128,0.25)",
+        "freeOwner": "EPSImageGrid:collect-only",
+        "claimedTracked": False,
+    }
+    assert result["afterRestore"] == {
+        "claimedColor": "orange",
+        "claimedOwner": "EPSSwitcher:all-off",
+        "freeColor": "teal",
+        "freeOwnerCleared": True,
+    }
+    assert result["loneClaimedLinkDirtied"] == 0
 
 
 def test_dim_is_a_pure_noop_outside_collect_only(grid_api: dict) -> None:

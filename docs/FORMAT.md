@@ -2879,7 +2879,10 @@ dynamic link colouring of its own may expose a duck-typed
 `node.__epsResyncLinkColors()` (distributor.js does, in its own `attach()`)
 that `image_grid.js` calls once, directly, right after releasing a link —
 never a subscription or a poll, so there is no repaint ping-pong between
-the two files. `number_controller.js` is the only other file that writes
+the two files. The tag is a claim in both directions: a link ANOTHER owner
+has already tagged is never recoloured, re-tagged or tracked by
+`image_grid.js` either (since 2026-11-15; `switcher.js`, `save_image.js` and
+`checkpoint_switcher.js` always skipped it). `number_controller.js` is the only other file that writes
 `link.color` in this pack, and it only ever colours links leaving its OWN
 outputs (it has no input sockets of its own to share a link with a Grid's
 output), so no equivalent conflict exists there.
