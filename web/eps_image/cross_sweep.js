@@ -105,7 +105,7 @@
  * Checkpoint Switcher whose literal `selection` names nothing
  * (`sourceIsStaticallyEmpty`). Those inputs are the multiplier's six
  * `MULTIPLIER_LAZY_INPUTS` (model, model_low, clip, vae, image, mask),
- * EPS Resolution's `image`/`image_2..8`, and EPS Image Grid's `image`.
+ * EPS Resolution's `image`/`image_2..9`, and EPS Image Grid's `image`.
  * `sourceCount` marks such a source's zero with `allOff: true`, and
  * exactly those consumer inputs read it through `lazySourceCount` /
  * `lazyInputWired` as UNWIRED: the multiplier drops that axis (an all-off
