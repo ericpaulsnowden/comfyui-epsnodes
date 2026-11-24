@@ -5511,10 +5511,38 @@ Class id `EPSBypass` (FROZEN, §8), category `EPSNodes/Utilities`.
   any settle, so the dropped state is also what serialises. A workflow load,
   undo/redo, tab switch, Save As, Duplicate (the last two give the workflow a
   NEW id but keep every node id) and convert-to-subgraph configure each node
-  with its saved id and keep the memory. Not covered: a memory whose target
-  sits in another graph (e.g. outside a subgraph the node was converted into)
-  and whose id is later reused by a new node there: the replug then connects
-  to that node if it has an empty input of the same name.
+  with its saved id and keep the memory.
+
+  **Inside a subgraph the stamp carries the subgraph's UUID too (`graph`).**
+  `configuredAsCopy` cannot see a pasted SUBGRAPH: frontend 1.52.7's
+  `_deserializeItems` (LGraphCanvas.ts) gives every pasted definition a new
+  UUID (`subgraphInfo.id = createUuidv4()`), runs
+  `remapClipboardSubgraphNodeIds` (renumbers the interior ids that collide
+  with the destination workflow, never touching widget values or
+  properties), then `createSubgraph(info)` + `subgraph.configure(info)`
+  configure each interior node with its (remapped) REAL id -- so `owner`
+  still matches while a remembered target id can now name an unrelated
+  interior node. A definition's UUID, in contrast, survives a workflow load,
+  undo, tab switch, Save As and Duplicate (`saveAs` / `duplicateWorkflow`
+  change only the ROOT `state.id`), and changes exactly when the definition
+  is copied. So a node in a subgraph writes `{"owner": id, "graph": <UUID>,
+  ...}` (`memoryStamp`, number_controller.js) and `isForeignStamp` refuses a
+  memory whose `graph` differs from the subgraph the node is now in; the
+  same `onConfigure` wrap that drops a copy's memory also drops that
+  foreign memory (and re-stamps a still-valid one), before any settle. The
+  ROOT graph writes no `graph` and never compares one: its id changes on
+  Save As / Duplicate while the memory stays valid, and a root paste is
+  `configuredAsCopy`'s case. Memory with no `graph` -- saved before this
+  stamp existed, or written in the root graph and then converted into a
+  subgraph (convert-to-subgraph keeps node ids and the target moves with it)
+  -- is accepted ONCE by a node configured inside a subgraph and stamped for
+  it right there; the one gap is such an unstamped memory pasted inside a
+  subgraph before it was ever re-opened, which is accepted like any older
+  memory. Unpacking a subgraph gives each node a new id, so the `owner`
+  check drops its memory. Not covered: a memory whose target sits in another
+  graph (e.g. outside a subgraph the node was converted into) and whose id is
+  later reused by a new node there: the replug then connects to that node if
+  it has an empty input of the same name.
 - **Multi-target and stale-target rules.** Every link off the output is
   remembered and restored (fan-out). Replug is ONE attempt and then the
   memory is forgotten (§6.17's reasoning: otherwise a later manual unplug

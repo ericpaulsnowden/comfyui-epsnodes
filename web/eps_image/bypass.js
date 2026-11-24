@@ -112,7 +112,9 @@ import {
   configuredAsCopy,
   disconnectAllTargets,
   hideValuesWidget,
+  isForeignStamp,
   isOutputConnected,
+  memoryStamp,
   normalizeRememberedLinks,
   reconnectRememberedTargets
 } from './number_controller.js'
@@ -189,20 +191,19 @@ export function isBypassEnabled(value) {
 }
 
 /**
- * Parses the hidden `links` widget for *ownerId*. Never throws. Returns the
+ * Parses the hidden `links` widget for *node*. Never throws. Returns the
  * `normalizeRememberedLinks`-sanitised target list, or `[]` for: malformed
- * JSON, a non-object, a missing/foreign `owner` (a pasted copy's memory
- * points at the ORIGINAL's consumers -- module docstring), or no `links`.
- * `owner` must be present and equal (compared as strings, since a hand-edited
- * or foreign workflow may stringify ids) -- memory this file did not write is
- * not trusted.
+ * JSON, a non-object, a missing/foreign `owner` or a foreign `graph` (a
+ * pasted copy's memory points at the ORIGINAL's consumers -- module
+ * docstring; `isForeignStamp`), or no `links`. `owner` must be present and
+ * equal (compared as strings, since a hand-edited or foreign workflow may
+ * stringify ids) -- memory this file did not write is not trusted.
  */
-export function parseMemory(raw, ownerId) {
+export function parseMemory(raw, node) {
   try {
     const parsed = JSON.parse(raw || '{}')
     if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return []
-    if (parsed.owner == null || ownerId == null) return []
-    if (String(parsed.owner) !== String(ownerId)) return []
+    if (parsed.owner == null || isForeignStamp(parsed, node)) return []
     return normalizeRememberedLinks(parsed.links)
   } catch (error) {
     return []
@@ -210,13 +211,14 @@ export function parseMemory(raw, ownerId) {
 }
 
 /**
- * Inverse of `parseMemory`: the JSON string for *links* owned by *ownerId*.
- * An empty (or wholly invalid) list serialises to `'{}'` -- the backend's
- * default -- so a switched-on node carries no residue in its saved workflow.
+ * Inverse of `parseMemory`: the JSON string for *links* owned by *node*
+ * (stamped with its id, and its subgraph's UUID inside a subgraph). An empty
+ * (or wholly invalid) list serialises to `'{}'` -- the backend's default -- so
+ * a switched-on node carries no residue in its saved workflow.
  */
-export function serializeMemory(ownerId, links) {
+export function serializeMemory(node, links) {
   const clean = normalizeRememberedLinks(links)
-  return clean.length > 0 ? JSON.stringify({ owner: ownerId, links: clean }) : '{}'
+  return clean.length > 0 ? JSON.stringify({ ...memoryStamp(node), links: clean }) : '{}'
 }
 
 /** Whether two remembered targets are the same wire (ids compared as strings). */
@@ -338,12 +340,12 @@ function isEnabled(state) {
 }
 
 function readMemory(state) {
-  return parseMemory(state.linksWidget.value, state.node.id)
+  return parseMemory(state.linksWidget.value, state.node)
 }
 
 /** The SOLE writer of the `links` widget. Writes only on a real change. */
 function writeMemory(state, links) {
-  const json = serializeMemory(state.node.id, links)
+  const json = serializeMemory(state.node, links)
   if (state.linksWidget.value === json) return
   state.linksWidget.value = json
   state.linksWidget.callback?.(json)
@@ -808,7 +810,9 @@ export function attach(node) {
     node.onConfigure = function (info) {
       const result = originalOnConfigure?.apply(this, arguments)
       try {
-        if (configuredAsCopy(info)) writeMemory(state, []) // a copy owns no memory
+        // A copy owns no memory; anything else keeps what is still its own,
+        // re-stamped for the graph it now sits in (`isForeignStamp`).
+        writeMemory(state, configuredAsCopy(info) ? [] : readMemory(state))
         settle(state)
         schedule(false)
       } catch (error) {

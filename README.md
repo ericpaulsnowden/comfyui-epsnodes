@@ -983,7 +983,10 @@ save and recall the whole set at once — which is the point of it.
   it into another workflow where it happens to get the same node number as
   the original. (Save As and Duplicate keep every node's number, so there the
   memory is kept and still plugs the wires back.) The same goes for EPS
-  Bypass and for an all-off switcher's unplugged wires. A workflow saved
+  Bypass and for an all-off switcher's unplugged wires. Inside a subgraph
+  the memory is also stamped with that subgraph, so pasting a subgraph (which
+  renumbers the nodes inside it) never carries the remembered wires over,
+  while reloading, Save As, Duplicate and undo keep them. A workflow saved
   before this stamp existed keeps working: the first node to open it takes
   the memory over and stamps it.
 
