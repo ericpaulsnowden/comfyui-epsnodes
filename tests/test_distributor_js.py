@@ -604,7 +604,7 @@ def test_growth_is_wired_through_both_hooks(distributor_source: str) -> None:
     assert "wireOutputGrowth(node)" in distributor_source, "not installed from attach()"
     body = _function_body(distributor_source, "wireOutputGrowth(node)")
     assert "node.configure = function" in body
-    assert "node.onConnectionsChange = function" in body
+    assert "chainHook(\n    node,\n    'onConnectionsChange'," in body
     assert "state.restoring = true" in body
     assert "state.restoring = false" in body
 
@@ -630,13 +630,9 @@ def test_growth_ignores_the_isconnected_argument(distributor_source: str) -> Non
     `highestWiredSlot`, which is why a restore could not misgrow even if one
     got past the `restoring` guard."""
     body = _function_body(distributor_source, "wireOutputGrowth(node)")
-    signature_line = next(line for line in body.split("\n") if "onConnectionsChange = " in line)
+    signature_line = next(line for line in body.split("\n") if "function (type, index" in line)
     assert "isConnected" in signature_line, "argument should still be named for clarity"
-    used = [
-        line
-        for line in body.split("\n")
-        if "isConnected" in line and "onConnectionsChange = " not in line
-    ]
+    used = [line for line in body.split("\n") if "isConnected" in line and line != signature_line]
     assert not used, f"growth must not branch on isConnected: {used}"
 
 
@@ -838,8 +834,10 @@ def test_type_veto_hooks_are_installed_and_consult_is_allowed_type(
     actually consult isAllowedType -- not just exist as no-op stubs."""
     assert "wireTypeVeto(node)" in distributor_source, "not installed from attach()"
     body = _function_body(distributor_source, "wireTypeVeto(node)")
-    assert "node.onConnectInput = function" in body
-    assert "node.onConnectOutput = function" in body
+    # the veto is chainHook's named `veto` option, ours runs before the original
+    assert "'onConnectInput'" in body and "'onConnectOutput'" in body
+    assert body.count("veto: true") == 2 and body.count("order: 'before'") == 2
+    assert "node.onConnectInput =" not in body and "node.onConnectOutput =" not in body
     assert body.count("isAllowedType(") == 2, "both hooks must consult isAllowedType"
 
 

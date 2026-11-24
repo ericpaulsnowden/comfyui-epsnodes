@@ -67,6 +67,7 @@
 
 import { app } from '../../../scripts/app.js'
 import * as api from './api.js'
+import { chainHook } from './panel_helpers.js'
 
 /** The FORMAT.md §7.6 gate -- registered as a boolean in `settings.js`,
  * default `true`. Owned here so the hook and the registration can never
@@ -273,17 +274,12 @@ const wrappedNodes = new WeakSet()
 export function attachConfigureHeal(node) {
   if (!node || typeof node !== 'object' || wrappedNodes.has(node)) return
   wrappedNodes.add(node)
-  const originalOnConfigure = node.onConfigure
-  node.onConfigure = function (info) {
-    let result
-    if (typeof originalOnConfigure === 'function') {
-      result = originalOnConfigure.apply(this, arguments)
-    }
-    try {
+  chainHook(
+    node,
+    'onConfigure',
+    function (info) {
       if (isHealEnabled()) recordHealed(healNode(this))
-    } catch (error) {
-      api.warn('path heal (onConfigure) failed', error)
-    }
-    return result
-  }
+    },
+    { warn: api.warn, label: 'path heal (onConfigure)' }
+  )
 }

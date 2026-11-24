@@ -1532,7 +1532,7 @@ def test_delete_menu_registered_on_the_same_surface_as_copy() -> None:
     mechanism for deciding "which tile is this menu about"."""
     body = _function_body("function installDeleteImageMenuItem")
     assert "currentMenuSelection(node)" in body
-    assert "node.getExtraMenuOptions" in body
+    assert "'getExtraMenuOptions'" in body and "node.getExtraMenuOptions =" not in body
     assert "DELETE_MENU_LABEL" in body
 
 
@@ -1794,9 +1794,11 @@ def test_display_thumbnails_come_from_the_frame_route_and_degrade_once() -> None
 def test_attach_installs_the_focus_swap_as_a_draw_wrap() -> None:
     assert "installFocusedFullResSwap(node)" in _SOURCE
     body = _function_body("function installFocusedFullResSwap")
-    assert "node.onDrawBackground = function" in body
+    # wraps, never replaces core's hook: ours first, then chainHook calls through
+    assert "chainHook(" in body and "'onDrawBackground'" in body
+    assert "order: 'before'" in body
+    assert "node.onDrawBackground =" not in body
     assert "ensureFocusedFullRes(this)" in body
-    assert "original.apply(this, args)" in body  # wraps, never replaces core's hook
 
 
 def test_frame_route_and_preview_param_are_pinned_constants() -> None:
@@ -1890,9 +1892,10 @@ def test_attach_hides_the_focus_widget_and_installs_its_draw_sync() -> None:
 
 def test_focus_widget_sync_wraps_ondrawbackground_without_replacing_it() -> None:
     body = _function_body("function installFocusWidgetSync")
-    assert "node.onDrawBackground = function" in body
+    assert "chainHook(" in body and "'onDrawBackground'" in body  # wraps, never replaces
+    assert "order: 'before'" in body
+    assert "node.onDrawBackground =" not in body
     assert "syncFocusFromView(this)" in body
-    assert "original.apply(this, args)" in body  # wraps, never replaces
 
 
 def test_write_focus_widget_sets_value_before_firing_the_callback() -> None:
@@ -2248,19 +2251,22 @@ def test_configure_refresh_also_rederives_link_dimming() -> None:
 
 def test_mode_widget_callback_chains_never_replaces_the_original() -> None:
     body = _function_body("function installModeDimSync")
-    assert "originalCallback.apply(this, args)" in body
+    assert "chainHook(\n    widget,\n    'callback'," in body
+    assert "widget.callback =" not in body
     assert "reconcileLinkDimming(node)" in body
 
 
 def test_link_dim_connections_sync_chains_never_replaces_onconnectionschange() -> None:
     body = _function_body("function installLinkDimConnectionsSync")
-    assert "original.apply(this, args)" in body
+    assert "chainHook(" in body and "'onConnectionsChange'" in body
+    assert "node.onConnectionsChange =" not in body
     assert "reconcileLinkDimming(this)" in body
 
 
 def test_link_dim_cleanup_chains_never_replaces_onremoved() -> None:
     body = _function_body("function installLinkDimCleanup")
-    assert "original.apply(this, args)" in body
+    assert "chainHook(" in body and "'onRemoved'" in body
+    assert "order: 'before'" in body and "node.onRemoved =" not in body
     assert "forceUndim: true" in body
 
 

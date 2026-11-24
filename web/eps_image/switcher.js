@@ -293,7 +293,7 @@
 
 import { app } from '../../../scripts/app.js'
 import { loggerFor, showToast } from '../lora_library/api.js'
-import { findWidget, linkById, nodeClassOf } from '../lora_library/panel_helpers.js'
+import { chainHook, findWidget, linkById, nodeClassOf } from '../lora_library/panel_helpers.js'
 import { LINK_COLOR_OWNER_KEY, ensureOwnedLinkColourHook } from './owned_link_colour.js'
 import {
   configuredAsCopy,
@@ -894,21 +894,25 @@ function wirePairingGate(node) {
           'partner sockets will not follow it'
       )
     } else {
-      const original = widget.callback
-      widget.callback = function (...args) {
-        const result = typeof original === 'function' ? original.apply(this, args) : undefined
-        reconverge(node)
-        return result
-      }
+      chainHook(
+        widget,
+        'callback',
+        function () {
+          reconverge(node)
+        },
+        { warn, label: 'pair-output reconverge (gate callback)' }
+      )
     }
   } else {
     node.addProperty(pair.gateProperty, false, 'boolean')
-    const original = node.onPropertyChanged
-    node.onPropertyChanged = function (name, value, prevValue) {
-      const result = original?.call(this, name, value, prevValue)
-      if (name === pair.gateProperty) reconverge(this)
-      return result
-    }
+    chainHook(
+      node,
+      'onPropertyChanged',
+      function (name, value, prevValue) {
+        if (name === pair.gateProperty) reconverge(this)
+      },
+      { warn, label: 'pair-output reconverge (onPropertyChanged)' }
+    )
   }
   // Fresh node: the gate is off -> the backend-declared tail output comes
   // off until the gate turns it on (resolution.js's apply-once rationale:
@@ -1062,17 +1066,16 @@ function wireImageInputGrowth(node) {
     }
   }
 
-  const originalOnConnectionsChange = node.onConnectionsChange
-  node.onConnectionsChange = function (type, index, isConnected, linkInfo, inputOrOutput) {
-    let result
-    if (typeof originalOnConnectionsChange === 'function') {
-      result = originalOnConnectionsChange.apply(this, arguments)
-    }
-    if (!state.restoring && spec && spec.inputRe.test(inputOrOutput?.name || '')) {
-      scheduleConverge(this)
-    }
-    return result
-  }
+  chainHook(
+    node,
+    'onConnectionsChange',
+    function (type, index, isConnected, linkInfo, inputOrOutput) {
+      if (!state.restoring && spec && spec.inputRe.test(inputOrOutput?.name || '')) {
+        scheduleConverge(this)
+      }
+    },
+    { warn, label: 'image-input growth (onConnectionsChange)' }
+  )
 
   // A brand-new node already satisfies the invariant via its class-def
   // default image_1 socket -- cheap insurance against a future INPUT_TYPES
@@ -1348,17 +1351,14 @@ function drawRowToggles(node, ctx) {
 }
 
 function wireRowToggleDrawing(node) {
-  const original = node.onDrawForeground
-  node.onDrawForeground = function (ctx, canvas, canvasEl) {
-    let result
-    if (typeof original === 'function') result = original.apply(this, arguments)
-    try {
+  chainHook(
+    node,
+    'onDrawForeground',
+    function (ctx, canvas, canvasEl) {
       drawRowToggles(this, ctx)
-    } catch (error) {
-      warn('drawRowToggles failed', error)
-    }
-    return result
-  }
+    },
+    { warn, label: 'drawRowToggles' }
+  )
 }
 
 /** @returns {boolean} true if the click hit a row toggle (and was handled). */
@@ -1377,6 +1377,8 @@ function handleRowToggleClick(node, localPos) {
 }
 
 function wireRowToggleClicks(node) {
+  // Not chainHook: with no original this returns `false` (not `undefined`),
+  // which chainHook's `veto` form does not express.
   const original = node.onMouseDown
   node.onMouseDown = function (e, pos, canvas) {
     try {
@@ -1591,39 +1593,29 @@ function rowAtLocalY(node, localY) {
 function wireRowRename(node) {
   // Resolved once, same reasoning as wireImageInputGrowth's own `spec`.
   const spec = switcherSpecOf(node)
-  const originalOnInputDblClick = node.onInputDblClick
-  node.onInputDblClick = function (index, e) {
-    let result
-    if (typeof originalOnInputDblClick === 'function') {
-      result = originalOnInputDblClick.apply(this, arguments)
-    }
-    try {
+  chainHook(
+    node,
+    'onInputDblClick',
+    function (index, e) {
       const input = this.inputs?.[index]
       if (input && spec && spec.inputRe.test(input.name || '')) {
         promptForLabel(this, input, activeCanvas(), e)
       }
-    } catch (error) {
-      warn('onInputDblClick rename failed', error)
-    }
-    return result
-  }
+    },
+    { warn, label: 'onInputDblClick rename' }
+  )
 
-  const originalOnDblClick = node.onDblClick
-  node.onDblClick = function (e, pos, canvas) {
-    let result
-    if (typeof originalOnDblClick === 'function') {
-      result = originalOnDblClick.apply(this, arguments)
-    }
-    try {
+  chainHook(
+    node,
+    'onDblClick',
+    function (e, pos, canvas) {
       if (Array.isArray(pos) && pos[1] >= 0) {
         const entry = rowAtLocalY(this, pos[1])
         if (entry) promptForLabel(this, entry.input, canvas || activeCanvas(), e)
       }
-    } catch (error) {
-      warn('onDblClick rename failed', error)
-    }
-    return result
-  }
+    },
+    { warn, label: 'onDblClick rename' }
+  )
 }
 
 // ---------------------------------------------------------------------------
@@ -1775,13 +1767,14 @@ function installTogglesDimSync(node) {
   const widget = getTogglesWidget(node)
   if (!widget || widget.__epsSwitcherDimSyncInstalled) return
   widget.__epsSwitcherDimSyncInstalled = true
-  const originalCallback = widget.callback
-  widget.callback = function (...args) {
-    const result =
-      typeof originalCallback === 'function' ? originalCallback.apply(this, args) : undefined
-    syncAllOff(node, 'toggles callback')
-    return result
-  }
+  chainHook(
+    widget,
+    'callback',
+    function () {
+      syncAllOff(node, 'toggles callback')
+    },
+    { warn, label: 'toggles callback' }
+  )
 }
 
 /** litegraph's `NodeSlotType.OUTPUT` (`onConnectionsChange`'s first arg). */
@@ -1799,22 +1792,24 @@ const LINK_SLOT_OUTPUT = 2
 function installLinkDimConnectionsSync(node) {
   if (node.__epsSwitcherLinkDimConnectionsWrapped) return
   node.__epsSwitcherLinkDimConnectionsWrapped = true
-  const original = node.onConnectionsChange
-  node.onConnectionsChange = function (...args) {
-    const result = typeof original === 'function' ? original.apply(this, args) : undefined
-    const [type, , isConnected] = args
-    if (type === LINK_SLOT_OUTPUT && isConnected) {
-      // An OUTPUT link landing: the user just dragged it here. Never pull it
-      // out from under the cursor -- only dim it (the backend blocker makes
-      // it inert). It becomes an unplug candidate on the next reconcile
-      // (a toggle, an input-side wiring change, or a settled load / undo /
-      // redo / tab-switch / paste pass), not now.
-      if (!this.__epsSwitcherRewiring) syncLinkDimming(this, 'output link landed')
-    } else {
-      syncAllOff(this, 'onConnectionsChange')
-    }
-    return result
-  }
+  chainHook(
+    node,
+    'onConnectionsChange',
+    function (...args) {
+      const [type, , isConnected] = args
+      if (type === LINK_SLOT_OUTPUT && isConnected) {
+        // An OUTPUT link landing: the user just dragged it here. Never pull it
+        // out from under the cursor -- only dim it (the backend blocker makes
+        // it inert). It becomes an unplug candidate on the next reconcile
+        // (a toggle, an input-side wiring change, or a settled load / undo /
+        // redo / tab-switch / paste pass), not now.
+        if (!this.__epsSwitcherRewiring) syncLinkDimming(this, 'output link landed')
+      } else {
+        syncAllOff(this, 'onConnectionsChange')
+      }
+    },
+    { warn, label: 'link dim sync (onConnectionsChange)' }
+  )
 }
 
 /**
@@ -1826,16 +1821,18 @@ function installLinkDimConnectionsSync(node) {
 function installLinkDimConfigureSync(node) {
   if (node.__epsSwitcherLinkDimConfigureWrapped) return
   node.__epsSwitcherLinkDimConfigureWrapped = true
-  const original = node.onConfigure
-  node.onConfigure = function (...args) {
-    const result = typeof original === 'function' ? original.apply(this, args) : undefined
-    // A copy owns no memory; anything else keeps what is still its own,
-    // re-stamped for the graph it now sits in (`isForeignStamp`).
-    writeUnplugMemory(this, configuredAsCopy(args[0]) ? {} : readUnplugMemory(this))
-    syncLinkDimming(this, 'onConfigure')
-    scheduleUnplugReconcile(this) // unplug/replug once the restore settles
-    return result
-  }
+  chainHook(
+    node,
+    'onConfigure',
+    function (...args) {
+      // A copy owns no memory; anything else keeps what is still its own,
+      // re-stamped for the graph it now sits in (`isForeignStamp`).
+      writeUnplugMemory(this, configuredAsCopy(args[0]) ? {} : readUnplugMemory(this))
+      syncLinkDimming(this, 'onConfigure')
+      scheduleUnplugReconcile(this) // unplug/replug once the restore settles
+    },
+    { warn, label: 'link dim sync (onConfigure)' }
+  )
 }
 
 /**
@@ -1846,15 +1843,14 @@ function installLinkDimConfigureSync(node) {
 function installLinkDimCleanup(node) {
   if (node.__epsSwitcherLinkDimCleanupWrapped) return
   node.__epsSwitcherLinkDimCleanupWrapped = true
-  const original = node.onRemoved
-  node.onRemoved = function (...args) {
-    try {
+  chainHook(
+    node,
+    'onRemoved',
+    function () {
       reconcileLinkDimming(this, { forceUndim: true })
-    } catch (error) {
-      warn('link dim cleanup (onRemoved) failed', error)
-    }
-    return typeof original === 'function' ? original.apply(this, args) : undefined
-  }
+    },
+    { warn, label: 'link dim cleanup (onRemoved)', order: 'before' }
+  )
 }
 
 // ---------------------------------------------------------------------------

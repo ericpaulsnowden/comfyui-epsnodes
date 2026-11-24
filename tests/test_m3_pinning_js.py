@@ -744,8 +744,8 @@ class TestNotebookPinWiring:
         assert "applyPinnedView(state)" in sync
         # the widget callback is CHAINED, never replaced
         wire = _function_body(notebook_source, "wirePinnedWidget(state)")
-        assert "const original = widget.callback" in wire
-        assert "original.apply(this, [value, ...rest])" in wire
+        assert "chainHook(widget, 'callback'" in wire
+        assert "widget.callback =" not in wire
         assert "syncPinnedFromWidget(state)" in wire
 
     def test_badge_row_and_unpin_button(self, notebook_source: str) -> None:
@@ -1012,11 +1012,12 @@ class TestSetsPinWiring:
         self, sets_source: str
     ) -> None:
         wire = _function_body(sets_source, "wirePinConfigureSync(node, state)")
-        assert "const original = node.onConfigure" in wire
-        assert "original.apply(this, args)" in wire
+        assert "chainHook(" in wire and "'onConfigure'" in wire
+        assert "node.onConfigure =" not in wire
         assert wire.index("healLegacyWidgetShift(node)") < wire.index("syncPinFromWidget(state)")
         cb = _function_body(sets_source, "wirePinnedStateWidget(node, state)")
-        assert "const original = widget.callback" in cb and "syncPinFromWidget(state)" in cb
+        assert "chainHook(widget, 'callback'" in cb and "syncPinFromWidget(state)" in cb
+        assert "widget.callback =" not in cb
 
     def test_legacy_migration_writes_through_the_widget_idiom_and_logs_once(
         self, sets_source: str

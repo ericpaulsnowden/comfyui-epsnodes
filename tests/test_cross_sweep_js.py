@@ -2796,29 +2796,28 @@ def test_all_three_refresh_triggers_share_the_wrapped_throttle(source: str) -> N
     recompute rides THREE chained triggers -- the onDrawForeground wrap as
     the litegraph catch-all, plus onConnectionsChange and the two mode
     widgets' callbacks, which exist in BOTH renderers -- all through the
-    SAME wrapWithRecompute -> maybeRecompute throttle. No polling loop."""
+    SAME chainHook -> maybeRecompute throttle. No polling loop."""
     body = _function_body(source, "attach(node)")
-    assert "node.onDrawForeground = wrapWithRecompute(node.onDrawForeground, state)" in body
-    assert (
-        "node.onConnectionsChange = wrapWithRecompute(node.onConnectionsChange, state)" in body
-    )
+    assert "const onTrigger = () => maybeRecompute(state)" in body
+    assert "chainHook(node, 'onDrawForeground', onTrigger, hookOptions)" in body
+    assert "chainHook(node, 'onConnectionsChange', onTrigger, hookOptions)" in body
     # v0.67.0: solo_run joined the widget-callback triggers (a token
     # paste changes the count with no rewire, same as a mode flip).
     assert "for (const name of ['pair_mode', 'sweep_mode', 'solo_run'])" in body
-    assert "widget.callback = wrapWithRecompute(widget.callback, state)" in body
+    assert "chainHook(widget, 'callback', onTrigger, hookOptions)" in body
 
 
 def test_trigger_wrapper_chains_originals_and_never_throws(source: str) -> None:
-    """wrapWithRecompute must WRAP, never replace: the original hook or
-    widget callback (possibly undefined) runs first with its own
-    this/arguments, its return value passes through, and the recompute is
-    try/caught so it can never throw out of a draw or a callback."""
-    helper = _function_body(source, "wrapWithRecompute(original, state)")
-    assert "original.apply(this, arguments)" in helper
-    assert "maybeRecompute(state)" in helper
-    assert "try {" in helper
-    assert "} catch (error) {" in helper
-    assert "return result" in helper
+    """The triggers must WRAP, never replace: the original hook or widget
+    callback (possibly undefined) runs first with its own this/arguments, its
+    return value passes through, and the recompute is caught so it can never
+    throw out of a draw or a callback. That contract is chainHook's
+    (tests/test_chain_hook_js.py); here: every trigger goes through it, the
+    old private wrapper is gone, and the warn names the recompute."""
+    assert "wrapWithRecompute" not in source
+    body = _function_body(source, "attach(node)")
+    assert "label: 'run-count recompute'" in body
+    assert "warn," in body
 
 
 def test_throttle_constant_and_gate(source: str) -> None:
@@ -2979,7 +2978,7 @@ def test_run_count_refreshes_on_graph_changes_not_only_draws(source: str) -> Non
     watch = _function_body(source, "installGraphNodeWatch(graph)")
     assert "graph.__epsRcNodeWatch" in watch, "per-graph record of the installed wrappers"
     assert "'onNodeAdded', 'onNodeRemoved', 'onAfterChange'" in watch
-    assert "original?.apply(this, args)" in watch, "chained, never replaced"
+    assert "chainHook(graph, hook," in watch, "chained, never replaced"
     # State hangs off the node, so a deleted node takes its state with it.
     assert "node.__epsRcState = state" in source
     assert "installGraphNodeWatch(node.graph || app.graph)" in source
@@ -2994,6 +2993,7 @@ def test_run_count_refreshes_on_graph_changes_not_only_draws(source: str) -> Non
     assert "graph.__epsRcNodeWatch = true" not in source, "the one-shot flag is gone"
     assert "if (current && current === stored[hook]) continue" in watch
     assert "if (current && current.__epsRcNodeWatch) {" in watch
+    assert "const wrapper = graph[hook]" in watch
     assert "wrapper.__epsRcNodeWatch = true" in watch
     assert "scheduleGraphRecompute(graph)" in watch
     assert "scheduleGraphRecompute(this)" not in watch

@@ -133,7 +133,7 @@ class TestMirrorsComboIsPureV0681:
         watch = _function_body(source, "installMirrorsGraphWatch()")
         assert "api.walkGraphs(app.graph)" in watch
         assert "graph.__epsSetsMirrorsWatch" in watch  # install once per graph
-        assert "original?.apply(this, args)" in watch  # chained, never replaced
+        assert "chainHook(graph, 'onNodeRemoved'" in watch  # chained, never replaced
         assert "scheduleMirrorsHeal()" in watch
         # one deferred pass per created node (configure() restores the tag
         # AFTER nodeCreated, so the tick lands after the whole load)

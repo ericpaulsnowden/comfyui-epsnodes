@@ -1,9 +1,9 @@
 # ROADMAP — shared panel code
 
 **Status:** in progress. M1 (`el`, `installMinWidth`), M1b (`nodeClassOf`,
-`findWidget`, `linkById`, `LINK_COLOR_OWNER_KEY`), M3 (`loggerFor`,
-`showToast`) and M4 (the group helpers, `group_helpers.js`) are shipped and
-enforced by tests; M2, M5 and M6 are open. The plan was first written on
+`findWidget`, `linkById`, `LINK_COLOR_OWNER_KEY`), M2 (`chainHook`), M3
+(`loggerFor`, `showToast`) and M4 (the group helpers, `group_helpers.js`) are
+shipped and enforced by tests; M5 and M6 are open. The plan was first written on
 2026-09-08.
 **Census:** performed 2026-09-08 against v0.91.1. Every number below was
 counted from the files, not estimated.
@@ -187,9 +187,74 @@ once. Four more files import `panel_helpers.js` (`save_image.js`,
 imports `owned_link_colour.js`, so the served layouts of five test files copy
 those modules too.
 
-### M2 — `chainHook()`: the biggest number in the census
+### M2 — `chainHook()`: the biggest number in the census — **SHIPPED**
 
-The pack hand-rolls "capture the original hook, wrap it, try/catch both
+*Shipped (branch `refactor/shared-chain-hook`). Re-census before touching
+anything: the 63 below had grown to 75 `.onX = function` assignments, and the
+same scaffolding also existed for graph hooks written with a computed key
+(`graph[hook]`, 3 sites), widget `callback` wraps (about 16),
+`getExtraMenuOptions` (3) and `cross_sweep.js`'s own `wrapWithRecompute`, so
+the unit counted is "capture the original, assign a wrapper, call through",
+whatever it hangs on. About 98 such wrappers existed; the wrappers were
+never one shape (the original was swallowed, propagated, or let `ours` run
+anyway; `ours` was caught, partly caught or not at all; the cleanups ran
+before the original), which is why the helper has options and why a
+dozen files disagreed about what a throwing hook does.*
+
+*The helper is `chainHook(target, hook, ours, { warn, label, order,
+onOriginalThrow, veto })` in `web/lora_library/panel_helpers.js` (FORMAT.md
+§7.5, "chain, never replace"). The original is captured at install time and
+always called with the same `this` and arguments, and ITS result is what the
+hook returns. `ours` is caught and reported as `warn(`${label} failed`,
+error)`, so a throwing `ours` never breaks the node or stops the original.
+Options, each proven by the census: `order: 'before'` (ours first: 13 cleanup,
+draw-time and veto sites); `onOriginalThrow` = `'propagate'` (default, 47
+sites), `'still-run'` (a try/finally: ours runs, the original's error is
+rethrown; 15 sites, mostly Resolution), `'log'` (the original's error is
+reported as `original <hook> threw` and swallowed, as those sites already did;
+19 sites); `veto` (ours may answer for the hook, with `order: 'before'`:
+`onConnectInput` / `onConnectOutput`, 3 sites). Install-once guards stay at
+the call sites (independent chains on one hook are normal, and the guard flag
+names are pinned by tests).*
+
+*Final counts: 94 `chainHook` call sites in 16 panel files plus
+`panel_helpers.js` (some loop over 2-3 hooks), replacing the hand-written wrappers; 8 sites left hand-written, each
+listed with its reason in `HAND_CHAIN_ALLOW` in `tests/test_chain_hook_js.py`:
+the two row-toggle `onMouseDown` wraps (they return `false`, not
+`undefined`, with no original), Resolution's preset-combo `onClick`
+replacement and its v0.61 `onConfigure` (reads `info` before the original
+runs), Image Grid's context-menu item callback wrap, the two drag-and-drop
+installers (no original exists), and the Notebook file widget's remote-viewer
+revert (answers instead of the original). `installMinWidth` now uses
+`chainHook` too.*
+
+*"Now caught" (an uncaught `ours` used to propagate; it is now logged and the
+original / node carry on): Bypass's connection settle, EPS Switcher's gate
+and dim hooks, Distributor / Number Controller type vetoes (a throwing veto now fails
+OPEN to the original), Number Controller and Checkpoint Switcher connection
+hooks, Frame Saver's configure resync scheduling, Resolution's `onResize`,
+`onConfigure` grid reconcile, property-visibility `onPropertyChanged`, image
+converge and its seven widget callbacks, Image Grid's configure refresh and
+three `getExtraMenuOptions` items, Sets' `onPropertyChanged` and graph
+`onNodeRemoved`, the Notebook's two property hooks, the Prompt Builder's
+`onAdded` and property hook, the Controller / Picker graph watches, and
+`installMinWidth`'s floor. Two message changes: the "original node onRemoved
+threw" variants are now `original onRemoved threw` (and likewise for
+`onConfigure` / `onAdded` / `onConnectionsChange`), and under `'still-run'`
+the original's error now wins over a second error from `ours`.*
+
+*Enforcement: `tests/test_chain_hook_js.py` drives the helper under Node
+(same `this` and arguments, original's result, no original, both orders,
+`ours` throwing, the original throwing in each mode, veto, a second chain on
+the same hook) and fails on any `.onX =` assignment or captured original
+outside the allow-list (and on a stale allow-list entry). Test side: three
+modules gained their first import of `panel_helpers.js` (`resolution.js`,
+`sets.js`, `path_heal.js`), so the eight served-layout test files that copy
+them copy it too, and the source pins on the old wrapper text in 22 test
+files were rewritten to the `chainHook` call (their behaviour now has one
+test home).*
+
+Original plan text, kept for the record: the pack hand-rolls "capture the original hook, wrap it, try/catch both
 halves, call through, return the original's result" **63 times across 14
 files** — for `onConfigure`, `onResize`, `onPropertyChanged`, `onRemoved`,
 `onConnectionsChange`, `onDrawForeground`, `onDblClick`, `onSerialize`,
