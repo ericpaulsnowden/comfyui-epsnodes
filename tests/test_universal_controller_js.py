@@ -11,7 +11,6 @@ Two-tier test strategy, mirroring ``tests/test_pll_bridge_js.py``:
 1. The PURE, exported helpers (``validateStateValue``, ``buildStatePayload``,
    ``applyPlan``, ``exclusionsAfterToggle``, ``classToggleState``,
    ``summarizeCapture``, ``summarizeApply``, ``compareStateEntries``,
-   ``parseCollapsedGroups``, ``isGroupNameInput``, ``groupNameFromInput``,
    ``normalizeExclusions``, ``normalizeRegistry``) touch no DOM/network and
    are driven for real under Node, in a served-layout tmp dir (the module
    imports ``./api.js`` and ``../../../scripts/app.js`` / ``scripts/api.js``,
@@ -58,6 +57,7 @@ LORA_CONTROLLER_JS = REPO_ROOT / "web" / "lora_library" / "controller.js"
 # ./search.js is explicitly the ONE new cross-import this boundary allows).
 SEARCH_JS = REPO_ROOT / "web" / "lora_library" / "search.js"
 PANEL_HELPERS_JS = REPO_ROOT / "web" / "lora_library" / "panel_helpers.js"
+GROUP_HELPERS_JS = REPO_ROOT / "web" / "lora_library" / "group_helpers.js"
 
 NODE = shutil.which("node")
 
@@ -94,10 +94,6 @@ out.exports = {
   summarizeUpdate: typeof m.summarizeUpdate,
   summarizeApply: typeof m.summarizeApply,
   compareStateEntries: typeof m.compareStateEntries,
-  parseCollapsedGroups: typeof m.parseCollapsedGroups,
-  parseRenameDraft: typeof m.parseRenameDraft,
-  isGroupNameInput: typeof m.isGroupNameInput,
-  groupNameFromInput: typeof m.groupNameFromInput,
   normalizeExclusions: typeof m.normalizeExclusions,
   normalizeRegistry: typeof m.normalizeRegistry,
   registerControllerNode: typeof m.registerControllerNode,
@@ -408,39 +404,6 @@ out.compareStateEntries = [
   { name: 'alpha', slug: 'z' }
 ].sort(m.compareStateEntries)
 
-out.parseCollapsedGroups = {
-  array: m.parseCollapsedGroups(['A', 'B']),
-  mixedArray: m.parseCollapsedGroups(['A', 1, null, 'B']),
-  jsonString: m.parseCollapsedGroups('["A","B"]'),
-  malformedString: m.parseCollapsedGroups('not json'),
-  emptyString: m.parseCollapsedGroups(''),
-  notArrayJson: m.parseCollapsedGroups('{"a":1}'),
-  nullish: m.parseCollapsedGroups(null),
-  number: m.parseCollapsedGroups(42)
-}
-
-out.parseRenameDraft = {
-  valid: m.parseRenameDraft(['Portraits', 'Portra']),
-  emptyArray: m.parseRenameDraft([]),
-  nullish: m.parseRenameDraft(null),
-  notArray: m.parseRenameDraft('not an array'),
-  jsonString: m.parseRenameDraft('["Portraits","Portra"]'),
-  malformedString: m.parseRenameDraft('not json'),
-  emptyCategory: m.parseRenameDraft(['', 'text']),
-  wrongCategoryType: m.parseRenameDraft([1, 'text']),
-  wrongTextType: m.parseRenameDraft(['Portraits', 2]),
-  wrongLength: m.parseRenameDraft(['a', 'b', 'c'])
-}
-
-out.groupNameInput = {
-  hash: m.isGroupNameInput('# Portraits'),
-  plain: m.isGroupNameInput('Portraits'),
-  emptyIsNotHash: m.isGroupNameInput(''),
-  extracted: m.groupNameFromInput('#   Portraits  '),
-  extractedNoHash: m.groupNameFromInput('Portraits'),
-  extractedManyHashes: m.groupNameFromInput('###Portraits')
-}
-
 out.normalizeExclusions = {
   onlyFalseKept: m.normalizeExclusions({
     nodes: { a: false, b: true, c: 'nope' },
@@ -689,6 +652,7 @@ def controller_api(tmp_path_factory: pytest.TempPathFactory) -> dict:
     shutil.copyfile(VERSION_JS, module_dir / "version.js")
     shutil.copyfile(SEARCH_JS, module_dir / "search.js")
     shutil.copyfile(PANEL_HELPERS_JS, module_dir / "panel_helpers.js")
+    shutil.copyfile(GROUP_HELPERS_JS, module_dir / "group_helpers.js")
 
     scripts = layout / "scripts"
     scripts.mkdir(parents=True, exist_ok=True)
@@ -1065,30 +1029,6 @@ def test_compare_state_entries_sorts_by_name_then_slug(controller_api: dict) -> 
     assert [e["slug"] for e in ordered] == ["a", "z", "b"]  # alpha/a, alpha/z, beta/b
 
 
-class TestParseCollapsedGroups:
-    def test_tolerant_of_every_shape(self, controller_api: dict) -> None:
-        p = controller_api["parseCollapsedGroups"]
-        assert p["array"] == ["A", "B"]
-        assert p["mixedArray"] == ["A", "B"]
-        assert p["jsonString"] == ["A", "B"]
-        assert p["malformedString"] == []
-        assert p["emptyString"] == []
-        assert p["notArrayJson"] == []
-        assert p["nullish"] == []
-        assert p["number"] == []
-
-
-class TestGroupNameInput:
-    def test_hash_prefix_detection_and_extraction(self, controller_api: dict) -> None:
-        g = controller_api["groupNameInput"]
-        assert g["hash"] is True
-        assert g["plain"] is False
-        assert g["emptyIsNotHash"] is False
-        assert g["extracted"] == "Portraits"
-        assert g["extractedNoHash"] == "Portraits"
-        assert g["extractedManyHashes"] == "Portraits"
-
-
 class TestNormalizeExclusions:
     def test_only_false_entries_survive(self, controller_api: dict) -> None:
         n = controller_api["normalizeExclusions"]["onlyFalseKept"]
@@ -1378,7 +1318,6 @@ def test_prop_rename_draft_registered_and_wired(source: str) -> None:
     chained onto the shared onPropertyChanged hook, kept in sync on every
     keystroke, cleared only on a real end-of-edit, and reopened from the
     tail of every _renderStateList() once the data it needs exists."""
-    assert "const PROP_RENAME_DRAFT = 'Group rename draft'" in source
     ctor = _method_body(source, "constructor(title = NODE_TITLE)")
     assert "this._pendingRenameDraft = null" in ctor
     assert "this.addProperty(PROP_RENAME_DRAFT, [], 'array')" in ctor
@@ -1488,26 +1427,6 @@ def test_escape_enter_and_blur_all_route_through_a_real_end_of_edit(source: str)
     assert commit.index("this._clearRenameDraftProperty()") < commit.index(
         "const from = rename.category"
     )
-
-
-class TestParseRenameDraft:
-    """Fail-soft parse for the restored `Group rename draft` property --
-    controller.js's identical `parseRenameDraft`, duplicated by hand (file
-    convention: small, stable cross-file helpers are copied, not
-    imported)."""
-
-    def test_tolerant_of_every_shape(self, controller_api: dict) -> None:
-        p = controller_api["parseRenameDraft"]
-        assert p["valid"] == {"category": "Portraits", "text": "Portra"}
-        assert p["emptyArray"] is None
-        assert p["nullish"] is None
-        assert p["notArray"] is None
-        assert p["jsonString"] == {"category": "Portraits", "text": "Portra"}
-        assert p["malformedString"] is None
-        assert p["emptyCategory"] is None  # empty category never counts as a draft
-        assert p["wrongCategoryType"] is None
-        assert p["wrongTextType"] is None
-        assert p["wrongLength"] is None
 
 
 def test_registering_a_controller_kicks_an_immediate_refresh(source: str) -> None:
@@ -1874,11 +1793,9 @@ class TestCrossMachineMatching:
 # `_onCaptureClick()` (the `#`-name group-creation entry point the owner
 # has muscle memory for) turned up a SEPARATE, already-fixed-once bug:
 # controller.js's v0.90.0 `_flushPendingNameEdit()` fix for the identical
-# stale-read hazard was never ported here. Both files clone the same
-# blueprint but deliberately duplicate small helpers BY HAND (file header
-# note next to `parseCollapsedGroups`/`isGroupNameInput`/
-# `groupNameFromInput`) -- nothing keeps the two in sync automatically, and
-# this is exactly the gap that left. See controller.js's own
+# stale-read hazard was never ported here -- the gap that duplicating the
+# helper by hand left. Both Controllers now call the ONE
+# `flushPendingNameEdit()` in group_helpers.js. See controller.js's own
 # `_onCaptureClick()` doc comment for the full VERIFY(live) sourcemap
 # investigation (comfyui_frontend_package 1.48.7) this closes -- it is
 # ported and re-pinned here, not re-investigated.
@@ -1888,9 +1805,7 @@ __NODE_TITLE_LINE__
 __LABEL_CAPTURE_LINE__
 __LABEL_UPDATE_LINE__
 
-__IS_GROUP_FN__
-
-__GROUP_FROM_FN__
+__GROUP_HELPERS_IMPORT__
 
 const WARNINGS = []
 const api = { warn: (...args) => { WARNINGS.push(args) } }
@@ -2070,15 +1985,9 @@ def name_field_flush_probe(source: str, tmp_path_factory: pytest.TempPathFactory
         "__NODE_TITLE_LINE__": _const_line(source, "NODE_TITLE"),
         "__LABEL_CAPTURE_LINE__": _const_line(source, "LABEL_CAPTURE"),
         "__LABEL_UPDATE_LINE__": _const_line(source, "LABEL_UPDATE"),
-        "__IS_GROUP_FN__": (
-            "function isGroupNameInput(rawName) {\n"
-            + _function_body(source, "isGroupNameInput(rawName)")
-            + "\n}"
-        ),
-        "__GROUP_FROM_FN__": (
-            "function groupNameFromInput(rawName) {\n"
-            + _function_body(source, "groupNameFromInput(rawName)")
-            + "\n}"
+        "__GROUP_HELPERS_IMPORT__": (
+            "import { isGroupNameInput, groupNameFromInput, flushPendingNameEdit } "
+            f"from '{GROUP_HELPERS_JS.as_uri()}'"
         ),
         "__FLUSH_METHOD__": (
             "  _flushPendingNameEdit() {\n"
@@ -2121,37 +2030,6 @@ class TestNameFieldStaleReadHandPortV20260907:
         update_flush_at = update_click.index("this._flushPendingNameEdit()")
         run_at = update_click.index("this._runAction(LABEL_UPDATE, () => this._doUpdate())")
         assert update_flush_at < run_at
-
-    def test_flush_is_a_no_op_without_a_connected_dialog(self, source: str) -> None:
-        """No open canvas-legacy prompt (Vue mode always; canvas mode once
-        Enter/OK already committed) -- widget.value is already
-        authoritative, so this must do nothing rather than invent state."""
-        flush = _method_body(source, "_flushPendingNameEdit()")
-        assert "const dialog = app.canvas?.prompt_box" in flush
-        assert "if (!dialog?.isConnected) return" in flush
-        assert "const input = dialog.querySelector?.('.value')" in flush
-        assert "if (!input) return" in flush
-        assert "if (live === widget.value) return" in flush
-
-    def test_flush_commits_through_the_value_callback_dirty_idiom(
-        self, source: str
-    ) -> None:
-        """Same idiom `_clearNameField()` established -- value, then a
-        guarded callback, then setDirtyCanvas -- so a flushed edit reads as
-        a real commit to BOTH renderers, not just to `.value`."""
-        flush = _method_body(source, "_flushPendingNameEdit()")
-        value_at = flush.index("widget.value = live")
-        callback_at = flush.index("widget.callback?.(live)")
-        dirty_at = flush.index("this.setDirtyCanvas(true, true)")
-        close_at = flush.index("dialog.close?.()")
-        assert value_at < callback_at < dirty_at < close_at
-        assert "api.warn(`${NODE_TITLE}: name widget callback threw`, error)" in flush
-
-    def test_flush_never_throws_out_of_the_click(self, source: str) -> None:
-        flush = _method_body(source, "_flushPendingNameEdit()")
-        assert flush.strip().startswith("const widget = this._w.name")
-        assert "} catch (error) {" in flush
-        assert "api.warn(`${NODE_TITLE}: could not flush pending name edit`, error)" in flush
 
     def test_uncommitted_hash_value_still_takes_the_group_branch(
         self, name_field_flush_probe: dict

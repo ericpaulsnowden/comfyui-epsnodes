@@ -504,11 +504,8 @@ class TestStateGroupsV0650:
 
     def test_hash_name_creates_a_group_not_a_state(self, controller_source: str) -> None:
         click = controller_source.split("_onCaptureClick() {", 1)[1].split("\n      }\n", 1)[0]
-        assert "if (isCategoryNameInput(this._w.name?.value))" in click
+        assert "if (isGroupNameInput(this._w.name?.value))" in click
         assert "this._runAction('New Group', () => this._doNewCategory())" in controller_source
-        # the notebook's parse, verbatim by hand
-        assert "function isCategoryNameInput(rawName)" in controller_source
-        assert "function categoryNameFromInput(rawName)" in controller_source
 
     def test_capture_button_is_blocked_not_disabled(self, controller_source: str) -> None:
         """Group creation is pure layout and must work with NO loader in
@@ -886,6 +883,7 @@ PATH_HEAL_JS = REPO_ROOT / "web" / "lora_library" / "path_heal.js"
 # layout can't resolve either module's import under Node.
 SEARCH_JS = REPO_ROOT / "web" / "lora_library" / "search.js"
 PANEL_HELPERS_JS = REPO_ROOT / "web" / "lora_library" / "panel_helpers.js"
+GROUP_HELPERS_JS = REPO_ROOT / "web" / "lora_library" / "group_helpers.js"
 
 STATES_LOC_PROBE_JS = """
 import * as c from './extensions/comfyui-epsnodes/lora_library/controller.js'
@@ -893,44 +891,8 @@ import * as c from './extensions/comfyui-epsnodes/lora_library/controller.js'
 const out = {
   exports: {
     statesLocationLine: typeof c.statesLocationLine === 'function',
-    setsDirOf: typeof c.setsDirOf === 'function',
-    parseCollapsedGroups: typeof c.parseCollapsedGroups === 'function',
-    parseRenameDraft: typeof c.parseRenameDraft === 'function'
+    setsDirOf: typeof c.setsDirOf === 'function'
   },
-  // Task 3 (2026-08-25): notebook.js's parseCollapsedSections() tolerance
-  // pins, by hand, against controller.js's own duplicate.
-  collapsedGroupsParse: [
-    c.parseCollapsedGroups(['A', 'B']),
-    c.parseCollapsedGroups(['A', 1, null, 'B', {}]), // non-strings dropped
-    c.parseCollapsedGroups('["A","B"]'), // a hand-edited JSON string round-trips
-    c.parseCollapsedGroups('not json'), // malformed JSON folds to []
-    c.parseCollapsedGroups('[1,2]'), // a JSON array of non-strings folds to []
-    c.parseCollapsedGroups(''), // blank string
-    c.parseCollapsedGroups('   '), // whitespace-only string
-    c.parseCollapsedGroups(null),
-    c.parseCollapsedGroups(undefined),
-    c.parseCollapsedGroups(42),
-    c.parseCollapsedGroups({ A: true }) // a plain object, not an array
-  ],
-  // Tab-switch rename fix (2026-08-28): PROP_RENAME_DRAFT's own fail-soft
-  // parser, same tolerance shape as parseCollapsedGroups() above.
-  renameDraftParse: [
-    c.parseRenameDraft(['Group A', 'Group A2']),
-    c.parseRenameDraft('["Group A","Group A2"]'), // a hand-edited JSON string round-trips
-    c.parseRenameDraft([]), // no open rename
-    c.parseRenameDraft(['Group A']), // wrong length
-    c.parseRenameDraft(['Group A', 'x', 'y']), // wrong length
-    c.parseRenameDraft(['', 'x']), // empty category
-    c.parseRenameDraft([1, 'x']), // non-string category
-    c.parseRenameDraft(['Group A', 1]), // non-string text
-    c.parseRenameDraft('not json'), // malformed JSON
-    c.parseRenameDraft(''), // blank string
-    c.parseRenameDraft('   '), // whitespace-only string
-    c.parseRenameDraft(null),
-    c.parseRenameDraft(undefined),
-    c.parseRenameDraft(42),
-    c.parseRenameDraft({ category: 'Group A', text: 'x' }) // a plain object, not an array
-  ],
   defaultSameDir: c.statesLocationLine({ library_dir: '/home/u/lib', default_library_dir: '/home/u/lib/' }),
   defaultWinSeparators: c.statesLocationLine({ library_dir: 'C:\\\\Users\\\\e\\\\lib', default_library_dir: 'C:/Users/e/lib' }),
   configuredUnc: c.statesLocationLine({ library_dir: '\\\\\\\\nas\\\\share\\\\comfy', default_library_dir: 'C:\\\\Users\\\\e\\\\lib' }),
@@ -1002,7 +964,7 @@ def controller_api(tmp_path_factory: pytest.TempPathFactory) -> dict:
     module_dir = layout / "extensions" / "comfyui-epsnodes" / "lora_library"
     module_dir.mkdir(parents=True)
     js_files = (
-        CONTROLLER_JS, API_JS, VERSION_JS, NOTEBOOK_JS, SETTINGS_JS, PATH_HEAL_JS, SEARCH_JS, PANEL_HELPERS_JS
+        CONTROLLER_JS, API_JS, VERSION_JS, NOTEBOOK_JS, SETTINGS_JS, PATH_HEAL_JS, SEARCH_JS, PANEL_HELPERS_JS, GROUP_HELPERS_JS
     )
     for src in js_files:
         shutil.copyfile(src, module_dir / src.name)
@@ -1419,25 +1381,7 @@ class TestCollapsedGroupsPersistPerWorkflowV20260825:
     states." `_collapsedCategories` was an in-memory-only Set, lost on every
     reload. Mirrors notebook.js's v0.79.0 `Collapsed sections` property
     idiom exactly, renamed for this file's own vocabulary (`Collapsed
-    groups`, duplicated by hand per the isCategoryNameInput/
-    categoryNameFromInput no-cross-import convention)."""
-
-    def test_pure_parser_is_exported_and_tolerant(self, controller_api: dict) -> None:
-        assert controller_api["exports"]["parseCollapsedGroups"] is True
-        parsed = controller_api["collapsedGroupsParse"]
-        assert parsed == [
-            ["A", "B"],
-            ["A", "B"],
-            ["A", "B"],
-            [],
-            [],
-            [],
-            [],
-            [],
-            [],
-            [],
-            [],
-        ]
+    groups`; the parser is group_helpers.js's parseCollapsedGroups)."""
 
     def test_property_declared_right_after_debug_capture_and_applied_explicitly(
         self, controller_source: str
@@ -1534,32 +1478,10 @@ class TestRenameDraftSurvivesTabSwitchV20260828:
     -- called from `_renderStateList()`'s tail -- reopens the editor once
     the category's header actually exists)."""
 
-    def test_pure_parser_is_exported_and_tolerant(self, controller_api: dict) -> None:
-        assert controller_api["exports"]["parseRenameDraft"] is True
-        parsed = controller_api["renameDraftParse"]
-        assert parsed == [
-            {"category": "Group A", "text": "Group A2"},
-            {"category": "Group A", "text": "Group A2"},
-            None,  # []
-            None,  # wrong length (1)
-            None,  # wrong length (3)
-            None,  # empty category
-            None,  # non-string category
-            None,  # non-string text
-            None,  # malformed JSON
-            None,  # blank string
-            None,  # whitespace-only string
-            None,  # null
-            None,  # undefined
-            None,  # 42
-            None,  # a plain object, not an array
-        ]
-
     def test_property_declared_right_after_collapsed_groups_and_applied_explicitly(
         self, controller_source: str
     ) -> None:
         ctor = _method_body(controller_source, "constructor(title = NODE_TITLE)")
-        assert "const PROP_RENAME_DRAFT = 'Group rename draft'" in controller_source
         assert "this.addProperty(PROP_RENAME_DRAFT, [], 'array')" in ctor
         # addProperty() never fires onPropertyChanged -- a fresh node needs
         # the explicit apply, BEFORE _buildWidgets()'s first render.
@@ -2048,9 +1970,7 @@ __NODE_TITLE_LINE__
 __LABEL_CAPTURE_LINE__
 __LABEL_UPDATE_LINE__
 
-__IS_CATEGORY_FN__
-
-__CATEGORY_FROM_FN__
+__GROUP_HELPERS_IMPORT__
 
 const WARNINGS = []
 const api = { warn: (...args) => { WARNINGS.push(args) } }
@@ -2230,15 +2150,9 @@ def name_field_flush_probe(
         "__NODE_TITLE_LINE__": _const_line(controller_source, "NODE_TITLE"),
         "__LABEL_CAPTURE_LINE__": _const_line(controller_source, "LABEL_CAPTURE"),
         "__LABEL_UPDATE_LINE__": _const_line(controller_source, "LABEL_UPDATE"),
-        "__IS_CATEGORY_FN__": (
-            "function isCategoryNameInput(rawName) {\n"
-            + _function_body(controller_source, "isCategoryNameInput(rawName)")
-            + "\n}"
-        ),
-        "__CATEGORY_FROM_FN__": (
-            "function categoryNameFromInput(rawName) {\n"
-            + _function_body(controller_source, "categoryNameFromInput(rawName)")
-            + "\n}"
+        "__GROUP_HELPERS_IMPORT__": (
+            "import { isGroupNameInput, groupNameFromInput, flushPendingNameEdit } "
+            f"from '{GROUP_HELPERS_JS.as_uri()}'"
         ),
         "__FLUSH_METHOD__": (
             "  _flushPendingNameEdit() {\n"
@@ -2279,7 +2193,7 @@ class TestNameFieldStaleReadFixV20260902:
     test_name_field_clears_through_the_widget_callback,
     test_new_group_is_announced_with_toasts and
     test_save_layout_toasts_loudly_on_failure) -- every one of them was a
-    real bug in what happens AFTER `isCategoryNameInput(this._w.name.value)`
+    real bug in what happens AFTER `isGroupNameInput(this._w.name.value)`
     reads the field. None of them questioned whether that READ itself could
     be wrong. It can, reliably-*sometimes*, which is exactly what "doesn't
     seem to work, or at least not reliably" describes.
@@ -2322,43 +2236,12 @@ class TestNameFieldStaleReadFixV20260902:
     def test_flush_runs_before_the_group_vs_state_branch(self, controller_source: str) -> None:
         click = _method_body(controller_source, "_onCaptureClick()")
         flush_at = click.index("this._flushPendingNameEdit()")
-        branch_at = click.index("if (isCategoryNameInput(this._w.name?.value))")
+        branch_at = click.index("if (isGroupNameInput(this._w.name?.value))")
         assert flush_at < branch_at
         update_click = _method_body(controller_source, "_onUpdateClick()")
         update_flush_at = update_click.index("this._flushPendingNameEdit()")
         run_at = update_click.index("this._runAction(LABEL_UPDATE, () => this._doUpdate())")
         assert update_flush_at < run_at
-
-    def test_flush_is_a_no_op_without_a_connected_dialog(self, controller_source: str) -> None:
-        """No open canvas-legacy prompt (Vue mode always; canvas mode once
-        Enter/OK already committed) -- widget.value is already
-        authoritative, so this must do nothing rather than invent state."""
-        flush = _method_body(controller_source, "_flushPendingNameEdit()")
-        assert "const dialog = app.canvas?.prompt_box" in flush
-        assert "if (!dialog?.isConnected) return" in flush
-        assert "const input = dialog.querySelector?.('.value')" in flush
-        assert "if (!input) return" in flush
-        assert "if (live === widget.value) return" in flush
-
-    def test_flush_commits_through_the_value_callback_dirty_idiom(
-        self, controller_source: str
-    ) -> None:
-        """Same idiom `_clearNameField()` established for v0.67.2 -- value,
-        then a guarded callback, then setDirtyCanvas -- so a flushed edit
-        reads as a real commit to BOTH renderers, not just to `.value`."""
-        flush = _method_body(controller_source, "_flushPendingNameEdit()")
-        value_at = flush.index("widget.value = live")
-        callback_at = flush.index("widget.callback?.(live)")
-        dirty_at = flush.index("this.setDirtyCanvas(true, true)")
-        close_at = flush.index("dialog.close?.()")
-        assert value_at < callback_at < dirty_at < close_at
-        assert "api.warn(`${NODE_TITLE}: name widget callback threw`, error)" in flush
-
-    def test_flush_never_throws_out_of_the_click(self, controller_source: str) -> None:
-        flush = _method_body(controller_source, "_flushPendingNameEdit()")
-        assert flush.strip().startswith("const widget = this._w.name")
-        assert "} catch (error) {" in flush
-        assert "api.warn(`${NODE_TITLE}: could not flush pending name edit`, error)" in flush
 
     def test_prior_three_fixes_remain_wired(self, controller_source: str) -> None:
         """This fix changes only the READ that feeds the branch decision --

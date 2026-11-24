@@ -26,7 +26,7 @@ pytestmark = pytest.mark.skipif(NODE is None, reason="node (JS runtime) not inst
 @pytest.fixture(scope="module")
 def state(tmp_path_factory: pytest.TempPathFactory) -> dict:
     root = build_layout(
-        tmp_path_factory.mktemp("usc"), lora_library=("universal_controller.js", "search.js")
+        tmp_path_factory.mktemp("usc"), lora_library=("universal_controller.js", "search.js", "group_helpers.js")
     )
     return run_probe(root, PROBE_JS)
 
