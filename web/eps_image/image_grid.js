@@ -4314,7 +4314,9 @@ function installExecutionRefreshListener() {
 // `api.queuePrompt`), never from whichever graph is open when an event
 // arrives. Missing history is never evidence of a skip: a prompt this tab did
 // not queue is ignored, and a websocket gap or a newer `execution_start`
-// discards what was tracked.
+// discards what was tracked. The queue response and the websocket events
+// race: a fast prompt can finish before its response resolves, so a finished
+// prompt whose grids are not known yet is held until they are.
 // ---------------------------------------------------------------------------
 
 /** Pure: ids of `grids` (Map id -> title) announced by core but never run. */
@@ -4348,22 +4350,37 @@ export function gridsOfQueuedPrompt(output, workflow) {
 
 /**
  * The per-prompt bookkeeping, effects injected so it is testable without a
- * browser. State: prompt_id -> { grids: Map|null, announced, ran }; an entry
- * is deleted at that prompt's success/error/interrupt, on any websocket gap,
- * and when a newer prompt starts (no timers).
+ * browser. State: prompt_id -> { grids: Map|null, announced, ran, finished }.
+ * An entry leaves when its verdict is given (success with the grids known,
+ * whichever of the two arrives last), at error/interrupt, on a websocket
+ * gap, when a newer prompt starts, and -- for prompts still waiting -- when
+ * the server reports an empty queue (a cancelled job gets no other event).
+ * A prompt with no grid is never tracked. No timers.
  */
 export function createSkippedRunTracker({ onSkipped }) {
   const prompts = new Map()
   const entry = (promptId) => {
     if (!prompts.has(promptId)) {
-      prompts.set(promptId, { grids: null, announced: new Set(), ran: new Set() })
+      prompts.set(promptId, { grids: null, announced: new Set(), ran: new Set(), finished: false })
     }
     return prompts.get(promptId)
   }
+  const verdict = (promptId, e) => {
+    prompts.delete(promptId)
+    for (const id of skippedGridIds(e.grids, e.announced, e.ran)) onSkipped(id, e.grids.get(id))
+  }
   return {
-    /** The queue response: which ids of this prompt are grids. */
+    /** The queue response: which ids of this prompt are grids. It can
+     * arrive AFTER the prompt finished (see `success`). */
     queued(promptId, grids) {
-      if (promptId) entry(promptId).grids = grids
+      if (!promptId) return
+      if (grids.size === 0) {
+        prompts.delete(promptId)
+        return
+      }
+      const e = entry(promptId)
+      e.grids = grids
+      if (e.finished) verdict(promptId, e)
     },
     /** `progress_state` detail: `{ prompt_id, nodes: { id: { state } } }`. */
     progressState(detail) {
@@ -4381,20 +4398,32 @@ export function createSkippedRunTracker({ onSkipped }) {
       const targets = promptId ? [prompts.get(promptId)] : [...prompts.values()]
       for (const e of targets) e?.ran.add(id)
     },
-    /** The server runs one prompt at a time: an entry with announcements
-     * that is not this one started earlier and its end was missed. Entries
-     * that were only queued (no announcements) are still waiting: kept. */
+    /** The server runs one prompt at a time: another entry that already
+     * ran (announcements, or finished and still unidentified) started
+     * earlier, and its end or its queue response is not coming. Entries
+     * that were only queued are still waiting: kept. */
     started(detail) {
       for (const [id, e] of prompts) {
-        if (id !== detail?.prompt_id && e.announced.size > 0) prompts.delete(id)
+        if (id !== detail?.prompt_id && (e.announced.size > 0 || e.finished)) prompts.delete(id)
       }
     },
-    /** `execution_success` detail: `{ prompt_id }`. */
+    /** `execution_success` detail: `{ prompt_id }`. With the grids not
+     * known yet (the queue response has not resolved) the entry is held as
+     * finished and `queued` gives the verdict. */
     success(detail) {
       const e = prompts.get(detail?.prompt_id)
-      prompts.delete(detail?.prompt_id)
-      if (!e?.grids) return
-      for (const id of skippedGridIds(e.grids, e.announced, e.ran)) onSkipped(id, e.grids.get(id))
+      if (!e) return
+      if (e.grids) verdict(detail.prompt_id, e)
+      else e.finished = true
+    },
+    /** `status` detail: `{ exec_info: { queue_remaining } }`. Nothing
+     * running and nothing pending: a prompt still waiting here was
+     * cancelled (core sends no per-prompt event for that). */
+    status(detail) {
+      if (detail?.exec_info?.queue_remaining !== 0) return
+      for (const [id, e] of prompts) {
+        if (e.announced.size === 0 && !e.finished) prompts.delete(id)
+      }
     },
     /** `execution_error` / `execution_interrupted`: core reports those. */
     discard(detail) {
@@ -4440,6 +4469,7 @@ function installSkippedRunAlert() {
   api.addEventListener('execution_success', (event) => tracker.success(event?.detail))
   api.addEventListener('execution_error', (event) => tracker.discard(event?.detail))
   api.addEventListener('execution_interrupted', (event) => tracker.discard(event?.detail))
+  api.addEventListener('status', (event) => tracker.status(event?.detail))
   api.addEventListener('reconnecting', () => tracker.reset())
   api.addEventListener('reconnected', () => tracker.reset())
 }
