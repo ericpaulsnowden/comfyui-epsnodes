@@ -14,9 +14,6 @@
  * against BOTH files).
  */
 
-import { app } from '../../../scripts/app.js'
-import { walkLiveNodes, comparePathIds } from './api.js'
-
 /** Exact rgthree type/title/comfyClass string — constants.js addRgthree("Power Lora Loader"). */
 export const POWER_LORA_LOADER_TYPE = 'Power Lora Loader (rgthree)'
 /** Per-node property (not per-row) that picks single vs dual strength mode. */
@@ -29,33 +26,7 @@ const MAX_ROW_ADJUST_STEPS = 500
 
 const MSG_NO_RGTHREE = 'Install rgthree-comfy, or use EPS Apply LoRA Set instead'
 const MSG_SHAPE_DRIFT = 'Power Lora Loader internals changed — controller disabled (v-check)'
-const MSG_NO_TARGET_IN_GRAPH =
-  'No Power Lora Loader (rgthree) or EPS LoRA Picker node in this workflow yet — add one, then pick it above.'
 const MSG_NO_TARGET_SELECTED = 'Pick a target loader node above.'
-
-/** Every live `Power Lora Loader (rgthree)` instance in the WHOLE workflow
- * -- subgraphs included (v1.2.0, owner ask 2026-10-03, FORMAT.md §7.10 nested
- * reach: it used to read `app.graph._nodes` only) -- ascending by execution
- * PATH id (§6.13 M2's target-combo order; a nested loader sorts after the
- * root loaders it shares a head with). Returns the node objects.
- * v0.68.1: UNUSED BY THE PICKER, marked for removal. Since v0.64.0
- * picker.js's findSendCandidates() walks the whole workflow (subgraphs
- * included) against its adapter registry and never calls this (the
- * registry's `find` key is gone as of v0.68.1); the only remaining caller
- * is probePll(null)'s null-target leg below, which the picker never reaches
- * either (its probeSendTarget owns the family-agnostic null legs). Kept
- * solely because tests/test_pll_bridge_js.py pins the export surface
- * (`hasFindPllNodes`, `findPllOrder`) and the null legs
- * (`probeNullNoCandidates` / `probeNullWithCandidates`); remove together
- * with those pins. It imports the shared `walkLiveNodes` rather than
- * re-walking by hand (this file's "deliberately duplicated, not imported"
- * rule is about controller.js's owner-validated code, not the traversal). */
-export function findPllNodes() {
-  return walkLiveNodes(app.graph)
-    .filter(({ node }) => node && node.type === POWER_LORA_LOADER_TYPE)
-    .sort((a, b) => comparePathIds(a.pathId, b.pathId))
-    .map(({ node }) => node)
-}
 
 /** rgthree registers the PLL type with LiteGraph iff it's installed and loaded. */
 function isRgthreeInstalled() {
@@ -95,17 +66,7 @@ export function probePll(node) {
   if (!isRgthreeInstalled()) {
     return { ok: false, code: 'no-rgthree', message: MSG_NO_RGTHREE }
   }
-  if (!node) {
-    // v0.68.1: unreachable from the picker (see findPllNodes) -- kept for
-    // the test pins only.
-    const hasAny = findPllNodes().length > 0
-    return {
-      ok: false,
-      code: hasAny ? 'no-target-selected' : 'no-target-in-graph',
-      message: hasAny ? MSG_NO_TARGET_SELECTED : MSG_NO_TARGET_IN_GRAPH
-    }
-  }
-  if (node.type !== POWER_LORA_LOADER_TYPE) {
+  if (!node || node.type !== POWER_LORA_LOADER_TYPE) {
     return { ok: false, code: 'wrong-type', message: MSG_NO_TARGET_SELECTED }
   }
   if (

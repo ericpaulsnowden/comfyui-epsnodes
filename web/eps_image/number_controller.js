@@ -346,7 +346,7 @@
 
 import { app } from '../../../scripts/app.js'
 import { SUBGRAPH_OUTPUT_ID, loggerFor, showToast, subscribeWidgetsChangedExternally } from '../lora_library/api.js'
-import { el, installMinWidth } from '../lora_library/panel_helpers.js'
+import { el, findWidget, installMinWidth, linkById, nodeClassOf } from '../lora_library/panel_helpers.js'
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -854,33 +854,12 @@ export function typeBadgeFor(jsonType) {
 }
 
 // ---------------------------------------------------------------------------
-// Node / widget lookups (distributor.js's/checkpoint_switcher.js's identical
-// helpers, copied verbatim -- each eps_image/*.js module keeps its own
-// copy).
+// Node / widget lookups (`nodeClassOf` / `findWidget` / `linkById` are
+// imported from panel_helpers.js).
 // ---------------------------------------------------------------------------
-
-function nodeClassOf(node) {
-  if (!node) return null
-  if (node.comfyClass) return node.comfyClass
-  if (node.constructor && node.constructor.comfyClass) return node.constructor.comfyClass
-  return null
-}
-
-function findWidget(node, name) {
-  return node.widgets?.find((w) => w && w.name === name)
-}
 
 function outputIndexByName(node, name) {
   return (node.outputs || []).findIndex((output) => output?.name === name)
-}
-
-/** Looks up an LLink object by id, tolerant of either shape this
- * frontend's forks have used for `graph.links` (a plain object/array
- * indexed by id, or a `Map`) -- distributor.js's/frame_saver.js's identical
- * defensive lookup. Returns null if unreachable. */
-function linkById(graph, linkId) {
-  if (linkId == null || !graph) return null
-  return graph.links?.[linkId] ?? graph.links?.get?.(linkId) ?? null
 }
 
 /** The colour to paint a link carrying *type* -- Reroute's own rule

@@ -877,7 +877,8 @@ import {
   showToast,
   walkLiveNodes
 } from '../lora_library/api.js'
-import { ensureOwnedLinkColourHook } from './owned_link_colour.js'
+import { findWidget, linkById, nodeClassOf } from '../lora_library/panel_helpers.js'
+import { LINK_COLOR_OWNER_KEY, ensureOwnedLinkColourHook } from './owned_link_colour.js'
 
 const CLASS_ID = 'EPSImageGrid'
 const PREFIX = '[eps_image:image_grid]'
@@ -949,7 +950,6 @@ const DIM_LINK_COLOR = 'rgba(128,128,128,0.25)'
  * can't close by itself. A single direct call, never a subscription or a
  * poll, so there is no repaint ping-pong between the two files.
  */
-const LINK_COLOR_OWNER_KEY = '__epsLinkColorOwner'
 const LINK_COLOR_OWNER_GRID = 'EPSImageGrid:collect-only'
 const LINK_COLOR_RESYNC_HOOK = '__epsResyncLinkColors'
 
@@ -957,19 +957,9 @@ const LINK_COLOR_RESYNC_HOOK = '__epsResyncLinkColors'
 const attachedNodes = new WeakSet()
 
 // ---------------------------------------------------------------------------
-// Node / widget lookups (same idiom as switcher.js / resolution.js)
+// Node / widget lookups (`nodeClassOf` / `findWidget` / `linkById` are
+// imported from panel_helpers.js)
 // ---------------------------------------------------------------------------
-
-function nodeClassOf(node) {
-  if (!node) return null
-  if (node.comfyClass) return node.comfyClass
-  if (node.constructor && node.constructor.comfyClass) return node.constructor.comfyClass
-  return null
-}
-
-function findWidget(node, name) {
-  return node.widgets?.find((w) => w && w.name === name)
-}
 
 function getGridUuidWidget(node) {
   return findWidget(node, GRID_UUID_WIDGET_NAME) || null
@@ -2590,16 +2580,6 @@ function installFocusWidgetSync(node) {
 //: far the common case -- "usually undefined", per the owner ask) is
 //: distinguishable from "never stashed at all".
 const dimStash = new WeakMap()
-
-/** Same lookup shape as distributor.js's/number_controller.js's own
- * `linkById` (this pack's "duplicate BY HAND" convention -- 119 source
- * comments already say so; the shared-panel-code lesson is to grep every
- * sibling before calling a helper fixed, not to actually share the code) --
- * kept as an independent copy here rather than imported. */
-function linkById(graph, linkId) {
-  if (linkId == null || !graph) return null
-  return graph.links?.[linkId] ?? graph.links?.get?.(linkId) ?? null
-}
 
 /** Every link id currently wired to one of *node*'s three dimmable outputs
  * (`DIMMABLE_OUTPUT_NAMES`) -- the "should be dimmed" candidate set while

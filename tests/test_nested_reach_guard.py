@@ -119,14 +119,14 @@ def test_api_owns_the_stored_and_reverified_watch() -> None:
 
 #: Modules that CONTROL or READ other nodes, and the shared reach they must use.
 #: A positive list: deleting the import (back to a hand walk) fails here.
+#: (pll_bridge.js / dasiwa_bridge.js left it with their dead root-only
+#: finders, v0.110.17: they walk nothing now.)
 REACHES_THROUGH_SHARED_HELPERS = {
     "web/lora_library/controller.js": ("api.walkLiveNodes", "api.watchAllGraphs"),
     "web/lora_library/universal_controller.js": ("api.walkLiveNodes",),
     "web/lora_library/picker.js": ("walkLiveNodes", "api.watchAllGraphs"),
     "web/lora_library/sets.js": ("api.walkLiveNodes", "api.watchAllGraphs"),
     "web/lora_library/prompt_builder.js": ("walkLiveNodes", "api.describePath"),
-    "web/lora_library/pll_bridge.js": ("walkLiveNodes",),
-    "web/lora_library/dasiwa_bridge.js": ("walkLiveNodes",),
     "web/eps_image/save_image.js": ("walkLiveNodes",),
     "web/eps_image/cross_sweep.js": ("watchAllGraphs",),
     "web/eps_image/bypass.js": ("resolveLinkTargets", "locationsOfNode"),

@@ -179,6 +179,7 @@ import {
   walkLiveNodes,
   watchAllGraphs
 } from '../lora_library/api.js'
+import { nodeClassOf } from '../lora_library/panel_helpers.js'
 import * as broadcast from './broadcast.js'
 
 /** Frozen once shipped -- mirrors the Python node's class id (§6.10/§8). */
@@ -1848,14 +1849,6 @@ function injectStyles() {
   style.id = STYLE_TAG_ID
   style.textContent = CSS_TEXT
   document.head.appendChild(style)
-}
-
-/** @param {object} node @returns {string|null} */
-function nodeClassOf(node) {
-  if (!node) return null
-  if (node.comfyClass) return node.comfyClass
-  if (node.constructor && node.constructor.comfyClass) return node.constructor.comfyClass
-  return null
 }
 
 /**

@@ -63,6 +63,7 @@
 
 import { app } from '../../../scripts/app.js'
 import { loggerFor, showToast, walkGraphs, watchGraphHooks } from '../lora_library/api.js'
+import { nodeClassOf } from '../lora_library/panel_helpers.js'
 import {
   BROADCAST_OUTPUTS,
   KINDS,
@@ -188,13 +189,6 @@ export function readSettings() {
 // ---------------------------------------------------------------------------
 // Small helpers
 // ---------------------------------------------------------------------------
-
-function nodeClassOf(node) {
-  if (!node) return null
-  if (node.comfyClass) return node.comfyClass
-  if (node.constructor && node.constructor.comfyClass) return node.constructor.comfyClass
-  return null
-}
 
 function toast(node, severity, summaryText, detail, life) {
   // the ONE toast (lora_library/api.js showToast, M3); errors linger longer here

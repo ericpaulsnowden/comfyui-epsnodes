@@ -469,7 +469,7 @@
 
 import * as api from './api.js'
 import { entryMatchesSearch, searchHaystack, searchWords } from './search.js'
-import { el, installMinWidth } from './panel_helpers.js'
+import { el, findWidget, installMinWidth } from './panel_helpers.js'
 
 /** FORMAT.md §6.1 — frozen once shipped. */
 const NODE_CLASS = 'LoraLibraryNotebook'
@@ -1214,14 +1214,6 @@ function isNotebookNode(node) {
   if (node.comfyClass === NODE_CLASS) return true
   if (node.constructor && node.constructor.comfyClass === NODE_CLASS) return true
   return false
-}
-
-/**
- * @param {object} node
- * @param {string} name
- */
-function findWidget(node, name) {
-  return node.widgets?.find((w) => w && w.name === name)
 }
 
 // ---------------------------------------------------------------------------

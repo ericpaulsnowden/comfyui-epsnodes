@@ -12,8 +12,8 @@ source assertion.
 
 Unlike controller.js, the bridge's whole surface is drivable under Node in
 a served-layout tmp dir (``test_picker_js.py``'s fixture convention, itself
-from ``test_checkpoint_switcher_js.py``): ``app`` is the stubbed served
-module the bridge imports, ``LiteGraph`` is a bare global the probe defines
+from ``test_checkpoint_switcher_js.py``): the bridge imports nothing,
+``LiteGraph`` is a bare global the probe defines
 itself mid-run (which also exercises the no-rgthree gate first), and
 ``writeRowsToPll`` needs only a widgets array plus the four LGraphNode
 methods ``probePll`` feature-detects -- so grow/shrink/assign runs against
@@ -69,8 +69,6 @@ SHARED_CONSTANT_LINES = [
 
 PROBE_JS = """
 import * as m from './extensions/comfyui-epsnodes/lora_library/pll_bridge.js'
-import { app } from './scripts/app.js'
-
 const PLL = m.POWER_LORA_LOADER_TYPE
 const isRow = (w) => /^lora_\\d+$/.test(w.name)
 
@@ -105,7 +103,6 @@ function fakePll(id, properties = {}) {
 
 const out = {
   exports: {
-    hasFindPllNodes: typeof m.findPllNodes === 'function',
     hasProbePll: typeof m.probePll === 'function',
     hasWriteRowsToPll: typeof m.writeRowsToPll === 'function',
     hasRowsForPll: typeof m.rowsForPll === 'function'
@@ -118,22 +115,10 @@ out.probeNoRgthree = m.probePll(null)
 
 globalThis.LiteGraph = { registered_node_types: { [PLL]: function () {} } }
 
-app.graph = { _nodes: [] }
-out.probeNullNoCandidates = m.probePll(null)
+out.probeNull = m.probePll(null)
+out.probeWrongType = m.probePll({ id: 5, type: 'SomeOtherNode', widgets: [] })
 
-const high = fakePll(7)
 const low = fakePll(3)
-app.graph = { _nodes: [high, low, { id: 5, type: 'SomeOtherNode' }] }
-out.findPllOrder = m.findPllNodes().map((node) => node.id)
-// v1.2.0 nested reach: loaders INSIDE a subgraph (own id space, so the inner
-// id deliberately collides with a root id) are found too, ordered by PATH id.
-const nestedA = fakePll(3) // collides with root `low` (id 3)
-const nestedB = fakePll(2)
-const sub = { id: 9, type: 'Sub', subgraph: { _nodes: [nestedA, nestedB] } }
-app.graph = { _nodes: [high, low, sub] }
-const tag = (node) => `${node.id}${node === nestedA || node === nestedB ? 'n' : ''}`
-out.findPllNested = m.findPllNodes().map(tag)
-out.probeNullWithCandidates = m.probePll(null)
 out.probeOk = m.probePll(low)
 out.probeMissingApi = m.probePll({ id: 9, type: PLL, widgets: [] })
 
@@ -198,17 +183,7 @@ def bridge_api(tmp_path_factory: pytest.TempPathFactory) -> dict:
     module_dir = layout / "extensions" / "comfyui-epsnodes" / "lora_library"
     module_dir.mkdir(parents=True)
     shutil.copyfile(BRIDGE_JS, module_dir / "pll_bridge.js")
-    # pll_bridge.js imports only `../../../scripts/app.js` -- stub it exactly
-    # as test_picker_js.py does; the probe mutates `app.graph` per scenario.
-    # v1.2.0 (FORMAT.md §7.10): the root-only finder now imports the shared
-    # `walkLiveNodes`/`comparePathIds` from `./api.js`, whose own imports
-    # (`scripts/api.js`, `scripts/app.js`, `./version.js`) need serving too.
-    shutil.copyfile(API_JS, module_dir / "api.js")
-    shutil.copyfile(API_JS.parent / "version.js", module_dir / "version.js")
-    scripts = layout / "scripts"
-    scripts.mkdir(parents=True, exist_ok=True)
-    (scripts / "app.js").write_text("export const app = {}\n", encoding="utf-8")
-    (scripts / "api.js").write_text("export const api = {}\n", encoding="utf-8")
+    # pll_bridge.js imports nothing, so the layout needs no stubs.
 
     probe = layout / "probe.mjs"
     probe.write_text(PROBE_JS, encoding="utf-8")
@@ -259,10 +234,9 @@ def test_pll_bridge_js_parses() -> None:
 
 
 def test_module_exports_the_bridge_surface(bridge_api: dict) -> None:
-    """picker.js's Send row consumes exactly these four plus the type
+    """picker.js's Send row consumes exactly these three plus the type
     constant -- nothing else is public."""
     assert bridge_api["exports"] == {
-        "hasFindPllNodes": True,
         "hasProbePll": True,
         "hasWriteRowsToPll": True,
         "hasRowsForPll": True,
@@ -284,19 +258,17 @@ def test_probe_without_rgthree_installed(bridge_api: dict) -> None:
     }
 
 
-def test_probe_null_node_distinguishes_empty_graph_from_no_selection(bridge_api: dict) -> None:
-    """The same two codes/messages controller.js's probeTarget() yields for
-    a null node: no candidates at all vs candidates present but unpicked."""
-    assert bridge_api["probeNullNoCandidates"] == {
-        "ok": False,
-        "code": "no-target-in-graph",
-        "message": MSG_NO_TARGET_IN_GRAPH,
-    }
-    assert bridge_api["probeNullWithCandidates"] == {
-        "ok": False,
-        "code": "no-target-selected",
-        "message": MSG_NO_TARGET_SELECTED,
-    }
+def test_probe_of_a_missing_or_foreign_node_is_wrong_type(bridge_api: dict) -> None:
+    """The picker's probeSendTarget owns "nothing picked" / "nothing in the
+    graph" and only ever hands the bridge a node of its own type; a null or
+    foreign node is still answered (never thrown on), as wrong-type --
+    dasiwa_bridge.js's probeDasiwa shape."""
+    for key in ("probeNull", "probeWrongType"):
+        assert bridge_api[key] == {
+            "ok": False,
+            "code": "wrong-type",
+            "message": MSG_NO_TARGET_SELECTED,
+        }, key
 
 
 def test_probe_ok_reports_row_count(bridge_api: dict) -> None:
@@ -317,20 +289,6 @@ def test_probe_shape_drift_on_missing_api_and_on_drifted_row_values(bridge_api: 
             "code": "shape-drift",
             "message": MSG_SHAPE_DRIFT,
         }, key
-
-
-def test_find_pll_nodes_sorted_ascending_and_type_filtered(bridge_api: dict) -> None:
-    """Graph order was [7, 3, non-PLL]; the combo order is ascending id with
-    the non-PLL dropped (§6.13 M2)."""
-    assert bridge_api["findPllOrder"] == [3, 7]
-
-
-def test_find_pll_nodes_reaches_into_subgraphs_ordered_by_path_id(bridge_api: dict) -> None:
-    """v1.2.0 nested reach (owner ask 2026-10-03, FORMAT.md §7.10): the
-    finder used to read `app.graph._nodes` only. Loaders inside a SubgraphNode
-    are found too (an inner id may collide with a root id -- 3 here), ordered
-    by execution PATH id: root 3, root 7, then "9:2", "9:3"."""
-    assert bridge_api["findPllNested"] == ["3", "7", "2n", "3n"]
 
 
 # ----------------------------------------------------------------- rowsForPll
@@ -408,13 +366,17 @@ def test_write_rows_splices_when_remove_widget_throws(bridge_api: dict) -> None:
 def test_vocabulary_strings_byte_identical_in_both_files(
     source: str, controller_source: str
 ) -> None:
-    """THE §6.13 M2 vocabulary contract: every §6.3 message text appears
-    verbatim in controller.js AND pll_bridge.js, so an edit to either side
-    alone fails here instead of quietly forking the vocabulary."""
-    messages = (MSG_NO_RGTHREE, MSG_SHAPE_DRIFT, MSG_NO_TARGET_IN_GRAPH, MSG_NO_TARGET_SELECTED)
+    """THE §6.13 M2 vocabulary contract: every §6.3 message text the bridge
+    uses appears verbatim in controller.js AND pll_bridge.js, so an edit to
+    either side alone fails here instead of quietly forking the vocabulary.
+    (The "no target in this workflow" text is controller.js's alone: the
+    picker's probeSendTarget answers that case before the bridge is asked.)"""
+    messages = (MSG_NO_RGTHREE, MSG_SHAPE_DRIFT, MSG_NO_TARGET_SELECTED)
     for message in messages:
         assert f"'{message}'" in source, f"bridge lost: {message!r}"
         assert f"'{message}'" in controller_source, f"controller lost: {message!r}"
+    assert f"'{MSG_NO_TARGET_IN_GRAPH}'" in controller_source
+    assert MSG_NO_TARGET_IN_GRAPH not in source
 
 
 def test_shared_constants_byte_identical_in_both_files(
@@ -448,13 +410,7 @@ def test_attribution_comment_and_no_controller_import(source: str) -> None:
     assert "controller.js" in source
     assert "deliberately duplicated, not imported" in source
     assert "from './controller.js'" not in source
-    # v1.2.0 (FORMAT.md §7.10): the root-only finder imports the SHARED
-    # traversal helpers (not controller.js -- the duplication rule is about
-    # that owner-validated code), so api.js is the one other import allowed.
-    assert re.findall(r"^import .*$", source, flags=re.MULTILINE) == [
-        "import { app } from '../../../scripts/app.js'",
-        "import { walkLiveNodes, comparePathIds } from './api.js'",
-    ]
+    assert re.findall(r"^import .*$", source, flags=re.MULTILINE) == []
 
 
 class TestPickerTargetFamilyV0640:
@@ -862,15 +818,13 @@ def test_noop_drop_skips_the_post(controller_source: str) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_root_only_find_helper_is_marked_unused_by_the_picker(source: str) -> None:
+def test_root_only_find_helper_and_null_leg_are_gone(source: str) -> None:
     """Since v0.64.0 picker.js's findSendCandidates() walks the whole
-    workflow itself; the registry's `find` key is gone (v0.68.1), so
-    findPllNodes and probePll(null)'s null leg are reachable from nothing
-    but this file's own probe. They stay ONLY because the pins above
-    (`hasFindPllNodes`, `findPllOrder`, `probeNullNoCandidates` /
-    `probeNullWithCandidates`) pin them -- remove together."""
-    block = source.split("export function findPllNodes()", 1)[0]
-    assert "UNUSED BY THE PICKER, marked for removal" in block[-1400:]
+    workflow itself and its probeSendTarget owns the null-target answers, so
+    the bridge's root-only findPllNodes and probePll's "nothing picked" leg
+    had no caller. Removed 2026-11-15; the picker must not grow one back."""
+    assert "findPllNodes" not in source
+    assert "no-target-in-graph" not in source
     picker = (REPO_ROOT / "web" / "lora_library" / "picker.js").read_text(encoding="utf-8")
     assert "pll.findPllNodes" not in picker
     assert "pll.probePll(null" not in picker

@@ -532,6 +532,7 @@ def probe(tmp_path_factory: pytest.TempPathFactory) -> dict:
             "bypass.js",
             "number_controller.js",
             "distributor.js",
+            "owned_link_colour.js",
         ),
         with_fake=True,
     )

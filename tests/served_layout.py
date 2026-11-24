@@ -35,6 +35,7 @@ CROSS_SWEEP_MODULES = (
     "bypass.js",
     "number_controller.js",
     "distributor.js",
+    "owned_link_colour.js",
 )
 
 #: The lora_library modules those reach.

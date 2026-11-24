@@ -353,6 +353,10 @@ def distributor_api(tmp_path_factory: pytest.TempPathFactory) -> dict:
     module_dir = layout / "extensions" / "comfyui-epsnodes" / "eps_image"
     module_dir.mkdir(parents=True)
     shutil.copyfile(DISTRIBUTOR_JS, module_dir / "distributor.js")
+    # the one definition of LINK_COLOR_OWNER_KEY (no imports of its own)
+    shutil.copyfile(
+        DISTRIBUTOR_JS.parent / "owned_link_colour.js", module_dir / "owned_link_colour.js"
+    )
     helpers_dir = layout / "extensions" / "comfyui-epsnodes" / "lora_library"
     helpers_dir.mkdir(parents=True, exist_ok=True)
     shutil.copyfile(PANEL_HELPERS_JS, helpers_dir / "panel_helpers.js")
@@ -890,7 +894,7 @@ def test_sync_slot_types_skips_a_link_another_module_owns(distributor_source: st
     must never have its `.color` overwritten here -- checked immediately
     before BOTH `link.color =` writes (the `image` input's own link, and
     every output link), not just one of the two."""
-    assert "const LINK_COLOR_OWNER_KEY = '__epsLinkColorOwner'" in distributor_source
+    assert "import { LINK_COLOR_OWNER_KEY } from './owned_link_colour.js'" in distributor_source
     body = _function_body(distributor_source, "syncSlotTypes(node)")
     assert "if (link && !link[LINK_COLOR_OWNER_KEY]) {" in body
     assert "if (!link || link[LINK_COLOR_OWNER_KEY]) continue" in body

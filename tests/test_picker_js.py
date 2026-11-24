@@ -2674,12 +2674,9 @@ class TestPerfRoundV0681:
         assert "find:" not in registry
         assert "pll.findPllNodes" not in source
         assert "dasiwa.findDasiwaNodes" not in source
-        # the bridges keep their (v1.2.0: now nested-aware) find helpers only
-        # for their own test pins, and say so at the definition (removal is a
-        # follow-up)
-        for path in (BRIDGE_JS, DASIWA_JS):
-            bridge = path.read_text(encoding="utf-8")
-            assert "UNUSED BY THE PICKER, marked for removal" in bridge, path.name
+        # the bridges' root-only helpers are gone too (2026-11-15)
+        for path, name in ((BRIDGE_JS, "findPllNodes"), (DASIWA_JS, "findDasiwaNodes")):
+            assert name not in path.read_text(encoding="utf-8"), path.name
 
 
 class TestFixedHeightRound20260822:

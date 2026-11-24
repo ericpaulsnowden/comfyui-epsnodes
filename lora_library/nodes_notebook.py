@@ -223,13 +223,6 @@ def _file_token(path: Path) -> str:
     return f"{stat.st_mtime}:{stat.st_size}"
 
 
-def _notebook_token(context: LibraryContext | None, file: str, entry: str) -> str:
-    if context is None:
-        return f"no-context:{file}:{entry}"
-    path = context.resolve_notebook_file(file)
-    return f"{path}:{_file_token(path)}:{entry}"
-
-
 #: ``markdown_store.load_notebook`` results memoized by (mtime_ns, size) --
 #: v0.80.0 sweep-performance round: ``IS_CHANGED`` and ``read_entry`` both
 #: parse the file each queue; the memo makes that one parse, re-validated

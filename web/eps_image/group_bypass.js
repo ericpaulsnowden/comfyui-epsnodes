@@ -48,6 +48,7 @@
 
 import { app } from '../../../scripts/app.js'
 import { loggerFor, resolveInputSources, resolveSourcesAt, rootGraphOf } from '../lora_library/api.js'
+import { findWidget, nodeClassOf } from '../lora_library/panel_helpers.js'
 import { hideValuesWidget, parseValues, slotName } from './number_controller.js'
 import { captureUndoState } from './button_row.js'
 
@@ -160,17 +161,6 @@ export function drivenLabel(name, value) {
 // ---------------------------------------------------------------------------
 // Graph access
 // ---------------------------------------------------------------------------
-
-function nodeClassOf(node) {
-  if (!node) return null
-  if (node.comfyClass) return node.comfyClass
-  if (node.constructor && node.constructor.comfyClass) return node.constructor.comfyClass
-  return null
-}
-
-function findWidget(node, name) {
-  return node.widgets?.find((w) => w && w.name === name)
-}
 
 function groupsOf(graph) {
   return graph?.groups || graph?._groups || []

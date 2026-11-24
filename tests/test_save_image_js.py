@@ -360,6 +360,8 @@ def save_image_api(tmp_path_factory: pytest.TempPathFactory) -> dict:
         SAVE_IMAGE_JS.parent / "owned_link_colour.js", pack / "eps_image" / "owned_link_colour.js"
     )
     shutil.copyfile(API_JS, pack / "lora_library" / "api.js")
+    # the shared node/widget/link lookups
+    shutil.copyfile(API_JS.parent / "panel_helpers.js", pack / "lora_library" / "panel_helpers.js")
     # api.js imports its sibling version.js -- copy the real one too.
     shutil.copyfile(API_JS.parent / "version.js", pack / "lora_library" / "version.js")
     scripts = layout / "scripts"
@@ -630,10 +632,12 @@ def test_hooks_chain_never_replace_and_are_guarded_per_instance(source: str) -> 
 
 
 def test_dim_follows_the_cross_file_colour_convention(source: str) -> None:
-    # image_grid.js's grey, distributor.js's owner key + resync hook, our own
-    # owner value; the sibling files are named so a change finds them.
+    # image_grid.js's grey, the shared owner key (owned_link_colour.js's one
+    # definition) + distributor.js's resync hook, our own owner value; the
+    # sibling files are named so a change finds them.
     assert "'rgba(128,128,128,0.25)'" in source
-    assert "'__epsLinkColorOwner'" in source
+    assert "import { LINK_COLOR_OWNER_KEY, ensureOwnedLinkColourHook } from './owned_link_colour.js'" in source
+    assert "'__epsLinkColorOwner'" not in source
     assert "'EPSSaveImage:image-output-off'" in source
     assert "'__epsResyncLinkColors'" in source
     assert "image_grid.js" in source and "distributor.js" in source and "bypass.js" in source

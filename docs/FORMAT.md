@@ -5259,8 +5259,10 @@ toggle (`setHighlightedFile`), the Send-row candidate walk is memoized per
 synchronous run; `scheduleSendRowRefresh` coalesces on the root graph and
 walks the whole workflow; (4) the send-adapter registry surface is
 `{label, probe, write}` — the per-family `find` key was dead since v0.64.0
-and is gone; the bridges' root-only `findPllNodes`/`findDasiwaNodes` are
-marked unused (kept for their test pins, to be removed together).
+and is gone; the bridges' root-only `findPllNodes`/`findDasiwaNodes` were
+marked unused then and removed 2026-11-15, with `probePll`'s unreachable
+"nothing picked" leg (a null node now probes as `wrong-type`, as
+`probeDasiwa` always did).
 
 The answer to the owner's three LoRA-navigation pains (research round
 2026-08-09, roadmap `docs/plan/ROADMAP-lora-picker.md`): the flat lora list,
@@ -5850,8 +5852,9 @@ per instance path, turning a clean "apply" into a false "ambiguous"). 2026-10-29
 `_blocks_token`: zero blocks → the constant `"no-blocks"` (no file, no
 context — mirrors `_resolve_blocks`'s shortcut); otherwise sha1 of resolved
 path + each BLOCK's name and current text. Editing entries no block
-references no longer invalidates sweeps built on this node. Own
-`_load_notebook_cached` copy (own-your-helpers).
+references no longer invalidates sweeps built on this node. Reads through
+`nodes_notebook._load_notebook_cached` (one shared parse memo since
+2026-11-15; before that, its own identical copy).
 
 
 New in v0.76.0 (owner spec 2026-08-23, four design choices confirmed the same
@@ -6746,7 +6749,7 @@ Class id `EPSBypass` (FROZEN, §8), category `EPSNodes/Utilities`.
   refuses a mismatched later connection, so no veto hook is installed. Links
   are recoloured to the adopted type honouring the v0.98.0 owner-tag
   convention (`LINK_COLOR_OWNER_KEY`/`LINK_COLOR_RESYNC_HOOK`, imported from
-  distributor.js), so a Grid in Collect-only mode feeding this node keeps its
+  distributor.js, which re-exports the key from `owned_link_colour.js`), so a Grid in Collect-only mode feeding this node keeps its
   dimmed wire.
 - **"Off" is visible on the node, with nothing drawn on the canvas:** the
   toggle's own text (`label_off`) reads "off — sends nothing" and the output

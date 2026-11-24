@@ -89,8 +89,8 @@
 import { api } from '../../../scripts/api.js'
 import { healComboValue, isHealEnabled } from '../lora_library/path_heal.js'
 import { loggerFor, subscribeWidgetsChangedExternally } from '../lora_library/api.js'
-import { ensureOwnedLinkColourHook } from './owned_link_colour.js'
-import { el, installMinWidth } from '../lora_library/panel_helpers.js'
+import { LINK_COLOR_OWNER_KEY, ensureOwnedLinkColourHook } from './owned_link_colour.js'
+import { el, findWidget, installMinWidth, linkById, nodeClassOf } from '../lora_library/panel_helpers.js'
 
 /** Frozen once shipped -- mirrors the Python node's class id. */
 export const CLASS_ID = 'EPSCheckpointSwitcher'
@@ -228,38 +228,18 @@ function injectStyles() {
   document.head.appendChild(style)
 }
 
-// --- Node / widget lookups ---
-
-/** @param {object} node @returns {string|null} */
-function nodeClassOf(node) {
-  if (!node) return null
-  if (node.comfyClass) return node.comfyClass
-  if (node.constructor && node.constructor.comfyClass) return node.constructor.comfyClass
-  return null
-}
-
-function findWidget(node, name) {
-  return node.widgets?.find((w) => w && w.name === name)
-}
-
 // --- Empty selection -> dim every outgoing wire (file header). A BY-HAND
 // copy of switcher.js's all-off dimming (docs/plan/ROADMAP-shared-panel-code.md);
 // `link.color` is never serialized, so this is always DERIVED. ---
 
 /** image_grid.js's dim grey -- the same "not really there" look. */
 const DIM_LINK_COLOR = 'rgba(128,128,128,0.25)'
-const LINK_COLOR_OWNER_KEY = '__epsLinkColorOwner'
 export const LINK_COLOR_OWNER_CKPT = 'EPSCheckpointSwitcher:empty-selection'
 const LINK_COLOR_RESYNC_HOOK = '__epsResyncLinkColors'
 
 /** Per-link stash of the pre-dim colour (`{color}`, so a stashed
  * `undefined` is distinguishable from "never stashed"). */
 const dimStash = new WeakMap()
-
-function linkById(graph, linkId) {
-  if (linkId == null || !graph) return null
-  return graph.links?.[linkId] ?? graph.links?.get?.(linkId) ?? null
-}
 
 /**
  * The pure "does this node emit nothing?" decision: its `selection` widget

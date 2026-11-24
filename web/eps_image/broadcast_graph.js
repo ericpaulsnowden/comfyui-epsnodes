@@ -57,6 +57,7 @@
 
 import { app } from '../../../scripts/app.js'
 import { loggerFor, nodesOfGraph, walkGraphs, walkLiveNodes } from '../lora_library/api.js'
+import { linkById, nodeClassOf } from '../lora_library/panel_helpers.js'
 import { inputVerdict } from './bypass.js'
 import {
   MULTIPLIER_CLASS_ID,
@@ -101,18 +102,11 @@ function guarded(fn) {
 // Small live-graph helpers
 // ---------------------------------------------------------------------------
 
-function nodeClassOf(node) {
-  if (!node) return null
-  if (node.comfyClass) return node.comfyClass
-  if (node.constructor && node.constructor.comfyClass) return node.constructor.comfyClass
-  return null
-}
-
-/** An LLink by id, tolerant of `graph.links` being a Map-proxy or a plain
- * object (cross_sweep.js's / bypass.js's identical lookup). */
-function linkById(graph, linkId) {
-  if (linkId == null || !graph) return null
-  return graph.links?.get?.(linkId) ?? graph.links?.[linkId] ?? graph._links?.get?.(linkId) ?? null
+/** An LLink by id in a live graph OR a subgraph definition. The shared
+ * `linkById` reads `graph.links`; a definition handed over mid-configure has
+ * only its `_links` Map, which is the one thing added here. */
+function linkIn(graph, linkId) {
+  return linkById(graph, linkId) ?? graph?._links?.get?.(linkId) ?? null
 }
 
 /** Graph key used by snapshots and records: 'root' for the root graph, the
@@ -265,7 +259,7 @@ function snapshotNode(graph, node, boxes = []) {
   const classType = nodeClassOf(node) || node.type || ''
   const instance = isSubgraphInstance(node)
   const inputs = (node.inputs || []).map((input, index) => {
-    const link = linkById(graph, input?.link)
+    const link = linkIn(graph, input?.link)
     const entry = {
       name: typeof input?.name === 'string' ? input.name : '',
       type: typeof input?.type === 'string' ? input.type : '',
@@ -285,7 +279,7 @@ function snapshotNode(graph, node, boxes = []) {
     type: typeof output?.type === 'string' ? output.type : '',
     links: (Array.isArray(output?.links) ? output.links : [])
       .map((linkId) => {
-        const link = linkById(graph, linkId)
+        const link = linkIn(graph, linkId)
         if (!link) return null
         const target = graph.getNodeById?.(link.target_id)
         return {
@@ -334,7 +328,7 @@ function snapshotGraph(rootGraph, graph) {
       type: typeof slot.type === 'string' ? slot.type : ''
     }))
     out.outputs = (graph.outputs || []).map((slot) => {
-      const link = linkById(graph, slot.linkIds?.[0])
+      const link = linkIn(graph, slot.linkIds?.[0])
       return {
         name: slot.name,
         type: typeof slot.type === 'string' ? slot.type : '',
@@ -531,7 +525,7 @@ export function broadcastLinkOwner(graph, linkId) {
 function verifyMadeLink(graph, node, slotIndex, link, expectedOrigin) {
   if (!link) return null
   if (node.inputs?.[slotIndex]?.link !== link.id) return null
-  const live = linkById(graph, link.id)
+  const live = linkIn(graph, link.id)
   if (!live) return null
   if (expectedOrigin.kind === 'multiplier') {
     if (String(live.origin_id) !== String(expectedOrigin.nodeId) || live.origin_slot !== expectedOrigin.slot) return null
@@ -557,7 +551,7 @@ function disconnectSlot(node, slotIndex) {
  * it, which skips every other link, so we empty the list ourselves first. */
 function removeDefinitionInput(subgraph, input) {
   for (const linkId of [...(input.linkIds || [])]) {
-    const link = linkById(subgraph, linkId)
+    const link = linkIn(subgraph, linkId)
     const target = link ? subgraph.getNodeById?.(link.target_id) : null
     if (target) disconnectSlot(target, link.target_slot)
   }
@@ -715,7 +709,7 @@ function removeLinkRecord(rootGraph, mnode, rec, outputName) {
   const node = graph?.getNodeById?.(rec.n)
   const slotIndex = findInputIndex(node, rec.i)
   if (!node || slotIndex < 0) return false
-  const link = linkById(graph, node.inputs[slotIndex].link)
+  const link = linkIn(graph, node.inputs[slotIndex].link)
   if (!link) return false
   if (rec.o.m !== undefined) {
     const spec = OUTPUT_BY_NAME[rec.o.m] || OUTPUT_BY_NAME[outputName]

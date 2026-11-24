@@ -34,9 +34,6 @@
  * name every affected row.
  */
 
-import { app } from '../../../scripts/app.js'
-import { walkLiveNodes, comparePathIds } from './api.js'
-
 /** Exact ComfyUI type/comfyClass string — the pack's NODE_CLASS_MAPPINGS key. */
 export const DASIWA_LOADER_TYPE = 'DaSiWa_LTX2LoraLoader'
 
@@ -63,26 +60,6 @@ const DASIWA_ROW_H = 28
 const MSG_NO_TARGET_SELECTED = 'Pick a target DaSiWa Advanced LoRA Loader node above.'
 const MSG_SHAPE_DRIFT =
   'DaSiWa Advanced LoRA Loader internals changed — send disabled (v-check)'
-
-/** Every live `DaSiWa_LTX2LoraLoader` instance in the WHOLE workflow --
- * subgraphs included (v1.2.0, owner ask 2026-10-03, FORMAT.md §7.10 nested
- * reach: it used to read `app.graph._nodes` only) -- ascending by execution
- * PATH id (§6.13 M4's cross-family combo order). Returns the node objects.
- * v0.68.1: UNUSED BY THE PICKER, marked for removal. Since v0.64.0
- * picker.js's findSendCandidates() walks the whole workflow (subgraphs
- * included) against its adapter registry and never calls this (the
- * registry's `find` key is gone as of v0.68.1). Kept solely because
- * tests/test_dasiwa_bridge_js.py pins the export surface
- * (`hasFindDasiwaNodes`, `findOrder`); remove together with those pins --
- * and with pll_bridge.js's findPllNodes, so the two bridges keep mirroring
- * each other's surface. Imports the shared `walkLiveNodes` rather than
- * re-walking by hand. */
-export function findDasiwaNodes() {
-  return walkLiveNodes(app.graph)
-    .filter(({ node }) => node && node.type === DASIWA_LOADER_TYPE)
-    .sort((a, b) => comparePathIds(a.pathId, b.pathId))
-    .map(({ node }) => node)
-}
 
 /** The node's `stack_data` widget, or null — the probe's presence check and
  * the write's second sink. */

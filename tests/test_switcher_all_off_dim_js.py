@@ -449,12 +449,13 @@ def source() -> str:
 
 
 def test_by_hand_copy_not_an_import_of_image_grid(source: str) -> None:
-    """docs/plan/ROADMAP-shared-panel-code.md: helpers are duplicated per file;
-    only the renderLink hook is shared (it must wrap exactly once)."""
+    """docs/plan/ROADMAP-shared-panel-code.md: the dimming logic is still this
+    file's own copy; the renderLink hook (it must wrap exactly once) and the
+    owner key (one definition) come from owned_link_colour.js."""
     assert "from './image_grid.js'" not in source
-    assert "import { ensureOwnedLinkColourHook } from './owned_link_colour.js'" in source
+    assert "import { LINK_COLOR_OWNER_KEY, ensureOwnedLinkColourHook } from './owned_link_colour.js'" in source
     assert "const DIM_LINK_COLOR = 'rgba(128,128,128,0.25)'" in source
-    assert "const LINK_COLOR_OWNER_KEY = '__epsLinkColorOwner'" in source
+    assert "'__epsLinkColorOwner'" not in source
     assert f"export const LINK_COLOR_OWNER_SWITCHER = '{OWNER}'" in source
 
 
