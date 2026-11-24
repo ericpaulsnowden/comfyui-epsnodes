@@ -61,9 +61,13 @@ api.fetchApi = async (route, opts) => {
   calls.push({ route, body: opts && opts.body ? JSON.parse(opts.body) : null })
   return { ok: true, json: async () => ({ ok: true, refs: [], images: [] }) }
 }
+// Every listener of an event is called, as on the real api (the grid installs
+// more than one `progress_state` listener).
+const listeners = {}
 const handlers = {}
 api.addEventListener = (name, fn) => {
-  handlers[name] = fn
+  ;(listeners[name] ??= []).push(fn)
+  handlers[name] = (event) => listeners[name].forEach((listener) => listener(event))
 }
 const toasts = []
 app.extensionManager = { toast: { add: (t) => toasts.push(t) } }

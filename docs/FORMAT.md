@@ -2747,6 +2747,43 @@ lazy-skipped statically (above) and a Distributor's off slot blocks every
 element either way. Kept as is: one batch and one downstream run for the
 common switcher case outweighs the rare mixed list; reverting would bring
 back the duplicated Emit All.
+**Skipped-run alert (owner decision 2: one-run kept, but never silent).**
+Python cannot report a skip it never runs for, so the frontend detects it by
+absence. `run()` sends `eps-image-grid-ran` `{node, prompt_id}` first thing
+in every mode (`_announce_ran`; prompt id from core's
+`get_executing_context()`, `None` in tests). `image_grid.js`
+(`createSkippedRunTracker`, pure `skippedGridIds`) tracks per `prompt_id`
+`{grids, announced, ran}`:
+- `grids` (execution id -> title) is read from the prompt THAT WAS QUEUED,
+  never from the open graph: a chained `api.queuePrompt` (installed once,
+  result returned untouched, our failures only logged) feeds the queued
+  `output` (`class_type === EPSImageGrid`, ids may be subgraph-scoped
+  "3:2") and `workflow` (titles) to `gridsOfQueuedPrompt` once the response
+  gives the `prompt_id`. A prompt this tab did not queue has no record and
+  is never alerted on.
+- `announced` is every id seen with `progress_state` `state: 'running'`
+  (core's `start_progress`, sent just before `executing` and before the
+  blocker check in `process_inputs`). Not `executing`: the frontend
+  re-dispatches that as only a display-node id string with no prompt id.
+- `ran` is the `eps-image-grid-ran` events.
+The decision is made only at `execution_success` (`image` is lazy: a grid is
+announced, upstream is evaluated, and it is announced again before it runs):
+each id in `grids` that was announced and never ran gets ONE `warn` toast
+(its queued title) and one log line. Cached grids are never announced
+(`execution_cached`). The queue response and the websocket race, so the
+verdict is given by whichever of the two arrives LAST: a prompt that
+succeeds before its response resolved is held as `finished` and `queued()`
+decides. A prompt with no grid is never tracked. A waiting prompt that is
+cancelled gets no event of its own from core, so a `status` event with
+`exec_info.queue_remaining === 0` drops every entry that never started.
+`execution_error` / `execution_interrupted` discard the
+prompt silently. Missing history is never evidence: websocket
+`reconnecting`/`reconnected` discard every tracked prompt, and an
+`execution_start` for another prompt discards earlier entries that had
+announcements (the server runs one prompt at a time, so their end was
+missed) while keeping prompts that are only queued. By-design blocked feeds
+(a grid in Collect only wired into another grid) toast too; an all-off
+switcher does not, because the grid does not request that lazy slot and runs.
 
 **"Emit All" — a fourth `mode` value (v0.104.0, owner ask: "sends out all
 of the images at once vs one at a time").** Appended last in `MODES`, the
