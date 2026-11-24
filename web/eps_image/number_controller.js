@@ -547,12 +547,102 @@ export function normalizeRememberedLinks(raw) {
 }
 
 /**
+ * Whether a `configure(info)` call is configuring a COPY of a node rather
+ * than restoring one. A remembered-target memory (this file's rows,
+ * bypass.js's `links`, switcher.js's `EPSSwitcher.unplugged`) names targets
+ * by node id, and an id means something only inside the graph it was
+ * recorded in -- so the memory belongs to ONE node, and a copy is another
+ * node. litegraph configures a copy without a real id: a paste
+ * (`_deserializeItems`) sets `info.id = -1` and configures the node AFTER
+ * `graph.add` already gave it its new id, and `LGraphNode.clone()` (Ctrl+C
+ * / Alt-drag ghosts, which may never join a graph) sets `data.id =
+ * undefined`. A workflow load, undo/redo, tab switch, Save As, Duplicate
+ * and convert-to-subgraph all configure each node with its saved id. So the
+ * decision can only be taken here, in configure, never at replug time (the
+ * id is no longer informative by then). Each memory's `onConfigure` wrap
+ * calls this and drops what it remembers.
+ */
+export function configuredAsCopy(info) {
+  return info?.id == null || String(info.id) === '-1'
+}
+
+/**
+ * The graph identity a remembered-target memory is valid in -- the second
+ * half of `configuredAsCopy`'s rule, for nodes that live in a SUBGRAPH. A
+ * subgraph's interior is configured with REAL node ids even when it is a
+ * paste (`_deserializeItems` creates the definition and calls
+ * `subgraph.configure(info)`), after `remapClipboardSubgraphNodeIds` renumbered
+ * the ids that collided with the destination workflow -- and it does not touch
+ * widget values or properties, so a remembered target id can come to name an
+ * unrelated interior node while `owner` still matches. What does change on a
+ * paste is the definition's UUID (`subgraphInfo.id = createUuidv4()`); a
+ * workflow load, undo, tab switch, Save As and Duplicate keep it (they change
+ * only the ROOT workflow id). So a memory written inside a subgraph carries
+ * that UUID (`graph`) and is foreign anywhere else. In the ROOT graph there
+ * is nothing to compare (the root id changes on Save As / Duplicate while the
+ * memory stays valid; a root paste is `configuredAsCopy`'s case), so a root
+ * node writes no `graph`. Returns undefined in the root graph or off-graph.
+ */
+export function subgraphIdOf(node) {
+  const graph = node?.graph
+  return graph && graph.isRootGraph === false ? graph.id : undefined
+}
+
+/** The stamp every remembered-target memory is written with: the writing
+ * node's id, plus its subgraph's UUID when it lives in one. */
+export function memoryStamp(node) {
+  const graph = subgraphIdOf(node)
+  return graph === undefined ? { owner: node.id } : { owner: node.id, graph }
+}
+
+/** The stamp fields cleared when a memory is forgotten (spread into a patch). */
+export const FORGOTTEN = { owner: undefined, graph: undefined, links: undefined }
+
+/**
+ * Whether the stored *stamp* (`{owner, graph}`, as `memoryStamp` wrote it)
+ * was written by a different node, or by this node in a different subgraph.
+ * A stamp without `owner` is not foreign here: the caller decides whether
+ * unstamped (older) memory is trusted. Without `graph` (written in the root
+ * graph, or before the stamp existed) a node now in a subgraph is accepted --
+ * convert-to-subgraph keeps node ids, so that memory is still valid -- and
+ * its `onConfigure` re-stamps it for that subgraph.
+ */
+export function isForeignStamp(stamp, node) {
+  if (stamp?.owner == null) return false
+  if (node?.id == null || String(stamp.owner) !== String(node.id)) return true
+  const here = subgraphIdOf(node)
+  return here !== undefined && stamp.graph != null && stamp.graph !== here
+}
+
+/** Re-writes every row's remembered targets for this node as it is configured:
+ * a COPY forgets them, anything else keeps what is still its own, re-stamped
+ * for the graph it now sits in (foreign memory goes; older memory is stamped).
+ * Leaves the rows' own enabled/name/value alone. Writes `widget.value`
+ * directly, as configure itself does -- no callback. */
+function restampRememberedLinks(node, asCopy) {
+  const widget = findWidget(node, VALUES_WIDGET_NAME)
+  if (!widget) return
+  const map = parseValues(widget.value)
+  for (const entry of Object.values(map)) {
+    if (!entry || (entry.links === undefined && entry.owner === undefined)) continue
+    const links = asCopy ? [] : ownedRememberedLinks(entry, node)
+    delete entry.owner
+    delete entry.graph
+    delete entry.links
+    if (links.length > 0) Object.assign(entry, memoryStamp(node), { links })
+  }
+  const json = serializeValues(map)
+  if (json !== widget.value) widget.value = json
+}
+
+/**
  * The remembered links of one row's stored *entry* that belong to *node*.
  * The memory rides in the `values` widget, which a paste copies verbatim, so
  * it carries the id of the node that wrote it (`owner`, a sibling of
- * `links` in the row entry) and a node whose id differs ignores it -- the
- * same rule as bypass.js's `parseMemory` and switcher.js's
- * `parseUnplugMemory` (ids compared as strings). Without it a pasted copy,
+ * `links` in the row entry) and the subgraph it was written in (`graph`,
+ * only inside a subgraph -- `subgraphIdOf`), and a node that differs in
+ * either ignores it -- the same rule as bypass.js's `parseMemory` and
+ * switcher.js's `parseUnplugMemory` (`isForeignStamp`). Without it a pasted copy,
  * ticked on, wires itself into the ORIGINAL's consumers and the original
  * later finds them taken and forgets its memory. MIGRATION: memory saved
  * before the stamp existed has no `owner`; it is adopted by the first node
@@ -563,10 +653,7 @@ export function normalizeRememberedLinks(raw) {
 export function ownedRememberedLinks(entry, node) {
   const links = normalizeRememberedLinks(entry?.links)
   if (links.length === 0) return links
-  const owner = entry.owner
-  if (owner == null) return links
-  if (node?.id == null || String(owner) !== String(node.id)) return []
-  return links
+  return isForeignStamp(entry, node) ? [] : links
 }
 
 /**
@@ -1332,7 +1419,7 @@ function applyEnabledStateToWiring(state) {
     if (!storedEnabled && entry.wired) {
       const remembered = collectOutputTargets(node, entry.idx)
       disconnectAllTargets(node, entry.idx)
-      writeSlotField(node, entry.n, { enabled: false, owner: node.id, links: remembered })
+      writeSlotField(node, entry.n, { enabled: false, ...memoryStamp(node), links: remembered })
     } else if (storedEnabled && !entry.wired) {
       const remembered = ownedRememberedLinks(stored, node)
       if (remembered.length > 0) {
@@ -1344,7 +1431,7 @@ function applyEnabledStateToWiring(state) {
         // itself again on the very next syncNode pass -- this function
         // runs on EVERY pass, including a plain keystroke anywhere in the
         // panel, not just right after a re-enable.
-        writeSlotField(node, entry.n, { owner: undefined, links: undefined })
+        writeSlotField(node, entry.n, FORGOTTEN)
       }
     }
   }
@@ -1466,8 +1553,7 @@ function reconcileNode(state) {
       // exactly the shape it was before this feature existed.
       if (!enabled) nextEntry.enabled = false
       if (rememberedLinks.length > 0) {
-        nextEntry.owner = node.id
-        nextEntry.links = rememberedLinks
+        Object.assign(nextEntry, memoryStamp(node), { links: rememberedLinks })
       }
       nextMap[key] = nextEntry
     }
@@ -1568,10 +1654,10 @@ function setRowEnabled(state, n, checked) {
     const map = state.widget ? parseValues(state.widget.value) : {}
     const remembered = ownedRememberedLinks(map[slotName(n)], node)
     reconnectRememberedTargets(node, entry.idx, remembered)
-    writeSlotField(node, n, { enabled: true, owner: undefined, links: undefined })
+    writeSlotField(node, n, { enabled: true, ...FORGOTTEN })
   } else {
     const remembered = collectOutputTargets(node, entry.idx)
-    writeSlotField(node, n, { enabled: false, owner: node.id, links: remembered })
+    writeSlotField(node, n, { enabled: false, ...memoryStamp(node), links: remembered })
     disconnectAllTargets(node, entry.idx)
   }
   syncNode(state)
@@ -1986,7 +2072,7 @@ function autoReenableNewlyWiredRows(state) {
       // reconnect to a stale target the next time this row is unplugged
       // by hand (applyEnabledStateToWiring's identical "one attempt, then
       // forget" reasoning).
-      map[entry.name] = { ...stored, enabled: true, owner: undefined, links: undefined }
+      map[entry.name] = { ...stored, enabled: true, ...FORGOTTEN }
       changed = true
     }
   }
@@ -2215,6 +2301,7 @@ export function attach(node) {
     node.onConfigure = function (info) {
       const result = originalOnConfigure?.apply(this, arguments)
       try {
+        restampRememberedLinks(this, configuredAsCopy(info))
         // Same reset, same reason as `__epsNcReload` above: `configure()`
         // just replaced `widget.value` (and `node.size`) WHOLESALE, so the
         // pre-restore row count in `state.lastRowCount` must not be diffed

@@ -22,11 +22,13 @@ and a runaway loop trips the fake's depth limit instead of hanging.
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import subprocess
 from pathlib import Path
 
 import pytest
+from subgraph_paste import SUBGRAPH_PASTE_JS
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SWITCHER_JS = REPO_ROOT / "web" / "eps_image" / "switcher.js"
@@ -49,6 +51,8 @@ const settle = async () => { await tick(); await tick(); await tick() }
 
 globalThis.LiteGraph = { LGraphCanvas: { prototype: { renderLink() {} } } }
 
+//__SUBGRAPH_PASTE__
+
 let nextLinkId = 1
 let depth = 0
 let maxDepth = 0
@@ -62,8 +66,9 @@ function fire(node, ...args) {
   try { node.onConnectionsChange?.(...args) } finally { depth -= 1 }
 }
 
-function makeGraph() {
+function makeGraph(id) {
   const graph = { links: new Map(), _nodes: [], dirty: 0 }
+  if (id !== undefined) graph.id = id
   graph.setDirtyCanvas = () => { graph.dirty += 1 }
   graph.add = (node) => { graph._nodes.push(node); node.graph = graph; return node }
   graph.remove = (node) => {
@@ -246,8 +251,8 @@ const colourOf = (target, name) => {
   return link ? (link.color ?? null) : 'unwired'
 }
 
-async function rig() {
-  const graph = makeGraph()
+async function rig(graphId) {
+  const graph = makeGraph(graphId)
   const sw = makeSwitcher(graph, 1)
   s.attach(sw)
   const a = makeLoader(graph, 10)
@@ -276,14 +281,14 @@ const out = {}
   const good = JSON.stringify({ owner: 7, outputs: { images: [{ node: 3, input: 'image' }, { bad: 1 }], masks: [] } })
   out.pure = {
     prop: s.UNPLUGGED_PROPERTY,
-    parsed: s.parseUnplugMemory(good, 7),
-    parsedStringId: s.parseUnplugMemory(good, '7'),
-    foreign: s.parseUnplugMemory(good, 8),
-    noOwner: s.parseUnplugMemory('{"outputs": {"images": [{"node": 3, "input": "image"}]}}', 7),
-    malformed: s.parseUnplugMemory('not json', 7),
-    object: s.parseUnplugMemory({ owner: 7, outputs: { images: [{ node: 3, input: 'x' }] } }, 7),
-    serialized: s.serializeUnplugMemory(7, { images: [{ node: 3, input: 'image' }], masks: [] }),
-    serializedEmpty: s.serializeUnplugMemory(7, { images: [] }),
+    parsed: s.parseUnplugMemory(good, { id: 7 }),
+    parsedStringId: s.parseUnplugMemory(good, { id: '7' }),
+    foreign: s.parseUnplugMemory(good, { id: 8 }),
+    noOwner: s.parseUnplugMemory('{"outputs": {"images": [{"node": 3, "input": "image"}]}}', { id: 7 }),
+    malformed: s.parseUnplugMemory('not json', { id: 7 }),
+    object: s.parseUnplugMemory({ owner: 7, outputs: { images: [{ node: 3, input: 'x' }] } }, { id: 7 }),
+    serialized: s.serializeUnplugMemory({ id: 7 }, { images: [{ node: 3, input: 'image' }], masks: [] }),
+    serializedEmpty: s.serializeUnplugMemory({ id: 7 }, { images: [] }),
     exempt: [...s.UNPLUG_EXEMPT_CLASSES].sort()
   }
 }
@@ -444,6 +449,7 @@ const out = {}
   const copy = makeSwitcher(graph, 2)
   s.attach(copy)
   copy.configure({
+    id: -1,
     widgets_values: ['{}', true],
     properties: { 'EPSSwitcher.unplugged': JSON.stringify({ owner: 1, outputs: { images: [{ node: 20, input: 'image' }] } }) }
   })
@@ -453,13 +459,120 @@ const out = {}
   out.paste = { qwen: fedBy(qwen, 'image'), memory: memory(copy) }
 }
 
+// --- the same node id in ANOTHER workflow is not the same node ---------------
+// A node id is only unique inside one graph. Copy the switcher out of
+// workflow A and paste it as the first node of an empty workflow B: litegraph
+// (`_deserializeItems`) adds it -- it gets id 1 again, so the stamped `owner`
+// still matches -- and only THEN configures it with `id: -1` and the copied
+// properties. Node 20 of B is an unrelated node.
+{
+  const a = await rig('graph-A')
+  clickHeader(a.sw) // all off: unplugged + remembered
+  const copiedProps = { ...a.sw.properties }
+  const graphB = makeGraph('graph-B')
+  const stranger = makeTarget(graphB, 20, 'SomeOtherNode', [['image', 'IMAGE', 'optional']])
+  const pasted = makeSwitcher(graphB, 1) // graph.add: same id as the original
+  s.attach(pasted)
+  pasted.configure({ id: -1, widgets_values: ['{}', true], properties: copiedProps })
+  const memoryAfterConfigure = memory(pasted)
+  const src = makeLoader(graphB, 50)
+  plug(src, 0, pasted, 'image_1') // a row on -> would replug the memory
+  await settle()
+  out.crossGraph = { memoryAfterConfigure, stranger: fedBy(stranger, 'image'), memory: memory(pasted) }
+}
+
+// --- Save As / Duplicate: another graph id, the SAME node ids -----------------
+// workflowStore.saveAs / workflowService.duplicateWorkflow give the copy a
+// new workflow id; every node keeps its id, so the memory is still valid.
+{
+  const a = await rig('graph-A')
+  clickHeader(a.sw)
+  const saved = { ...a.sw.properties }
+  a.graph.id = 'graph-saved-as'
+  a.sw.configure({ id: a.sw.id, widgets_values: ['{"image_2": false}', true], properties: saved })
+  await settle()
+  out.saveAs = { qwen: fedBy(a.qwen, 'image'), memory: memory(a.sw) }
+}
+
+// --- Alt-drag / Ctrl+C ghost: clone() configures with `id: undefined`, off-graph
+{
+  const a = await rig('graph-A')
+  clickHeader(a.sw)
+  const saved = { ...a.sw.properties }
+  const ghost = makeSwitcher(makeGraph('ghost-graph'), 1)
+  s.attach(ghost)
+  ghost.graph = null // never joins a graph
+  let fetches = 0
+  globalThis.fetch = () => { fetches += 1; return Promise.resolve({ ok: true, json: async () => ({}) }) }
+  ghost.configure({ id: undefined, widgets_values: ['{}', true], properties: { ...saved } })
+  await settle()
+  out.ghost = { memory: memory(ghost), fetches }
+}
+
+// --- a pasted SUBGRAPH (frontend 1.52.7) ------------------------------------
+// Its interior nodes are configured with REAL ids after the clipboard remap,
+// and the definition gets a NEW uuid. Interior ids [1, 10, 7, 20] pasted into
+// a workflow using 7 and 19 become [1, 10, 20, 21]: the remembered target 20
+// now names the decoy, the intended consumer is 21.
+const QWEN = [['clip', 'CLIP', 'required'], ['vae', 'VAE', 'optional'], ['image', 'IMAGE', 'optional']]
+function subgraphRig(subgraphId, ids) {
+  const graph = makeGraph(subgraphId)
+  graph.isRootGraph = false
+  const sw = makeSwitcher(graph, ids.sw)
+  s.attach(sw)
+  const loader = makeLoader(graph, ids.loader)
+  const decoy = makeTarget(graph, ids.decoy, 'TextEncodeQwenImageEdit', QWEN)
+  const intended = makeTarget(graph, ids.intended, 'TextEncodeQwenImageEdit', QWEN)
+  plug(loader, 0, sw, 'image_1')
+  return { graph, sw, loader, decoy, intended }
+}
+{
+  const src = subgraphRig('sub-1', { sw: 1, loader: 10, decoy: 7, intended: 20 })
+  await settle()
+  plug(src.sw, 0, src.intended, 'image')
+  await settle()
+  clickHeader(src.sw) // all off: unplugged + remembered
+  const saved = { ...src.sw.properties }
+  const [swId, loaderId, decoyId, intendedId] =
+    remapPastedInteriorIds([1, 10, 7, 20], [7, 19], 19).map((m) => m.to)
+  const dst = subgraphRig('sub-2', { sw: swId, loader: loaderId, decoy: decoyId, intended: intendedId })
+  dst.sw.configure({ id: swId, widgets_values: ['{}', true], properties: { ...saved } })
+  const memoryAfterConfigure = memory(dst.sw)
+  await settle() // the row is on and the memory trusted -> it would replug
+  out.subgraphPaste = {
+    ids: [swId, loaderId, decoyId, intendedId],
+    memoryAfterConfigure,
+    decoy: fedBy(dst.decoy, 'image'),
+    intended: fedBy(dst.intended, 'image')
+  }
+  // the SAME definition reloaded (undo / Save As / Duplicate): kept, replugs
+  const stamp = memory(src.sw)
+  src.sw.configure({ id: 1, widgets_values: ['{}', true], properties: { ...saved } })
+  await settle()
+  out.subgraphReload = { stamp, intended: fedBy(src.intended, 'image'), decoy: fedBy(src.decoy, 'image') }
+}
+// --- converted into a subgraph WITH its target: written in the root graph, ----
+// configured in a brand-new subgraph -> kept, and restamped for that subgraph
+{
+  const a = await rig('root')
+  clickHeader(a.sw)
+  const saved = { ...a.sw.properties }
+  out.rootStamp = memory(a.sw)
+  const inner = makeGraph('sub-new')
+  inner.isRootGraph = false
+  for (const node of [a.sw, a.a, a.b, a.qwen, a.encode, a.maskUser]) inner.add(node)
+  a.sw.configure({ id: 1, widgets_values: ['{"image_2": false}', true], properties: saved })
+  await settle()
+  out.converted = { stamp: memory(a.sw), qwen: fedBy(a.qwen, 'image') }
+}
+
 // --- configure: memory + a row on replugs once the restore settles ----------
 {
   const { sw, qwen, maskUser } = await rig()
   clickHeader(sw) // all off: unplugged + remembered
   const saved = { ...sw.properties }
   // A load/undo of a state where a row is ON again, memory still present.
-  sw.configure({ widgets_values: ['{"image_2": false}', true], properties: saved })
+  sw.configure({ id: sw.id, widgets_values: ['{"image_2": false}', true], properties: saved })
   const sync = fedBy(qwen, 'image') // deferred: not yet
   await settle()
   out.configureReplug = {
@@ -478,7 +591,7 @@ const out = {}
   applyToggles(sw, '{}') // replugs; the widget now reads all-on
   qwen.disconnectInput(inputSlot(qwen, 'image')) // as in the saved (all-off) file
   // Restore an all-off save: the loop fires while toggles still read '{}'.
-  sw.configure({ widgets_values: ['{"image_1": false, "image_2": false}', true], properties: saved })
+  sw.configure({ id: sw.id, widgets_values: ['{"image_1": false, "image_2": false}', true], properties: saved })
   const duringLoop = fedBy(qwen, 'image')
   await settle()
   out.configureGuard = { duringLoop, settled: fedBy(qwen, 'image'), memory: memory(sw) }
@@ -490,7 +603,7 @@ const out = {}
   clickHeader(sw)
   const saved = { ...sw.properties }
   app.configuringGraph = true
-  sw.configure({ widgets_values: ['{}', true], properties: saved })
+  sw.configure({ id: sw.id, widgets_values: ['{}', true], properties: saved })
   await settle()
   const whileLoading = fedBy(qwen, 'image')
   app.configuringGraph = false
@@ -590,7 +703,9 @@ process.stdout.write(JSON.stringify(out))
 def probe(tmp_path_factory: pytest.TempPathFactory, install_switcher_js) -> dict:
     layout = tmp_path_factory.mktemp("web_root_all_off_unplug")
     install_switcher_js(layout)
-    (layout / "probe.mjs").write_text(PROBE_JS, encoding="utf-8")
+    (layout / "probe.mjs").write_text(
+        PROBE_JS.replace("//__SUBGRAPH_PASTE__", SUBGRAPH_PASTE_JS), encoding="utf-8"
+    )
     result = subprocess.run(
         [NODE, str(layout / "probe.mjs")],
         capture_output=True,
@@ -717,6 +832,43 @@ def test_pasted_copy_ignores_inherited_memory(probe: dict) -> None:
     assert probe["paste"] == {"qwen": None, "memory": None}
 
 
+def test_a_pasted_copy_in_another_workflow_never_wires_an_unrelated_node(probe: dict) -> None:
+    # Same node id (1), same target id (20), different graph: the copy is
+    # configured without a real id, so it owns no memory at all.
+    assert probe["crossGraph"] == {"memoryAfterConfigure": None, "stranger": None, "memory": None}
+
+
+def test_a_pasted_subgraphs_interior_never_wires_an_unrelated_node(probe: dict) -> None:
+    # The copy-id check cannot see this: the interior is configured with real
+    # ids, and the clipboard remap makes the remembered target 20 the decoy.
+    p = probe["subgraphPaste"]
+    assert p["ids"] == [1, 10, 20, 21]
+    assert p["decoy"] is None  # the harm: an unrelated node gets wired
+    assert p["intended"] is None
+    assert p["memoryAfterConfigure"] is None
+
+
+def test_a_subgraph_reload_keeps_the_memory_and_replugs(probe: dict) -> None:
+    p = probe["subgraphReload"]
+    assert p["stamp"]["owner"] == 1
+    assert p["stamp"]["graph"] == "sub-1"
+    assert p["intended"] == [1, 0]
+    assert p["decoy"] is None
+
+
+def test_converting_a_node_into_a_subgraph_with_its_target_keeps_the_memory(probe: dict) -> None:
+    assert "graph" not in probe["rootStamp"]
+    assert probe["converted"]["qwen"] == [1, 0]
+
+
+def test_save_as_keeps_every_node_id_so_the_memory_still_replugs(probe: dict) -> None:
+    assert probe["saveAs"] == {"qwen": [1, 0], "memory": None}
+
+
+def test_a_clone_ghost_drops_the_memory_and_makes_no_server_call(probe: dict) -> None:
+    assert probe["ghost"] == {"memory": None, "fetches": 0}
+
+
 def test_configure_with_memory_and_a_row_on_replugs_after_settling(probe: dict) -> None:
     result = probe["configureReplug"]
     assert result["sync"] is None
@@ -784,16 +936,16 @@ def source() -> str:
 
 
 def test_shared_machinery_is_imported_not_copied(source: str) -> None:
-    assert (
-        "import { normalizeRememberedLinks, reconnectRememberedTargets } "
-        "from './number_controller.js'" in source
-    )
+    assert "} from './number_controller.js'" in source
+    for name in ("configuredAsCopy", "normalizeRememberedLinks", "reconnectRememberedTargets"):
+        assert re.search(rf"import \{{[^}}]*\b{name}\b[^}}]*\}} from './number_controller.js'", source), name
     assert "import { inputVerdict, sameTarget } from './bypass.js'" in source
     for name in (
         "collectOutputTargets",
         "disconnectAllTargets",
         "reconnectRememberedTargets",
         "normalizeRememberedLinks",
+        "configuredAsCopy",
         "inputVerdict",
         "sameTarget",
     ):

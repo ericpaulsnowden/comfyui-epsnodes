@@ -1017,7 +1017,7 @@ const dom = out.dom
   graph.register(node2)
   nc.attach(node2)
   node2.widgets[0].value = savedValue
-  node2.onConfigure({})
+  node2.onConfigure({ id: node2.id })
 
   const row1b = rowsOf(node2)[0]
   const result = {
@@ -3298,16 +3298,17 @@ def test_auto_reenable_runs_before_the_general_sync(source: str) -> None:
 
 def test_reconnect_attempts_are_forgotten_not_retried_forever(source: str) -> None:
     """Both places that attempt a reconnect from remembered `links` clear
-    that memory afterward (`links: undefined` -- JSON.stringify drops it) --
+    that memory afterward (`FORGOTTEN`: `links: undefined` etc. --
+    JSON.stringify drops it) --
     otherwise a row a user later unplugs BY HAND, with nothing to do with
     the checkbox, would silently reconnect itself again on the very next
     sync pass, since applyEnabledStateToWiring runs on every one of them."""
     apply_body = _function_body(source, "applyEnabledStateToWiring(state)")
-    assert "links: undefined" in apply_body
+    assert "FORGOTTEN" in apply_body
     setrow_body = _function_body(source, "setRowEnabled(state, n, checked)")
-    assert "links: undefined" in setrow_body
+    assert "FORGOTTEN" in setrow_body
     reenable_body = _function_body(source, "autoReenableNewlyWiredRows(state)")
-    assert "links: undefined" in reenable_body
+    assert "FORGOTTEN" in reenable_body
 
 
 def test_checkbox_change_handler_calls_set_row_enabled(source: str) -> None:
