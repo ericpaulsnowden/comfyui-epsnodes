@@ -650,7 +650,8 @@ class TestWiredVideoInput:
 
     def test_wire_changes_resync_through_the_standard_wrap(self, frame_saver_source: str) -> None:
         body = _function_body(frame_saver_source, "attach(node)")
-        assert "node.onConnectionsChange = function (...args)" in body
+        assert "chainHook(\n      node,\n      'onConnectionsChange'," in body
+        assert "onOriginalThrow: 'log'" in body
         assert "fullResync(state)" in body
 
     def test_path_bar_names_the_wire_not_the_stale_path(self, frame_saver_source: str) -> None:

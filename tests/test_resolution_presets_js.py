@@ -222,6 +222,7 @@ def presets_api(tmp_path_factory: pytest.TempPathFactory) -> dict:
     lora_dir = layout / "extensions" / "comfyui-epsnodes" / "lora_library"
     lora_dir.mkdir(parents=True)
     shutil.copyfile(API_JS, lora_dir / "api.js")
+    shutil.copyfile(API_JS.with_name("panel_helpers.js"), lora_dir / "panel_helpers.js")
     shutil.copyfile(VERSION_JS, lora_dir / "version.js")
 
     # resolution.js's two DIRECT scripts imports -- `../../../scripts/app.js`
@@ -419,8 +420,8 @@ def test_property_changed_is_chained_never_replaced(source: str) -> None:
     onPropertyChanged wrap attach() already installs for the M1/M2
     properties, rather than installing a second, competing wrap."""
     body = _function_body(source, "attach(node)")
-    assert "const originalOnPropertyChanged = node.onPropertyChanged" in body
-    assert "originalOnPropertyChanged?.call(this, name, value, prevValue)" in body
+    assert "chainHook(\n    node,\n    'onPropertyChanged'," in body
+    assert "node.onPropertyChanged =" not in body
     # Every M1/M2 property branch is still present -- this is an ADDITION,
     # not a replacement of the existing chain.
     assert "applyPassthroughVisibility(this)" in body
@@ -748,9 +749,8 @@ def test_on_configure_is_chained_never_replaced(source: str) -> None:
     attachPresetsUi's own wrap must chain on top of attachSizeGrid's
     already-installed one, not replace it."""
     body = _function_body(source, "attachPresetsUi(node)")
-    assert "const originalOnConfigure = node.onConfigure" in body
-    assert "node.onConfigure = function presetsOnConfigure(info) {" in body
-    assert "originalOnConfigure?.call(this, info)" in body
+    assert "chainHook(\n      node,\n      'onConfigure'," in body
+    assert "node.onConfigure =" not in body
     assert "reconcilePresetsUi(this)" in body
 
 
@@ -845,9 +845,9 @@ def test_manual_edit_wrap_covers_every_preset_field_and_clears_via_commit(source
     exists, so it sits OUTSIDE the M2 grid's own width/height wrap."""
     body = _function_body(source, "wireManualEditClearsSelection(node, state)")
     assert "for (const field of PRESET_FIELD_NAMES)" in body
-    assert "const originalCallback = widget.callback" in body
-    assert "originalCallback?.apply(this, args)" in body
-    assert "} finally {" in body
+    assert "chainHook(\n      widget,\n      'callback'," in body
+    assert "widget.callback =" not in body
+    assert "onOriginalThrow: 'still-run'" in body  # ours runs even if the original throws
     assert "if (clearsPresetOnManualEdit(state)) commitSelection(node, [])" in body
     attach = _function_body(source, "attachPresetsUi(node)")
     assert "node._epsPresets = state\n    wireManualEditClearsSelection(node, state)" in attach

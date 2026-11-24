@@ -240,7 +240,7 @@ def test_controller_target_discovery_does_not_depend_on_drawing() -> None:
     watch = source.split("function installGraphNodeWatch(graph)", 1)[1].split("\n}\n", 1)[0]
     assert "graph.__epsCtrlNodeWatch" in watch, "must install once per graph"
     assert "'onNodeAdded', 'onNodeRemoved'" in watch
-    assert "original?.apply(this, args)" in watch, "chained, never replaced"
+    assert "chainHook(graph, hook," in watch, "chained, never replaced"
     assert "scheduleControllerRefresh()" in watch
     # ...installed from onAdded across EVERY graph in the workflow (v0.64.0:
     # subgraph events fire only on the subgraph's own hooks).

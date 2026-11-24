@@ -106,7 +106,7 @@
 
 import { app } from '../../../scripts/app.js'
 import { loggerFor, showToast, subscribeWidgetsChangedExternally } from '../lora_library/api.js'
-import { findWidget, installMinWidth, linkById, nodeClassOf } from '../lora_library/panel_helpers.js'
+import { chainHook, findWidget, installMinWidth, linkById, nodeClassOf } from '../lora_library/panel_helpers.js'
 import {
   collectOutputTargets,
   configuredAsCopy,
@@ -673,16 +673,14 @@ function installExternalWriteSubscription() {
  */
 function wireToggle(state) {
   const { enabledWidget } = state
-  const original = enabledWidget.callback
-  enabledWidget.callback = function (...args) {
-    const result = typeof original === 'function' ? original.apply(this, args) : undefined
-    try {
+  chainHook(
+    enabledWidget,
+    'callback',
+    function () {
       onEnabledChanged(state)
-    } catch (error) {
-      warn('toggle handler failed', error)
-    }
-    return result
-  }
+    },
+    { warn, label: 'toggle handler' }
+  )
 }
 
 /**
@@ -743,19 +741,18 @@ function wireConnectionSync(state) {
     }
   }
 
-  const originalOnConnectionsChange = node.onConnectionsChange
-  node.onConnectionsChange = function (type, index, isConnected, linkInfo, slot) {
-    let result
-    if (typeof originalOnConnectionsChange === 'function') {
-      result = originalOnConnectionsChange.apply(this, arguments)
-    }
-    // Only OUR two sockets: the `enabled`/`links` widget inputs also fire
-    // this when something is wired into them, and that is none of our
-    // business here.
-    const ours = slot === outputOf(this) || slot?.name === INPUT_NAME
-    if (!hook.restoring && ours) schedule(!isGraphConfiguring())
-    return result
-  }
+  chainHook(
+    node,
+    'onConnectionsChange',
+    function (type, index, isConnected, linkInfo, slot) {
+      // Only OUR two sockets: the `enabled`/`links` widget inputs also fire
+      // this when something is wired into them, and that is none of our
+      // business here.
+      const ours = slot === outputOf(this) || slot?.name === INPUT_NAME
+      if (!hook.restoring && ours) schedule(!isGraphConfiguring())
+    },
+    { warn, label: 'settle on connections change' }
+  )
 
   return schedule
 }
@@ -806,20 +803,18 @@ export function attach(node) {
     // must not flash wrong) and once more after the whole graph has been
     // configured (a peer may not have restored its inputs yet). Neither pass
     // rewires anything -- loading never does.
-    const originalOnConfigure = node.onConfigure
-    node.onConfigure = function (info) {
-      const result = originalOnConfigure?.apply(this, arguments)
-      try {
+    chainHook(
+      node,
+      'onConfigure',
+      function (info) {
         // A copy owns no memory; anything else keeps what is still its own,
         // re-stamped for the graph it now sits in (`isForeignStamp`).
         writeMemory(state, configuredAsCopy(info) ? [] : readMemory(state))
         settle(state)
         schedule(false)
-      } catch (error) {
-        warn('post-configure settle failed', error)
-      }
-      return result
-    }
+      },
+      { warn, label: 'post-configure settle' }
+    )
 
     // A fresh node: seed the `any` labels.
     settle(state)

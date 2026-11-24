@@ -469,7 +469,7 @@
 
 import * as api from './api.js'
 import { entryMatchesSearch, searchHaystack, searchWords } from './search.js'
-import { el, findWidget, installMinWidth } from './panel_helpers.js'
+import { chainHook, el, findWidget, installMinWidth } from './panel_helpers.js'
 import { isGroupNameInput, groupNameFromInput, parseCollapsedGroups } from './group_helpers.js'
 
 /** FORMAT.md §6.1 — frozen once shipped. */
@@ -1777,6 +1777,9 @@ function hideFileWidget(state) {
  */
 function wireFileWidget(state) {
   const widget = state.fileWidget
+  // Not chainHook: the remote-viewer revert answers for the callback and skips
+  // the original (and the file-change handler) entirely, and `lastKnownFileValue`
+  // is written between the guard and the original call.
   const original = widget.callback
   state.lastKnownFileValue = widget.value
   widget.callback = function (value, ...rest) {
@@ -1860,17 +1863,10 @@ function wireFileWidget(state) {
  */
 function wireConfigureReload(state) {
   const node = state.node
-  const originalOnConfigure = node.onConfigure
-  node.onConfigure = function (info) {
-    let result
-    if (typeof originalOnConfigure === 'function') {
-      try {
-        result = originalOnConfigure.apply(this, arguments)
-      } catch (error) {
-        api.warn('original onConfigure threw', error)
-      }
-    }
-    try {
+  chainHook(
+    node,
+    'onConfigure',
+    function (info) {
       const restored = state.fileWidget.value ?? ''
       state.lastKnownFileValue = restored
       // `|| state.loadError`: a failed load must be re-attempted on the
@@ -1892,11 +1888,9 @@ function wireConfigureReload(state) {
       // callbacks" reason, so a workflow saved mid-audition restores its
       // hint without a click.
       syncDraftsFromWidget(state)
-    } catch (error) {
-      api.warn('post-configure notebook reload failed', error)
-    }
-    return result
-  }
+    },
+    { warn: api.warn, label: 'post-configure notebook reload', onOriginalThrow: 'log' }
+  )
 }
 
 function onFileWidgetChanged(state) {
@@ -1920,23 +1914,14 @@ function scheduleSearchRender(state) {
 
 function wireNodeCleanup(state) {
   const node = state.node
-  const originalOnRemoved = node.onRemoved
-  node.onRemoved = function (...args) {
-    let result
-    if (typeof originalOnRemoved === 'function') {
-      try {
-        result = originalOnRemoved.apply(this, args)
-      } catch (error) {
-        api.warn('original node onRemoved threw', error)
-      }
-    }
-    try {
+  chainHook(
+    node,
+    'onRemoved',
+    function () {
       teardown(state)
-    } catch (error) {
-      api.warn('notebook teardown failed', error)
-    }
-    return result
-  }
+    },
+    { warn: api.warn, label: 'notebook teardown', onOriginalThrow: 'log' }
+  )
 }
 
 function teardown(state) {
@@ -4138,19 +4123,21 @@ function registerCollapsedSectionsProperty(state) {
     node.properties = node.properties || {}
     if (!(PROP_COLLAPSED_SECTIONS in node.properties)) node.properties[PROP_COLLAPSED_SECTIONS] = []
   }
-  const original = node.onPropertyChanged
-  node.onPropertyChanged = function (name, value, prevValue) {
-    const result = original?.call(this, name, value, prevValue)
-    if (name === PROP_COLLAPSED_SECTIONS) {
-      // Covers BOTH configure()'s restore (the saved array lands here) and a
-      // live hand-edit through the node's right-click Properties panel --
-      // the latter is the nice-to-have "a hand-edited property repaints the
-      // section headers" (owner ask's implementation note).
-      applyCollapsedSectionsFromProperty(state)
-      renderList(state)
-    }
-    return result
-  }
+  chainHook(
+    node,
+    'onPropertyChanged',
+    function (name, value, prevValue) {
+      if (name === PROP_COLLAPSED_SECTIONS) {
+        // Covers BOTH configure()'s restore (the saved array lands here) and a
+        // live hand-edit through the node's right-click Properties panel --
+        // the latter is the nice-to-have "a hand-edited property repaints the
+        // section headers" (owner ask's implementation note).
+        applyCollapsedSectionsFromProperty(state)
+        renderList(state)
+      }
+    },
+    { warn: api.warn }
+  )
   // addProperty() alone never fires onPropertyChanged (see above) -- sync a
   // FRESH node's Set explicitly now; a RESTORED node's configure() does this
   // again momentarily with the real saved value via the wrapper just above.
@@ -4255,14 +4242,16 @@ function registerOpenCategoryProperty(state) {
     node.properties = node.properties || {}
     if (!(PROP_OPEN_CATEGORY in node.properties)) node.properties[PROP_OPEN_CATEGORY] = ''
   }
-  const original = node.onPropertyChanged
-  node.onPropertyChanged = function (name, value, prevValue) {
-    const result = original?.call(this, name, value, prevValue)
-    if (name === PROP_OPEN_CATEGORY) {
-      applyOpenCategoryFromProperty(state)
-    }
-    return result
-  }
+  chainHook(
+    node,
+    'onPropertyChanged',
+    function (name, value, prevValue) {
+      if (name === PROP_OPEN_CATEGORY) {
+        applyOpenCategoryFromProperty(state)
+      }
+    },
+    { warn: api.warn }
+  )
   // addProperty() alone never fires onPropertyChanged (see above) -- apply
   // explicitly now for a FRESH node too. A no-op in practice (state.
   // activeCategory is already `null` and state.categories is still empty
@@ -6837,23 +6826,11 @@ function hidePinnedWidget(state) {
 function wirePinnedWidget(state) {
   const widget = state.pinnedWidget
   if (!widget) return
-  const original = widget.callback
-  widget.callback = function (value, ...rest) {
-    let result
-    if (typeof original === 'function') {
-      try {
-        result = original.apply(this, [value, ...rest])
-      } catch (error) {
-        api.warn('original pinned widget callback threw', error)
-      }
-    }
-    try {
-      syncPinnedFromWidget(state)
-    } catch (error) {
-      api.warn('pinned widget sync threw', error)
-    }
-    return result
-  }
+  chainHook(widget, 'callback', () => syncPinnedFromWidget(state), {
+    warn: api.warn,
+    label: 'pinned widget sync',
+    onOriginalThrow: 'log'
+  })
 }
 
 /**

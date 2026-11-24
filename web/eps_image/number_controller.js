@@ -260,7 +260,7 @@
 
 import { app } from '../../../scripts/app.js'
 import { loggerFor, showToast, subscribeWidgetsChangedExternally } from '../lora_library/api.js'
-import { el, findWidget, installMinWidth, linkById, nodeClassOf } from '../lora_library/panel_helpers.js'
+import { chainHook, el, findWidget, installMinWidth, linkById, nodeClassOf } from '../lora_library/panel_helpers.js'
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -1756,22 +1756,21 @@ function wireRowSync(state) {
     }
   }
 
-  const originalOnConnectionsChange = node.onConnectionsChange
-  node.onConnectionsChange = function (type, index, isConnected, linkInfo, slot) {
-    let result
-    if (typeof originalOnConnectionsChange === 'function') {
-      result = originalOnConnectionsChange.apply(this, arguments)
-    }
-    // Name-matched (`num_N` is only ever an output on this node) rather
-    // than slot-type-matched -- distributor.js's identical reasoning. This
-    // deliberately never branches on `isConnected`: litegraph's restore
-    // loop passes it hardcoded `true` even for a slot with no link, and
-    // `highestWiredSlot`/`slotCarriesContent` both recompute wiring/content
-    // from the slots and the map themselves, so a stale argument can never
-    // misdrive this.
-    if (!hook.restoring && OUTPUT_NAME_RE.test(slot?.name || '')) schedule(this)
-    return result
-  }
+  chainHook(
+    node,
+    'onConnectionsChange',
+    function (type, index, isConnected, linkInfo, slot) {
+      // Name-matched (`num_N` is only ever an output on this node) rather
+      // than slot-type-matched -- distributor.js's identical reasoning. This
+      // deliberately never branches on `isConnected`: litegraph's restore
+      // loop passes it hardcoded `true` even for a slot with no link, and
+      // `highestWiredSlot`/`slotCarriesContent` both recompute wiring/content
+      // from the slots and the map themselves, so a stale argument can never
+      // misdrive this.
+      if (!hook.restoring && OUTPUT_NAME_RE.test(slot?.name || '')) schedule(this)
+    },
+    { warn, label: 'schedule grow (onConnectionsChange)' }
+  )
 }
 
 /**
@@ -1786,16 +1785,18 @@ function wireRowSync(state) {
  * Chained with whatever else installed `onConnectOutput` first.
  */
 function wireTypeVeto(node) {
-  const original = node.onConnectOutput
-  node.onConnectOutput = function (outputIndex, inputType, input, targetNode, inputIndex) {
-    const output = this.outputs?.[outputIndex]
-    if (output && OUTPUT_NAME_RE.test(output.name || '') && !isAllowedType(inputType)) {
-      toast(this, 'warn', `EPS Number Controller only carries whole numbers or decimals -- not ${inputType}.`)
-      return false
-    }
-    if (typeof original === 'function') return original.apply(this, arguments)
-    return undefined
-  }
+  chainHook(
+    node,
+    'onConnectOutput',
+    function (outputIndex, inputType, input, targetNode, inputIndex) {
+      const output = this.outputs?.[outputIndex]
+      if (output && OUTPUT_NAME_RE.test(output.name || '') && !isAllowedType(inputType)) {
+        toast(this, 'warn', `EPS Number Controller only carries whole numbers or decimals -- not ${inputType}.`)
+        return false
+      }
+    },
+    { warn, label: 'type veto (onConnectOutput)', order: 'before', veto: true }
+  )
 }
 
 // ---------------------------------------------------------------------------
@@ -1864,10 +1865,10 @@ export function attach(node) {
     // `widget.value` for both a whole-workflow load and a paste
     // (distributor.js's/checkpoint_switcher.js's identical citation of this
     // ordering). Chained, never replaced.
-    const originalOnConfigure = node.onConfigure
-    node.onConfigure = function (info) {
-      const result = originalOnConfigure?.apply(this, arguments)
-      try {
+    chainHook(
+      node,
+      'onConfigure',
+      function (info) {
         restampRememberedLinks(this, configuredAsCopy(info))
         // Same reset, same reason as `__epsNcReload` above: `configure()`
         // just replaced `widget.value` (and `node.size`) WHOLESALE, so the
@@ -1875,11 +1876,9 @@ export function attach(node) {
         // against the freshly-restored one.
         state.lastRowCount = null
         syncNode(state)
-      } catch (error) {
-        warn('post-configure sync failed', error)
-      }
-      return result
-    }
+      },
+      { warn, label: 'post-configure sync' }
+    )
 
     // Settle once now: covers a FRESH node (nothing to restore -- collapses
     // to one blank row) and the other race order, a value already sitting

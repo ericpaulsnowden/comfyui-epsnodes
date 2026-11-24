@@ -1776,7 +1776,7 @@ def test_shared_helpers_are_imported_not_copied(source: str) -> None:
         "isOutputConnected",
     }
     assert (
-        "import { findWidget, installMinWidth, linkById, nodeClassOf } "
+        "import { chainHook, findWidget, installMinWidth, linkById, nodeClassOf } "
         "from '../lora_library/panel_helpers.js'"
     ) in source
     dist_import = re.search(r"import \{([^}]*)\} from './distributor\.js'", source)
@@ -1824,8 +1824,8 @@ def test_loading_never_rewires_by_construction(source: str) -> None:
     """onConfigure and the post-load pass may repaint; they may not call
     anything that can switch a wire."""
     attach = _function_body(source, "attach(node)")
-    on_configure = attach.split("node.onConfigure = function (info) {", 1)[1].split(
-        "\n    }\n", 1
+    on_configure = attach.split("'onConfigure',\n      function (info) {", 1)[1].split(
+        "\n      },\n", 1
     )[0]
     for wiring in ("switchOff(", "switchOn(", "reconcile(", "onEnabledChanged(", "autoReenable"):
         assert wiring not in on_configure, wiring
@@ -1891,14 +1891,16 @@ def test_refusal_reverts_directly_and_asserts_again_next_tick(source: str) -> No
 
 
 def test_the_hooks_chain_the_originals(source: str) -> None:
-    assert "const original = enabledWidget.callback" in source
-    assert "original.apply(this, args)" in source
+    assert "chainHook(\n    enabledWidget,\n    'callback'," in source
+    assert "enabledWidget.callback =" not in source
     assert "const originalConfigure = node.configure" in source
     assert "originalConfigure?.apply(this, args)" in source
-    assert "const originalOnConnectionsChange = node.onConnectionsChange" in source
-    assert "originalOnConnectionsChange.apply(this, arguments)" in source
-    assert "const originalOnConfigure = node.onConfigure" in source
-    assert "originalOnConfigure?.apply(this, arguments)" in source
+    # the two node hooks go through the shared chainHook (its own contract is
+    # tested in tests/test_chain_hook_js.py), never a hand-assigned wrapper
+    assert "chainHook(" in source
+    assert "'onConnectionsChange'" in source and "'onConfigure'" in source
+    assert "node.onConnectionsChange =" not in source
+    assert "node.onConfigure =" not in source
 
 
 def test_only_our_own_sockets_schedule_a_pass(source: str) -> None:

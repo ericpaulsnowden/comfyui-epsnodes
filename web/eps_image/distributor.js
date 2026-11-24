@@ -343,7 +343,7 @@
 import { app } from '../../../scripts/app.js'
 import { loggerFor, showToast } from '../lora_library/api.js'
 import { LINK_COLOR_OWNER_KEY } from './owned_link_colour.js'
-import { findWidget, installMinWidth, linkById, nodeClassOf } from '../lora_library/panel_helpers.js'
+import { chainHook, findWidget, installMinWidth, linkById, nodeClassOf } from '../lora_library/panel_helpers.js'
 
 /** FORMAT.md section 6.11 -- frozen once shipped. */
 export const CLASS_ID = 'EPSDistributor'
@@ -1428,21 +1428,20 @@ function wireOutputGrowth(node) {
     }
   }
 
-  const originalOnConnectionsChange = node.onConnectionsChange
-  node.onConnectionsChange = function (type, index, isConnected, linkInfo, slot) {
-    let result
-    if (typeof originalOnConnectionsChange === 'function') {
-      result = originalOnConnectionsChange.apply(this, arguments)
-    }
-    // Name-matched rather than type-matched: `out_N` is only ever an output,
-    // and this stays correct if litegraph's slot-type enum values ever move.
-    // v0.75.0: a change on the `image` INPUT also needs this pass (mechanism
-    // 4) -- that's the other slot whose adopted type can move.
-    if (!state.restoring && (OUTPUT_NAME_RE.test(slot?.name || '') || slot?.name === INPUT_NAME)) {
-      scheduleGrow(this)
-    }
-    return result
-  }
+  chainHook(
+    node,
+    'onConnectionsChange',
+    function (type, index, isConnected, linkInfo, slot) {
+      // Name-matched rather than type-matched: `out_N` is only ever an output,
+      // and this stays correct if litegraph's slot-type enum values ever move.
+      // v0.75.0: a change on the `image` INPUT also needs this pass (mechanism
+      // 4) -- that's the other slot whose adopted type can move.
+      if (!state.restoring && (OUTPUT_NAME_RE.test(slot?.name || '') || slot?.name === INPUT_NAME)) {
+        scheduleGrow(this)
+      }
+    },
+    { warn, label: 'output growth (onConnectionsChange)' }
+  )
 }
 
 /**
@@ -1459,30 +1458,30 @@ function wireOutputGrowth(node) {
  * `undefined`) when it isn't the one vetoing.
  */
 function wireTypeVeto(node) {
-  const originalOnConnectInput = node.onConnectInput
-  node.onConnectInput = function (targetSlot, type, output, sourceNode, sourceSlot) {
-    if (this.inputs?.[targetSlot]?.name === INPUT_NAME && !isAllowedType(type)) {
-      toast(this, 'warn', `EPS Distributor carries images or text for now -- not ${type}.`)
-      return false
-    }
-    if (typeof originalOnConnectInput === 'function') {
-      return originalOnConnectInput.apply(this, arguments)
-    }
-    return undefined
-  }
+  chainHook(
+    node,
+    'onConnectInput',
+    function (targetSlot, type, output, sourceNode, sourceSlot) {
+      if (this.inputs?.[targetSlot]?.name === INPUT_NAME && !isAllowedType(type)) {
+        toast(this, 'warn', `EPS Distributor carries images or text for now -- not ${type}.`)
+        return false
+      }
+    },
+    { warn, label: 'type veto (onConnectInput)', order: 'before', veto: true }
+  )
 
-  const originalOnConnectOutput = node.onConnectOutput
-  node.onConnectOutput = function (outputIndex, inputType, input, targetNode, inputIndex) {
-    const output = this.outputs?.[outputIndex]
-    if (output && OUTPUT_NAME_RE.test(output.name || '') && !isAllowedType(inputType)) {
-      toast(this, 'warn', `EPS Distributor carries images or text for now -- not ${inputType}.`)
-      return false
-    }
-    if (typeof originalOnConnectOutput === 'function') {
-      return originalOnConnectOutput.apply(this, arguments)
-    }
-    return undefined
-  }
+  chainHook(
+    node,
+    'onConnectOutput',
+    function (outputIndex, inputType, input, targetNode, inputIndex) {
+      const output = this.outputs?.[outputIndex]
+      if (output && OUTPUT_NAME_RE.test(output.name || '') && !isAllowedType(inputType)) {
+        toast(this, 'warn', `EPS Distributor carries images or text for now -- not ${inputType}.`)
+        return false
+      }
+    },
+    { warn, label: 'type veto (onConnectOutput)', order: 'before', veto: true }
+  )
 }
 
 // ---------------------------------------------------------------------------
@@ -1645,53 +1644,40 @@ function rowAtLocalY(node, localY) {
  * title still renames the NODE, not an output.
  */
 function wireOutputRename(node) {
-  const originalOnOutputDblClick = node.onOutputDblClick
-  node.onOutputDblClick = function (index, e) {
-    let result
-    if (typeof originalOnOutputDblClick === 'function') {
-      result = originalOnOutputDblClick.apply(this, arguments)
-    }
-    try {
+  chainHook(
+    node,
+    'onOutputDblClick',
+    function (index, e) {
       const output = this.outputs?.[index]
       if (output && OUTPUT_NAME_RE.test(output.name || '')) {
         promptForOutputLabel(this, output, activeCanvas(), e)
       }
-    } catch (error) {
-      warn('onOutputDblClick rename failed', error)
-    }
-    return result
-  }
+    },
+    { warn, label: 'onOutputDblClick rename' }
+  )
 
-  const originalOnDblClick = node.onDblClick
-  node.onDblClick = function (e, pos, canvas) {
-    let result
-    if (typeof originalOnDblClick === 'function') {
-      result = originalOnDblClick.apply(this, arguments)
-    }
-    try {
+  chainHook(
+    node,
+    'onDblClick',
+    function (e, pos, canvas) {
       if (Array.isArray(pos) && pos[1] >= 0) {
         const entry = rowAtLocalY(this, pos[1])
         if (entry) promptForOutputLabel(this, entry.output, canvas || activeCanvas(), e)
       }
-    } catch (error) {
-      warn('onDblClick rename failed', error)
-    }
-    return result
-  }
+    },
+    { warn, label: 'onDblClick rename' }
+  )
 }
 
 function wireRowToggleDrawing(node) {
-  const original = node.onDrawForeground
-  node.onDrawForeground = function (ctx, canvas, canvasEl) {
-    let result
-    if (typeof original === 'function') result = original.apply(this, arguments)
-    try {
+  chainHook(
+    node,
+    'onDrawForeground',
+    function (ctx, canvas, canvasEl) {
       drawRowToggles(this, ctx)
-    } catch (error) {
-      warn('drawRowToggles failed', error)
-    }
-    return result
-  }
+    },
+    { warn, label: 'drawRowToggles' }
+  )
 }
 
 /** @returns {boolean} true if the click hit a row toggle (and was handled). */
@@ -1709,6 +1695,8 @@ function handleRowToggleClick(node, localPos) {
 }
 
 function wireRowToggleClicks(node) {
+  // Not chainHook: with no original this returns `false` (not `undefined`),
+  // which chainHook's `veto` form does not express.
   const original = node.onMouseDown
   node.onMouseDown = function (e, pos, canvas) {
     try {
@@ -1845,18 +1833,20 @@ export function attach(node) {
 
     node.addProperty(PROP_OUTPUTS, DEFAULT_VISIBLE_OUTPUTS, 'number')
 
-    const originalOnPropertyChanged = node.onPropertyChanged
-    node.onPropertyChanged = function (name, value, prevValue) {
-      const result = originalOnPropertyChanged?.call(this, name, value, prevValue)
-      if (name === PROP_OUTPUTS) {
-        try {
-          applyVisibleOutputCount(this)
-        } catch (error) {
-          warn('applyVisibleOutputCount failed', error)
+    chainHook(
+      node,
+      'onPropertyChanged',
+      function (name, value, prevValue) {
+        if (name === PROP_OUTPUTS) {
+          try {
+            applyVisibleOutputCount(this)
+          } catch (error) {
+            warn('applyVisibleOutputCount failed', error)
+          }
         }
-      }
-      return result
-    }
+      },
+      { warn }
+    )
 
     wireRowToggleDrawing(node)
     wireRowToggleClicks(node)
@@ -1878,10 +1868,10 @@ export function attach(node) {
     // (`_wired_slots` -- unwired sockets never force the upstream), so
     // this is state hygiene: what the widget SAYS should match what the
     // node SHOWS.
-    const originalOnConfigure = node.onConfigure
-    node.onConfigure = function (info) {
-      const result = originalOnConfigure?.apply(this, arguments)
-      try {
+    chainHook(
+      node,
+      'onConfigure',
+      function (info) {
         // 2026-09-01 migration: heal a workflow SAVED with the pre-fix
         // auto-grow bug's baked-in `Outputs` value BEFORE deriving the
         // visible count from it, so an already-grown save floats again
@@ -1904,11 +1894,9 @@ export function attach(node) {
         // end, but that call ran before this restore's widgets/links were
         // necessarily final; this one is the authoritative last word.
         syncSlotTypes(this)
-      } catch (error) {
-        warn('post-configure re-prune failed', error)
-      }
-      return result
-    }
+      },
+      { warn, label: 'post-configure re-prune' }
+    )
 
     // Fresh node: hide down to the just-seeded default immediately (backend
     // declares all MAX_OUTPUTS outputs up front, per resolution.js's

@@ -395,9 +395,8 @@ def test_on_configure_is_chained_never_replaced(source: str) -> None:
     assert "function wireConfigureReload(state)" in source
     assert "wireConfigureReload(state)" in _function_body(source, "attach(node)")
     body = _function_body(source, "wireConfigureReload(state)")
-    assert "const originalOnConfigure = node.onConfigure" in body
-    assert "node.onConfigure = function (info) {" in body
-    assert "originalOnConfigure.apply(this, arguments)" in body
+    assert "chainHook(" in body and "'onConfigure'" in body
+    assert "node.onConfigure =" not in body
     assert "reloadFromWidget(state)" in body
 
 

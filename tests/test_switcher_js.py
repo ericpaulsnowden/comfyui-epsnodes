@@ -580,11 +580,11 @@ def test_widget_gate_is_chained_and_reseated_synchronously_after_configure(
     configure wrap's finally, before paste-with-links connects wires by
     slot index -- the Model switcher's property path is untouched."""
     gate = _function_body(switcher_source, "wirePairingGate(node)")
-    assert "const original = widget.callback" in gate
-    assert "widget.callback = function (...args)" in gate
-    assert "original.apply(this, args)" in gate
+    assert "chainHook(\n        widget,\n        'callback'," in gate
+    assert "widget.callback =" not in gate
     assert "node.addProperty(pair.gateProperty, false, 'boolean')" in gate
-    assert "node.onPropertyChanged = function (name, value, prevValue)" in gate
+    assert "chainHook(\n      node,\n      'onPropertyChanged'," in gate
+    assert "node.onPropertyChanged =" not in gate
     # the attach-time apply-once still runs for both gates
     assert gate.rstrip().endswith("convergePairOutput(node)")
     growth = _function_body(switcher_source, "wireImageInputGrowth(node)")

@@ -1,14 +1,14 @@
 /**
  * @file Shared DOM/node helpers for every EPS panel (docs/plan/ROADMAP-shared-panel-code.md
- * M1 + the `installMinWidth` unification; the three lookups at the bottom
- * joined 2026-11-15). Before this module `el` was
+ * M1 + the `installMinWidth` unification; the three lookups joined 2026-11-15
+ * and `chainHook` is M2). Before this module `el` was
  * declared 8 times and `installMinWidth` 9 times, one copy per panel, and a
  * fix to one never reached its siblings (the v0.68.1 width-lift fix reached
  * five of nine copies; M0 / v0.91.2 patched the other four).
  *
  * Every panel imports these under their EXISTING bare names (`el`,
- * `installMinWidth`, `nodeClassOf`, `findWidget`, `linkById`) so every CALL-SITE string a test pins on stays
- * byte-identical; only the declarations moved (the search.js precedent).
+ * `installMinWidth`, `nodeClassOf`, `findWidget`, `linkById`, `chainHook`) so
+ * every CALL-SITE string a test pins on stays byte-identical; only the declarations moved (the search.js precedent).
  * eps_image panels import it as `../lora_library/panel_helpers.js`.
  *
  * `el` is browser-only (`document`, `Node`); the rest are plain functions.
@@ -59,14 +59,87 @@ export function el(tag, options = {}, children = []) {
 export function installMinWidth(node, minWidth) {
   if (!node || node.__epsMinWidthInstalled) return
   node.__epsMinWidthInstalled = true
-  const originalOnResize = node.onResize
-  node.onResize = function (size) {
-    if (size && size[0] < minWidth) size[0] = minWidth
-    return originalOnResize?.call(this, size)
-  }
+  chainHook(
+    node,
+    'onResize',
+    (size) => {
+      if (size && size[0] < minWidth) size[0] = minWidth
+    },
+    { order: 'before', label: 'min-width floor (onResize)' }
+  )
   if (node.size && node.size[0] < minWidth) {
     if (typeof node.setSize === 'function') node.setSize([minWidth, node.size[1]])
     else node.size[0] = minWidth
+  }
+}
+
+/**
+ * THE one implementation of FORMAT.md section 7.5's "chain, never replace":
+ * capture whatever is on `target[hook]` NOW (a litegraph hook, another
+ * extension's wrapper, a widget callback -- or nothing), install a wrapper
+ * that runs it and *ours* with the SAME `this` and arguments, and make the
+ * wrapper return THE ORIGINAL'S result. `ours`' own return value is ignored
+ * (except under `veto`, below). Before this existed the pack hand-wrote the
+ * same wrapper ~75 times (docs/plan/ROADMAP-shared-panel-code.md M2).
+ *
+ * *ours* throwing never breaks the node and never stops the original: it is
+ * caught and reported as `warn(`${label} failed`, error)`. A site that needs
+ * an error to propagate does not belong here.
+ *
+ * Install-once guards are NOT owned here: independent chains on one hook
+ * are normal (a second module chaining the same hook still runs both), so
+ * each caller keeps its own per-node flag/WeakSet where it needs one.
+ *
+ * Options:
+ * - `warn(message, error)`   where failures are reported (each module's
+ *   `loggerFor(PREFIX).warn`, so the console names the module); default
+ *   `console.warn`.
+ * - `label`                  names *ours* in that message (default: the hook).
+ * - `order`                  'after' (default): original first, then ours.
+ *   'before': ours first, then the original (cleanups that must run while the
+ *   node is still intact; the original's errors then simply propagate).
+ * - `onOriginalThrow`        only for order 'after'. 'propagate' (default):
+ *   the original's error escapes and ours is skipped. 'still-run': ours runs
+ *   anyway, then the original's error is rethrown (a try/finally). 'log': the
+ *   error is reported through `warn` as `original ${hook} threw`, ours runs,
+ *   and the wrapper returns undefined. Never swallow another extension's
+ *   errors unless the site did so before.
+ * - `veto`                   only for order 'before': ours may answer for the
+ *   hook. A return value other than `undefined` is returned and the original
+ *   is NOT called (onConnectInput / onConnectOutput: `false` refuses the
+ *   link); `undefined` falls through to the original, whose result is returned.
+ */
+export function chainHook(target, hook, ours, options = {}) {
+  const { warn = console.warn, label = hook, order = 'after', onOriginalThrow = 'propagate', veto = false } = options
+  const original = target[hook]
+  const callOriginal = (self, args) => (typeof original === 'function' ? original.apply(self, args) : undefined)
+  const callOurs = (self, args) => {
+    try {
+      return ours.apply(self, args)
+    } catch (error) {
+      warn(`${label} failed`, error)
+      return undefined
+    }
+  }
+  target[hook] = function (...args) {
+    if (order === 'before') {
+      const answer = callOurs(this, args)
+      if (veto && answer !== undefined) return answer
+      return callOriginal(this, args)
+    }
+    let result
+    try {
+      result = callOriginal(this, args)
+    } catch (error) {
+      if (onOriginalThrow === 'propagate') throw error
+      if (onOriginalThrow === 'still-run') {
+        callOurs(this, args)
+        throw error
+      }
+      warn(`original ${hook} threw`, error)
+    }
+    callOurs(this, args)
+    return result
   }
 }
 

@@ -33,7 +33,7 @@
 
 import { app } from '../../../scripts/app.js'
 import { loggerFor, showToast, walkLiveNodes } from '../lora_library/api.js'
-import { findWidget, linkById, nodeClassOf } from '../lora_library/panel_helpers.js'
+import { chainHook, findWidget, linkById, nodeClassOf } from '../lora_library/panel_helpers.js'
 import { LINK_COLOR_OWNER_KEY, ensureOwnedLinkColourHook } from './owned_link_colour.js'
 
 const PREFIX = '[EPSNodes save_image]'
@@ -266,17 +266,14 @@ function installImageOutputDimSync(node) {
   const widget = findWidget(node, IMAGE_OUTPUT_WIDGET)
   if (!widget || widget.__epsSaveDimSyncInstalled) return
   widget.__epsSaveDimSyncInstalled = true
-  const originalCallback = widget.callback
-  widget.callback = function (...args) {
-    const result =
-      typeof originalCallback === 'function' ? originalCallback.apply(this, args) : undefined
-    try {
+  chainHook(
+    widget,
+    'callback',
+    function () {
       reconcileLinkDimming(node)
-    } catch (error) {
-      warn('link dim sync (image_output callback) failed', error)
-    }
-    return result
-  }
+    },
+    { warn, label: 'link dim sync (image_output callback)' }
+  )
 }
 
 /**
@@ -287,16 +284,14 @@ function installImageOutputDimSync(node) {
 function installLinkDimConnectionsSync(node) {
   if (node.__epsSaveLinkDimConnectionsWrapped) return
   node.__epsSaveLinkDimConnectionsWrapped = true
-  const original = node.onConnectionsChange
-  node.onConnectionsChange = function (...args) {
-    const result = typeof original === 'function' ? original.apply(this, args) : undefined
-    try {
+  chainHook(
+    node,
+    'onConnectionsChange',
+    function () {
       reconcileLinkDimming(this)
-    } catch (error) {
-      warn('link dim sync (onConnectionsChange) failed', error)
-    }
-    return result
-  }
+    },
+    { warn, label: 'link dim sync (onConnectionsChange)' }
+  )
 }
 
 /**
@@ -307,15 +302,14 @@ function installLinkDimConnectionsSync(node) {
 function installLinkDimCleanup(node) {
   if (node.__epsSaveLinkDimCleanupWrapped) return
   node.__epsSaveLinkDimCleanupWrapped = true
-  const original = node.onRemoved
-  node.onRemoved = function (...args) {
-    try {
+  chainHook(
+    node,
+    'onRemoved',
+    function () {
       reconcileLinkDimming(this, { forceUndim: true })
-    } catch (error) {
-      warn('link dim cleanup (onRemoved) failed', error)
-    }
-    return typeof original === 'function' ? original.apply(this, args) : undefined
-  }
+    },
+    { warn, label: 'link dim cleanup (onRemoved)', order: 'before' }
+  )
 }
 
 /**
@@ -353,10 +347,10 @@ export function imageOutputFromSavedValues(values) {
 function installConfigureSync(node) {
   if (node.__epsSaveConfigureWrapped) return
   node.__epsSaveConfigureWrapped = true
-  const original = node.onConfigure
-  node.onConfigure = function (info) {
-    const result = typeof original === 'function' ? original.call(this, info) : undefined
-    try {
+  chainHook(
+    node,
+    'onConfigure',
+    function (info) {
       const widget = findWidget(this, IMAGE_OUTPUT_WIDGET)
       const verdict = imageOutputFromSavedValues(info?.widgets_values)
       if (widget && verdict !== null && widget.value !== verdict) {
@@ -364,11 +358,9 @@ function installConfigureSync(node) {
         widget.callback?.(verdict)
       }
       reconcileLinkDimming(this)
-    } catch (error) {
-      warn('post-configure sync failed', error)
-    }
-    return result
-  }
+    },
+    { warn, label: 'post-configure sync' }
+  )
 }
 
 /**

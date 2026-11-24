@@ -1057,9 +1057,8 @@ def test_on_configure_is_chained_never_replaced(source: str) -> None:
     frontend lesson (§7.2)."""
     assert "wireConfigureReload(state)" in _function_body(source, "attachPickerPanel(node)")
     body = _function_body(source, "wireConfigureReload(state)")
-    assert "const originalOnConfigure = node.onConfigure" in body
-    assert "node.onConfigure = function (info) {" in body
-    assert "originalOnConfigure.apply(this, arguments)" in body
+    assert "chainHook(" in body and "'onConfigure'" in body
+    assert "node.onConfigure =" not in body
     assert "reloadFromWidget(state)" in body
 
 
@@ -2346,7 +2345,7 @@ class TestSendRowGraphWatchV0632:
         watch = _function_body(source, "installGraphNodeWatch(graph)")
         assert "graph.__epsLpNodeWatch" in watch, "install once per graph"
         assert "'onNodeAdded', 'onNodeRemoved'" in watch
-        assert "original?.apply(this, args)" in watch, "chained, never replaced"
+        assert "chainHook(\n      graph,\n      hook," in watch, "chained, never replaced"
         assert "scheduleSendRowRefresh(this)" in watch
 
     def test_refresh_is_coalesced_and_state_hangs_off_the_node(self, source: str) -> None:
@@ -2756,10 +2755,12 @@ class TestFixedHeightRound20260822:
         as it was) asks isManualResize with the live canvas and the
         programmatic flag, and calls through to the original either way."""
         watch = _function_body(source, "installManualResizeWatch(state)")
-        assert "const originalOnResize = node.onResize" in watch
+        # ours runs BEFORE the original (the drag flag is read first), then
+        # the shared chainHook calls through and returns the original's result
+        assert "chainHook(" in watch and "'onResize'" in watch
+        assert "order: 'before'" in watch
         assert "isManualResize(node, app.canvas, state.programmaticResize)" in watch
         assert "noteManualResize(state)" in watch
-        assert "return originalOnResize?.call(this, size)" in watch
         assert "node.__epsLpResizeWatchInstalled" in watch  # guard-flagged, the house pattern
         assert "installManualResizeWatch(state)" in _function_body(source, "attachDomWidget(state)")
         verdict = _function_body(source, "isManualResize(node, canvas, programmatic)")
@@ -2861,8 +2862,8 @@ class TestFixedHeightRound20260822:
         (bundle: `this.properties[t]=e.properties[t],this.onPropertyChanged?.
         (t,e.properties[t])`)."""
         wire = _function_body(source, "wireAutoGrowProperty(state)")
-        assert "const original = node.onPropertyChanged" in wire
-        assert "const result = original?.call(this, name, value, prevValue)" in wire
+        assert "chainHook(" in wire and "'onPropertyChanged'" in wire
+        assert "node.onPropertyChanged =" not in wire
         assert "if (name === PROP_AUTO_GROW)" in wire
         assert "applyAutoGrowChange(state, value, prevValue)" in wire
         apply = _function_body(source, "applyAutoGrowChange(state, value, prevValue)")
@@ -3043,8 +3044,8 @@ class TestSplitDividerRoundM5:
         installManualResizeWatch already stack two wraps of onResize."""
         wire = _function_body(source, "wireSplitProperty(state)")
         assert "node.addProperty(PROP_SELECTED_SPLIT, DEFAULT_SPLIT_FRACTION, 'number')" in wire
-        assert "const original = node.onPropertyChanged" in wire
-        assert "const result = original?.call(this, name, value, prevValue)" in wire
+        assert "chainHook(" in wire and "'onPropertyChanged'" in wire
+        assert "node.onPropertyChanged =" not in wire
         assert "if (name === PROP_SELECTED_SPLIT)" in wire
         assert "applySplit(state)" in wire
         attach = _function_body(source, "attachPickerPanel(node)")
@@ -3228,10 +3229,8 @@ class TestStrengthEditSurvivesTeardown20260901:
         """Same posture as wireConfigureReload's onConfigure wrap -- core or
         another extension may already own node.onRemoved."""
         body = _function_body(source, "wireNodeCleanup(state)")
-        assert "const originalOnRemoved = node.onRemoved" in body
-        assert "node.onRemoved = function (...args) {" in body
-        assert "originalOnRemoved.apply(this, args)" in body
-        assert "return result" in body
+        assert "chainHook(" in body and "'onRemoved'" in body
+        assert "node.onRemoved =" not in body
 
     def test_on_removed_flushes_the_active_strength_edit(self, source: str) -> None:
         body = _function_body(source, "wireNodeCleanup(state)")
@@ -3242,5 +3241,8 @@ class TestStrengthEditSurvivesTeardown20260901:
 
     def test_never_throws_out_of_the_wrapped_hook(self, source: str) -> None:
         body = _function_body(source, "wireNodeCleanup(state)")
+        # a throwing ORIGINAL onRemoved is logged (`original onRemoved threw`
+        # by chainHook) and our flush still runs; the flush's own failure is
+        # caught inline so the clearTimeout below it always runs
+        assert "onOriginalThrow: 'log'" in body
         assert "} catch (error) {" in body
-        assert "api.warn('original onRemoved threw', error)" in body

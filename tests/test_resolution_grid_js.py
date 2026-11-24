@@ -173,6 +173,7 @@ def grid_api(tmp_path_factory: pytest.TempPathFactory) -> dict:
     lora_dir = layout / "extensions" / "comfyui-epsnodes" / "lora_library"
     lora_dir.mkdir(parents=True)
     shutil.copyfile(API_JS, lora_dir / "api.js")
+    shutil.copyfile(API_JS.with_name("panel_helpers.js"), lora_dir / "panel_helpers.js")
     shutil.copyfile(VERSION_JS, lora_dir / "version.js")
 
     probe = layout / "probe.mjs"
@@ -545,8 +546,8 @@ class TestCopyFromImageV0630:
         # phantom `"copy from image": null` input.
         assert "button.serialize = false" in body
         assert "button.options = { ...(button.options || {}), serialize: false }" in body
-        assert "const originalOnSerialize = node.onSerialize" in body
-        assert "originalOnSerialize?.apply(this, arguments)" in body
+        assert "chainHook(\n    node,\n    'onSerialize'," in body
+        assert "node.onSerialize =" not in body
         # `i in values` distinguishes a HOLE from a genuinely stored null.
         assert "values.filter((_, i) => i in values)" in body
 

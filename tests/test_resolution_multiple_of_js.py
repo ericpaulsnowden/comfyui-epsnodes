@@ -120,6 +120,7 @@ def multiple_of_api(tmp_path_factory: pytest.TempPathFactory) -> dict:
     lora_dir = layout / "extensions" / "comfyui-epsnodes" / "lora_library"
     lora_dir.mkdir(parents=True)
     shutil.copyfile(API_JS, lora_dir / "api.js")
+    shutil.copyfile(API_JS.with_name("panel_helpers.js"), lora_dir / "panel_helpers.js")
     shutil.copyfile(VERSION_JS, lora_dir / "version.js")
 
     scripts = layout / "scripts"
@@ -236,7 +237,8 @@ class TestTypedCommitSnap:
         raw keystroke. Hooking here (not some DOM `input` listener) is what
         makes "snap on commit, never mid-keystroke" true by construction."""
         body = _function_body(source, "wireMultipleOfSnap(node)")
-        assert "widget.callback = function (...args)" in body
+        assert "chainHook(\n      widget,\n      'callback'," in body
+        assert "widget.callback =" not in body
         assert "addEventListener" not in body
 
     def test_reuses_snap_dimension_value_not_a_second_rounding_fn(self, source: str) -> None:
@@ -285,15 +287,15 @@ class TestMultipleOfChangeResnaps:
 
     def test_multiple_of_callback_is_chained_not_replaced(self, source: str) -> None:
         body = _function_body(source, "wireMultipleOfLock(node)")
-        assert "const originalCallback = multipleOfWidget.callback" in body
-        assert "originalCallback?.apply(this, args)" in body
+        assert "chainHook(\n      multipleOfWidget,\n      'callback'," in body
+        assert "multipleOfWidget.callback =" not in body
 
     def test_multiple_of_callback_resyncs_step_and_resnaps(self, source: str) -> None:
         body = _function_body(source, "wireMultipleOfLock(node)")
         # Only look inside multipleOfWidget's own callback block, not the
         # whole function (which also has an onConfigure block that does the
         # same two calls for a different reason -- both are asserted below).
-        callback_start = body.index("multipleOfWidget.callback = function")
+        callback_start = body.index("multipleOfWidget,\n      'callback'")
         callback_body = body[callback_start:]
         assert "applyMultipleOfWidgetStep(node)" in callback_body
         assert "resnapCurrentSizeToMultipleOf(node)" in callback_body
@@ -304,8 +306,10 @@ class TestMultipleOfChangeResnaps:
         assignment with no callback, file header) -- reconciled on load,
         same posture as the ratio lock's own reload reconcile (no toast)."""
         body = _function_body(source, "wireMultipleOfLock(node)")
-        assert "const originalOnConfigure = node.onConfigure" in body
-        assert "originalOnConfigure?.call(this, info)" in body
+        assert "chainHook(\n    node,\n    'onConfigure'," in body
+        assert "node.onConfigure =" not in body
+        # ours still runs when another extension's onConfigure throws
+        assert "onOriginalThrow: 'still-run'" in body
         assert "resnapCurrentSizeToMultipleOf(this)" in body
 
     def test_preset_apply_resnaps_by_its_own_multiple_of(self, source: str) -> None:

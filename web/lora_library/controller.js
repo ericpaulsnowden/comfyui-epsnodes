@@ -791,7 +791,7 @@ import * as api from './api.js'
 import { pickServerFolder } from './notebook.js'
 import { setLibraryDir } from './settings.js'
 import { entryMatchesSearch, searchHaystack, searchWords } from './search.js'
-import { el, installMinWidth } from './panel_helpers.js'
+import { chainHook, el, installMinWidth } from './panel_helpers.js'
 import { PROP_RENAME_DRAFT, isGroupNameInput, groupNameFromInput, parseCollapsedGroups, parseRenameDraft, flushPendingNameEdit } from './group_helpers.js'
 
 // ---------------------------------------------------------------- constants
@@ -1437,17 +1437,11 @@ function installGraphNodeWatch(graph) {
   if (!graph || graph.__epsCtrlNodeWatch) return
   graph.__epsCtrlNodeWatch = true
   for (const hook of ['onNodeAdded', 'onNodeRemoved']) {
-    const original = graph[hook]
-    graph[hook] = function (...args) {
-      let result
-      try {
-        result = original?.apply(this, args)
-      } catch (error) {
-        api.warn(`${NODE_TITLE}: original ${hook} threw`, error)
-      }
-      scheduleControllerRefresh()
-      return result
-    }
+    chainHook(graph, hook, () => scheduleControllerRefresh(), {
+      warn: (message, error) => api.warn(`${NODE_TITLE}: ${message}`, error),
+      label: `controller refresh (${hook})`,
+      onOriginalThrow: 'log'
+    })
   }
 }
 
