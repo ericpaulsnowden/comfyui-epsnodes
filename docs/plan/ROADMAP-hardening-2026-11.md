@@ -68,13 +68,37 @@ shared `el()`.
    mapping collected the valid ones. Kept (one batch for the common switcher
    case). Decision: kept one-run, with a skipped-run alert (a warning toast
    when the grid was skipped; FORMAT §6.6).
-3. **Suspected, not pursued** (agent reports, unverified on the rig):
+3. **Suspected** (agent reports; all three since settled, see the follow-up
+   build below):
    `controller.js` `_refreshTargetCombo` may overwrite the saved target on a
    transient zero-loader tick; `sets.js` `healMirrorsTags` undo ordering;
    Bypass/Switcher unplug memory keyed by node id could be trusted after a
    paste into ANOTHER workflow where the id coincides.
 
+## Follow-up build, 2026-11-15 to 2026-11-24
+
+The owner's answers to the decisions above, and what shipped for each.
+
+| Unit | PR | Version | What |
+| --- | --- | --- | --- |
+| Controller target | #14 | v0.110.15 | Suspected item, REAL: the LoRA Controller's saved target survives a refresh that finds no loader |
+| Switcher prompt pass | #15, #22 | v0.110.16, removed v0.110.20 | Decision 1: built, then found to fix nothing on a live server and removed |
+| Nine images | #21 | v0.110.19 | EPS Resolution takes nine images (owner ask) |
+| Group helpers | #18 | v0.110.21 | Shared-code M4 |
+| Skipped-run alert | #16 | v0.110.22 | Decision 2: Image Grid keeps one-run and warns when core skipped it |
+| Copies own no memory | #17 | v0.110.23 | Suspected item, REAL: a pasted or cloned node, and a pasted subgraph's interior, never re-plug the original's remembered wires |
+
+- Suspected item "`sets.js` heal undo order": NOT REAL on frontend 1.52.7.
+  The delete step is captured before the heal tick and the change tracker's
+  50 ms squash folds the heal's write into it. Depends on that squash; the
+  owner's checklist has one live check for newer frontends.
+- Every unit is on `v1` (1.37.0 to 1.45.0), together with `main`'s
+  v0.110.17 and v0.110.18 from the simplification round.
+- The plan for bringing `v1` onto `main` is
+  [ROADMAP-v1-merge.md](ROADMAP-v1-merge.md).
+
 ## Still open from this round
 
-- Shared code M2 (`chainHook`, ~90 sites, in batches) and M4 (group
-  helpers) — see [ROADMAP-shared-panel-code.md](ROADMAP-shared-panel-code.md).
+- Shared code M2 (`chainHook`, ~90 sites, in batches) — see
+  [ROADMAP-shared-panel-code.md](ROADMAP-shared-panel-code.md). M4 shipped in
+  v0.110.21. The owner asked for M2 as the next build.
