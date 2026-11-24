@@ -358,7 +358,7 @@ export function resolutionScaleModeActive(scaleMultiplier, inputs) {
   const multiplier = Number(scaleMultiplier)
   if (!(Number.isFinite(multiplier) && multiplier > 0)) return false
   for (const [name, link] of Object.entries(inputs || {})) {
-    if (link && (name === 'image' || /^image_[2-8]$/.test(name))) return true
+    if (link && isResolutionImageInput(name)) return true
   }
   return false
 }
@@ -656,9 +656,11 @@ function checkpointSwitcherIsStaticallyEmpty(node) {
  * there still blocks the node outright (zero-collapse). */
 export const MULTIPLIER_LAZY_INPUTS = new Set(['model', 'model_low', 'clip', 'vae', 'image', 'mask'])
 
-/** EPS Resolution's lazy inputs (§6.5): `image` and `image_2`..`image_8`. */
-function isResolutionImageInput(name) {
-  return name === 'image' || /^image_[2-8]$/.test(name)
+/** EPS Resolution's lazy image inputs (§6.5): `image` and `image_2`..
+ * `image_9` -- the node's `MAX_IMAGES`, which tests/test_resolution.py pins
+ * against this pattern and the backend. */
+export function isResolutionImageInput(name) {
+  return name === 'image' || /^image_[2-9]$/.test(name)
 }
 
 /**
@@ -1089,7 +1091,7 @@ function sourceCount(snapshot, link, path) {
     // already sums its slots' upstream counts and this branch just maps
     // over that. Image-typed outputs whose backing image input is unwired
     // are per-run ExecutionBlockers (`_resized(None)`; slots 0/1 <- image,
-    // slots 6..12 = resized_2..8 <- image_2..8), so consuming one with no
+    // slots 6.. = resized_2.. <- image_2..), so consuming one with no
     // image wired blocks the consumer outright -- the known-zero family.
     const slot = resolved.slot ?? 0
     const backing = slot <= 1 ? 'image' : slot >= 6 ? `image_${slot - 4}` : null

@@ -433,11 +433,26 @@ def _pad_to(image: Any, target_w: int, target_h: int, pad_value: float = 0.0) ->
     return canvas
 
 
-#: FORMAT.md §6.5 multi-image (v0.61.0): the extra growing inputs' name
-#: shape. The FIRST input keeps its frozen name `image`; extras are
-#: image_2..image_8 -- 8 total, because the paired resized_N OUTPUTS are
-#: positional and therefore a hard ceiling (§8).
-_EXTRA_IMAGE_PATTERN = re.compile(r"image_([2-8])")
+#: FORMAT.md §6.5 multi-image: how many images one node takes. The ONE
+#: number every input name, output and tooltip below derives from; the
+#: frontend's `MAX_IMAGES` (web/eps_image/resolution.js) must equal it
+#: (tests/test_resolution.py pins the pair). Raising it only ever APPENDS
+#: resized_N outputs at the tail, which is what keeps saved wires on their
+#: slots (outputs are positional, §8). 8 until v0.110.19, 9 since: current
+#: video models take nine reference images.
+MAX_IMAGES = 9
+#: The extra images' numbers: image_2..image_<MAX_IMAGES>. The FIRST input
+#: keeps its frozen name `image`.
+_EXTRA_IMAGE_NUMBERS = range(2, MAX_IMAGES + 1)
+_EXTRA_IMAGE_PATTERN = re.compile(r"image_([1-9]\d*)")
+
+
+def _extra_image_number(name: object) -> int | None:
+    """``"image_3"`` -> 3; anything that is not one of this node's extra
+    image inputs (``image``, ``image_1``, ``image_10``, a widget) -> None."""
+    match = _EXTRA_IMAGE_PATTERN.fullmatch(name) if isinstance(name, str) else None
+    number = int(match.group(1)) if match else None
+    return number if number in _EXTRA_IMAGE_NUMBERS else None
 
 
 def _resolve_run(
@@ -451,7 +466,7 @@ def _resolve_run(
     ratio: str = DEFAULT_RATIO,
     scale_multiplier: float = DEFAULT_SCALE_MULTIPLIER,
 ) -> tuple[Any, ...]:
-    """One run's 13-tuple of output values (FORMAT.md §6.5 v0.61.0).
+    """One run's tuple of output values (one per RETURN_NAMES entry) (FORMAT.md §6.5 v0.61.0).
 
     *scale_multiplier* > 0 with ANY image wired (v0.101.0, owner spec
     2026-10-29) switches BOTH modes to "each image at its own size times
@@ -494,7 +509,7 @@ def _resolve_run(
             width, height, resize_method, interpolation, multiple_of, image, ratio, scale_multiplier
         )
         blocker = _execution_blocker()
-        return base + (blocker,) * 7
+        return base + (blocker,) * len(_EXTRA_IMAGE_NUMBERS)
 
     first = image if image is not None else extra_images[min(extra_images)]
 
@@ -513,7 +528,7 @@ def _resolve_run(
             return _scale_image(img, scale_multiplier, interpolation)[0]
 
         blocker = _execution_blocker()
-        tail = tuple(_scaled(extra_images.get(index)) for index in range(2, 9))
+        tail = tuple(_scaled(extra_images.get(index)) for index in _EXTRA_IMAGE_NUMBERS)
         return (blocker, _scaled(image), first_w, first_h, blocker, blocker, *tail)
     # The shared target is the BOX -- a 0 axis derived from the FIRST
     # image's aspect, multiple_of applied -- probed with "stretch" so a
@@ -541,7 +556,7 @@ def _resolve_run(
         )[0]
 
     blocker = _execution_blocker()
-    tail = tuple(_resized(extra_images.get(index)) for index in range(2, 9))
+    tail = tuple(_resized(extra_images.get(index)) for index in _EXTRA_IMAGE_NUMBERS)
     return (blocker, _resized(image), target_w, target_h, blocker, blocker, *tail)
 
 
@@ -554,7 +569,7 @@ def _execution_blocker() -> Any:
 
 
 class _FlexibleResolutionOptional(dict):
-    """Accept ``image_2``..``image_8`` by NAME -- §6.4's flexible-optional
+    """Accept ``image_2``..``image_<MAX_IMAGES>`` by NAME -- §6.4's flexible-optional
     trick, LOCAL. Lazy since 2026-11-05: every wired ``image_N`` is
     requested by :meth:`EPSResolution.check_lazy_status` EXCEPT one fed by a
     switcher that provably emits nothing, which is then simply absent -- the
@@ -565,14 +580,14 @@ class _FlexibleResolutionOptional(dict):
     the rest (§6.4's converge pattern)."""
 
     def __contains__(self, key: object) -> bool:
-        if isinstance(key, str) and _EXTRA_IMAGE_PATTERN.fullmatch(key):
+        if _extra_image_number(key) is not None:
             return True
         return super().__contains__(key)
 
     def __getitem__(self, key: str) -> Any:
         if super().__contains__(key):
             return super().__getitem__(key)
-        if isinstance(key, str) and _EXTRA_IMAGE_PATTERN.fullmatch(key):
+        if _extra_image_number(key) is not None:
             return (
                 "IMAGE",
                 {
@@ -795,11 +810,11 @@ class EPSResolution:
     """
 
     CATEGORY = CATEGORY_NAME
-    # v0.61.0 (FORMAT.md §6.5 multi-image): resized_2..resized_8 are
-    # TAIL-APPENDED (§8) -- outputs are positional, so 8 images total is
-    # the hard ceiling (the §6.11 Distributor precedent). The frontend
-    # reveals them up to the highest wired image_N.
-    RETURN_TYPES = ("IMAGE", "IMAGE", "INT", "INT", "INT", "INT", *("IMAGE",) * 7)
+    # FORMAT.md §6.5 multi-image: resized_2..resized_<MAX_IMAGES> are
+    # TAIL-APPENDED (§8) -- outputs are positional, so the count is fixed
+    # here and only ever grows at the tail (the §6.11 Distributor
+    # precedent). The frontend reveals them up to the highest wired image_N.
+    RETURN_TYPES = ("IMAGE", "IMAGE", "INT", "INT", "INT", "INT", *("IMAGE",) * len(_EXTRA_IMAGE_NUMBERS))
     RETURN_NAMES = (
         "image",
         "resized_image",
@@ -807,9 +822,9 @@ class EPSResolution:
         "height",
         "original_width",
         "original_height",
-        *(f"resized_{n}" for n in range(2, 9)),
+        *(f"resized_{n}" for n in _EXTRA_IMAGE_NUMBERS),
     )
-    OUTPUT_IS_LIST = (True,) * 13
+    OUTPUT_IS_LIST = (True,) * len(RETURN_NAMES)
     OUTPUT_TOOLTIPS = (
         "The input image, unchanged. None if nothing is wired. With more "
         "than one size preset selected, this is a list, one element per "
@@ -853,7 +868,7 @@ class EPSResolution:
             f"consumes it when image_{n} is not wired. With more than one "
             "size preset selected, this is a list, one element per preset, "
             "in selection order."
-            for n in range(2, 9)
+            for n in _EXTRA_IMAGE_NUMBERS
         ),
     )
     FUNCTION = "resolve"
@@ -869,7 +884,7 @@ class EPSResolution:
         "downstream nodes on its own. Save named size presets and select "
         "several to run the rest of the workflow once per preset, in one "
         "queue; editing any field by hand un-selects the preset so the "
-        "numbers you see are what runs. Wire extra images (image_2 ... image_8 appear as you "
+        "numbers you see are what runs. Wire extra images (image_2 ... image_9 appear as you "
         "connect them) and every one is resized to the same target in one "
         "run, each on its own resized_N output. The 'copy from image' "
         "button fills width/height with the wired image's own size in one "
@@ -889,7 +904,7 @@ class EPSResolution:
     #: Controller may capture/apply, declared next to the parser that owns
     #: their shape. ``presets`` carries only the ticked preset NAMES (see
     #: ``_parse_preset_names`` above / FORMAT.md §6.5 M3) -- a plain string
-    #: array, nothing richer. The ``image``/``image_2``..``image_8`` sockets
+    #: array, nothing richer. The ``image``/``image_2``..``image_<MAX_IMAGES>`` sockets
     #: are IMAGE-typed, not widgets, and never appear here. ``ratio`` (owner
     #: ask 2026-08-28) is a plain combo like ``resize_method``/
     #: ``interpolation`` -- an Apply write to it goes through the same
@@ -1132,7 +1147,7 @@ class EPSResolution:
 
     #: ``image`` plus the §6.5 extras, the lazy set :meth:`check_lazy_status`
     #: governs (2026-11-05).
-    LAZY_IMAGE_INPUTS: ClassVar[tuple[str, ...]] = ("image", *(f"image_{n}" for n in range(2, 9)))
+    LAZY_IMAGE_INPUTS: ClassVar[tuple[str, ...]] = ("image", *(f"image_{n}" for n in _EXTRA_IMAGE_NUMBERS))
 
     def check_lazy_status(
         self, prompt: Any = None, unique_id: Any = None, **kwargs: Any
@@ -1174,9 +1189,9 @@ class EPSResolution:
         # flexible optional dict is what let them be wired at all.
         extra_images: dict[int, Any] = {}
         for key, value in extra.items():
-            match = _EXTRA_IMAGE_PATTERN.fullmatch(key)
-            if match and value is not None:
-                extra_images[int(match.group(1))] = value
+            number = _extra_image_number(key)
+            if number is not None and value is not None:
+                extra_images[number] = value
 
         multiplier = coerce_scale_multiplier(scale_multiplier)
         names = _parse_preset_names(presets)
