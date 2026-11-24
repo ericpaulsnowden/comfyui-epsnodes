@@ -2117,7 +2117,7 @@ everyone's box (1024×1024 box, a 2:1 `image` + a 1:1 `image_2` made
 paint per node (`paintGrid`; a drag tick used to do three layout reads +
 three redraws), the source-size probe arms only while `image` is actually
 linked, and the pad's title names the readout BELOW it. `OUTPUT_TOOLTIPS`
-covers all 13 outputs (`resized_2..8` + the blocker notes).
+covers all 14 outputs (`resized_2..9` + the blocker notes).
 
 Roadmap: `research/roadmap-eps-resolution.md` (M1 = this section; grid=M2,
 NAS presets=M3, list multi-image=M4 — all since shipped, see below). NON-lora node in `eps_image/`,
@@ -2176,9 +2176,15 @@ is the functional core WITHOUT the grid.
   §6.4's flexible-optional dict (Resolution has no `check_lazy_status`,
   so the switcher factory's `lazy: True` synthesis must NOT be reused),
   grown by the frontend with §6.4's converge pattern. Outputs gain a
-  TAIL-APPENDED fixed ceiling `resized_2 … resized_8` (7 × IMAGE,
+  TAIL-APPENDED fixed ceiling `resized_2 … resized_9` (8 × IMAGE,
   `OUTPUT_IS_LIST` like every other output — outputs are positional, so
-  the ceiling is 8 images total, the §6.11 Distributor precedent),
+  the ceiling is fixed: 9 images total since v0.110.19, 8 before; the
+  §6.11 Distributor precedent. **One number, `MAX_IMAGES`**, in
+  `nodes_resolution.py`, mirrored by `resolution.js`'s `MAX_IMAGES` and
+  `cross_sweep.js`'s `isResolutionImageInput`, pinned together by
+  `tests/test_resolution.py`. Raising it only appends `resized_N` at the
+  tail, so every saved wire keeps its slot and an older workflow loads
+  unchanged; a workflow that USES `image_9` needs v0.110.19 or newer),
   frontend-revealed to the highest wired `image_N` (true tail
   add/remove, link-guarded). The revealed set is always CONTIGUOUS
   (`resized_2..k`): the trim removes only an unwired tail and stops at
@@ -2226,7 +2232,7 @@ is the functional core WITHOUT the grid.
   pair (hidden-by-removal) get it re-APPENDED at its canonical slots
   4-5 on attach — append-only, never a reorder, so existing links'
   indices are untouched.
-- **Inputs:** `image` (IMAGE, optional — the first image; `image_2..image_8`
+- **Inputs:** `image` (IMAGE, optional — the first image; `image_2..image_9`
   grow by name in MULTI-IMAGE mode, v0.61.0 bullet above), widgets `width`
   (INT) and `height` (INT) (easy-to-edit target size;
   `0` on an axis = derive it from the other axis + the input image's aspect),
@@ -2259,7 +2265,7 @@ is the functional core WITHOUT the grid.
   trailing `original_width`/`original_height` pair — safe only while they
   were the TAIL of `RETURN_TYPES` (removing a non-tail output repoints later
   wires, since ComfyUI resolves a link's source by positional index against
-  the fixed backend tuple), which `resized_2..8` landing behind them ended;
+  the fixed backend tuple), which `resized_2..9` landing behind them ended;
   `Show passthrough image` was always cosmetic for the leading `image`
   output (removing it for real would corrupt the links of
   `resized_image`/`width`/`height` after it). Both refuse to hide an output
@@ -2416,7 +2422,7 @@ is the functional core WITHOUT the grid.
   - **Node semantics:** a hidden `presets` STRING widget (JSON array of
     preset NAMES in selection order, default `"[]"`; `options.hidden` in
     INPUT_TYPES is the §7.5 Vue-mode hide flag). All outputs (six at the
-    time; 13 since v0.61.0's `resized_2..8`) became
+    time; 13 since v0.61.0's `resized_2..8`, 14 since v0.110.19's `resized_9`) became
     `OUTPUT_IS_LIST` — an empty/absent/malformed selection wraps the
     UNCHANGED M1 computation in length-1 lists (downstream-indistinguishable
     from scalars; the Notebook's long-standing precedent), and K selected
@@ -2512,7 +2518,7 @@ is the functional core WITHOUT the grid.
     already labels ` (missing)`, and the store's answer relabels or
     confirms it.
 - **M4 (multi-image) — SHIPPED v0.61.0** as the MULTI-IMAGE mode bullet
-  above (`image_2..8` inputs → `resized_2..8` tail outputs); the earlier
+  above (`image_2..8` inputs → `resized_2..8` tail outputs; `image_9` / `resized_9` added v0.110.19); the earlier
   "Deferred (M4) … do NOT build it yet" note no longer applies.
 
 ## §6.6 `EPSImageGrid` (display: "EPS Image Grid") — accumulate + fan out

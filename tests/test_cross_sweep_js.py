@@ -1719,6 +1719,8 @@ RESOLUTION_SCALE_MODE_CASES = [
     ("on_with_fraction", 0.5, {"image": _LINKED}, True),
     ("on_with_only_an_extra_image", 2, {"image": None, "image_3": _LINKED}, True),
     ("on_with_image_8", 2, {"image_8": _LINKED}, True),
+    ("on_with_image_9", 2, {"image_9": _LINKED}, True),
+    ("on_with_image_10_only", 2, {"image_10": _LINKED}, False),
     ("on_but_nothing_wired", 2, {"image": None}, False),
     ("on_but_no_inputs_at_all", 2, {}, False),
     ("on_with_a_non_image_input_only", 2, {"mask": _LINKED}, False),

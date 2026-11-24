@@ -3817,10 +3817,13 @@ export function init() {
 /** Per-node-instance attach; no-op unless node is EPSResolution. */
 // ------------------------------------- v0.61.0: multi-image + widget layout
 
-/** FORMAT.md §6.5 multi-image: the extras' name shape and the 8-image
- * ceiling (paired resized_N outputs are positional -- §8). */
-const EXTRA_IMAGE_RE = /^image_([2-8])$/
-const MAX_IMAGES = 8
+/** FORMAT.md §6.5 multi-image: how many images one node takes, and the
+ * extras' name shape (image_2..image_<MAX_IMAGES>). MUST equal the backend's
+ * `MAX_IMAGES` (eps_image/nodes_resolution.py; tests/test_resolution.py pins
+ * the pair): the paired resized_N outputs are positional (§8), so the count
+ * is fixed on both sides and only ever grows at the tail. 8 until v0.110.19. */
+export const MAX_IMAGES = 9
+export const EXTRA_IMAGE_RE = new RegExp(`^image_([2-${MAX_IMAGES}])$`)
 const RESIZED_PREFIX = 'resized_'
 
 /** The properties marker resolving the v0.61.0 HEIGHT-FIRST widget swap
@@ -3833,7 +3836,7 @@ const WIDGET_LAYOUT_CURRENT = 2
 
 /** Grow/shrink the image_N inputs (§6.4's converge idea, local minimal
  * form): keep exactly one unwired trailing extra once the chain has
- * started, capped at image_8. Deferred callers coalesce via
+ * started, capped at image_<MAX_IMAGES>. Deferred callers coalesce via
  * scheduleImageConverge -- never splice inputs from inside litegraph's own
  * connection dispatch (the v0.16.0 reentrancy lesson). */
 function convergeExtraImageInputs(node) {
@@ -4255,7 +4258,7 @@ export function attach(node) {
   }
 
   // A FRESH node gets neither configure nor a connection event, so the
-  // backend's 13 declared outputs would all stay visible. One deferred
+  // backend's declared outputs would all stay visible. One deferred
   // converge trims to the base shape; for a reloaded node it coalesces
   // with the converge onConfigure schedules.
   scheduleImageConverge(node)

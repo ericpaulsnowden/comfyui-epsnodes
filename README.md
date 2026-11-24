@@ -1293,8 +1293,8 @@ dimensions. It replaces a resize node + a reroute + a get-image-size node.
   saved values intact — the values follow the field *names*, not the rows.
 - **Resize several images to one size:** wire your first image and an
   `image_2` socket appears; wire that and `image_3` appears, up to
-  `image_8`. Every wired image is resized to the same target in one Run,
-  each coming out on its own `resized_2` … `resized_8` output (revealed as
+  `image_9`. Every wired image is resized to the same target in one Run,
+  each coming out on its own `resized_2` … `resized_9` output (revealed as
   you wire the inputs — sockets and outputs both tidy themselves back up
   when you unplug, but an output that still has a wire on it stays, along
   with the ones below it, so nothing ever re-points to a different image). In this mode `resized_image` still carries the first
